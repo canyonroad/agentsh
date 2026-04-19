@@ -122,24 +122,37 @@ type SinkChain struct { /* mu, key, algorithm, generation, prevHash, fatal */ }
 
 func NewSinkChain(key []byte, algorithm string) (*SinkChain, error)
 
-// ComputeResult is the typed token returned by SinkChain.Compute and
-// consumed by SinkChain.Commit. Only Compute can produce a valid one
-// (unexported fields make literal construction outside the package
-// impossible). Commit reads the unexported (sequence, generation) and
-// the exported PrevHash to enforce chain-state invariants — backwards-
-// generation, stale-token, and rollover-with-nonempty-prev all latch
-// fatal rather than silently corrupt the chain.
+// ComputeResult is the opaque, chain-bound token returned by
+// SinkChain.Compute and consumed by SinkChain.Commit. All fields are
+// unexported so callers cannot mutate or fabricate one outside the audit
+// package; EntryHash() and PrevHash() expose the values for serialization.
+// The result is identity-bound to the SinkChain instance that produced it
+// (chain pointer pinned at Compute time); only that same chain's Commit
+// will accept it. Commit enforces five invariants — nil result, post-fatal
+// commit, cross-chain misuse, backwards-generation, and stale-token (same-
+// generation prev_hash mismatch OR rollover-with-nonempty-prev) — with all
+// integrity-affecting violations latching fatal rather than silently
+// corrupting the chain.
 type ComputeResult struct {
-    EntryHash string // HMAC of (formatVersion | sequence | prevHash | payload)
-    PrevHash  string // prev_hash that was hashed into EntryHash
-    // unexported sequence, generation
+    // unexported: entryHash, prevHash, sequence, generation, chain
 }
 
+// EntryHash returns the HMAC entry hash that should be persisted alongside
+// the payload for later integrity verification.
+func (r *ComputeResult) EntryHash() string
+
+// PrevHash returns the prev_hash the entry was chained against. For the
+// genesis entry of a chain or generation, this is "".
+func (r *ComputeResult) PrevHash() string
+
 // Compute computes the HMAC over (formatVersion, sequence, prev_hash,
-// canonical_payload) using the chain's key and returns it as a typed
-// *ComputeResult. PURE: it does not mutate prev_hash. The caller must
-// follow with Commit on durable success or discard the result on durable
-// failure.
+// canonical_payload) using the chain's key and returns it as an opaque,
+// chain-bound *ComputeResult. PURE: it does not mutate prev_hash. The
+// returned result is bound to this SinkChain instance — only Commit on
+// this same chain will accept it; cross-chain commits fail with
+// ErrCrossChainResult and latch the receiving chain fatal. The caller
+// must follow with Commit on durable success or discard the result on
+// durable failure.
 //
 // If generation differs from the chain's current generation, Compute
 // treats prev_hash as "" (chain rolls automatically). The transition is
@@ -151,12 +164,17 @@ func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32
 // the durable write succeeds. On ambiguous failure, the caller MUST call
 // Fatal instead; Commit and Fatal are mutually exclusive per Compute.
 //
-// Three failure modes latch the chain Fatal and return a typed error
+// Four failure modes latch the chain Fatal and return a typed error
 // (callers use errors.Is to detect):
+//   - result.chain != c (ComputeResult was produced by a different
+//     SinkChain instance) → wraps ErrCrossChainResult. Checked FIRST so
+//     mixing tokens between chains always surfaces as cross-chain misuse,
+//     not as a downstream invariant violation. Latches the receiving
+//     chain only; the producing chain is unaffected.
 //   - result.generation < c.generation → wraps ErrBackwardsGeneration.
-//   - result.generation == c.generation but result.PrevHash != c.prevHash
+//   - result.generation == c.generation but result.PrevHash() != c.prevHash
 //     (stale token: a prior Commit advanced prev_hash) → wraps ErrStaleResult.
-//   - result.generation > c.generation but result.PrevHash != "" (rollover
+//   - result.generation > c.generation but result.PrevHash() != "" (rollover
 //     results MUST have empty prev_hash) → wraps ErrStaleResult.
 //
 // nil result returns an error WITHOUT latching fatal (caller bug, not an
@@ -191,6 +209,7 @@ var (
     ErrInvalidChainState   = errors.New("invalid sink chain state")
     ErrBackwardsGeneration = errors.New("backwards-generation Commit: chain latched fatal")
     ErrStaleResult         = errors.New("stale ComputeResult: caller committed against an obsolete chain head; chain latched fatal")
+    ErrCrossChainResult    = errors.New("ComputeResult bound to a different SinkChain")
 )
 ```
 
@@ -217,8 +236,8 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
     wrapped := buildJSON(payload, IntegrityMetadata{
         FormatVersion: IntegrityFormatVersion,
         Sequence:      seq,
-        PrevHash:      result.PrevHash,
-        EntryHash:     result.EntryHash,
+        PrevHash:      result.PrevHash(),
+        EntryHash:     result.EntryHash(),
     })
     if err := c.chain.Commit(result); err != nil {
         return nil, err
@@ -300,7 +319,7 @@ func (s *MySink) AppendEvent(ctx context.Context, ev types.Event) error {
     }
 
     // Step 2: durable write. Failure modes split three ways.
-    werr := s.writeDurable(canonical, result.EntryHash, result.PrevHash)
+    werr := s.writeDurable(canonical, result.EntryHash(), result.PrevHash())
     switch {
     case werr == nil:
         // Step 3a: clean success → commit. A non-nil error from Commit means
@@ -338,7 +357,7 @@ When the composite owner rotates the chain key:
 
 1. Owner calls `composite.NextGeneration()` → returns new generation.
 2. Next `AppendEvent` call allocates `(seq=0, gen=new)`.
-3. Each chained sink observes `ev.Chain.Generation` differs from its `SinkChain.State().Generation`. `SinkChain.Compute` automatically uses `prev_hash = ""` for the new generation and returns a `*ComputeResult` with `PrevHash == ""` — the rollover signal. `Commit(result)` records the new generation.
+3. Each chained sink observes `ev.Chain.Generation` differs from its `SinkChain.State().Generation`. `SinkChain.Compute` automatically uses `prev_hash = ""` for the new generation and returns a `*ComputeResult` whose `PrevHash()` is `""` — the rollover signal. `Commit(result)` records the new generation.
 4. Per-sink work (e.g., WTP forces a batch flush + WAL segment roll + `SessionUpdate`) is triggered by the sink observing the generation change in `ev.Chain.Generation`.
 
 Generation is a property of the *shared allocator*, not of any individual sink. All sinks roll on the same logical event boundary — the first event with the new generation.

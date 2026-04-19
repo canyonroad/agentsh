@@ -129,8 +129,10 @@ watchtower.Store.AppendEvent(ctx, ev)
   │ 3. canonicalize → bytes for hashing
   │
   │ 4. SinkChain.Compute(formatVersion, seq, gen, payload)
-  │      → *ComputeResult (EntryHash, PrevHash exposed; sequence,
-  │        generation tracked internally for Commit-time validation)
+  │      → *ComputeResult (opaque, chain-bound; EntryHash() and
+  │        PrevHash() accessors expose values for serialization;
+  │        sequence, generation, chain pointer tracked internally for
+  │        Commit-time validation)
   │        PURE, no chain mutation
   │
   │ 5. wal.Append(seq, gen, record_bytes)
