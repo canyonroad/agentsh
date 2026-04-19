@@ -696,6 +696,7 @@ Create `internal/metrics/wtp_test.go`:
 package metrics
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"strconv"
 	"strings"
@@ -822,6 +823,64 @@ func TestWTPMetrics_ReconnectReasonValidationAndEscape(t *testing.T) {
 		t.Errorf("invalid reason leaked through validator into output:\n%s", body)
 	}
 }
+
+func TestWTPMetrics_WALCorruptionCounter(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	// Initial scrape: counter must be present at zero.
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_wal_corruption_total 0") {
+		t.Errorf("expected zero-valued wtp_wal_corruption_total in initial scrape\nbody:\n%s", rr.Body.String())
+	}
+
+	// After increments, the value must reflect the sum.
+	w.IncWALCorruption(1)
+	w.IncWALCorruption(4)
+
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_wal_corruption_total 5") {
+		t.Errorf("expected wtp_wal_corruption_total 5 after increments\nbody:\n%s", rr.Body.String())
+	}
+}
+
+func TestWTPMetrics_ReconnectsAlwaysEmittedAllReasons(t *testing.T) {
+	c := New()
+	// Note: no IncReconnects calls. Per spec the family must still be present
+	// with zero-valued series for every enumerated reason.
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	expectedReasons := []string{
+		"ack_timeout",
+		"dial_failed",
+		"heartbeat_timeout",
+		"send_error",
+		"server_goaway",
+		"stream_recv_error",
+		"unknown",
+	}
+	for _, reason := range expectedReasons {
+		want := fmt.Sprintf(`wtp_reconnects_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("missing zero-valued reconnect series %q\nbody:\n%s", want, body)
+		}
+	}
+	// After one increment, only that reason flips to 1; the others stay 0.
+	c.WTP().IncReconnects(WTPReconnectReasonAckTimeout)
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_reconnects_total{reason="ack_timeout"} 1`) {
+		t.Errorf("expected ack_timeout=1 after one IncReconnects\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_reconnects_total{reason="dial_failed"} 0`) {
+		t.Errorf("expected other reasons to remain 0 after one increment\nbody:\n%s", body)
+	}
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -837,8 +896,6 @@ package metrics
 import (
 	"fmt"
 	"io"
-	"sort"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -877,6 +934,21 @@ var wtpReconnectReasonsValid = map[WTPReconnectReason]struct{}{
 	WTPReconnectReasonHeartbeatTimeout: {},
 	WTPReconnectReasonServerGoaway:     {},
 	WTPReconnectReasonUnknown:          {},
+}
+
+// wtpReconnectReasonsEmitOrder is the canonical, sorted-by-string emission
+// order for the wtp_reconnects_total family. Using a fixed slice keeps
+// Prometheus exposition deterministic and lets emitWTPMetrics emit
+// zero-valued series for reasons that have not yet fired (per the
+// always-emit contract in the design spec).
+var wtpReconnectReasonsEmitOrder = []WTPReconnectReason{
+	WTPReconnectReasonAckTimeout,
+	WTPReconnectReasonDialFailed,
+	WTPReconnectReasonHeartbeatTimeout,
+	WTPReconnectReasonSendError,
+	WTPReconnectReasonServerGoaway,
+	WTPReconnectReasonStreamRecvError,
+	WTPReconnectReasonUnknown,
 }
 
 // WTPMetrics is the per-Collector facade for wtp_* series. Returned by
@@ -1023,18 +1095,17 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 	fmt.Fprint(w, "# TYPE wtp_transport_loss_total counter\n")
 	fmt.Fprintf(w, "wtp_transport_loss_total %d\n", c.wtpTransportLoss.Load())
 
-	reasons := snapshotKeys(&c.wtpReconnectsByReason)
-	if len(reasons) > 0 {
-		fmt.Fprint(w, "# HELP wtp_reconnects_total WTP transport reconnects by reason.\n")
-		fmt.Fprint(w, "# TYPE wtp_reconnects_total counter\n")
-		for _, r := range reasons {
-			ptr, _ := c.wtpReconnectsByReason.Load(r)
-			n := uint64(0)
-			if ptr != nil {
-				n = ptr.(*atomic.Uint64).Load()
-			}
-			fmt.Fprintf(w, "wtp_reconnects_total{reason=%q} %d\n", escapeLabelValue(r), n)
+	// Always emit the wtp_reconnects_total family with all enumerated reasons
+	// so dashboards have a stable schema regardless of runtime activity (per
+	// the always-emit contract in the design spec).
+	fmt.Fprint(w, "# HELP wtp_reconnects_total WTP transport reconnects by reason.\n")
+	fmt.Fprint(w, "# TYPE wtp_reconnects_total counter\n")
+	for _, r := range wtpReconnectReasonsEmitOrder {
+		var n uint64
+		if v, ok := c.wtpReconnectsByReason.Load(string(r)); ok && v != nil {
+			n = v.(*atomic.Uint64).Load()
 		}
+		fmt.Fprintf(w, "wtp_reconnects_total{reason=%q} %d\n", escapeLabelValue(string(r)), n)
 	}
 
 	fmt.Fprint(w, "# HELP wtp_session_state Current WTP session state (0=connecting,1=replaying,2=live,3=shutdown).\n")
@@ -1078,13 +1149,6 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 	fmt.Fprintf(w, "wtp_send_latency_seconds_sum %g\n", sumSnapshot)
 	fmt.Fprintf(w, "wtp_send_latency_seconds_count %d\n", countSnapshot)
 }
-
-// reuse-prevention: ensure sort.Strings stays imported even if the only
-// caller above is removed during refactors.
-var _ = sort.Strings
-
-// sync import retention (used via sync.Map field on Collector and sync.Mutex).
-var _ sync.Locker = (*sync.Mutex)(nil)
 ```
 
 - [ ] **Step 4: Add WTP fields to the Collector and wire emitter**

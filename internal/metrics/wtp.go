@@ -3,8 +3,6 @@ package metrics
 import (
 	"fmt"
 	"io"
-	"sort"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -43,6 +41,21 @@ var wtpReconnectReasonsValid = map[WTPReconnectReason]struct{}{
 	WTPReconnectReasonHeartbeatTimeout: {},
 	WTPReconnectReasonServerGoaway:     {},
 	WTPReconnectReasonUnknown:          {},
+}
+
+// wtpReconnectReasonsEmitOrder is the canonical, sorted-by-string emission
+// order for the wtp_reconnects_total family. Using a fixed slice keeps
+// Prometheus exposition deterministic and lets emitWTPMetrics emit
+// zero-valued series for reasons that have not yet fired (per the
+// always-emit contract in the design spec).
+var wtpReconnectReasonsEmitOrder = []WTPReconnectReason{
+	WTPReconnectReasonAckTimeout,
+	WTPReconnectReasonDialFailed,
+	WTPReconnectReasonHeartbeatTimeout,
+	WTPReconnectReasonSendError,
+	WTPReconnectReasonServerGoaway,
+	WTPReconnectReasonStreamRecvError,
+	WTPReconnectReasonUnknown,
 }
 
 // WTPMetrics is the per-Collector facade for wtp_* series. Returned by
@@ -189,18 +202,17 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 	fmt.Fprint(w, "# TYPE wtp_transport_loss_total counter\n")
 	fmt.Fprintf(w, "wtp_transport_loss_total %d\n", c.wtpTransportLoss.Load())
 
-	reasons := snapshotKeys(&c.wtpReconnectsByReason)
-	if len(reasons) > 0 {
-		fmt.Fprint(w, "# HELP wtp_reconnects_total WTP transport reconnects by reason.\n")
-		fmt.Fprint(w, "# TYPE wtp_reconnects_total counter\n")
-		for _, r := range reasons {
-			ptr, _ := c.wtpReconnectsByReason.Load(r)
-			n := uint64(0)
-			if ptr != nil {
-				n = ptr.(*atomic.Uint64).Load()
-			}
-			fmt.Fprintf(w, "wtp_reconnects_total{reason=%q} %d\n", escapeLabelValue(r), n)
+	// Always emit the wtp_reconnects_total family with all enumerated reasons
+	// so dashboards have a stable schema regardless of runtime activity (per
+	// the always-emit contract in the design spec).
+	fmt.Fprint(w, "# HELP wtp_reconnects_total WTP transport reconnects by reason.\n")
+	fmt.Fprint(w, "# TYPE wtp_reconnects_total counter\n")
+	for _, r := range wtpReconnectReasonsEmitOrder {
+		var n uint64
+		if v, ok := c.wtpReconnectsByReason.Load(string(r)); ok && v != nil {
+			n = v.(*atomic.Uint64).Load()
 		}
+		fmt.Fprintf(w, "wtp_reconnects_total{reason=%q} %d\n", escapeLabelValue(string(r)), n)
 	}
 
 	fmt.Fprint(w, "# HELP wtp_session_state Current WTP session state (0=connecting,1=replaying,2=live,3=shutdown).\n")
@@ -244,10 +256,3 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 	fmt.Fprintf(w, "wtp_send_latency_seconds_sum %g\n", sumSnapshot)
 	fmt.Fprintf(w, "wtp_send_latency_seconds_count %d\n", countSnapshot)
 }
-
-// reuse-prevention: ensure sort.Strings stays imported even if the only
-// caller above is removed during refactors.
-var _ = sort.Strings
-
-// sync import retention (used via sync.Map field on Collector and sync.Mutex).
-var _ sync.Locker = (*sync.Mutex)(nil)

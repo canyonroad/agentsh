@@ -542,6 +542,13 @@ All exposed via slog at debug + as structured counters consumable by the existin
 - `wtp_bytes_sent_total` (counter, post-compression)
 - `wtp_transport_loss_total` (counter)
 - `wtp_reconnects_total` (counter, labeled by reason; reason is one of: `dial_failed`, `stream_recv_error`, `send_error`, `ack_timeout`, `heartbeat_timeout`, `server_goaway`, `unknown`)
+  - `dial_failed`: gRPC `Dial`/`NewClient` failed before any stream opened.
+  - `stream_recv_error`: stream `Recv` returned a non-EOF error after a session was established.
+  - `send_error`: stream `Send`/`CloseSend` returned an error.
+  - `ack_timeout`: no `BatchAck` received within the configured ack-timeout window for in-flight batches.
+  - `heartbeat_timeout`: no `ServerHeartbeat` received within the configured heartbeat-timeout window.
+  - `server_goaway`: server sent a `Goaway` frame requesting reconnect.
+  - `unknown`: catch-all when the reconnect cause cannot be classified.
 - `wtp_session_state` (gauge: 0=connecting, 1=replaying, 2=live, 3=shutdown)
 - `wtp_wal_segments` (gauge)
 - `wtp_wal_bytes` (gauge)
