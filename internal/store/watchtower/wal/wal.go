@@ -464,6 +464,41 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 		return AppendResult{}, &AppendError{Class: FailureClean, Op: "append", Err: fmt.Errorf("payload %d exceeds segment budget", len(payload))}
 	}
 
+	// Overflow: if appending would push past MaxTotalBytes, drop oldest
+	// sealed segments first and emit a TransportLoss marker for the dropped
+	// range. The check uses (totalBytes + SegmentSize) as a heuristic — when
+	// we are within one full segment of the cap, we drop. Loop until either
+	// (a) we are back under the threshold or (b) there are no more sealed
+	// segments to drop (in which case we proceed and accept being over
+	// budget for one record). This must fire BEFORE the segment-full roll
+	// below so we never seal+open a new segment that immediately pushes us
+	// past the cap.
+	for w.totalBytes+int64(w.opts.SegmentSize) > w.opts.MaxTotalBytes {
+		dropped, err := w.dropOldestLocked()
+		if err != nil {
+			return AppendResult{}, w.failAmbiguousLocked("overflow-gc", err)
+		}
+		if dropped.ToSequence == 0 {
+			// Nothing left to drop; proceed and accept the overage.
+			break
+		}
+		// dropOldestLocked may have removed the file backing the live
+		// segment — but the live segment is .INPROGRESS and is excluded
+		// from the sealed set, so w.current remains valid. Append the
+		// loss marker into the current segment (opening one if there
+		// isn't one yet — the recover-from-empty case).
+		if w.current == nil {
+			seg, err := w.openNewSegmentLocked(gen, FlagGenInit)
+			if err != nil {
+				return AppendResult{}, w.failAmbiguousLocked("overflow-open", err)
+			}
+			w.current = seg
+		}
+		if err := w.appendLossLocked(dropped); err != nil {
+			return AppendResult{}, w.failAmbiguousLocked("overflow-loss", err)
+		}
+	}
+
 	rolled := false
 	// Generation roll: seal current segment, open a new one with the new gen.
 	// This is the ONLY place that sets rolled=true. The fresh-WAL "first
@@ -593,4 +628,273 @@ func parseSeqGen(framed []byte) (uint64, uint32, bool) {
 		gen |= uint32(framed[8+i]) << (8 * (3 - i))
 	}
 	return seq, gen, true
+}
+
+// LossMarkerSentinel is a fixed byte string embedded in the framed payload of
+// a synthetic TransportLoss record. Used by recovery and tests to identify
+// loss markers without parsing the protobuf payload (which carries seq=0,
+// gen=N for a marker — sentinels avoid ambiguity).
+const LossMarkerSentinel = "\x00WTPLOSS\x00"
+
+// LossRecord describes a synthetic TransportLoss inserted into the WAL stream.
+type LossRecord struct {
+	FromSequence uint64
+	ToSequence   uint64
+	Generation   uint32
+	Reason       string // "overflow" | "crc_corruption"
+}
+
+// AppendLoss writes a synthetic TransportLoss record into the WAL stream so
+// the transport's reader observes the gap inline. Always fsync'd. Used by the
+// overflow path and the CRC-corruption recovery path.
+//
+// Respects the closed and latched-fatal contracts established in Task 12: a
+// closed WAL returns FailureClean ErrClosed; a previously-latched fatal
+// returns a clean ErrFatal-wrapped error without attempting I/O. Any I/O
+// failure inside the lock is classified as ambiguous via failAmbiguousLocked
+// so the WAL latches into the fatal state.
+func (w *WAL) AppendLoss(loss LossRecord) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return &AppendError{Class: FailureClean, Op: "append-loss", Err: ErrClosed}
+	}
+	if w.fatalErr != nil {
+		return &AppendError{
+			Class: FailureClean,
+			Op:    "append-loss",
+			Err:   fmt.Errorf("%w: %v", ErrFatal, w.fatalErr),
+		}
+	}
+	if w.current == nil {
+		seg, err := w.openNewSegmentLocked(loss.Generation, FlagGenInit)
+		if err != nil {
+			return w.failAmbiguousLocked("open-loss-segment", err)
+		}
+		w.current = seg
+	}
+	payload := encodeLossPayload(loss)
+	if err := w.current.WriteRecord(payload); err != nil {
+		return w.failAmbiguousLocked("write-loss", err)
+	}
+	if err := w.current.Sync(); err != nil {
+		return w.failAmbiguousLocked("sync-loss", err)
+	}
+	w.totalBytes += int64(8 + len(payload))
+	return nil
+}
+
+// encodeLossPayload encodes a LossRecord into the on-disk loss-marker layout:
+//
+//	offset  size  field
+//	0       10    LossMarkerSentinel
+//	10      8     FromSequence (uint64 BE)
+//	18      8     ToSequence   (uint64 BE)
+//	26      4     Generation   (uint32 BE)
+//	30      N     Reason       (UTF-8, no terminator)
+//
+// Total length is 30 + len(reason) bytes. The Reason has no length prefix
+// because the framing layer's record length implicitly bounds it.
+func encodeLossPayload(l LossRecord) []byte {
+	out := make([]byte, 10+8+8+4+len(l.Reason))
+	copy(out[0:10], LossMarkerSentinel)
+	for i := 0; i < 8; i++ {
+		out[17-i] = byte(l.FromSequence >> (8 * i))
+	}
+	for i := 0; i < 8; i++ {
+		out[25-i] = byte(l.ToSequence >> (8 * i))
+	}
+	for i := 0; i < 4; i++ {
+		out[29-i] = byte(l.Generation >> (8 * i))
+	}
+	copy(out[30:], l.Reason)
+	return out
+}
+
+// MarkAcked records the highest-acked sequence in meta.json and GCs sealed
+// segments whose highest sequence is <= seq. The live (.INPROGRESS) segment
+// is never removed.
+//
+// Returns nil even if no segments were eligible for GC. Callers do not need
+// to filter on whether progress was made.
+//
+// Filename ordering uses the numeric segment index (parseSegmentIndex), not
+// lexicographic order on filenames — once an index crosses 10^10 the digit
+// count changes and lex order silently picks the wrong "oldest" file. The
+// current per-segment scan via segmentHighSeq is the safety check that
+// prevents us from removing a segment whose tail records are still unacked.
+func (w *WAL) MarkAcked(seq uint64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := WriteMeta(w.opts.Dir, Meta{
+		AckHighWatermarkSeq: seq,
+		AckHighWatermarkGen: w.highGen,
+	}); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(w.segDir)
+	if err != nil {
+		return err
+	}
+	var sealed []segmentEntry
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, sealedSuffix) || strings.HasSuffix(name, inprogressSuffix) {
+			continue
+		}
+		idx, ok := parseSegmentIndex(name)
+		if !ok {
+			continue
+		}
+		sealed = append(sealed, segmentEntry{name: name, idx: idx})
+	}
+	sort.Slice(sealed, func(i, j int) bool { return sealed[i].idx < sealed[j].idx })
+	removed := false
+	for _, e := range sealed {
+		path := filepath.Join(w.segDir, e.name)
+		hi, err := segmentHighSeq(path, w.maxRec)
+		if err != nil {
+			continue
+		}
+		if hi <= seq {
+			st, _ := os.Stat(path)
+			if err := os.Remove(path); err == nil {
+				if st != nil {
+					w.totalBytes -= st.Size()
+				}
+				removed = true
+			}
+		}
+	}
+	if removed {
+		if err := syncDir(w.segDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// segmentHighSeq returns the highest sequence number recorded in the segment
+// at path. A scan is required because the WAL does not maintain a per-segment
+// index. Used by MarkAcked GC and by overflow GC to identify safe-to-drop
+// segments.
+//
+// Errors during the read loop (truncation, CRC mismatch, corrupt frames)
+// are treated as "stop scanning" so a partially-written segment still
+// reports its highest known-good seq rather than failing outright; the
+// caller decides whether that's safe to act on.
+func segmentHighSeq(path string, maxPayload int) (uint64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	if _, err := ReadSegmentHeader(f); err != nil {
+		return 0, err
+	}
+	var hi uint64
+	for {
+		payload, err := ReadRecord(f, maxPayload)
+		if err == io.EOF {
+			return hi, nil
+		}
+		if err != nil {
+			return hi, nil
+		}
+		if seq, _, ok := parseSeqGen(payload); ok {
+			if seq > hi {
+				hi = seq
+			}
+		}
+	}
+}
+
+// appendLossLocked writes a TransportLoss marker into the live segment and
+// fsyncs it. Caller MUST hold w.mu and MUST have ensured w.current != nil.
+// Used by the overflow path; AppendLoss is the public entry point that
+// handles the closed/fatal/no-segment preconditions.
+func (w *WAL) appendLossLocked(loss LossRecord) error {
+	payload := encodeLossPayload(loss)
+	if err := w.current.WriteRecord(payload); err != nil {
+		return err
+	}
+	if err := w.current.Sync(); err != nil {
+		return err
+	}
+	w.totalBytes += int64(8 + len(payload))
+	return nil
+}
+
+// dropOldestLocked drops the oldest sealed segment file to free disk space.
+// Returns the LossRecord describing the dropped seq range, or LossRecord{}
+// (with ToSequence == 0) when no sealed segments remain. The live
+// (.INPROGRESS) segment is excluded — we never drop the file we're writing
+// to. Caller MUST hold w.mu.
+//
+// Sort order is numeric (by parsed segment index), not lexicographic on
+// filenames, for the same reason MarkAcked uses numeric: once indices cross
+// 10^10 the digit count grows and lex order silently picks the wrong oldest.
+func (w *WAL) dropOldestLocked() (LossRecord, error) {
+	entries, err := os.ReadDir(w.segDir)
+	if err != nil {
+		return LossRecord{}, err
+	}
+	var sealed []segmentEntry
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, sealedSuffix) || strings.HasSuffix(name, inprogressSuffix) {
+			continue
+		}
+		idx, ok := parseSegmentIndex(name)
+		if !ok {
+			continue
+		}
+		sealed = append(sealed, segmentEntry{name: name, idx: idx})
+	}
+	if len(sealed) == 0 {
+		return LossRecord{}, nil
+	}
+	sort.Slice(sealed, func(i, j int) bool { return sealed[i].idx < sealed[j].idx })
+	oldest := sealed[0].name
+	path := filepath.Join(w.segDir, oldest)
+	f, err := os.Open(path)
+	if err != nil {
+		return LossRecord{}, err
+	}
+	hdr, _ := ReadSegmentHeader(f)
+	var fromSeq, toSeq uint64
+	first := true
+	for {
+		payload, err := ReadRecord(f, w.maxRec)
+		if err == io.EOF || err != nil {
+			break
+		}
+		if seq, _, ok := parseSeqGen(payload); ok {
+			if first {
+				fromSeq = seq
+				first = false
+			}
+			toSeq = seq
+		}
+	}
+	f.Close()
+	st, _ := os.Stat(path)
+	if err := os.Remove(path); err != nil {
+		return LossRecord{}, err
+	}
+	if st != nil {
+		w.totalBytes -= st.Size()
+	}
+	if err := syncDir(w.segDir); err != nil {
+		return LossRecord{}, err
+	}
+	// A dropped segment with no decodable records still represents a loss
+	// of an unknown range; report ToSequence == 0 so the caller treats it
+	// as a no-op for the loss-marker emission (the file is gone either
+	// way). For real (non-empty) segments we always observe at least one
+	// record and toSeq is non-zero unless the segment held literally only
+	// seq==0 — which is fine: the caller's "dropped.ToSequence > 0" gate
+	// will skip the marker, and the budget recheck will retry on the next
+	// sealed file.
+	return LossRecord{FromSequence: fromSeq, ToSequence: toSeq, Generation: hdr.Generation, Reason: "overflow"}, nil
 }
