@@ -6320,6 +6320,8 @@ six invariants:
 - Create: `internal/store/watchtower/transport/batcher.go`
 - Create: `internal/store/watchtower/transport/state_live.go`
 - Test: `internal/store/watchtower/transport/batcher_test.go`
+- Modify: `proto/canyonroad/wtp/v1/validate.go` (Step 4 — add `ValidationReason` enum + `ValidationError` typed classifier so receivers consume `errors.As(err, &ve)` instead of grepping the validator's formatted message)
+- Test: `proto/canyonroad/wtp/v1/validate_reason_test.go` (table-driven coverage that each input maps to its enum constant; `errors.As` and `errors.Is(err, ErrInvalidFrame)` both work)
 
 - [ ] **Step 1: Write the failing tests for each invariant**
 
@@ -6655,15 +6657,219 @@ func encodeBatchMessage(_ []wal.Record) (*wtpv1.ClientMessage, error) {
 }
 ```
 
+- [ ] **Step 4 (validator-classifier prerequisite for Step 4a): Extend validator boundary with typed reason classifier**
+
+Step 4a relies on the receiver classifying validator failures into a fixed `wtp_dropped_invalid_frame_total{reason}` enum. Today `proto/canyonroad/wtp/v1/validate.go` exposes only generic sentinels (`ErrInvalidFrame`, `ErrPayloadTooLarge`) constructed via `fmt.Errorf("%w: <peer-supplied details>", ErrXxx, ...)` — receivers would have to grep the formatted message to recover the reason, which both leaks peer-supplied bytes (the wrapped detail string embeds byte counts and oneof discriminators) into metric cardinality and is fragile. This step adds a typed classifier so receivers consume the reason via `errors.As(err, &ve)` and never touch the formatted message in the hot path.
+
+Files to modify (Go-code change — small but real):
+- Modify: `proto/canyonroad/wtp/v1/validate.go` — add `ValidationReason` enum, `ValidationError` typed struct, refactor `ValidateEventBatch` and `ValidateSessionInit` to return `&ValidationError{Reason: ..., Inner: fmt.Errorf(...)}`.
+- Create: `proto/canyonroad/wtp/v1/validate_reason_test.go` — TDD-first table-driven tests asserting each enum constant maps to the correct input, `errors.As(err, &ve)` works, and `errors.Is(err, ErrInvalidFrame)` / `errors.Is(err, ErrPayloadTooLarge)` still work for legacy callers.
+
+TDD order:
+
+1. **Write the failing tests** (`proto/canyonroad/wtp/v1/validate_reason_test.go`):
+
+```go
+package wtpv1_test
+
+import (
+	"bytes"
+	"errors"
+	"strings"
+	"testing"
+
+	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+)
+
+// Each enum constant maps to the correct ValidateEventBatch input.
+func TestValidateEventBatch_ReasonClassification(t *testing.T) {
+	cases := []struct {
+		name     string
+		batch    *wtpv1.EventBatch
+		reason   wtpv1.ValidationReason
+		isInner  error // sentinel that errors.Is must match
+	}{
+		{"nil_batch", nil, wtpv1.ReasonNilBatch, wtpv1.ErrInvalidFrame},
+		{"compression_unspecified", &wtpv1.EventBatch{Compression: wtpv1.Compression_COMPRESSION_UNSPECIFIED}, wtpv1.ReasonCompressionUnspecified, wtpv1.ErrInvalidFrame},
+		{"body_unset", &wtpv1.EventBatch{Compression: wtpv1.Compression_COMPRESSION_NONE, Body: nil}, wtpv1.ReasonBodyUnset, wtpv1.ErrInvalidFrame},
+		{"compression_mismatch_uncompressed", &wtpv1.EventBatch{
+			Compression: wtpv1.Compression_COMPRESSION_ZSTD,
+			Body:        &wtpv1.EventBatch_Uncompressed{Uncompressed: &wtpv1.UncompressedBatch{}},
+		}, wtpv1.ReasonCompressionMismatch, wtpv1.ErrInvalidFrame},
+		{"compression_mismatch_compressed_with_none", &wtpv1.EventBatch{
+			Compression: wtpv1.Compression_COMPRESSION_NONE,
+			Body:        &wtpv1.EventBatch_CompressedPayload{CompressedPayload: []byte{1, 2, 3}},
+		}, wtpv1.ReasonCompressionMismatch, wtpv1.ErrInvalidFrame},
+		{"payload_too_large", &wtpv1.EventBatch{
+			Compression: wtpv1.Compression_COMPRESSION_ZSTD,
+			Body:        &wtpv1.EventBatch_CompressedPayload{CompressedPayload: bytes.Repeat([]byte{0}, wtpv1.MaxCompressedPayloadBytes+1)},
+		}, wtpv1.ReasonPayloadTooLarge, wtpv1.ErrPayloadTooLarge},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := wtpv1.ValidateEventBatch(tc.batch)
+			if err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+			var ve *wtpv1.ValidationError
+			if !errors.As(err, &ve) {
+				t.Fatalf("errors.As: not a *ValidationError: %v", err)
+			}
+			if ve.Reason != tc.reason {
+				t.Errorf("reason: got %q, want %q", ve.Reason, tc.reason)
+			}
+			if !errors.Is(err, tc.isInner) {
+				t.Errorf("errors.Is(%v): want match for %v", err, tc.isInner)
+			}
+			// Sanity: the formatted message preserves the inner detail so
+			// existing callers logging `err.Error()` are not broken; the
+			// caller is still responsible for sanitization (do NOT log
+			// this string from the receiver per spec §"Invalid-frame log
+			// sanitization").
+			if !strings.Contains(err.Error(), ve.Inner.Error()) {
+				t.Errorf("Error() lost inner detail: %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestValidateSessionInit_ReasonClassification(t *testing.T) {
+	cases := []struct {
+		name   string
+		s      *wtpv1.SessionInit
+		reason wtpv1.ValidationReason
+	}{
+		{"nil_session_init", nil, wtpv1.ReasonNilSessionInit},
+		{"algorithm_unspecified", &wtpv1.SessionInit{Algorithm: wtpv1.HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED}, wtpv1.ReasonAlgorithmUnspecified},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := wtpv1.ValidateSessionInit(tc.s)
+			if err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+			var ve *wtpv1.ValidationError
+			if !errors.As(err, &ve) {
+				t.Fatalf("errors.As: not a *ValidationError: %v", err)
+			}
+			if ve.Reason != tc.reason {
+				t.Errorf("reason: got %q, want %q", ve.Reason, tc.reason)
+			}
+			if !errors.Is(err, wtpv1.ErrInvalidFrame) {
+				t.Errorf("errors.Is(ErrInvalidFrame): want true")
+			}
+		})
+	}
+}
+```
+
+2. **Run the tests to confirm they fail** (`go test ./proto/canyonroad/wtp/v1/... -run TestValidate.*Reason`). Expected: `wtpv1.ValidationReason undefined`, `wtpv1.ValidationError undefined`, `wtpv1.Reason* undefined`.
+
+3. **Implement** in `proto/canyonroad/wtp/v1/validate.go`:
+
+```go
+// ValidationReason is the canonical low-cardinality classification of
+// validator failures. Receivers consume this via errors.As to stamp
+// wtp_dropped_invalid_frame_total{reason=string(ve.Reason)} without
+// parsing the formatted error message. The string values match the
+// enumerated reasons in spec §Metrics; adding a new validator branch
+// requires adding a new ValidationReason constant AND adding the
+// matching label to internal/metrics' WTPInvalidFrameReason enum (Task
+// 22a).
+type ValidationReason string
+
+const (
+	ReasonNilBatch              ValidationReason = "event_batch_body_unset" // nil *EventBatch — folded under body_unset for the metric
+	ReasonCompressionUnspecified ValidationReason = "event_batch_compression_unspecified"
+	ReasonBodyUnset             ValidationReason = "event_batch_body_unset"
+	ReasonCompressionMismatch   ValidationReason = "event_batch_compression_mismatch"
+	ReasonPayloadTooLarge       ValidationReason = "payload_too_large"
+	ReasonNilSessionInit        ValidationReason = "session_init_algorithm_unspecified" // nil *SessionInit — folded under algorithm_unspecified for the metric (no separate "nil" label by design)
+	ReasonAlgorithmUnspecified  ValidationReason = "session_init_algorithm_unspecified"
+)
+
+// ValidationError carries both a structured Reason (safe for metric labels
+// and structured logs) and the original Inner error (which embeds peer-
+// supplied details and MUST NOT be logged by receivers per the spec
+// sanitization rule). Receivers MUST consume Reason via errors.As; the
+// Inner error remains available via Unwrap for tests and developer-side
+// debugging.
+type ValidationError struct {
+	Reason ValidationReason
+	Inner  error
+}
+
+func (e *ValidationError) Error() string { return e.Inner.Error() } // no Reason leak — Reason is for the metric label, not the message
+func (e *ValidationError) Unwrap() error  { return e.Inner }
+
+// Is preserves errors.Is(err, ErrInvalidFrame) / ErrPayloadTooLarge
+// semantics so legacy callers built before this typed boundary still
+// work. The match is delegated to the Inner error which itself wraps
+// the appropriate sentinel.
+func (e *ValidationError) Is(target error) bool { return errors.Is(e.Inner, target) }
+
+// ValidateEventBatch returns a *ValidationError on failure; the typed
+// Reason field lets receivers classify the failure into a fixed metric
+// label without parsing the error message.
+func ValidateEventBatch(b *EventBatch) error {
+	if b == nil {
+		return &ValidationError{Reason: ReasonNilBatch, Inner: fmt.Errorf("%w: batch is nil", ErrInvalidFrame)}
+	}
+	if b.Compression == Compression_COMPRESSION_UNSPECIFIED {
+		return &ValidationError{Reason: ReasonCompressionUnspecified, Inner: fmt.Errorf("%w: compression unspecified", ErrInvalidFrame)}
+	}
+	switch body := b.Body.(type) {
+	case nil:
+		return &ValidationError{Reason: ReasonBodyUnset, Inner: fmt.Errorf("%w: body unset", ErrInvalidFrame)}
+	case *EventBatch_Uncompressed:
+		if b.Compression != Compression_COMPRESSION_NONE {
+			return &ValidationError{Reason: ReasonCompressionMismatch, Inner: fmt.Errorf("%w: uncompressed body requires compression=NONE (got %s)", ErrInvalidFrame, b.Compression)}
+		}
+	case *EventBatch_CompressedPayload:
+		if b.Compression == Compression_COMPRESSION_NONE {
+			return &ValidationError{Reason: ReasonCompressionMismatch, Inner: fmt.Errorf("%w: compressed_payload requires compression != NONE", ErrInvalidFrame)}
+		}
+		if len(body.CompressedPayload) > MaxCompressedPayloadBytes {
+			return &ValidationError{Reason: ReasonPayloadTooLarge, Inner: fmt.Errorf("%w: compressed_payload is %d bytes (cap %d)", ErrPayloadTooLarge, len(body.CompressedPayload), MaxCompressedPayloadBytes)}
+		}
+	default:
+		// Default branch keeps the bare ErrInvalidFrame return path so a
+		// future protobuf revision that adds a new oneof arm without
+		// updating this switch surfaces as wtp_dropped_invalid_frame_total
+		// {reason="unknown"} downstream — that's the intentional forward-
+		// compat catch-all per spec §Metrics.
+		return fmt.Errorf("%w: unknown body oneof case", ErrInvalidFrame)
+	}
+	return nil
+}
+
+func ValidateSessionInit(s *SessionInit) error {
+	if s == nil {
+		return &ValidationError{Reason: ReasonNilSessionInit, Inner: fmt.Errorf("%w: session_init is nil", ErrInvalidFrame)}
+	}
+	if s.Algorithm == HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED {
+		return &ValidationError{Reason: ReasonAlgorithmUnspecified, Inner: fmt.Errorf("%w: algorithm unspecified", ErrInvalidFrame)}
+	}
+	return nil
+}
+```
+
+4. **Run the tests to confirm they pass** (`go test ./proto/canyonroad/wtp/v1/... -count=1`). Expected: PASS.
+
+5. **Cross-compile** (`GOOS=windows go build ./...`) before moving on.
+
+This step is a small but real Go-code change — doc-only rounds (such as round 6) MUST NOT touch `validate.go`; the actual edit happens during Task 17 execution.
+
 - [ ] **Step 4a: Inbound frame validation acceptance**
 
 The Live state (and any other receive site introduced in Phase 8) MUST honor the spec's "Frame validation and forward compatibility" contract for every inbound `ServerMessage`. Acceptance criteria:
 
-(a) When the receiver detects a frame-validation failure, it MUST increment `wtp_dropped_invalid_frame_total{reason="<value>"}` exactly once per offending frame. The `reason` value MUST come from the canonical enum defined by Task 22a (currently: `event_batch_body_unset`, `event_batch_compression_unspecified`, `session_init_algorithm_unspecified`, plus `unknown` as the catch-all). New reasons added in future tasks MUST be added to that enum first; receivers reference the enum, never literals.
+(a) When the receiver detects a frame-validation failure, it MUST consume the typed reason via `errors.As(err, &ve)` and increment `wtp_dropped_invalid_frame_total{reason=string(ve.Reason)}` exactly once per offending frame. The `reason` value MUST come from the canonical `wtpv1.ValidationReason` constants defined in Step 4 above (currently: `event_batch_body_unset`, `event_batch_compression_unspecified`, `event_batch_compression_mismatch`, `session_init_algorithm_unspecified`, `payload_too_large`, `decompress_error` (emitted by streaming decompression downstream of the validator — see (d) below), plus `unknown` as the catch-all for any future validator class not yet folded into `ValidationReason`). New reasons added in future tasks MUST be added to the `ValidationReason` enum first; receivers reference `wtpv1.Reason*` constants, never literals. There MUST be no fallback that parses `err.Error()` — the typed boundary is the contract.
 (b) After incrementing the counter, the receiver MUST tear down the stream rather than silently consuming the malformed frame: server-side validation failures (this task) take the `stream_recv_error` reconnect path documented in spec §"Frame validation and forward compatibility" — close the current stream, return `StateConnecting` from the live loop, and let the Run loop's backoff handle the reconnect. The newly-added Goaway path is reserved for the testserver / server-side validators in Phase 9 (where the client's outbound frame is rejected) — Phase 8 receivers do not emit Goaway because they are reading, not writing.
-(c) Invalid-frame logging MUST follow the spec's sanitization rule (reason + ≤16-byte hex prefix only; no raw protobuf payloads, no peer-supplied unbounded strings).
+(c) Invalid-frame logging MUST follow the spec's sanitization rule: log only `session_id` (local UUID, internal-only), `reason` (the canonical `string(ve.Reason)`), and `hex_prefix` (a hex-encoded prefix of the offending frame's serialized representation, capped at 16 input bytes — 32 hex chars output). The receiver MUST NOT log `ve.Inner` or `err.Error()` — both embed peer-supplied byte counts and oneof discriminators per the validator's `fmt.Errorf` construction.
+(d) The streaming decompression path (downstream of `ValidateEventBatch` — added when WTP gains a real decompression code path post-MVP) MUST classify zstd/gzip framing errors and `MaxDecompressedBatchBytes` overruns as `wtpv1.ReasonDecompressError` (label string `decompress_error`) and route them through the same counter + tear-down path. Until a real decompression path lands, the `decompress_error` reason exists in the enum so the metric series is registered at zero (always-emit contract) — no live increment yet.
 
-Add a transport-level unit test that injects each enumerated frame-validation reason via the fakeConn `recvCh` (mirror the pattern used by the existing `wtp_session_failures_total{reason}` tests in `internal/metrics/wtp_test.go`). For each reason the test MUST assert: (1) the corresponding `wtp_dropped_invalid_frame_total{reason="<value>"}` series increments by exactly one, AND (2) the live loop returns `StateConnecting` (i.e., the reconnect path was taken). The test SHOULD use a table-driven structure keyed by the canonical enum so adding a new reason is a one-line change. The test MUST NOT redefine the enum locally — it imports the canonical values from the proto/validate package referenced by Task 22a.
+Add a transport-level unit test that injects each enumerated frame-validation reason via the fakeConn `recvCh` (mirror the pattern used by the existing `wtp_session_failures_total{reason}` tests in `internal/metrics/wtp_test.go`). For each reason the test MUST assert: (1) the corresponding `wtp_dropped_invalid_frame_total{reason="<value>"}` series increments by exactly one, AND (2) the live loop returns `StateConnecting` (i.e., the reconnect path was taken). The test SHOULD use a table-driven structure keyed by the `wtpv1.Reason*` constants so adding a new reason is a one-line change. The test MUST consume reasons via `errors.As` against `*wtpv1.ValidationError` rather than parsing the error string.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -6678,8 +6884,8 @@ Expected: no errors.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add internal/store/watchtower/transport/batcher.go internal/store/watchtower/transport/batcher_test.go internal/store/watchtower/transport/state_live.go
-git commit -m "feat(wtp/transport): add Batcher with 6 flush invariants + Live state"
+git add proto/canyonroad/wtp/v1/validate.go proto/canyonroad/wtp/v1/validate_reason_test.go internal/store/watchtower/transport/batcher.go internal/store/watchtower/transport/batcher_test.go internal/store/watchtower/transport/state_live.go
+git commit -m "feat(wtp/transport): add Batcher + Live state + typed validator classifier"
 ```
 
 - [ ] **Step 8: Roborev**
@@ -8566,11 +8772,11 @@ The spec lists five sink-failure counters that Task 23 (`AppendEvent`) and Phase
 
 - `wtp_dropped_invalid_utf8_total` (counter): a record was dropped because the canonical encoder reported `chain.ErrInvalidUTF8`. Wired by `AppendEvent` (Task 23).
 - `wtp_dropped_sequence_overflow_total` (counter): a record was dropped because `ev.Chain.Sequence > math.MaxInt64`. Wired by `AppendEvent` (Task 23).
-- `wtp_dropped_invalid_frame_total{reason}` (counter, labeled): a peer frame was dropped at the protocol-validation boundary; reasons are a fixed enum (`event_batch_body_unset`, `event_batch_compression_unspecified`, `session_init_algorithm_unspecified`, plus `unknown` as the catch-all). Wired by transport / receivers in Phase 8 — specifically Task 17 Step 4a, where the Live state's inbound `ServerMessage` handling increments this counter and triggers the `stream_recv_error` reconnect path. Phase 9 (testserver) covers the symmetric server-side validation of inbound `ClientMessage` frames.
+- `wtp_dropped_invalid_frame_total{reason}` (counter, labeled): a peer frame was dropped at the protocol-validation boundary; reasons are a fixed enum (`event_batch_body_unset`, `event_batch_compression_unspecified`, `event_batch_compression_mismatch`, `session_init_algorithm_unspecified`, `payload_too_large`, `decompress_error`, plus `unknown` as the catch-all). The Go-side label values come from `wtpv1.ValidationReason` constants (added in Task 17 Step 4) — `internal/metrics`' `WTPInvalidFrameReason` constants MUST equal `string(wtpv1.Reason*)` to keep the two enums in lockstep; a future receiver consumes `errors.As(err, &ve)` and increments using `WTPInvalidFrameReason(ve.Reason)`. Wired by transport / receivers in Phase 8 — specifically Task 17 Step 4a, where the Live state's inbound `ServerMessage` handling increments this counter and triggers the `stream_recv_error` reconnect path. Phase 9 (testserver) covers the symmetric server-side validation of inbound `ClientMessage` frames.
 - `wtp_session_init_failures_total{reason}` (counter, labeled): an in-band session-init step failed; reason `invalid_utf8` is the only enumerated value today, with `unknown` as the catch-all. Wired by transport in Phase 8.
 - `wtp_session_rotation_failures_total{reason}` (counter, labeled): same shape as init, but for rotation/SessionUpdate. Wired by transport in Phase 8.
 
-**Encode-error classification counters.** Task 9 added defense-in-depth validation to `compact.Encode`. `AppendEvent` (Task 23) classifies Encode failures via `errors.Is`. Three classes are dropped silently and counted; the fourth (`ErrMissingChain`) is propagated to the caller as a wrapped error and has no counter (a missing chain indicates a composite-store regression that operators must surface loudly):
+**Encode-error classification counters.** Task 9 added defense-in-depth validation to `compact.Encode`. `AppendEvent` (Task 23) classifies Encode failures via `errors.Is`. Three classes are dropped silently and counted (each also emits a WARN-severity structured log); the fourth (`ErrMissingChain`) is propagated to the caller as a wrapped error and has no counter (a missing chain indicates a composite-store regression that operators must surface loudly), but it DOES emit one ERROR-severity structured log per occurrence with internal-only fields `{event_id_or_seq, generation, err}`:
 
 - `wtp_dropped_invalid_mapper_total` (counter): a record was dropped because `compact.Encode` returned `ErrInvalidMapper`. This is defense in depth — `Store.New` rejects the same condition at construction time, so this counter SHOULD always be 0 in practice. A non-zero value indicates a code path constructed `Store` with an invalid mapper or mutated it post-construction.
 - `wtp_dropped_invalid_timestamp_total` (counter): a record was dropped because `compact.Encode` returned `ErrInvalidTimestamp` (zero or pre-epoch).
@@ -8583,9 +8789,18 @@ ce, err := compact.Encode(s.opts.Mapper, ev)
 if err != nil {
     switch {
     case errors.Is(err, compact.ErrMissingChain):
-        // Loud failure — composite-store regression. No counter, no log
-        // (no chain to log fields from); the wrapped error string already
-        // identifies the failure to the caller.
+        // Loud failure — composite-store regression. No counter (it's a
+        // developer error, not a runtime drop class), but MUST emit one
+        // ERROR-severity structured log via the same `slogger` used by
+        // the other drop branches. Fields: {event_id_or_seq, generation,
+        // err} — internal state only, no peer-supplied content. The log
+        // is exempt from the invalid-frame sanitization rule because
+        // every field is internal-only (no peer bytes ever appear).
+        slog.ErrorContext(ctx, "watchtower: composite-store regression — missing chain",
+            "event_id_or_seq", appendEventID(ev), // helper returns ev.EventID if non-empty, else fmt.Sprint(ev.Sequence) if non-zero, else "<unknown>"
+            "generation", appendEventGeneration(ev), // helper returns ev.Chain.Generation when non-nil, else 0 (chain is nil here, so 0)
+            "err", err,
+        )
         return fmt.Errorf("watchtower: %w", err)
     case errors.Is(err, compact.ErrInvalidMapper):
         s.opts.Metrics.WTP().IncDroppedInvalidMapper(1)
@@ -8813,8 +9028,11 @@ func TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons(t *testing.T) {
 	body := rr.Body.String()
 
 	expectedReasons := []string{
+		"decompress_error",
 		"event_batch_body_unset",
+		"event_batch_compression_mismatch",
 		"event_batch_compression_unspecified",
+		"payload_too_large",
 		"session_init_algorithm_unspecified",
 		"unknown",
 	}
@@ -8888,32 +9106,49 @@ var wtpSessionFailureReasonsEmitOrder = []WTPSessionFailureReason{
 }
 
 // WTPInvalidFrameReason is a fixed, low-cardinality classification of why
-// a peer frame was dropped at the protocol-validation boundary. Adding new
-// reasons requires updating both the spec §Metrics section and the
-// wtpInvalidFrameReasonsValid table below.
+// a peer frame was dropped at the protocol-validation boundary. The
+// string values MUST equal string(wtpv1.Reason*) — receivers consume the
+// reason via errors.As against *wtpv1.ValidationError and forward
+// ve.Reason directly into IncDroppedInvalidFrame. Adding new reasons
+// requires updating: (a) wtpv1.ValidationReason in
+// proto/canyonroad/wtp/v1/validate.go, (b) the constants below, (c) the
+// wtpInvalidFrameReasonsValid table, (d) the wtpInvalidFrameReasonsEmitOrder
+// slice, and (e) the spec §Metrics enum list. The two enums are kept
+// deliberately separate (proto vs. metrics package) so the metrics
+// package does not import the proto package — but the string values
+// must stay byte-equal.
 type WTPInvalidFrameReason string
 
 const (
 	WTPInvalidFrameReasonEventBatchBodyUnset            WTPInvalidFrameReason = "event_batch_body_unset"
 	WTPInvalidFrameReasonEventBatchCompressionUnspec    WTPInvalidFrameReason = "event_batch_compression_unspecified"
+	WTPInvalidFrameReasonEventBatchCompressionMismatch  WTPInvalidFrameReason = "event_batch_compression_mismatch"
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec     WTPInvalidFrameReason = "session_init_algorithm_unspecified"
+	WTPInvalidFrameReasonPayloadTooLarge                WTPInvalidFrameReason = "payload_too_large"
+	WTPInvalidFrameReasonDecompressError                WTPInvalidFrameReason = "decompress_error"
 	WTPInvalidFrameReasonUnknown                        WTPInvalidFrameReason = "unknown"
 )
 
 var wtpInvalidFrameReasonsValid = map[WTPInvalidFrameReason]struct{}{
-	WTPInvalidFrameReasonEventBatchBodyUnset:         {},
-	WTPInvalidFrameReasonEventBatchCompressionUnspec: {},
-	WTPInvalidFrameReasonSessionInitAlgorithmUnspec:  {},
-	WTPInvalidFrameReasonUnknown:                     {},
+	WTPInvalidFrameReasonEventBatchBodyUnset:           {},
+	WTPInvalidFrameReasonEventBatchCompressionUnspec:   {},
+	WTPInvalidFrameReasonEventBatchCompressionMismatch: {},
+	WTPInvalidFrameReasonSessionInitAlgorithmUnspec:    {},
+	WTPInvalidFrameReasonPayloadTooLarge:               {},
+	WTPInvalidFrameReasonDecompressError:               {},
+	WTPInvalidFrameReasonUnknown:                       {},
 }
 
 // wtpInvalidFrameReasonsEmitOrder mirrors the wtpSessionFailureReasonsEmitOrder
 // pattern: a fixed slice keeps Prometheus exposition deterministic and lets
 // emitWTPMetrics emit zero-valued series for every enumerated reason on
-// every scrape.
+// every scrape. Order is alphabetical-by-string for stable output.
 var wtpInvalidFrameReasonsEmitOrder = []WTPInvalidFrameReason{
+	WTPInvalidFrameReasonDecompressError,
 	WTPInvalidFrameReasonEventBatchBodyUnset,
+	WTPInvalidFrameReasonEventBatchCompressionMismatch,
 	WTPInvalidFrameReasonEventBatchCompressionUnspec,
+	WTPInvalidFrameReasonPayloadTooLarge,
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
 	WTPInvalidFrameReasonUnknown,
 }
@@ -9309,9 +9544,13 @@ func TestAppendEvent_DropsInvalidUTF8(t *testing.T) {
 // ErrMissingChain branch fires when ev.Chain is nil and AppendEvent
 // PROPAGATES the error to the caller (wrapped as `watchtower: %w`)
 // rather than dropping silently. Composite-store regressions must be
-// loud — there is no `wtp_dropped_missing_chain_total` counter and no
-// structured log (ev.Chain is unstamped, so we cannot include
-// sequence/generation fields).
+// loud — there is no `wtp_dropped_missing_chain_total` counter (this
+// is a developer-facing integration bug, not a per-record drop class),
+// but AppendEvent MUST emit one ERROR-severity structured log per
+// occurrence so operators see the regression at the call site. The
+// log carries internal-only fields ({event_id_or_seq, generation, err})
+// and is exempt from the invalid-frame sanitization rule because no
+// peer-supplied bytes ever appear in the field set.
 //
 // Note: ErrInvalidMapper has no end-to-end test here. Store.New rejects
 // invalid mappers at construction time, so reaching Encode with an invalid
@@ -9533,7 +9772,38 @@ func TestAppendEvent_LogsInvalidUTF8(t *testing.T) {
 // AppendEvent emits the log without an error attribute.)
 ```
 
-Note: `TestAppendEvent_PropagatesMissingChain` does NOT assert any log content — the `ErrMissingChain` branch in `AppendEvent` emits no structured log (ev.Chain is unstamped). The wrapped error returned to the caller is the only diagnostic.
+Note: `TestAppendEvent_PropagatesMissingChain` keeps its assertion that the wrapped `compact.ErrMissingChain` is propagated to the caller AND ALSO asserts (via `captureLogs(t)` mounted at the top of the test) that exactly one `slog.LevelError` record was emitted with fields `event_id_or_seq`, `generation`, and `err` set, and NO `payload`, NO `mapper_err`, NO peer-derived content. The single-record assertion catches both regressions where the log call is silently dropped (zero records) and regressions where missing-chain accidentally re-enters a retry loop (multiple records). The assertion shape:
+
+```go
+// At top of TestAppendEvent_PropagatesMissingChain, before the AppendEvent call:
+logs := captureLogs(t)
+
+// ...existing setup + AppendEvent call + wrapped-error / WAL / prev_hash assertions...
+
+// Exactly one ERROR-level record was emitted.
+records := strings.Split(strings.TrimRight(logs.String(), "\n"), "\n")
+if len(records) != 1 {
+    t.Fatalf("expected exactly one structured log record, got %d:\n%s", len(records), logs.String())
+}
+body := records[0]
+for _, want := range []string{
+    `"level":"ERROR"`,
+    `"msg":"watchtower: composite-store regression — missing chain"`,
+    `"event_id_or_seq":`,
+    `"generation":`,
+    `"err":`,
+} {
+    if !strings.Contains(body, want) {
+        t.Errorf("expected log substring %q\nrecord:\n%s", want, body)
+    }
+}
+// Sanitization: no peer-derived content.
+for _, banned := range []string{`"payload"`, `"mapper_err"`} {
+    if strings.Contains(body, banned) {
+        t.Errorf("missing-chain log must not include %q\nrecord:\n%s", banned, body)
+    }
+}
+```
 
 `TestAppendEvent_LogsInvalidMapper` is intentionally omitted: end-to-end coverage requires constructing a `Store` with an invalid mapper, which `Store.New` rejects at construction time (Task 22). The branch is exercised by Encode-direct unit tests in Task 9.
 
@@ -9602,11 +9872,20 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 		switch {
 		case errors.Is(err, compact.ErrMissingChain):
 			// Loud failure — composite-store regression. Propagate as a
-			// wrapped error rather than dropping silently. No structured
-			// log here: ev.Chain is unstamped (we cannot include
-			// sequence/generation fields), and the wrapped error string
-			// already identifies the failure to the caller. No counter,
-			// either: missing-chain is not a per-record drop class.
+			// wrapped error rather than dropping silently AND emit one
+			// ERROR-severity structured log per occurrence. ev.Chain is
+			// nil here, so we cannot include sequence/generation from the
+			// chain — fall back to event-level identifiers via small
+			// helpers that yield internal-state-only values (no peer
+			// bytes). No counter is wired: missing-chain is a
+			// developer-facing integration bug, not a per-record runtime
+			// drop class. The log is exempt from the invalid-frame
+			// sanitization rule because every field is internal-only.
+			slog.ErrorContext(ctx, "watchtower: composite-store regression — missing chain",
+				"event_id_or_seq", appendEventID(ev),
+				"generation", appendEventGeneration(ev),
+				"err", err,
+			)
 			return fmt.Errorf("watchtower: %w", err)
 		case errors.Is(err, compact.ErrInvalidMapper):
 			s.metrics.IncDroppedInvalidMapper(1)
@@ -9712,6 +9991,25 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	_ = res
 	return nil
 }
+
+// appendEventID returns a stable, internal-only identifier for ev to log
+// from drop / loud-failure paths. Returns ev.EventID when non-empty,
+// otherwise fmt.Sprint(ev.Sequence) when ev carries a non-zero sequence,
+// otherwise the literal "<unknown>". The value is internal state derived
+// from sink-side bookkeeping; it MUST NOT carry peer-supplied bytes.
+//
+// Used specifically by the missing-chain ERROR-log path because ev.Chain
+// is nil when ErrMissingChain fires, so the usual `ev.Chain.Sequence`
+// field is unavailable. The other drop branches keep using
+// `ev.Chain.Sequence` directly because Encode rejects nil chains first.
+func appendEventID(ev types.Event) string { /* implementation as documented above */ }
+
+// appendEventGeneration mirrors appendEventID for the generation field:
+// returns ev.Chain.Generation when non-nil, otherwise 0. Always
+// internal-only. (For the missing-chain log path the chain is nil, so
+// the returned value is always 0; the field is kept in the log shape
+// for symmetry with the other drop branches' field set.)
+func appendEventGeneration(ev types.Event) uint32 { /* implementation as documented above */ }
 ```
 
 Add fatal-latch helpers to `internal/store/watchtower/store.go`:
