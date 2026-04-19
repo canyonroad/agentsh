@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/internal/store/sqlite"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -15,11 +16,17 @@ type Store struct {
 	primary       store.EventStore
 	output        store.OutputStore
 	others        []store.EventStore
+	allocator     *audit.SequenceAllocator
 	onAppendError func(error)
 }
 
 func New(primary store.EventStore, output store.OutputStore, others ...store.EventStore) *Store {
-	return &Store{primary: primary, output: output, others: others}
+	return &Store{
+		primary:   primary,
+		output:    output,
+		others:    others,
+		allocator: audit.NewSequenceAllocator(),
+	}
 }
 
 func (s *Store) SetAppendErrorHook(fn func(error)) {
@@ -27,10 +34,25 @@ func (s *Store) SetAppendErrorHook(fn func(error)) {
 }
 
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
+	// Phase 0: composite allocates the shared (seq, gen) once before fanout.
+	seq, gen, err := s.allocator.Next()
+	if err != nil {
+		return err
+	}
+
+	// stampForSink returns ev with a FRESH *ChainState pointer so no two
+	// sinks ever alias the same ChainState. This is the per-sink-copy
+	// guarantee that prevents one sink's mutation from corrupting another.
+	stampForSink := func() types.Event {
+		stamped := ev
+		stamped.Chain = &types.ChainState{Sequence: uint64(seq), Generation: gen}
+		return stamped
+	}
+
 	var firstErr error
 	var hookErr error
 	if s.primary != nil {
-		if err := s.primary.AppendEvent(ctx, ev); err != nil {
+		if err := s.primary.AppendEvent(ctx, stampForSink()); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -44,7 +66,7 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 		}
 	}
 	for _, o := range s.others {
-		if err := o.AppendEvent(ctx, ev); err != nil {
+		if err := o.AppendEvent(ctx, stampForSink()); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -61,6 +83,16 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 		s.onAppendError(hookErr)
 	}
 	return firstErr
+}
+
+// NextGeneration advances the shared sequence generation. The next
+// AppendEvent stamps ev.Chain with (Sequence:0, Generation:newGen).
+// Used by the composite owner when the chain key rotates.
+//
+// Returns ErrGenerationOverflow on uint32 wrap; the allocator is not
+// modified in that case (see audit.SequenceAllocator.NextGeneration).
+func (s *Store) NextGeneration() (uint32, error) {
+	return s.allocator.NextGeneration()
 }
 
 func (s *Store) QueryEvents(ctx context.Context, q types.EventQuery) ([]types.Event, error) {

@@ -3,6 +3,7 @@ package composite
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	storepkg "github.com/agentsh/agentsh/internal/store"
@@ -216,5 +217,88 @@ func TestComposite_NilPrimary_Close(t *testing.T) {
 	}
 	if !other.closed {
 		t.Fatal("expected other store to be closed")
+	}
+}
+
+type chainCapturingStore struct {
+	captured []*types.ChainState
+}
+
+func (s *chainCapturingStore) AppendEvent(ctx context.Context, ev types.Event) error {
+	// Composite stamps a fresh *ChainState per sink, so the captured
+	// pointer is the sink-local copy — distinct from every other sink's.
+	s.captured = append(s.captured, ev.Chain)
+	return nil
+}
+func (s *chainCapturingStore) QueryEvents(ctx context.Context, q types.EventQuery) ([]types.Event, error) {
+	return nil, nil
+}
+func (s *chainCapturingStore) Close() error { return nil }
+
+func TestComposite_StampsChainBeforeFanout(t *testing.T) {
+	primary := &chainCapturingStore{}
+	other := &chainCapturingStore{}
+	s := New(primary, nil, other)
+
+	for i := 0; i < 5; i++ {
+		if err := s.AppendEvent(context.Background(), types.Event{ID: "e"}); err != nil {
+			t.Fatalf("AppendEvent #%d: %v", i, err)
+		}
+	}
+
+	if len(primary.captured) != 5 || len(other.captured) != 5 {
+		t.Fatalf("captured counts: primary=%d other=%d", len(primary.captured), len(other.captured))
+	}
+	for i, p := range primary.captured {
+		o := other.captured[i]
+		if p == nil || o == nil {
+			t.Fatalf("event %d: nil Chain — primary=%v other=%v", i, p, o)
+		}
+		if p.Sequence != uint64(i) || p.Generation != 0 {
+			t.Errorf("primary event %d: Chain=(seq=%d,gen=%d) want (seq=%d,gen=0)", i, p.Sequence, p.Generation, i)
+		}
+		// Per-sink-copy contract: pointer-distinct across sinks but
+		// value-equal. Use == on pointers (must differ) and DeepEqual
+		// on dereferenced values (must match).
+		if p == o {
+			t.Errorf("event %d: sinks alias the same *ChainState pointer (%p); composite must stamp fresh per sink", i, p)
+		}
+		if !reflect.DeepEqual(*p, *o) {
+			t.Errorf("event %d: sinks saw different Chain values: primary=%+v other=%+v", i, *p, *o)
+		}
+	}
+
+	// Mutating one sink's captured ChainState must not affect the other's.
+	primary.captured[0].Sequence = 0xDEADBEEF
+	if other.captured[0].Sequence == 0xDEADBEEF {
+		t.Errorf("per-sink-copy invariant violated: mutating primary leaked into other")
+	}
+}
+
+func TestComposite_NextGeneration_ResetsSequence(t *testing.T) {
+	primary := &chainCapturingStore{}
+	s := New(primary, nil)
+
+	for i := 0; i < 3; i++ {
+		if err := s.AppendEvent(context.Background(), types.Event{}); err != nil {
+			t.Fatalf("AppendEvent #%d: %v", i, err)
+		}
+	}
+
+	newGen, err := s.NextGeneration()
+	if err != nil {
+		t.Fatalf("NextGeneration: %v", err)
+	}
+	if newGen != 1 {
+		t.Fatalf("NextGeneration() = %d, want 1", newGen)
+	}
+
+	if err := s.AppendEvent(context.Background(), types.Event{}); err != nil {
+		t.Fatal(err)
+	}
+
+	last := primary.captured[len(primary.captured)-1]
+	if last == nil || last.Sequence != 0 || last.Generation != 1 {
+		t.Errorf("after rollover: Chain=(seq=%d,gen=%d) want (seq=0,gen=1)", last.Sequence, last.Generation)
 	}
 }
