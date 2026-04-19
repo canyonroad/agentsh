@@ -174,7 +174,9 @@ func TestSinkChain_State_Restore_RoundTrip(t *testing.T) {
 	}
 
 	d, _ := newTestSinkChain(t)
-	d.Restore(state.Generation, state.PrevHash)
+	if err := d.Restore(state.Generation, state.PrevHash, state.Fatal); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
 
 	// Continue the chain from d — same key, so same entry hash as if c
 	// had continued.
@@ -212,12 +214,14 @@ func TestNewSinkChain_RejectsUnsupportedAlgorithm(t *testing.T) {
 	}
 }
 
-func TestSinkChain_Concurrent_ComputeCommit_NoChainBreakage(t *testing.T) {
+func TestSinkChain_SerialComputeCommit_NoChainBreakage(t *testing.T) {
 	c, key := newTestSinkChain(t)
 
-	// Single owner serializes Compute+Commit pairs; this test asserts that
-	// repeated Compute under contention with Commit does not produce a
-	// chain that fails verification when replayed in committed order.
+	// Single-goroutine serialization verifies chain continuity; concurrent
+	// ComputeCommit pairs across goroutines is NOT a supported pattern (Commit
+	// cannot identify which Compute it finalizes). This test asserts that
+	// repeated Compute+Commit in serial order produces a chain that verifies
+	// when replayed in committed order.
 	const N = 200
 	type record struct {
 		seq       int64
@@ -261,5 +265,155 @@ func TestSinkChain_Concurrent_ComputeCommit_NoChainBreakage(t *testing.T) {
 			t.Fatalf("seq %d: entry=%q want %q", r.seq, r.entryHash, want)
 		}
 		expectedPrev = r.entryHash
+	}
+}
+
+func TestSinkChain_Compute_IsPureUnderConcurrentCallers(t *testing.T) {
+	c, _ := newTestSinkChain(t)
+	payload := []byte(`{"k":"v"}`)
+
+	const N = 32
+	type result struct {
+		entry string
+		prev  string
+	}
+	results := make([]result, 0, N)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			entry, prev, err := c.Compute(IntegrityFormatVersion, 0, 0, payload)
+			if err != nil {
+				t.Errorf("Compute: %v", err)
+				return
+			}
+			mu.Lock()
+			results = append(results, result{entry: entry, prev: prev})
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	if len(results) != N {
+		t.Fatalf("got %d results, want %d", len(results), N)
+	}
+	wantEntry := results[0].entry
+	wantPrev := results[0].prev
+	for i, r := range results {
+		if r.entry != wantEntry {
+			t.Errorf("result %d: entry=%q, want %q (Compute is not pure under contention)", i, r.entry, wantEntry)
+		}
+		if r.prev != wantPrev {
+			t.Errorf("result %d: prev=%q, want %q (Compute is not pure under contention)", i, r.prev, wantPrev)
+		}
+	}
+}
+
+func TestSinkChain_State_PersistsFatal(t *testing.T) {
+	c, _ := newTestSinkChain(t)
+
+	if _, _, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	c.Fatal(errors.New("ambiguous WAL write"))
+
+	state := c.State()
+	if !state.Fatal {
+		t.Fatalf("State.Fatal = false after Fatal(); want true")
+	}
+
+	// Round-trip into a fresh chain via Restore. The latch must survive.
+	d, _ := newTestSinkChain(t)
+	if err := d.Restore(state.Generation, state.PrevHash, state.Fatal); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if _, _, err := d.Compute(IntegrityFormatVersion, 1, 0, []byte(`{"b":2}`)); !errors.Is(err, ErrFatalIntegrity) {
+		t.Fatalf("Compute after Restore-with-Fatal: err = %v, want ErrFatalIntegrity", err)
+	}
+}
+
+func TestSinkChain_Restore_ValidatesPrevHash(t *testing.T) {
+	validSha256 := strings.Repeat("a", 64)  // 32 bytes hex-encoded
+	validSha512 := strings.Repeat("b", 128) // 64 bytes hex-encoded
+
+	cases := []struct {
+		name      string
+		algorithm string
+		prevHash  string
+		wantErr   bool
+	}{
+		{name: "empty is genesis", algorithm: "hmac-sha256", prevHash: "", wantErr: false},
+		{name: "valid sha256 hex", algorithm: "hmac-sha256", prevHash: validSha256, wantErr: false},
+		{name: "wrong length hex (sha512 under sha256)", algorithm: "hmac-sha256", prevHash: validSha512, wantErr: true},
+		{name: "non-hex characters", algorithm: "hmac-sha256", prevHash: strings.Repeat("z", 64), wantErr: true},
+		{name: "odd-length hex", algorithm: "hmac-sha256", prevHash: strings.Repeat("a", 63), wantErr: true},
+		{name: "valid sha512 hex under sha512", algorithm: "hmac-sha512", prevHash: validSha512, wantErr: false},
+		{name: "sha256 length under sha512", algorithm: "hmac-sha512", prevHash: validSha256, wantErr: true},
+		{name: "empty under sha512 is genesis", algorithm: "hmac-sha512", prevHash: "", wantErr: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key := make([]byte, MinKeyLength)
+			c, err := NewSinkChain(key, tc.algorithm)
+			if err != nil {
+				t.Fatalf("NewSinkChain: %v", err)
+			}
+
+			// Capture pre-state to assert non-mutation on rejected restore.
+			before := c.State()
+
+			err = c.Restore(7, tc.prevHash, false)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Restore(%q): err = nil, want error", tc.prevHash)
+				}
+				if !errors.Is(err, ErrInvalidChainState) {
+					t.Errorf("Restore(%q): err = %v, want errors.Is ErrInvalidChainState", tc.prevHash, err)
+				}
+				after := c.State()
+				if after != before {
+					t.Errorf("rejected Restore mutated state: before=%+v after=%+v", before, after)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Restore(%q): unexpected err = %v", tc.prevHash, err)
+			}
+			after := c.State()
+			if after.Generation != 7 || after.PrevHash != tc.prevHash || after.Fatal {
+				t.Errorf("after Restore: state = %+v, want {Generation:7 PrevHash:%q Fatal:false}", after, tc.prevHash)
+			}
+		})
+	}
+}
+
+func TestSinkChain_Commit_BackwardsGenerationIsIgnored(t *testing.T) {
+	c, _ := newTestSinkChain(t)
+
+	// Establish gen=2 with one committed entry.
+	if _, _, err := c.Compute(IntegrityFormatVersion, 0, 2, []byte(`{"a":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	h2, _, err := c.Compute(IntegrityFormatVersion, 0, 2, []byte(`{"a":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Commit(2, h2)
+
+	before := c.State()
+	if before.Generation != 2 || before.PrevHash != h2 {
+		t.Fatalf("setup: state = %+v, want {Generation:2 PrevHash:%q}", before, h2)
+	}
+
+	// Commit with an older generation must be a no-op.
+	c.Commit(1, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+
+	after := c.State()
+	if after.Generation != before.Generation || after.PrevHash != before.PrevHash {
+		t.Errorf("backwards-generation Commit mutated state: before=%+v after=%+v", before, after)
 	}
 }
