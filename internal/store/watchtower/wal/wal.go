@@ -148,6 +148,11 @@ type WAL struct {
 	ackHighSeq uint64
 	ackHighGen uint32 // ack watermark generation; combined with ackHighSeq forms a (gen, seq) tuple
 	ackPresent bool   // true once an ack has been persisted; zero values are NOT a valid watermark
+
+	// readers tracks open Reader instances so Append/AppendLoss can wake them
+	// via notifyReaders, and Close can drop their file handles. Mutated only
+	// under w.mu.
+	readers []*Reader
 }
 
 // segmentEntry pairs a segment filename with its parsed numeric index so
@@ -633,6 +638,7 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 	// totalBytes accounting: framed already includes the 12-byte seq/gen
 	// prefix; the framing layer adds the 8-byte frame header on top.
 	w.totalBytes += int64(8 + len(framed))
+	w.notifyReaders()
 	return AppendResult{GenerationRolled: rolled}, nil
 }
 
@@ -655,7 +661,9 @@ func (w *WAL) openNewSegmentLocked(gen uint32, flags uint16) (*Segment, error) {
 
 // Close seals the live segment (if any) without removing INPROGRESS — instead
 // flushes and closes for clean reopen. The next Open will reopen the
-// .INPROGRESS file.
+// .INPROGRESS file. Also closes the file handles owned by every open Reader so
+// the OS releases them promptly; subsequent Reader.Next calls observe the
+// closure via the per-reader closed flag and surface an error.
 func (w *WAL) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -663,6 +671,14 @@ func (w *WAL) Close() error {
 		return nil
 	}
 	w.closed = true
+	// Close reader file handles before our own segment to mirror the order
+	// callers will see on a normal shutdown. Errors per-reader are swallowed
+	// so one stuck handle doesn't block release of the rest; the WAL Close
+	// contract surfaces only the live-segment close error.
+	for _, r := range w.readers {
+		r.closeFromWALLocked()
+	}
+	w.readers = nil
 	if w.current != nil {
 		if err := w.current.Close(); err != nil {
 			return err
@@ -756,6 +772,7 @@ func (w *WAL) AppendLoss(loss LossRecord) error {
 		return w.failAmbiguousLocked("sync-loss", err)
 	}
 	w.totalBytes += int64(8 + len(payload))
+	w.notifyReaders()
 	return nil
 }
 
@@ -784,6 +801,33 @@ func encodeLossPayload(l LossRecord) []byte {
 	}
 	copy(out[30:], l.Reason)
 	return out
+}
+
+// decodeLossPayload is the inverse of encodeLossPayload. Returns ok=false if
+// payload is too short to hold the fixed-size header (sentinel+seq+gen) or if
+// the sentinel prefix does not match — in either case the caller MUST treat
+// the bytes as a non-loss-marker record.
+func decodeLossPayload(payload []byte) (LossRecord, bool) {
+	if len(payload) < 30 {
+		return LossRecord{}, false
+	}
+	if string(payload[:len(LossMarkerSentinel)]) != LossMarkerSentinel {
+		return LossRecord{}, false
+	}
+	var loss LossRecord
+	for i := 0; i < 8; i++ {
+		loss.FromSequence |= uint64(payload[10+i]) << (8 * (7 - i))
+	}
+	for i := 0; i < 8; i++ {
+		loss.ToSequence |= uint64(payload[18+i]) << (8 * (7 - i))
+	}
+	for i := 0; i < 4; i++ {
+		loss.Generation |= uint32(payload[26+i]) << (8 * (3 - i))
+	}
+	if len(payload) > 30 {
+		loss.Reason = string(payload[30:])
+	}
+	return loss, true
 }
 
 // MarkAcked records the highest-acked watermark (gen, seq) in meta.json and
@@ -928,7 +972,21 @@ func (w *WAL) appendLossLocked(loss LossRecord) error {
 		return err
 	}
 	w.totalBytes += int64(8 + len(payload))
+	w.notifyReaders()
 	return nil
+}
+
+// notifyReaders signals every open Reader that new records are available. The
+// per-reader notify channel is single-buffered, so a non-blocking send drops
+// the signal when the channel is full — readers coalesce notifications and
+// must drain to io.EOF before waiting again. Caller MUST hold w.mu.
+func (w *WAL) notifyReaders() {
+	for _, r := range w.readers {
+		select {
+		case r.notify <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // dropOldestLocked drops the oldest sealed segment from disk. Returns:
