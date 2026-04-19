@@ -2131,3 +2131,36 @@ func TestAuditWatchtowerConfig_NoFilesystemArtifactsOnGateRejection(t *testing.T
 		t.Errorf("unexpected stat error: %v", err)
 	}
 }
+
+// TestAuditWatchtowerConfig_WALSyncModeDeferredRejected pins the
+// config/runtime parity that round 2 surfaced. WAL.Open rejects
+// SyncDeferred until the periodic-sync timer hook is implemented; config
+// validation must reject the same value at the same gate so a config that
+// turns the mode on fails fast at load time, not at WAL open.
+//
+// "immediate" is exercised implicitly by every other passing test (the
+// helper omits sync_mode and applyDefaults sets it to "immediate"), so
+// we only assert the rejection branches here.
+func TestAuditWatchtowerConfig_WALSyncModeDeferredRejected(t *testing.T) {
+	t.Run("deferred", func(t *testing.T) {
+		yaml := validWatchtowerYAML(t, true, "    wal:\n      sync_mode: \"deferred\"\n")
+		_, err := loadFromString(t, yaml)
+		if err == nil {
+			t.Fatal("expected error for sync_mode=deferred, got nil")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "sync_mode") || !strings.Contains(msg, "deferred") {
+			t.Errorf("err = %v, want mention of sync_mode and deferred", err)
+		}
+	})
+	t.Run("unknown", func(t *testing.T) {
+		yaml := validWatchtowerYAML(t, true, "    wal:\n      sync_mode: \"never\"\n")
+		_, err := loadFromString(t, yaml)
+		if err == nil {
+			t.Fatal("expected error for sync_mode=never, got nil")
+		}
+		if !strings.Contains(err.Error(), "sync_mode") {
+			t.Errorf("err = %v, want mention of sync_mode", err)
+		}
+	})
+}

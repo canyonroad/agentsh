@@ -911,7 +911,7 @@ type WatchtowerBatchConfig struct {
 type WatchtowerWALConfig struct {
 	SegmentSize   int64         `yaml:"segment_size"`
 	MaxTotalBytes int64         `yaml:"max_total_bytes"`
-	SyncMode      string        `yaml:"sync_mode"` // immediate (default) | deferred
+	SyncMode      string        `yaml:"sync_mode"` // immediate (only mode currently implemented; "deferred" is reserved for the periodic-sync timer hook and rejected by validation until that lands)
 	SyncInterval  time.Duration `yaml:"sync_interval"`
 }
 
@@ -1166,9 +1166,18 @@ func (w *AuditWatchtowerConfig) validate() error {
 		return fmt.Errorf("audit.watchtower.batch.compression %q: must be zstd, gzip, or none", w.Batch.Compression)
 	}
 	switch w.WAL.SyncMode {
-	case "immediate", "deferred":
+	case "immediate":
+	case "deferred":
+		// SyncDeferred is forward-compatible in the WAL layer but the
+		// periodic-sync timer hook is not yet wired (plan task tracks
+		// the work). WAL.Open rejects it at runtime; reject it at
+		// config validation too so a config that turns the mode on
+		// fails fast — otherwise the daemon would only fail when the
+		// audit pipeline tries to open the WAL, after the rest of the
+		// config has been accepted as valid.
+		return fmt.Errorf("audit.watchtower.wal.sync_mode %q: deferred mode requires the periodic-sync timer hook (not yet implemented); use \"immediate\"", w.WAL.SyncMode)
 	default:
-		return fmt.Errorf("audit.watchtower.wal.sync_mode %q: must be immediate or deferred", w.WAL.SyncMode)
+		return fmt.Errorf("audit.watchtower.wal.sync_mode %q: must be immediate", w.WAL.SyncMode)
 	}
 
 	// Filter: min_risk_level enum (matches OTEL filter).

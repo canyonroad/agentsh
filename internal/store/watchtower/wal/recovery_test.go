@@ -211,3 +211,55 @@ func TestWAL_RecoverPicksNumericMaxIndex(t *testing.T) {
 		t.Errorf("live segment index = %d, want %d", gotCurrent.Index(), highInProgress)
 	}
 }
+
+// TestWAL_RecoverFailsOnSmallerSegmentSize regresses the round-2 finding
+// that wrapping the "payloadLen > maxPayload" branch in ErrCorruptFrame
+// caused recovery to silently truncate valid records when an operator
+// restarted the daemon with a smaller wal.segment_size than what wrote
+// the segment.
+//
+// The fix narrows ErrCorruptFrame to the structurally-impossible case
+// (length < 4) and leaves the over-bound case as an unwrapped error,
+// which recovery surfaces as a hard Open failure rather than treating it
+// as truncatable corruption. We exercise that here by writing a record
+// whose framed payload exceeds the new (smaller) segment's per-record
+// budget — recovery must refuse to open, not silently chop the file.
+func TestWAL_RecoverFailsOnSmallerSegmentSize(t *testing.T) {
+	dir := t.TempDir()
+	// Open with a generous segment size so the framed (12-byte seq/gen
+	// prefix + payload) record + 8-byte frame header + 16-byte segment
+	// header all fit. We use a payload that is comfortably larger than
+	// the smaller-restart per-record budget (smallSize - 16 - 8 - 12).
+	const largeSize int64 = 4 * 1024
+	const smallSize int64 = 256
+	w, err := Open(Options{Dir: dir, SegmentSize: largeSize, MaxTotalBytes: 64 * 1024, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pick a payload that fits under largeSize but exceeds the smaller
+	// budget by a wide margin: the smaller per-record cap is
+	// smallSize-SegmentHeaderSize = 240 bytes total for header+seq/gen+payload,
+	// so a 1 KiB payload is well past it.
+	payload := make([]byte, 1024)
+	for i := range payload {
+		payload[i] = 0xA5
+	}
+	if _, err := w.Append(0, 0, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen with the smaller segment size: recovery must surface a hard
+	// error instead of silently truncating the previously-valid record.
+	_, err = Open(Options{Dir: dir, SegmentSize: smallSize, MaxTotalBytes: 64 * 1024, SyncMode: SyncImmediate})
+	if err == nil {
+		t.Fatal("Open with smaller segment_size must fail rather than silently truncate valid records")
+	}
+	// The error must NOT be ErrCorruptFrame: that would put recovery on
+	// the truncate-and-continue path, which is the bug being regressed.
+	if errors.Is(err, ErrCorruptFrame) {
+		t.Errorf("Open err = %v; expected an unwrapped over-bound error, NOT ErrCorruptFrame", err)
+	}
+}

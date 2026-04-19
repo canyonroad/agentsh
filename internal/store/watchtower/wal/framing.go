@@ -103,11 +103,20 @@ const MaxFramedPayload = math.MaxUint32 - 4
 var ErrCRCMismatch = errors.New("wal: record CRC mismatch")
 
 // ErrCorruptFrame is returned by ReadRecord when the on-disk frame header is
-// structurally invalid (length < 4, or a declared payload size that exceeds
-// the caller's maxPayload). Recovery treats this the same as ErrCRCMismatch
-// or io.ErrUnexpectedEOF: stop scanning and truncate the live segment back
-// to the last known-good offset before reopening for append. Wrapping is
-// preserved via %w so callers can detect the class via errors.Is.
+// structurally invalid in a way no valid frame ever produced — currently
+// only length < 4 (the length field encodes len(payload)+4, so values below
+// 4 are impossible for any real record). Recovery treats this the same as
+// ErrCRCMismatch or io.ErrUnexpectedEOF: stop scanning and truncate the
+// live segment back to the last known-good offset before reopening for
+// append. Wrapping is preserved via %w so callers can detect the class via
+// errors.Is.
+//
+// An over-bound payload size (payloadLen > maxPayload) deliberately does
+// NOT wrap this sentinel: it most often indicates a configuration mismatch
+// (operator restarted with a smaller wal.segment_size than wrote the
+// segment) rather than corruption, and silently truncating valid records
+// in that case would drop queued data. Recovery surfaces that case as a
+// hard open error instead.
 var ErrCorruptFrame = errors.New("wal: corrupt record frame")
 
 // WriteRecord writes a length-prefixed, CRC32C-protected record to w.
@@ -155,8 +164,11 @@ func WriteRecord(w io.Writer, payload []byte, maxPayload int) error {
 
 // ReadRecord reads one length-prefixed CRC32C record from r and returns the
 // payload. Returns ErrCRCMismatch on bad CRC, ErrCorruptFrame on a
-// structurally invalid frame header, io.ErrUnexpectedEOF on truncation,
-// io.EOF when r is at the end of its data.
+// structurally impossible frame header (length < 4), an unwrapped error on
+// payload size exceeding maxPayload (treated as a configuration mismatch
+// rather than corruption — see ErrCorruptFrame's docstring),
+// io.ErrUnexpectedEOF on truncation, io.EOF when r is at the end of its
+// data.
 //
 // maxPayload bounds the declared payload size before any allocation, so a
 // corrupted on-disk length cannot drive ReadRecord into an unbounded
@@ -185,7 +197,13 @@ func ReadRecord(r io.Reader, maxPayload int) ([]byte, error) {
 	}
 	payloadLen := length - 4
 	if uint64(payloadLen) > uint64(maxPayload) {
-		return nil, fmt.Errorf("%w: record payload size %d exceeds maxPayload %d", ErrCorruptFrame, payloadLen, maxPayload)
+		// Deliberately NOT wrapped with ErrCorruptFrame: an over-bound
+		// length most often signals a configuration mismatch (operator
+		// reopened the WAL with a smaller wal.segment_size than what
+		// wrote the segment), and treating it as truncatable corruption
+		// during recovery would silently chop a perfectly-valid file.
+		// Recovery must surface this as a hard open error instead.
+		return nil, fmt.Errorf("wal: record payload size %d exceeds maxPayload %d", payloadLen, maxPayload)
 	}
 	// Stream the payload into a growable buffer rather than pre-allocating
 	// `payloadLen` bytes up front. A corrupted on-disk length can claim up
