@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package canyonroad.wtp.v1;
+
+option go_package = "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1;wtpv1";
+
+// Bidi stream: client opens, sends ClientMessage frames, receives ServerMessage frames.
+service Watchtower {
+  rpc Stream(stream ClientMessage) returns (stream ServerMessage);
+}
+
+message ClientMessage {
+  oneof msg {
+    SessionInit    session_init    = 1;
+    SessionUpdate  session_update  = 2;
+    EventBatch     event_batch     = 3;
+    Heartbeat      heartbeat       = 4;
+    TransportLoss  transport_loss  = 5;
+    ClientShutdown shutdown        = 6;
+  }
+}
+
+message ServerMessage {
+  oneof msg {
+    SessionAck       session_ack        = 1;
+    BatchAck         batch_ack          = 2;
+    ServerHeartbeat  server_heartbeat   = 3;
+    Goaway           goaway             = 4;
+    SessionUpdate    server_update      = 5;
+  }
+}
+
+// SessionInit (§7.1)
+message SessionInit {
+  string  session_id              = 1;
+  string  ocsf_version            = 2;
+  uint32  format_version          = 3;
+  string  algorithm               = 4;   // hmac-sha256 | hmac-sha512
+  string  key_fingerprint         = 5;
+  string  context_digest          = 6;   // hex-encoded SHA-256
+  uint64  wal_high_watermark_seq  = 7;
+  uint32  generation              = 8;
+  string  agent_id                = 9;
+  string  agent_version           = 10;
+  uint64  total_chained           = 11;  // count of records sink has chained
+}
+
+message SessionAck {
+  uint64 ack_high_watermark_seq = 1;
+  uint32 generation             = 2;
+  bool   accepted               = 3;
+  string reject_reason          = 4;     // empty when accepted=true
+}
+
+// SessionUpdate (§7.2): generation roll, key rotation, context change.
+message SessionUpdate {
+  uint32 new_generation         = 1;
+  string new_key_fingerprint    = 2;
+  string new_context_digest     = 3;
+  uint64 boundary_sequence      = 4;     // last seq of prior generation
+}
+
+// EventBatch (§7.3)
+message EventBatch {
+  uint64 from_sequence          = 1;
+  uint64 to_sequence            = 2;
+  uint32 generation             = 3;
+  repeated CompactEvent events  = 4;
+  Compression compression       = 5;
+  bytes  compressed_payload     = 6;     // when compression != NONE; events repeated empty
+}
+
+enum Compression {
+  COMPRESSION_UNSPECIFIED = 0;
+  COMPRESSION_NONE        = 1;
+  COMPRESSION_ZSTD        = 2;
+  COMPRESSION_GZIP        = 3;
+}
+
+// CompactEvent (§6.3)
+message CompactEvent {
+  uint64  sequence              = 1;
+  uint32  generation            = 2;
+  uint64  timestamp_unix_nanos  = 3;
+  uint32  ocsf_class_uid        = 4;
+  uint32  ocsf_activity_id      = 5;
+  bytes   payload               = 6;     // protobuf-encoded class-specific payload
+  IntegrityRecord integrity     = 7;
+}
+
+message IntegrityRecord {
+  uint32  format_version        = 1;
+  uint64  sequence              = 2;
+  uint32  generation            = 3;
+  string  prev_hash             = 4;
+  string  event_hash            = 5;
+  string  context_digest        = 6;
+  string  key_fingerprint       = 7;
+}
+
+message Heartbeat {
+  uint64 wal_high_watermark_seq = 1;
+  uint32 generation             = 2;
+}
+
+message ServerHeartbeat {
+  uint64 ack_high_watermark_seq = 1;
+}
+
+message BatchAck {
+  uint64 ack_high_watermark_seq = 1;
+  uint32 generation             = 2;
+}
+
+// TransportLoss (§7.5) — emitted on WAL overflow or CRC corruption.
+message TransportLoss {
+  uint64 from_sequence  = 1;
+  uint64 to_sequence    = 2;
+  uint32 generation     = 3;
+  string reason         = 4;     // "overflow" | "crc_corruption"
+}
+
+message Goaway {
+  string code             = 1;   // "DRAINING" | "OVERLOAD" | etc.
+  string message          = 2;
+  bool   retry_immediately = 3;
+}
+
+message ClientShutdown {
+  string reason = 1;
+}
