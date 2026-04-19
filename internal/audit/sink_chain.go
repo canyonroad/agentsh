@@ -376,6 +376,15 @@ func (c *SinkChain) Restore(generation uint32, prevHash string, fatal bool) erro
 	return nil
 }
 
+// keyAndAlgorithm exposes the chain's key and algorithm for legacy
+// IntegrityChain delegation. NOT part of the public Phase 0 contract;
+// future code should use Compute and never reach for raw key material.
+func (c *SinkChain) keyAndAlgorithm() ([]byte, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.key, c.algorithm
+}
+
 // validatePrevHash returns nil if prevHash is empty (genesis) or a valid
 // hex string of the algorithm's expected output length. Otherwise it
 // returns an error wrapping ErrInvalidChainState.

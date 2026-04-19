@@ -104,7 +104,9 @@ func TestIntegrityChain_Restore_ContinuesFromLastWrittenSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewIntegrityChain() error = %v", err)
 	}
-	chain.Restore(41, "prev-hash")
+	if err := chain.Restore(41, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
 
 	wrapped, err := chain.Wrap([]byte(`{"event":"after_restore"}`))
 	if err != nil {
@@ -120,8 +122,8 @@ func TestIntegrityChain_Restore_ContinuesFromLastWrittenSequence(t *testing.T) {
 	if got := int64(integrity["sequence"].(float64)); got != 42 {
 		t.Fatalf("sequence = %d, want 42", got)
 	}
-	if got := integrity["prev_hash"].(string); got != "prev-hash" {
-		t.Fatalf("prev_hash = %q, want prev-hash", got)
+	if got := integrity["prev_hash"].(string); got != "0000000000000000000000000000000000000000000000000000000000000000" {
+		t.Fatalf("prev_hash = %q, want zero hex", got)
 	}
 }
 
@@ -160,7 +162,10 @@ func TestIntegrityChain_Wrap_ReturnsSequenceOverflowAtMaxInt64(t *testing.T) {
 		t.Fatalf("NewIntegrityChain() error = %v", err)
 	}
 
-	chain.Restore(math.MaxInt64, "prev-hash")
+	const zeroHash = "0000000000000000000000000000000000000000000000000000000000000000"
+	if err := chain.Restore(math.MaxInt64, zeroHash); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
 
 	_, err = chain.Wrap([]byte(`{"event":"overflow"}`))
 	if !errors.Is(err, ErrSequenceOverflow) {
@@ -171,8 +176,8 @@ func TestIntegrityChain_Wrap_ReturnsSequenceOverflowAtMaxInt64(t *testing.T) {
 	if state.Sequence != math.MaxInt64 {
 		t.Fatalf("State().Sequence = %d, want %d", state.Sequence, int64(math.MaxInt64))
 	}
-	if state.PrevHash != "prev-hash" {
-		t.Fatalf("State().PrevHash = %q, want %q", state.PrevHash, "prev-hash")
+	if state.PrevHash != zeroHash {
+		t.Fatalf("State().PrevHash = %q, want %q", state.PrevHash, zeroHash)
 	}
 }
 
@@ -426,7 +431,9 @@ func TestIntegrityChain_VerifyWrapped_PreservesLargeSequencePrecision(t *testing
 	}
 
 	const lastWrittenSequence int64 = 9007199254740992
-	chain.Restore(lastWrittenSequence, "prev-hash")
+	if err := chain.Restore(lastWrittenSequence, ""); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
 
 	wrapped, err := chain.Wrap([]byte(`{"event":"high_sequence"}`))
 	if err != nil {
@@ -551,7 +558,9 @@ func TestIntegrityChain_Restore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewIntegrityChain() error = %v", err)
 	}
-	newChain.Restore(state.Sequence, state.PrevHash)
+	if err := newChain.Restore(state.Sequence, state.PrevHash); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
 
 	// Wrap a new entry
 	wrapped, err := newChain.Wrap([]byte(`{"event":"after_restore"}`))
