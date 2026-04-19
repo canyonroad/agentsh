@@ -19,9 +19,12 @@ type SyncMode int
 const (
 	// SyncImmediate causes every Append to fsync the segment before returning.
 	SyncImmediate SyncMode = iota
-	// SyncDeferred batches fsyncs onto a timer driven by SyncInterval (the
-	// timer itself is wired by a higher-level Task; this layer just records
-	// the choice).
+	// SyncDeferred batches fsyncs onto a timer driven by SyncInterval. The
+	// timer-driven path is not yet wired by this WAL: there is no public
+	// flush hook the higher-level Task can call between appends, so a crash
+	// in this mode would silently lose acknowledged records. Open() rejects
+	// SyncDeferred until the periodic-sync API is added; this constant is
+	// kept so the surface is forward-compatible.
 	SyncDeferred
 )
 
@@ -95,6 +98,15 @@ func IsAmbiguous(err error) bool {
 // closed WAL. No I/O is attempted.
 var ErrClosed = errors.New("wal: closed")
 
+// ErrFatal is wrapped in a clean AppendError when Append is called on a WAL
+// that has previously returned an ambiguous failure. The WAL latches into
+// a fatal state on any ambiguous error so subsequent appends fail fast
+// without compounding on-disk corruption — the caller MUST Close the WAL
+// and reopen it to resume. The original ambiguous error is wrapped via
+// fmt.Errorf("%w: %v", ErrFatal, originalErr) so callers can inspect both
+// via errors.Is(err, ErrFatal) and the formatted message.
+var ErrFatal = errors.New("wal: fatal error — WAL must be closed and reopened")
+
 // recordOverhead is the per-record on-disk cost beyond the payload bytes
 // themselves: an 8-byte frame header (uint32 length + uint32 CRC) plus the
 // 12-byte (seq:int64 + gen:uint32) prefix this WAL adds to each record so
@@ -122,10 +134,19 @@ type WAL struct {
 	current    *Segment
 	segDir     string
 	closed     bool
+	fatalErr   error
 	highSeq    uint64
 	highGen    uint32
 	nextIndex  uint64
 	totalBytes int64
+}
+
+// segmentEntry pairs a segment filename with its parsed numeric index so
+// recovery can pick the numeric maximum (rather than the lexicographic
+// maximum, which silently breaks once an index crosses 10^10).
+type segmentEntry struct {
+	name string
+	idx  uint64
 }
 
 // Open opens or creates the WAL directory at opts.Dir. On open, all sealed
@@ -148,6 +169,16 @@ func Open(opts Options) (*WAL, error) {
 	if maxRec <= 0 || uint64(maxRec) > MaxFramedPayload {
 		return nil, fmt.Errorf("wal: SegmentSize %d invalid; need room for header+record within MaxFramedPayload",
 			opts.SegmentSize)
+	}
+	// SyncDeferred is documented as a forward-compatible mode but the
+	// periodic-sync hook is not yet implemented. Accepting it would let
+	// successful appends linger in the bufio.Writer until Close, so a
+	// crash would silently drop acknowledged records — exactly the
+	// failure mode this WAL is built to prevent. Reject it explicitly
+	// until the timer task is wired up; the failure is at Open time so
+	// callers can adjust configuration before any events are written.
+	if opts.SyncMode != SyncImmediate {
+		return nil, errors.New("wal.Open: only SyncImmediate is implemented; SyncDeferred requires the periodic-sync timer hook")
 	}
 	segDir := filepath.Join(opts.Dir, "segments")
 	if err := os.MkdirAll(segDir, 0o700); err != nil {
@@ -184,76 +215,110 @@ func parseSegmentIndex(name string) (uint64, bool) {
 	return idx, true
 }
 
+// pickMaxByIndex returns the entry with the largest numeric index, or false
+// if entries is empty. Used by recover() to find the live (or last sealed)
+// segment without relying on lexicographic order — once segment indices
+// cross 10^10 (digit count changes), filename order stops matching numeric
+// order and a sort.Strings()-based "last wins" picks the wrong segment.
+func pickMaxByIndex(entries []segmentEntry) (segmentEntry, bool) {
+	if len(entries) == 0 {
+		return segmentEntry{}, false
+	}
+	max := entries[0]
+	for _, e := range entries[1:] {
+		if e.idx > max.idx {
+			max = e
+		}
+	}
+	return max, true
+}
+
 func (w *WAL) recover() error {
-	entries, err := os.ReadDir(w.segDir)
+	dirEntries, err := os.ReadDir(w.segDir)
 	if err != nil {
 		return fmt.Errorf("readdir segments: %w", err)
 	}
-	var sealed, inProgress []string
-	for _, e := range entries {
+	var sealed, inProgress []segmentEntry
+	for _, e := range dirEntries {
 		if e.IsDir() {
 			continue
 		}
-		if strings.HasSuffix(e.Name(), inprogressSuffix) {
-			inProgress = append(inProgress, e.Name())
-		} else if strings.HasSuffix(e.Name(), sealedSuffix) {
-			sealed = append(sealed, e.Name())
+		name := e.Name()
+		idx, ok := parseSegmentIndex(name)
+		if !ok {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(name, inprogressSuffix):
+			inProgress = append(inProgress, segmentEntry{name: name, idx: idx})
+		case strings.HasSuffix(name, sealedSuffix):
+			sealed = append(sealed, segmentEntry{name: name, idx: idx})
 		}
 	}
-	sort.Strings(sealed)
-	sort.Strings(inProgress)
+	// Sort by numeric index for deterministic processing (currently only the
+	// "compute totalBytes" loop walks every entry; the live-segment picks
+	// below use pickMaxByIndex, not the sort order).
+	sort.Slice(sealed, func(i, j int) bool { return sealed[i].idx < sealed[j].idx })
+	sort.Slice(inProgress, func(i, j int) bool { return inProgress[i].idx < inProgress[j].idx })
 
-	// Compute total bytes for overflow tracking.
-	for _, name := range append(append([]string{}, sealed...), inProgress...) {
-		st, err := os.Stat(filepath.Join(w.segDir, name))
-		if err != nil {
-			return err
-		}
-		w.totalBytes += st.Size()
-	}
-
-	// Rebuild high-watermark by scanning the highest sealed + the inProgress.
+	// Rebuild high-watermark (the segment file index, not the record seq) by
+	// taking the numeric maximum across both sealed and inProgress.
 	maxIdx := uint64(0)
-	if len(sealed) > 0 {
-		if idx, ok := parseSegmentIndex(sealed[len(sealed)-1]); ok && idx >= maxIdx {
-			maxIdx = idx
-		}
+	if e, ok := pickMaxByIndex(sealed); ok && e.idx >= maxIdx {
+		maxIdx = e.idx
 	}
-	if len(inProgress) > 0 {
-		if idx, ok := parseSegmentIndex(inProgress[len(inProgress)-1]); ok && idx >= maxIdx {
-			maxIdx = idx
-		}
+	if e, ok := pickMaxByIndex(inProgress); ok && e.idx >= maxIdx {
+		maxIdx = e.idx
 	}
 	w.nextIndex = maxIdx + 1
 
 	// Scan the live (or last sealed) segment for the highest seq/gen seen.
-	scan := func(path string) error {
+	// scanForRecovery returns the offset of the first byte AFTER the last
+	// known-good record, so a corrupt or truncated tail can be truncated
+	// before we reopen the file for append. Returning the offset (and not
+	// just the high-watermark) is what closes the "appending after a
+	// corrupt tail" hole that recovery used to leave open.
+	scanForRecovery := func(path string) (lastGood int64, scanErr error) {
 		f, err := os.Open(path)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		defer f.Close()
 		hdr, err := ReadSegmentHeader(f)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		// Seed the high-water generation from the header so an empty
 		// segment still updates highGen. Real records will overwrite
 		// these as the loop progresses.
 		w.highGen = hdr.Generation
+		// After reading the header, the cursor is at SegmentHeaderSize.
+		// Track the offset of the first byte past the last successfully
+		// decoded record so the caller can truncate any garbage tail.
+		lastGood = int64(SegmentHeaderSize)
 		for {
 			payload, err := ReadRecord(f, w.maxRec)
 			// Recovery treats a clean EOF, a truncated tail
-			// (io.ErrUnexpectedEOF), and a CRC mismatch as the same
-			// "stop scanning" signal. The framing layer wraps the
-			// underlying io errors with %w, so use errors.Is so
-			// wrapping doesn't break the recovery loop.
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, ErrCRCMismatch) {
-				return nil
+			// (io.ErrUnexpectedEOF), a CRC mismatch, and a
+			// structurally corrupt frame header (ErrCorruptFrame)
+			// as the same "stop scanning" signal. The framing
+			// layer wraps the underlying io errors with %w, so use
+			// errors.Is so wrapping doesn't break the recovery loop.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+				errors.Is(err, ErrCRCMismatch) || errors.Is(err, ErrCorruptFrame) {
+				return lastGood, nil
 			}
 			if err != nil {
-				return err
+				return lastGood, err
 			}
+			// Only advance lastGood after we have actually decoded
+			// a record; this is the offset at which the next
+			// record would begin.
+			off, err := f.Seek(0, io.SeekCurrent)
+			if err != nil {
+				return lastGood, err
+			}
+			lastGood = off
 			if seq, gen, ok := parseSeqGen(payload); ok {
 				w.highSeq = seq
 				w.highGen = gen
@@ -261,12 +326,45 @@ func (w *WAL) recover() error {
 		}
 	}
 
-	if len(inProgress) > 0 {
-		// Reopen for append. Scan first to seed high-watermark, then
-		// reopen the writer at EOF.
-		path := filepath.Join(w.segDir, inProgress[len(inProgress)-1])
-		if err := scan(path); err != nil {
+	// truncateLiveSegment chops the .INPROGRESS file at lastGood. Without
+	// this, a recovered corrupt or truncated tail stays on disk; the next
+	// Append writes after the bad bytes, and a future recovery scan stops
+	// at the same bad tail — never reaching the newly appended records.
+	truncateLiveSegment := func(path string, lastGood int64) error {
+		f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+		if err != nil {
 			return err
+		}
+		defer f.Close()
+		st, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if st.Size() == lastGood {
+			return nil
+		}
+		if err := f.Truncate(lastGood); err != nil {
+			return err
+		}
+		if err := f.Sync(); err != nil {
+			return err
+		}
+		// Sync the parent directory too so the size change is durable
+		// across crashes (the segment dir uses the cross-platform
+		// fsync-parent-dir helper used elsewhere in this package).
+		return syncDir(filepath.Dir(path))
+	}
+
+	if e, ok := pickMaxByIndex(inProgress); ok {
+		// Reopen for append. Scan first to seed high-watermark, truncate
+		// any corrupt tail, then reopen the writer at EOF.
+		path := filepath.Join(w.segDir, e.name)
+		lastGood, err := scanForRecovery(path)
+		if err != nil {
+			return err
+		}
+		if err := truncateLiveSegment(path, lastGood); err != nil {
+			return fmt.Errorf("truncate live segment: %w", err)
 		}
 		seg, err := ReopenSegment(path, w.maxRec)
 		if err != nil {
@@ -275,12 +373,33 @@ func (w *WAL) recover() error {
 		w.current = seg
 		// Use the existing index, not a fresh one.
 		w.nextIndex = seg.Index() + 1
-	} else if len(sealed) > 0 {
-		// Last segment is sealed; scan it for high-watermark only.
-		path := filepath.Join(w.segDir, sealed[len(sealed)-1])
-		if err := scan(path); err != nil {
+	} else if e, ok := pickMaxByIndex(sealed); ok {
+		// Last segment is sealed; scan it for high-watermark only. A
+		// sealed segment with a corrupt tail is a deeper inconsistency
+		// — we cannot rewrite a sealed file from inside recovery — but
+		// at least the high-watermark is bounded by the last good
+		// record so future generations don't reuse a seq.
+		path := filepath.Join(w.segDir, e.name)
+		if _, err := scanForRecovery(path); err != nil {
 			return err
 		}
+	}
+
+	// Compute total bytes for overflow tracking AFTER any truncation, so
+	// the byte budget reflects the post-recovery on-disk size.
+	for _, e := range sealed {
+		st, err := os.Stat(filepath.Join(w.segDir, e.name))
+		if err != nil {
+			return err
+		}
+		w.totalBytes += st.Size()
+	}
+	for _, e := range inProgress {
+		st, err := os.Stat(filepath.Join(w.segDir, e.name))
+		if err != nil {
+			return err
+		}
+		w.totalBytes += st.Size()
 	}
 	return nil
 }
@@ -302,6 +421,18 @@ func (w *WAL) HighGeneration() uint32 {
 	return w.highGen
 }
 
+// failAmbiguousLocked latches the WAL into a fatal state and returns an
+// AppendError classified as FailureAmbiguous. Callers MUST hold w.mu. After
+// this call, every subsequent Append fails fast with a clean ErrFatal-wrapped
+// error rather than running against the partially-mutated segment — that's
+// what closes the "compound corruption" hole the previous code had open.
+func (w *WAL) failAmbiguousLocked(op string, err error) error {
+	if w.fatalErr == nil {
+		w.fatalErr = err
+	}
+	return &AppendError{Class: FailureAmbiguous, Op: op, Err: err}
+}
+
 // Append writes a record with the given (seq, gen) and payload. See spec
 // §"Append — clean vs ambiguous failure classification" for the failure
 // taxonomy.
@@ -313,6 +444,17 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 	defer w.mu.Unlock()
 	if w.closed {
 		return AppendResult{}, &AppendError{Class: FailureClean, Op: "append", Err: ErrClosed}
+	}
+	// Latched fatal: any prior ambiguous failure must prevent further
+	// appends so partial mutations don't compound. Surface as a clean
+	// failure (no I/O attempted on this call) wrapping ErrFatal so the
+	// caller's transactional pattern can detect the latch via errors.Is.
+	if w.fatalErr != nil {
+		return AppendResult{}, &AppendError{
+			Class: FailureClean,
+			Op:    "append",
+			Err:   fmt.Errorf("%w: %v", ErrFatal, w.fatalErr),
+		}
 	}
 	// The on-disk per-record cost is 8 (frame header) + 12 (seq/gen prefix)
 	// + len(payload). Reject up-front if even a fresh segment couldn't fit
@@ -329,11 +471,11 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 	// so the very first Append doesn't claim a generation roll occurred.
 	if w.current != nil && w.current.Generation() != gen {
 		if err := w.sealCurrentLocked(); err != nil {
-			return AppendResult{}, &AppendError{Class: FailureAmbiguous, Op: "seal-on-gen-roll", Err: err}
+			return AppendResult{}, w.failAmbiguousLocked("seal-on-gen-roll", err)
 		}
 		seg, err := w.openNewSegmentLocked(gen, FlagGenInit)
 		if err != nil {
-			return AppendResult{}, &AppendError{Class: FailureAmbiguous, Op: "open-on-gen-roll", Err: err}
+			return AppendResult{}, w.failAmbiguousLocked("open-on-gen-roll", err)
 		}
 		w.current = seg
 		rolled = true
@@ -345,7 +487,7 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 	if w.current == nil {
 		seg, err := w.openNewSegmentLocked(gen, FlagGenInit)
 		if err != nil {
-			return AppendResult{}, &AppendError{Class: FailureAmbiguous, Op: "open-first", Err: err}
+			return AppendResult{}, w.failAmbiguousLocked("open-first", err)
 		}
 		w.current = seg
 	}
@@ -353,11 +495,11 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 	// the new segment because the generation is unchanged.
 	if w.current.Bytes()+int64(recordOverhead+len(payload)) > w.opts.SegmentSize {
 		if err := w.sealCurrentLocked(); err != nil {
-			return AppendResult{}, &AppendError{Class: FailureAmbiguous, Op: "seal-on-full", Err: err}
+			return AppendResult{}, w.failAmbiguousLocked("seal-on-full", err)
 		}
 		seg, err := w.openNewSegmentLocked(gen, 0)
 		if err != nil {
-			return AppendResult{}, &AppendError{Class: FailureAmbiguous, Op: "open-on-full", Err: err}
+			return AppendResult{}, w.failAmbiguousLocked("open-on-full", err)
 		}
 		w.current = seg
 	}
@@ -368,11 +510,11 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 	framed := encodeSeqGenFrame(seq, gen, payload)
 
 	if err := w.current.WriteRecord(framed); err != nil {
-		return AppendResult{}, &AppendError{Class: FailureAmbiguous, Op: "write-record", Err: err}
+		return AppendResult{}, w.failAmbiguousLocked("write-record", err)
 	}
 	if w.opts.SyncMode == SyncImmediate {
 		if err := w.current.Sync(); err != nil {
-			return AppendResult{}, &AppendError{Class: FailureAmbiguous, Op: "sync", Err: err}
+			return AppendResult{}, w.failAmbiguousLocked("sync", err)
 		}
 	}
 

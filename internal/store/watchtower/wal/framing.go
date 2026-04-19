@@ -102,6 +102,14 @@ const MaxFramedPayload = math.MaxUint32 - 4
 // match the recomputed CRC of the payload bytes.
 var ErrCRCMismatch = errors.New("wal: record CRC mismatch")
 
+// ErrCorruptFrame is returned by ReadRecord when the on-disk frame header is
+// structurally invalid (length < 4, or a declared payload size that exceeds
+// the caller's maxPayload). Recovery treats this the same as ErrCRCMismatch
+// or io.ErrUnexpectedEOF: stop scanning and truncate the live segment back
+// to the last known-good offset before reopening for append. Wrapping is
+// preserved via %w so callers can detect the class via errors.Is.
+var ErrCorruptFrame = errors.New("wal: corrupt record frame")
+
 // WriteRecord writes a length-prefixed, CRC32C-protected record to w.
 //
 // Frame layout:
@@ -146,8 +154,9 @@ func WriteRecord(w io.Writer, payload []byte, maxPayload int) error {
 }
 
 // ReadRecord reads one length-prefixed CRC32C record from r and returns the
-// payload. Returns ErrCRCMismatch on bad CRC, io.ErrUnexpectedEOF on
-// truncation, io.EOF when r is at the end of its data.
+// payload. Returns ErrCRCMismatch on bad CRC, ErrCorruptFrame on a
+// structurally invalid frame header, io.ErrUnexpectedEOF on truncation,
+// io.EOF when r is at the end of its data.
 //
 // maxPayload bounds the declared payload size before any allocation, so a
 // corrupted on-disk length cannot drive ReadRecord into an unbounded
@@ -172,11 +181,11 @@ func ReadRecord(r io.Reader, maxPayload int) ([]byte, error) {
 	length := binary.BigEndian.Uint32(header[0:4])
 	expectedCRC := binary.BigEndian.Uint32(header[4:8])
 	if length < 4 {
-		return nil, fmt.Errorf("invalid record length %d", length)
+		return nil, fmt.Errorf("%w: invalid record length %d", ErrCorruptFrame, length)
 	}
 	payloadLen := length - 4
 	if uint64(payloadLen) > uint64(maxPayload) {
-		return nil, fmt.Errorf("wal: record payload size %d exceeds maxPayload %d", payloadLen, maxPayload)
+		return nil, fmt.Errorf("%w: record payload size %d exceeds maxPayload %d", ErrCorruptFrame, payloadLen, maxPayload)
 	}
 	// Stream the payload into a growable buffer rather than pre-allocating
 	// `payloadLen` bytes up front. A corrupted on-disk length can claim up
