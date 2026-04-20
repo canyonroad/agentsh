@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/agentsh/agentsh/internal/client"
@@ -312,7 +313,19 @@ func setupWrapInterception(ctx context.Context, c client.CLIClient, sessID strin
 }
 
 func buildWrapEnv(base []string, sessionID string, serverAddr string, bypassShellShim bool) []string {
-	env := append([]string{}, base...)
+	env := make([]string, 0, len(base)+3)
+	for _, e := range base {
+		switch {
+		case strings.HasPrefix(e, "AGENTSH_SESSION_ID="):
+			continue
+		case strings.HasPrefix(e, "AGENTSH_SERVER="):
+			continue
+		case strings.HasPrefix(e, "AGENTSH_IN_SESSION="):
+			continue
+		default:
+			env = append(env, e)
+		}
+	}
 	env = append(env,
 		fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessionID),
 		fmt.Sprintf("AGENTSH_SERVER=%s", serverAddr),

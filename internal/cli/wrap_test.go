@@ -332,6 +332,54 @@ func TestBuildWrapEnv_OmitsInSessionWhenBypassDisabled(t *testing.T) {
 	}
 }
 
+func TestBuildWrapEnv_StripsInheritedAgentshVarsWhenBypassDisabled(t *testing.T) {
+	env := buildWrapEnv([]string{
+		"PATH=/usr/bin",
+		"AGENTSH_SESSION_ID=stale-session",
+		"AGENTSH_SERVER=http://stale",
+		"AGENTSH_IN_SESSION=1",
+	}, "sess-123", "http://127.0.0.1:18080", false)
+
+	for _, e := range env {
+		if e == "AGENTSH_IN_SESSION=1" {
+			t.Fatal("did not expect inherited AGENTSH_IN_SESSION when bypass is disabled")
+		}
+		if e == "AGENTSH_SESSION_ID=stale-session" {
+			t.Fatal("did not expect stale AGENTSH_SESSION_ID to remain in env")
+		}
+		if e == "AGENTSH_SERVER=http://stale" {
+			t.Fatal("did not expect stale AGENTSH_SERVER to remain in env")
+		}
+	}
+
+	envMap := make(map[string]int)
+	for _, e := range env {
+		envMap[e]++
+	}
+	assert.Equal(t, 1, envMap["AGENTSH_SESSION_ID=sess-123"])
+	assert.Equal(t, 1, envMap["AGENTSH_SERVER=http://127.0.0.1:18080"])
+}
+
+func TestBuildWrapEnv_ReplacesInheritedAgentshVarsWhenBypassEnabled(t *testing.T) {
+	env := buildWrapEnv([]string{
+		"PATH=/usr/bin",
+		"AGENTSH_SESSION_ID=stale-session",
+		"AGENTSH_SERVER=http://stale",
+		"AGENTSH_IN_SESSION=1",
+	}, "sess-123", "http://127.0.0.1:18080", true)
+
+	envMap := make(map[string]int)
+	for _, e := range env {
+		envMap[e]++
+	}
+
+	assert.Equal(t, 1, envMap["AGENTSH_SESSION_ID=sess-123"])
+	assert.Equal(t, 1, envMap["AGENTSH_SERVER=http://127.0.0.1:18080"])
+	assert.Equal(t, 1, envMap["AGENTSH_IN_SESSION=1"])
+	assert.Equal(t, 0, envMap["AGENTSH_SESSION_ID=stale-session"])
+	assert.Equal(t, 0, envMap["AGENTSH_SERVER=http://stale"])
+}
+
 func TestWrapLaunchConfig_EnvContainsSessionAndWrapper(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("wrap interception requires Linux or macOS")
