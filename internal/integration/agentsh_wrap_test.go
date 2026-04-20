@@ -190,7 +190,10 @@ func TestWrapFallback_OmitsInSessionMarker(t *testing.T) {
 			testcontainers.BindMount(policiesDir, "/policies"),
 			testcontainers.BindMount(workspace, "/workspace"),
 		},
-		Env: map[string]string{"AGENTSH_CONFIG": "/config.yaml"},
+		Env: map[string]string{
+			"AGENTSH_CONFIG":     "/config.yaml",
+			"AGENTSH_IN_SESSION": "1",
+		},
 		HostConfigModifier: func(hc *container.HostConfig) {
 			hc.SecurityOpt = []string{"apparmor:unconfined", "seccomp:unconfined"}
 		},
