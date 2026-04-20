@@ -110,7 +110,7 @@ type CreateSessionRequest struct {
 	Workspace         string `json:"workspace,omitempty"`
 	Policy            string `json:"policy,omitempty"`
 	Profile           string `json:"profile,omitempty"`
-	Home              string `json:"home,omitempty"`                 // User's home directory for ${HOME} policy expansion
+	Home              string `json:"home,omitempty"`                // User's home directory for ${HOME} policy expansion
 	DetectProjectRoot *bool  `json:"detect_project_root,omitempty"` // Override server default
 	ProjectRoot       string `json:"project_root,omitempty"`        // Explicit override
 	RealPaths         *bool  `json:"real_paths,omitempty"`          // Use actual host paths instead of /workspace
@@ -131,11 +131,12 @@ type WrapInitRequest struct {
 
 // WrapInitResponse returns the seccomp wrapper configuration to the CLI.
 type WrapInitResponse struct {
-	PtraceMode    bool              `json:"ptrace_mode,omitempty"`
-	WrapperBinary string            `json:"wrapper_binary"`
-	StubBinary    string            `json:"stub_binary,omitempty"`
-	SeccompConfig string            `json:"seccomp_config"`          // JSON-encoded seccomp config
-	NotifySocket  string            `json:"notify_socket"`           // Unix socket path for forwarding notify fd
-	SignalSocket  string            `json:"signal_socket,omitempty"` // Unix socket path for forwarding signal filter fd
-	WrapperEnv    map[string]string `json:"wrapper_env"`             // Extra env vars for the wrapper
+	PtraceMode            bool              `json:"ptrace_mode,omitempty"`
+	SafeToBypassShellShim bool              `json:"safe_to_bypass_shell_shim,omitempty"`
+	WrapperBinary         string            `json:"wrapper_binary"`
+	StubBinary            string            `json:"stub_binary,omitempty"`
+	SeccompConfig         string            `json:"seccomp_config"`          // JSON-encoded seccomp config
+	NotifySocket          string            `json:"notify_socket"`           // Unix socket path for forwarding notify fd
+	SignalSocket          string            `json:"signal_socket,omitempty"` // Unix socket path for forwarding signal filter fd
+	WrapperEnv            map[string]string `json:"wrapper_env"`             // Extra env vars for the wrapper
 }

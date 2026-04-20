@@ -208,8 +208,9 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		a.broker.Publish(ev)
 
 		return types.WrapInitResponse{
-			PtraceMode:   true,
-			NotifySocket: notifySocketPath,
+			PtraceMode:            true,
+			SafeToBypassShellShim: true,
+			NotifySocket:          notifySocketPath,
 		}, http.StatusOK, nil
 	}
 
@@ -398,12 +399,13 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	a.broker.Publish(ev)
 
 	return types.WrapInitResponse{
-		WrapperBinary: wrapperPath,
-		StubBinary:    stubPath,
-		SeccompConfig: string(cfgJSON),
-		NotifySocket:  notifySocketPath,
-		SignalSocket:  signalSocketPath,
-		WrapperEnv:    wrapperEnv,
+		SafeToBypassShellShim: execveEnabled,
+		WrapperBinary:         wrapperPath,
+		StubBinary:            stubPath,
+		SeccompConfig:         string(cfgJSON),
+		NotifySocket:          notifySocketPath,
+		SignalSocket:          signalSocketPath,
+		WrapperEnv:            wrapperEnv,
 	}, http.StatusOK, nil
 }
 
