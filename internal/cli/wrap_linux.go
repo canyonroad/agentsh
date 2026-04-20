@@ -25,11 +25,7 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 	if wrapResp.PtraceMode {
 		notifySocket := wrapResp.NotifySocket
 
-		env := os.Environ()
-		env = append(env,
-			fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
-			fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
-		)
+		env := buildWrapEnv(os.Environ(), sessID, cfg.serverAddr, wrapResp.SafeToBypassShellShim)
 
 		// connHolder stores the keepalive connection set by ptracePostStart.
 		var connHolder net.Conn
@@ -130,12 +126,8 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 	}
 
 	// Build env for the wrapped process
-	env := os.Environ()
-	env = append(env,
-		fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
-		fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
-		"AGENTSH_NOTIFY_SOCK_FD=3", // fd 3 = ExtraFiles[0]
-	)
+	env := buildWrapEnv(os.Environ(), sessID, cfg.serverAddr, wrapResp.SafeToBypassShellShim)
+	env = append(env, "AGENTSH_NOTIFY_SOCK_FD=3") // fd 3 = ExtraFiles[0]
 	if hasSignalSocket {
 		env = append(env, "AGENTSH_SIGNAL_SOCK_FD=4") // fd 4 = ExtraFiles[1]
 	}
