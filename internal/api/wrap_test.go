@@ -569,6 +569,8 @@ func TestWrapInit_SeccompConfigContent(t *testing.T) {
 	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
 	cfg.Sandbox.Seccomp.Execve.Enabled = true
 	cfg.Sandbox.Seccomp.UnixSocket.Enabled = true
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &enabled
+	cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE = &enabled
 	app, mgr := newTestAppForWrap(t, cfg)
 
 	s, err := mgr.Create(t.TempDir(), "default")
@@ -584,31 +586,26 @@ func TestWrapInit_SeccompConfigContent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// The seccomp config should contain the expected fields
-	cfg_str := resp.SeccompConfig
-	if cfg_str == "" {
-		t.Fatal("expected non-empty seccomp config")
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(resp.SeccompConfig), &parsed); err != nil {
+		t.Fatalf("unmarshal SeccompConfig: %v\n%s", err, resp.SeccompConfig)
 	}
-	// Verify it contains expected JSON fields
-	if !contains(cfg_str, "unix_socket_enabled") {
-		t.Error("seccomp config should contain unix_socket_enabled")
-	}
-	if !contains(cfg_str, "execve_enabled") {
-		t.Error("seccomp config should contain execve_enabled")
-	}
-}
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+	if got, _ := parsed["unix_socket_enabled"].(bool); !got {
+		t.Fatalf("unix_socket_enabled = %v, want true (JSON: %s)", got, resp.SeccompConfig)
 	}
-	return false
+	if got, _ := parsed["execve_enabled"].(bool); !got {
+		t.Fatalf("execve_enabled = %v, want true (JSON: %s)", got, resp.SeccompConfig)
+	}
+	if got, _ := parsed["file_monitor_enabled"].(bool); !got {
+		t.Fatalf("file_monitor_enabled = %v, want true (JSON: %s)", got, resp.SeccompConfig)
+	}
+	if got, _ := parsed["intercept_metadata"].(bool); !got {
+		t.Fatalf("intercept_metadata = %v, want true (JSON: %s)", got, resp.SeccompConfig)
+	}
+	if got, _ := parsed["block_io_uring"].(bool); !got {
+		t.Fatalf("block_io_uring = %v, want true (JSON: %s)", got, resp.SeccompConfig)
+	}
 }
 
 func TestWrapInit_LongTMPDIR_LongSessionID(t *testing.T) {
