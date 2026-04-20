@@ -206,14 +206,16 @@ type Transport struct {
 	ackAnomalyLimiter *rate.Limiter
 
 	// walMarkAckedFn / walWrittenDataHighWaterFn / walEarliestDataSequenceFn /
-	// walHighGenerationFn are seams the helper calls instead of t.wal.*
-	// directly. New() wires them to t.wal.* when wal != nil and to safe stubs
-	// (no-op success / ok=false / 0) otherwise. Test code overrides via
-	// SetWAL*FnForTest in seams_export_test.go to inject error paths.
-	walMarkAckedFn            func(gen uint32, seq uint64) error
-	walWrittenDataHighWaterFn func(gen uint32) (uint64, bool, error)
-	walEarliestDataSequenceFn func(gen uint32) (uint64, bool, error)
-	walHighGenerationFn       func() uint32
+	// walHighGenerationFn / walHasDataBelowGenerationFn are seams the helper
+	// calls instead of t.wal.* directly. New() wires them to t.wal.* when
+	// wal != nil and to safe stubs (no-op success / ok=false / 0 / false)
+	// otherwise. Test code overrides via SetWAL*FnForTest in
+	// seams_export_test.go to inject error paths.
+	walMarkAckedFn              func(gen uint32, seq uint64) error
+	walWrittenDataHighWaterFn   func(gen uint32) (uint64, bool, error)
+	walEarliestDataSequenceFn   func(gen uint32) (uint64, bool, error)
+	walHighGenerationFn         func() uint32
+	walHasDataBelowGenerationFn func(threshold uint32) (bool, error)
 
 	// rejectReason is populated when the server rejects the session
 	// (SessionAck.accepted=false). Surfaced via RejectReason().
@@ -260,11 +262,13 @@ func New(opts Options) (*Transport, error) {
 		t.walWrittenDataHighWaterFn = t.wal.WrittenDataHighWater
 		t.walEarliestDataSequenceFn = t.wal.EarliestDataSequence
 		t.walHighGenerationFn = t.wal.HighGeneration
+		t.walHasDataBelowGenerationFn = t.wal.HasDataBelowGeneration
 	} else {
 		t.walMarkAckedFn = func(uint32, uint64) error { return nil }
 		t.walWrittenDataHighWaterFn = func(uint32) (uint64, bool, error) { return 0, false, nil }
 		t.walEarliestDataSequenceFn = func(uint32) (uint64, bool, error) { return 0, false, nil }
 		t.walHighGenerationFn = func() uint32 { return 0 }
+		t.walHasDataBelowGenerationFn = func(uint32) (bool, error) { return false, nil }
 	}
 	return t, nil
 }
@@ -321,8 +325,15 @@ func (t *Transport) applyServerAckTuple(serverGen uint32, serverSeq uint64) AckO
 	// permanently delete records that have not yet been delivered.
 	//
 	// Validation rules (mirror the cross-gen and same-gen-advance branches):
-	//   - serverSeq == 0: vacuous "I haven't acked anything yet" — adopt
-	//     unconditionally; no record can be over-acked.
+	//   - serverSeq == 0: "I haven't acked anything yet" within serverGen.
+	//     Vacuous within the same generation, but adopting (G, 0) when local
+	//     data exists at any (g < G) lex-over-acks all of that lower-gen data
+	//     via wal.MarkAcked's (gen, seq) compare. Validate with
+	//     HasDataBelowGeneration(serverGen) before adopting; if any
+	//     lower-generation data remains on disk, fall through to the
+	//     "server_ack_exceeds_local_data" anomaly branch below. Same-gen
+	//     (G, 0) with no lower-gen data is safe to adopt unconditionally —
+	//     no record can be over-acked.
 	//   - WAL read failure → Anomaly("wal_read_failure"). Cursors UNCHANGED;
 	//     persistedAckPresent stays false so the next ack re-runs the seed
 	//     gate against a (presumably) recovered WAL.
@@ -333,6 +344,23 @@ func (t *Transport) applyServerAckTuple(serverGen uint32, serverSeq uint64) AckO
 	//     the server is past our highest local data-bearing seq.
 	if !t.persistedAckPresent {
 		if serverSeq == 0 {
+			hasLowerData, walErr := t.walHasDataBelowGenerationFn(serverGen)
+			if walErr != nil {
+				return AckOutcome{
+					Kind:           AckOutcomeAnomaly,
+					PersistedTuple: t.persistedAck,
+					ReplayCursor:   t.remoteReplayCursor,
+					AnomalyReason:  "wal_read_failure",
+				}
+			}
+			if hasLowerData {
+				return AckOutcome{
+					Kind:           AckOutcomeAnomaly,
+					PersistedTuple: t.persistedAck,
+					ReplayCursor:   t.remoteReplayCursor,
+					AnomalyReason:  "server_ack_exceeds_local_data",
+				}
+			}
 			t.persistedAck = server
 			t.persistedAckPresent = true
 			t.remoteReplayCursor = server

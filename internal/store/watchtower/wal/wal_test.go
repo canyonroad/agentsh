@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -435,6 +436,86 @@ func TestWAL_WrittenDataHighWaterAfterRoll(t *testing.T) {
 			t.Errorf("WrittenDataHighWater(%d) = (%d, %v); want (%d, %v)",
 				tc.gen, seq, ok, tc.wantSeq, tc.wantOK)
 		}
+	}
+}
+
+// TestWAL_HasDataBelowGeneration covers the round-16 Finding 1 accessor:
+// the transport's first-apply (gen, seq=0) gate uses it to refuse to adopt
+// a (G, 0) ack tuple when local data exists at any (g < G).
+func TestWAL_HasDataBelowGeneration(t *testing.T) {
+	// Fresh WAL: no data anywhere, every threshold returns false.
+	dir := t.TempDir()
+	w, err := Open(Options{Dir: dir, SegmentSize: 4 * 1024, MaxTotalBytes: 64 * 1024, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	for _, threshold := range []uint32{0, 1, 5, 1 << 20} {
+		below, err := w.HasDataBelowGeneration(threshold)
+		if err != nil || below {
+			t.Errorf("fresh HasDataBelowGeneration(%d) = (%v, %v); want (false, nil)", threshold, below, err)
+		}
+	}
+	// Append data in gen=2: thresholds <=2 stay false, >=3 returns true.
+	if _, err := w.Append(1, 2, []byte("g2")); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		threshold uint32
+		want      bool
+	}{
+		{0, false},
+		{1, false},
+		{2, false}, // strictly less than 2 means gen 0..1, none populated
+		{3, true},  // gen=2 populated, 2 < 3
+		{1 << 20, true},
+	}
+	for _, tc := range cases {
+		below, err := w.HasDataBelowGeneration(tc.threshold)
+		if err != nil {
+			t.Errorf("threshold=%d err = %v, want nil", tc.threshold, err)
+			continue
+		}
+		if below != tc.want {
+			t.Errorf("HasDataBelowGeneration(%d) = %v; want %v", tc.threshold, below, tc.want)
+		}
+	}
+	// Append data in gen=5: threshold>=3 still true, threshold>=6 still
+	// true (now via gen=5), threshold==3 stays true via gen=2.
+	if _, err := w.Append(1, 5, []byte("g5")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		threshold uint32
+		want      bool
+	}{
+		{0, false},
+		{2, false},
+		{3, true}, // gen=2 < 3
+		{5, true}, // gen=2 < 5
+		{6, true}, // gen=5 < 6
+	} {
+		below, err := w.HasDataBelowGeneration(tc.threshold)
+		if err != nil || below != tc.want {
+			t.Errorf("HasDataBelowGeneration(%d) = (%v, %v); want (%v, nil)", tc.threshold, below, err, tc.want)
+		}
+	}
+}
+
+// TestWAL_HasDataBelowGenerationAfterClose asserts the accessor surfaces
+// ErrClosed once the WAL has been closed (matches the WrittenDataHighWater
+// closed-state contract).
+func TestWAL_HasDataBelowGenerationAfterClose(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(Options{Dir: dir, SegmentSize: 4 * 1024, MaxTotalBytes: 64 * 1024, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.HasDataBelowGeneration(1); !errors.Is(err, ErrClosed) {
+		t.Errorf("HasDataBelowGeneration after Close = %v; want ErrClosed", err)
 	}
 }
 

@@ -840,21 +840,29 @@ func TestApplyServerAckTuple_EmitsMetricOnAdopted(t *testing.T) {
 // helper MUST validate the server tuple against local WAL data before
 // adopting; an unbounded server tuple cannot be allowed to seed the
 // persistedAck cursor (which drives the GC predicate) at an impossible
-// position. Three sub-cases mirror the production validation rules:
+// position. Sub-cases mirror the production validation rules:
 //
-//  1. server_seq_zero_adopts: seq=0 is vacuous, adopted unconditionally.
-//  2. server_seq_beyond_local_data: WAL has gen=8 records 1..50, server
+//  1. server_seq_zero_with_no_lower_data_adopts: seq=0 in a generation with
+//     no lower-gen data is vacuous, adopted unconditionally.
+//  2. server_seq_zero_with_lower_gen_data_is_anomaly (round-16 Finding 1):
+//     seq=0 in serverGen=2 when WAL has data in gen=1 would lex-over-ack
+//     the gen=1 records via wal.MarkAcked (segGen < ackHighGen reclaims).
+//     Helper MUST return Anomaly("server_ack_exceeds_local_data") with
+//     cursors UNCHANGED.
+//  3. server_seq_beyond_local_data: WAL has gen=8 records 1..50, server
 //     reports (gen=8, seq=200). Helper MUST return Anomaly(
 //     "server_ack_exceeds_local_data") with cursors UNCHANGED and
 //     persistedAckPresent still false.
-//  3. unwritten_generation: WAL has gen=7 only, server reports (gen=8,
+//  4. unwritten_generation: WAL has gen=7 only, server reports (gen=8,
 //     seq=10). Helper MUST return Anomaly("unwritten_generation") with
 //     cursors UNCHANGED and persistedAckPresent still false.
 //
-// The fourth sub-case (wal_read_failure) is exercised separately via the
-// WrittenDataHighWater seam below.
+// The fifth sub-case (wal_read_failure) is exercised separately via the
+// WrittenDataHighWater seam below. The sixth (round-16 Finding 1
+// HasDataBelowGeneration read failure) is exercised via the
+// HasDataBelowGeneration seam.
 func TestApplyServerAckTuple_FirstApplyValidatesAgainstWAL(t *testing.T) {
-	t.Run("server_seq_zero_adopts", func(t *testing.T) {
+	t.Run("server_seq_zero_with_no_lower_data_adopts", func(t *testing.T) {
 		env := newClampTestEnv(t, Options{}) // no InitialAckTuple
 		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
 
@@ -870,6 +878,52 @@ func TestApplyServerAckTuple_FirstApplyValidatesAgainstWAL(t *testing.T) {
 		}
 		if got := PersistedAckForTest(env.tr); got != (AckCursor{Sequence: 0, Generation: 5}) {
 			t.Fatalf("persistedAck: got %+v, want {0,5}", got)
+		}
+	})
+
+	t.Run("server_seq_zero_with_lower_gen_data_is_anomaly", func(t *testing.T) {
+		// Round-16 Finding 1 regression: WAL has data in gen=1 (seqs 1..3).
+		// Server reports (gen=2, seq=0). Adopting unconditionally would seed
+		// persistedAck=(2, 0), which under wal.MarkAcked's lex-compare
+		// (segGen < ackHighGen entirely reclaims segment) would discard
+		// every gen=1 record on the next GC pass — silent data loss.
+		env := newClampTestEnv(t, Options{}) // no InitialAckTuple
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		appendDataInGen(t, env.w, 1, 1, 3) // gen=1 records 1..3
+
+		outcome := ApplyServerAckTupleForTest(env.tr, 2, 0)
+		if outcome.Kind != AckOutcomeAnomaly {
+			t.Fatalf("kind: got %v, want Anomaly (server_seq=0 with lower-gen data)", outcome.Kind)
+		}
+		if outcome.AnomalyReason != "server_ack_exceeds_local_data" {
+			t.Fatalf("reason: got %q, want server_ack_exceeds_local_data", outcome.AnomalyReason)
+		}
+		if PersistedAckPresentForTest(env.tr) {
+			t.Fatal("persistedAckPresent must remain false on round-16 Finding 1 Anomaly")
+		}
+		if got := PersistedAckForTest(env.tr); got != (AckCursor{}) {
+			t.Fatalf("persistedAck mutated on Anomaly: %+v", got)
+		}
+		if got := RemoteReplayCursorForTest(env.tr); got != (AckCursor{}) {
+			t.Fatalf("remoteReplayCursor mutated on Anomaly: %+v", got)
+		}
+	})
+
+	t.Run("server_seq_zero_same_gen_with_lower_data_adopts", func(t *testing.T) {
+		// Defensive: (gen=1, seq=0) with data in gen=1 must still adopt —
+		// HasDataBelowGeneration(1) is false (no gen<1 entries), so the
+		// vacuous-zero adopt path applies. Confirms the gate is strictly
+		// "below threshold", not "≤ threshold".
+		env := newClampTestEnv(t, Options{}) // no InitialAckTuple
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		appendDataInGen(t, env.w, 1, 1, 3) // gen=1 records 1..3
+
+		outcome := ApplyServerAckTupleForTest(env.tr, 1, 0)
+		if outcome.Kind != AckOutcomeAdopted {
+			t.Fatalf("kind: got %v, want Adopted (same-gen seq=0 with no lower-gen data)", outcome.Kind)
+		}
+		if got := PersistedAckForTest(env.tr); got != (AckCursor{Sequence: 0, Generation: 1}) {
+			t.Fatalf("persistedAck: got %+v, want {0,1}", got)
 		}
 	})
 
@@ -931,6 +985,31 @@ func TestApplyServerAckTuple_FirstApplyValidatesAgainstWAL(t *testing.T) {
 		}
 		if PersistedAckPresentForTest(env.tr) {
 			t.Fatal("persistedAckPresent must remain false on first-apply WAL failure")
+		}
+	})
+
+	t.Run("wal_read_failure_in_zero_seq_branch_is_anomaly", func(t *testing.T) {
+		// Round-16 Finding 1 sibling: HasDataBelowGeneration error must
+		// surface as wal_read_failure with cursors UNCHANGED.
+		env := newClampTestEnv(t, Options{}) // no InitialAckTuple
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		injErr := errors.New("simulated has-data-below-gen failure")
+		SetWALHasDataBelowGenerationFnForTest(env.tr, func(uint32) (bool, error) {
+			return false, injErr
+		})
+
+		outcome := ApplyServerAckTupleForTest(env.tr, 5, 0)
+		if outcome.Kind != AckOutcomeAnomaly {
+			t.Fatalf("kind: got %v, want Anomaly", outcome.Kind)
+		}
+		if outcome.AnomalyReason != "wal_read_failure" {
+			t.Fatalf("reason: got %q, want wal_read_failure", outcome.AnomalyReason)
+		}
+		if PersistedAckPresentForTest(env.tr) {
+			t.Fatal("persistedAckPresent must remain false on first-apply WAL failure")
+		}
+		if got := PersistedAckForTest(env.tr); got != (AckCursor{}) {
+			t.Fatalf("persistedAck mutated on Anomaly: %+v", got)
 		}
 	})
 }

@@ -661,6 +661,43 @@ func (w *WAL) WrittenDataHighWater(gen uint32) (uint64, bool, error) {
 	return seq, ok, nil
 }
 
+// HasDataBelowGeneration reports whether any RecordData has been durably
+// written to disk for a generation strictly less than threshold. It is the
+// guard the transport's first-apply ack validation uses (round-16 Finding 1)
+// to detect when adopting (serverGen, serverSeq=0) would silently over-ack
+// data in a lower generation: MarkAcked enforces lex order on (gen, seq),
+// so persisting (G, 0) when local data exists at any (g < G) marks all of
+// that lower-gen data as fully acked and reclaims it on the next GC pass.
+//
+// Adopting a higher-gen ack tuple is only safe when the WAL has no
+// data-bearing record below that generation — either because the agent was
+// truly cold (Open scan filled perGenDataHighWater with nothing) or because
+// every lower-gen record has already been GC'd via a prior ack (the map
+// entry was removed by prunePerGenDataHighWaterLocked when its last segment
+// went away). Without this guard a server that legitimately advanced beyond
+// our last on-disk position — e.g., after the agent restored from a
+// snapshot whose WAL is older than the server's persisted state — would
+// poison MarkAcked's predicate and destroy not-yet-delivered records.
+//
+// O(N) in the number of generations currently tracked by the in-memory
+// map (which is bounded by the number of generations that have at least
+// one un-GC'd data record on disk — usually 0–2). Callers can treat it as
+// effectively constant on the recv hot path. Returns ErrClosed if the WAL
+// has been closed; never returns any other error.
+func (w *WAL) HasDataBelowGeneration(threshold uint32) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return false, ErrClosed
+	}
+	for gen := range w.perGenDataHighWater {
+		if gen < threshold {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // EarliestDataSequence returns the lowest RecordData sequence still on
 // disk for the given generation, or ok=false if no data-bearing segment
 // for that generation survives (either it was never opened, or every

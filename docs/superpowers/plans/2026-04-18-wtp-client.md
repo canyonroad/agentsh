@@ -5700,9 +5700,9 @@ Run `/roborev-design-review` and address findings.
 **Why this task belongs to the WAL package, not transport.** The transport package is downstream of the WAL — it reads `wal.ReadMeta` to build the `AckTuple` seed and never writes meta.json directly. The "first writer wins; later Open with different value errors" invariant is a WAL-side invariant (it protects the WAL directory's integrity against being silently retargeted to a new identity mid-lifetime). The cold-start gate in Task 27 layers on top by mapping a meta-mismatch into a "do not seed" decision rather than an error; that policy choice is the store-wiring layer's, but the underlying check (read meta, compare identity, refuse to mutate on mismatch) lives in the WAL.
 
 **Files:**
-- Modify: `internal/store/watchtower/wal/wal.go` (extend `Options` with `SessionID string` and `KeyFingerprint string`; in `Open`, after the existing `ReadMeta` call, validate identity if meta is present-and-non-empty; refactor the `MarkAcked` `WriteMeta` call to include identity from `w.opts`; expose `w.SessionID()` / `w.KeyFingerprint()` accessors so tests can assert what the WAL has staged for the next meta write; **add `(w *WAL) EarliestDataSequence() (uint64, bool, error)`, `(w *WAL) HighWaterSequence() uint64`, AND `(w *WAL) WrittenDataHighWater(gen uint32) (uint64, bool)` accessors** — see Step 3a for the contract. Round-11 SAFETY (Finding 1): the per-generation, data-bearing accessor `WrittenDataHighWater(gen)` REPLACES the round-10 `WrittenHighGeneration() uint32` because the latter is unsafe — `w.highGen` is seeded from segment headers during recovery (wal.go:340) BEFORE any RecordData lands, so a header-only generation is indistinguishable from a generation with actual data; admitting an ack for an unwritten generation lets `wal.MarkAcked` accept the ack and lex GC discard surviving lower-gen segments holding unsent records.)
+- Modify: `internal/store/watchtower/wal/wal.go` (extend `Options` with `SessionID string` and `KeyFingerprint string`; in `Open`, after the existing `ReadMeta` call, validate identity if meta is present-and-non-empty; refactor the `MarkAcked` `WriteMeta` call to include identity from `w.opts`; expose `w.SessionID()` / `w.KeyFingerprint()` accessors so tests can assert what the WAL has staged for the next meta write; **add `(w *WAL) EarliestDataSequence() (uint64, bool, error)`, `(w *WAL) HighWaterSequence() uint64`, `(w *WAL) WrittenDataHighWater(gen uint32) (uint64, bool)`, AND `(w *WAL) HasDataBelowGeneration(threshold uint32) (bool, error)` accessors** — see Step 3a for the contract. Round-11 SAFETY (Finding 1): the per-generation, data-bearing accessor `WrittenDataHighWater(gen)` REPLACES the round-10 `WrittenHighGeneration() uint32` because the latter is unsafe — `w.highGen` is seeded from segment headers during recovery (wal.go:340) BEFORE any RecordData lands, so a header-only generation is indistinguishable from a generation with actual data; admitting an ack for an unwritten generation lets `wal.MarkAcked` accept the ack and lex GC discard surviving lower-gen segments holding unsent records. Round-16 SAFETY (Finding 1): `HasDataBelowGeneration(threshold)` is added to gate the first-apply (serverGen, 0) adopt branch in `applyServerAckTuple` — without it, adopting (serverGen, 0) when local data exists at any g<serverGen would lex-over-ack every lower-gen record via `wal.MarkAcked`'s `segmentFullyAckedLocked` predicate.)
 - Test: `internal/store/watchtower/wal/wal_identity_test.go` (new file — keeps the four identity-focused tests grouped without bloating `wal_test.go`)
-- Test: extend `internal/store/watchtower/wal/wal_test.go` (NOT `wal_identity_test.go` — these accessors are general-purpose, not identity-related) with NINE new tests for the accessors (Step 3a — `TestWAL_HighWaterSequenceMatchesReader`, `TestWAL_EarliestDataSequence`, plus the FIVE round-11 per-gen data-bearing HW tests `TestWAL_WrittenDataHighWaterReturnsFalseForFutureGen`, `TestWAL_WrittenDataHighWaterReturnsFalseForGenWithOnlyHeader`, `TestWAL_WrittenDataHighWaterTracksAppend`, `TestWAL_WrittenDataHighWaterAfterRoll`, `TestWAL_WrittenDataHighWaterIgnoresLossMarkers`, plus the round-13 performance-budget test `TestWAL_WrittenDataHighWater_IsConstantTime`)
+- Test: extend `internal/store/watchtower/wal/wal_test.go` (NOT `wal_identity_test.go` — these accessors are general-purpose, not identity-related) with ELEVEN new tests for the accessors (Step 3a — `TestWAL_HighWaterSequenceMatchesReader`, `TestWAL_EarliestDataSequence`, plus the FIVE round-11 per-gen data-bearing HW tests `TestWAL_WrittenDataHighWaterReturnsFalseForFutureGen`, `TestWAL_WrittenDataHighWaterReturnsFalseForGenWithOnlyHeader`, `TestWAL_WrittenDataHighWaterTracksAppend`, `TestWAL_WrittenDataHighWaterAfterRoll`, `TestWAL_WrittenDataHighWaterIgnoresLossMarkers`, plus the round-13 performance-budget test `TestWAL_WrittenDataHighWater_IsConstantTime`, plus the round-16 Finding 1 tests `TestWAL_HasDataBelowGeneration` and `TestWAL_HasDataBelowGenerationAfterClose`)
 
 **Spec rule (design.md §"Cold-start seed safety / stale meta detection"):** the persisted meta.json carries the WAL's installation identity. A WAL directory is bound to one (SessionID, KeyFingerprint) for its lifetime; reopening the directory with different values is a configuration error and MUST be surfaced rather than silently consumed.
 
@@ -5818,7 +5818,7 @@ if err := WriteMeta(w.opts.Dir, Meta{
 }); err != nil {
 ```
 
-**Step 3a: Add `EarliestDataSequence()`, `HighWaterSequence()`, and `WrittenDataHighWater(gen)` accessors.** The transport (Task 15.1) needs three read-only WAL accessors that today live ONLY on the `Reader` (`(r *Reader) WALHighWaterSequence()` at `internal/store/watchtower/wal/reader.go:276`) or do not exist at all. Hoisting them onto `*WAL` lets the transport query them directly without opening a Reader — important for the `ack_regression_after_gc` detector (Task 15.1 Step 1b.5), which must check the on-disk earliest BEFORE opening the replay reader so the synthesized loss marker is appended in the right ordering, AND for the round-11 cross-generation ack taxonomy (Task 15.1 `applyServerAckTuple`), which needs a per-generation, **data-bearing** high-water proof so the helper can distinguish "server is on a generation we've actually emitted RecordData in" (Adopted) from "server is on a generation we've only opened a segment header for" (Anomaly).
+**Step 3a: Add `EarliestDataSequence()`, `HighWaterSequence()`, `WrittenDataHighWater(gen)`, and `HasDataBelowGeneration(threshold)` accessors.** The transport (Task 15.1) needs four read-only WAL accessors that today live ONLY on the `Reader` (`(r *Reader) WALHighWaterSequence()` at `internal/store/watchtower/wal/reader.go:276`) or do not exist at all. Hoisting them onto `*WAL` lets the transport query them directly without opening a Reader — important for the `ack_regression_after_gc` detector (Task 15.1 Step 1b.5), which must check the on-disk earliest BEFORE opening the replay reader so the synthesized loss marker is appended in the right ordering, AND for the round-11 cross-generation ack taxonomy (Task 15.1 `applyServerAckTuple`), which needs a per-generation, **data-bearing** high-water proof so the helper can distinguish "server is on a generation we've actually emitted RecordData in" (Adopted) from "server is on a generation we've only opened a segment header for" (Anomaly), AND for the round-16 Finding 1 first-apply data-loss fix, which needs `HasDataBelowGeneration(threshold)` to detect "server is acking gen=N when the WAL still has data in some g<N" before adopting `(N, 0)` would lex-over-ack every lower-gen record.
 
 **Round-11 SAFETY NOTE (replaces the round-10 `WrittenHighGeneration()` accessor).** The round-10 design exposed `WrittenHighGeneration() = w.highGen`, but `w.highGen` is seeded from segment headers during recovery (`wal.go:340` — `w.highGen = hdr.Generation`) BEFORE any RecordData is decoded for that generation. That meant `applyServerAckTuple` could classify `(server.gen=N, server.seq=K)` as `Adopted` even when generation N had only been ROLLED (the writer opened a new segment header and crashed before writing a single RecordData) — and then `wal.MarkAcked(N, K)` would accept any K, immediately make all lower-generation segments reclaimable under lexicographic GC (`wal.go:1099` `segmentFullyAckedLocked`), and silently drop unsent history. The round-11 accessor `WrittenDataHighWater(gen)` returns `(maxDataSeq, ok)` where `ok=true` ONLY if at least one RecordData entry exists on disk for that generation. The cross-generation Adopted branch in `applyServerAckTuple` MUST consult this accessor rather than `WrittenHighGeneration()`. The unsafe `WrittenHighGeneration()` accessor is REMOVED from this task's scope; it has no other consumer.
 
@@ -6047,6 +6047,59 @@ func (w *WAL) EarliestDataSequence(gen uint32) (uint64, bool, error) {
     //      the loop advances to the next segment. Other I/O errors bubble up
     //      as the err return.
 }
+
+// HasDataBelowGeneration reports whether the WAL has ever emitted a RecordData
+// entry in ANY generation strictly less than `threshold`. Returns false when
+// no RecordData exists below the threshold (either no lower-generation has
+// been written OR all lower-generation segments have been GC'd).
+//
+// Round-16 Finding 1 RATIONALE. The transport's applyServerAckTuple
+// first-apply branch (Task 15.1) needs to safely adopt (serverGen, 0) —
+// a vacuous "I haven't acked anything yet within serverGen" — WITHOUT
+// lex-over-acking records in lower generations. `wal.MarkAcked(N, 0)`
+// persists the tuple; the per-segment GC predicate
+// (`segmentFullyAckedLocked` in wal.go — reclaims any segment with
+// `segGen < ackHighGen`) then reclaims every lower-generation segment
+// on the next GC pass, silently destroying records that have not yet
+// been delivered. `HasDataBelowGeneration(serverGen)` closes this hole:
+// if it returns `(true, nil)`, the first-apply branch takes the
+// Anomaly path with `AnomalyReason="server_ack_exceeds_local_data"`
+// instead of adopting.
+//
+// Contract:
+//   - Returns `(false, nil)` on a fresh WAL (no RecordData anywhere).
+//   - Returns `(false, nil)` when the highest-data generation on disk is
+//     `>= threshold`, OR the only records below `threshold` are synthetic
+//     loss markers (same data-bearing exclusion as
+//     `WrittenDataHighWater`).
+//   - Returns `(true, nil)` when at least one generation `g < threshold`
+//     has a RecordData entry in `w.perGenDataHighWater`. This is the
+//     "do not adopt (threshold, 0)" signal.
+//   - Returns `(_, err != nil)` for I/O failures the WAL chose to surface
+//     (approach 1 is in-memory-only and therefore does NOT error; the err
+//     return is reserved for a future refactor that pulls the data from
+//     disk).
+//
+// Boundary: HasDataBelowGeneration(G) against a WAL whose only data is
+// in gen=G returns `(false, nil)` — same-generation data is NOT "below"
+// and the first-apply branch adopts safely.
+//
+// Implementation: O(N) where N is the count of populated entries in
+// `perGenDataHighWater` (typically 0-2: the current writer's gen plus at
+// most a couple of older partial-GC'd gens). The accessor is on the
+// recv hot path (every first-apply SessionAck) so a per-call disk scan
+// would be unacceptable; approach 1 is mandatory.
+func (w *WAL) HasDataBelowGeneration(threshold uint32) (bool, error) {
+    // Implementation outline — actual code lives in wal.go:
+    //   1. Lock w.mu.
+    //   2. Iterate w.perGenDataHighWater; if any key < threshold, return
+    //      (true, nil).
+    //   3. Return (false, nil).
+    // The iteration is bounded by the size of perGenDataHighWater, which
+    // is GC-aware: entries are removed when the last segment for that
+    // generation is GC'd (Task 13's ack-aware GC contract). A fully-GC'd
+    // lower generation therefore correctly reports "no data below".
+}
 ```
 
 **Tests for the accessors** (added to `wal_test.go`, NOT `wal_identity_test.go`):
@@ -6074,6 +6127,16 @@ func (w *WAL) EarliestDataSequence(gen uint32) (uint64, bool, error) {
 - *Single segment with records*: Append 5 records in gen=1, no MarkAcked. Assert `seq, ok, err := w.EarliestDataSequence(1); ok && err == nil && seq == 1`. Assert higher gens are empty: `_, ok2, err2 := w.EarliestDataSequence(2); !ok2 && err2 == nil`.
 - *Post-GC same gen*: Append 50 records in gen=1 (configure SegmentSize small enough to force ≥3 segments). Drive `w.MarkAcked(gen=1, seq=20)` so segments 1+2 GC. Assert `seq, ok, err := w.EarliestDataSequence(1); ok && err == nil && seq == 21` (the first surviving record in gen=1).
 - *Mixed-gen on disk*: Append 5 records in gen=1, roll to gen=2, append 5 records in gen=2. Assert `seq1, ok1, err1 := w.EarliestDataSequence(1); ok1 && err1 == nil && seq1 == 1` AND `seq2, ok2, err2 := w.EarliestDataSequence(2); ok2 && err2 == nil && seq2 == 1` (sequences reset across generations; the accessor returns the lowest in EACH generation independently). Now drive `w.MarkAcked(gen=1, seqHigh)` so all gen=1 segments GC, leaving only gen=2 on disk. Assert `_, okPostGC1, errPostGC1 := w.EarliestDataSequence(1); !okPostGC1 && errPostGC1 == nil` (gen=1 is empty post-GC) AND `seqPostGC2, okPostGC2, errPostGC2 := w.EarliestDataSequence(2); okPostGC2 && errPostGC2 == nil && seqPostGC2 == 1` (gen=2 still has its records). This sub-case is the round-12 Finding 1 regression test: without the gen parameter, the post-GC query for gen=1 would surface gen=2's seq=1 and silently mask the GC'd-prefix loss.
+
+`TestWAL_HasDataBelowGeneration` — Round-16 Finding 1 regression test for the new cross-gen lower-data accessor that gates the first-apply (serverGen, 0) adopt branch in Task 15.1's `applyServerAckTuple`. Six sub-cases in one test (each uses a fresh WAL):
+- *Empty WAL*: Open WAL, do not append. Assert `has, err := w.HasDataBelowGeneration(1); !has && err == nil` AND `has, err := w.HasDataBelowGeneration(0); !has && err == nil` AND `has, err := w.HasDataBelowGeneration(99); !has && err == nil` (no data in any generation, so no threshold has lower data).
+- *Single-gen data, threshold above*: Append 5 records in gen=1. Assert `has, err := w.HasDataBelowGeneration(2); has && err == nil` (gen=1 < 2). Assert `has, err := w.HasDataBelowGeneration(99); has && err == nil` (gen=1 < 99).
+- *Single-gen data, threshold equal*: Same setup. Assert `has, err := w.HasDataBelowGeneration(1); !has && err == nil` (gen=1 is NOT strictly less than 1 — same-gen data is safe to ack at seq=0).
+- *Multi-gen data*: Append 5 records in gen=1, roll, append 3 in gen=2. Assert `has, err := w.HasDataBelowGeneration(1); !has && err == nil` (no gen<1 data), `has, err := w.HasDataBelowGeneration(2); has && err == nil` (gen=1 < 2), `has, err := w.HasDataBelowGeneration(3); has && err == nil` (gen=1 AND gen=2 both < 3).
+- *Post-GC drains lower-gen entry*: Same setup as multi-gen. Drive `w.MarkAcked(gen=2, seq=3)` so gen=1 segments GC and the perGenDataHighWater entry for gen=1 is removed (Task 13 contract). Assert `has, err := w.HasDataBelowGeneration(2); !has && err == nil` (the lower-gen entry was GC'd; the WAL no longer has data below gen=2). This sub-case is the GC-awareness regression test: without correct map cleanup on GC, a long-running agent would stay in the "lower-gen data exists" state forever even after legitimate GC.
+- *Loss markers do NOT count as data*: Open fresh WAL, drive `w.AppendLoss(LossRecord{FromSequence: 1, ToSequence: 10, Generation: 1, Reason: "overflow"})` ONLY (no RecordData). Assert `has, err := w.HasDataBelowGeneration(2); !has && err == nil` (loss markers are NOT data — same exclusion rule as `WrittenDataHighWater`; this matters because adopting `(2, 0)` against a WAL with only gen=1 loss markers is safe — there's nothing to over-ack).
+
+`TestWAL_HasDataBelowGenerationAfterClose` — Setup: open WAL, close. Assert `has, err := w.HasDataBelowGeneration(1)` returns `errors.Is(err, wal.ErrClosed)` (mirrors the closed-WAL contract on every other accessor).
 
 `TestWAL_WrittenDataHighWater_IsConstantTime` — Round-13 Missing A regression test for the performance budget. The test asserts `WrittenDataHighWater(gen)` does NOT scale with on-disk segment count, which is the binding contract for production wiring (the accessor is consulted on the recv hot path by every BatchAck + ServerHeartbeat + SessionAck via `applyServerAckTuple`; a per-call disk scan would couple ack-validation latency to segment count and violate the Phase-8 "state machine never holds the WAL mutex during recv-hot-path validation" invariant). Setup:
 - Open WAL with `SegmentSize` small enough that ~50 segments form. Append 5,000 RecordData entries in gen=1, NO MarkAcked (so all segments stay on disk). Assert `seq, ok, err := w.WrittenDataHighWater(1); ok && err == nil && seq == 5000` baseline.
@@ -7223,20 +7286,89 @@ type AckCursor struct {
 // with FULL context (server tuple, persistedAck tuple, walHighSeq) AND
 // increment wtp_anomalous_ack_total{reason=AnomalyReason}.
 //
-// First-apply: when t.persistedAckPresent==false, the helper returns
-// Adopted and seeds BOTH cursors from the server tuple, regardless of
-// value. This is "first contact between client and server" — there is
-// no local baseline to compare against and the server's seed is
-// authoritative. The cross-gen anomaly check does NOT apply on
-// first-apply (there is no persistedAck.gen to compare against).
+// First-apply: when t.persistedAckPresent==false, the helper validates
+// the server tuple against local WAL data BEFORE seeding either cursor.
+// Wholesale-adoption is unsafe — seeding persistedAck at an impossible
+// position (e.g. server reports (gen=8, seq=200) against a WAL that
+// only ever wrote (gen=8, seq=1..50) because the agent's WAL was wiped
+// or restored from a snapshot) drives the per-generation lex GC
+// predicate past surviving records and silently deletes records that
+// have not yet been delivered. The first-apply branch therefore
+// short-circuits the same WAL validation rules used by the higher-gen
+// and higher-same-gen-advance branches:
+//   - serverSeq == 0 AND wal.HasDataBelowGeneration(serverGen) returns
+//     (false, nil): adopt unconditionally into BOTH cursors.
+//     `HasDataBelowGeneration` is the round-16 Finding 1 fix — without
+//     it, adopting (serverGen, 0) when local data exists at any
+//     generation g < serverGen would lex-over-ack every lower-gen
+//     record via wal.MarkAcked (whose segmentFullyAckedLocked predicate
+//     reclaims any segment with segGen < ackHighGen) and silently
+//     destroy not-yet-delivered records on the next GC pass.
+//   - serverSeq == 0 AND wal.HasDataBelowGeneration(serverGen) returns
+//     (true, nil): Anomaly("server_ack_exceeds_local_data"). Cursors
+//     and persistedAckPresent stay UNCHANGED.
+//   - wal.HasDataBelowGeneration(serverGen) returns (_, err != nil):
+//     Anomaly("wal_read_failure"). Cursors UNCHANGED.
+//   - serverSeq > 0: defer to the WrittenDataHighWater(serverGen)
+//     branch, which classifies wal_read_failure / unwritten_generation /
+//     server_ack_exceeds_local_data exactly like the cross-gen
+//     ADVANCE path.
 func (t *Transport) applyServerAckTuple(serverGen uint32, serverSeq uint64) AckOutcome {
     server := AckCursor{Sequence: serverSeq, Generation: serverGen}
-    // First-apply: seed both cursors from the server tuple. The caller
-    // will call wal.MarkAcked(serverGen, serverSeq), which on a fresh
-    // WAL is a no-op-friendly write (the monotonic predicate's
-    // "!w.ackPresent" branch lets the very first ack land regardless
-    // of value).
     if !t.persistedAckPresent {
+        if serverSeq == 0 {
+            hasLowerData, walErr := t.walHasDataBelowGenerationFn(serverGen)
+            if walErr != nil {
+                return AckOutcome{
+                    Kind:           AckOutcomeAnomaly,
+                    PersistedTuple: t.persistedAck,
+                    ReplayCursor:   t.remoteReplayCursor,
+                    AnomalyReason:  "wal_read_failure",
+                }
+            }
+            if hasLowerData {
+                return AckOutcome{
+                    Kind:           AckOutcomeAnomaly,
+                    PersistedTuple: t.persistedAck,
+                    ReplayCursor:   t.remoteReplayCursor,
+                    AnomalyReason:  "server_ack_exceeds_local_data",
+                }
+            }
+            t.persistedAck = server
+            t.persistedAckPresent = true
+            t.remoteReplayCursor = server
+            return AckOutcome{
+                Kind:              AckOutcomeAdopted,
+                PersistedTuple:    server,
+                ReplayCursor:      server,
+                PersistedAdvanced: true,
+            }
+        }
+        maxDataSeq, haveData, walErr := t.walWrittenDataHighWaterFn(serverGen)
+        if walErr != nil {
+            return AckOutcome{
+                Kind:           AckOutcomeAnomaly,
+                PersistedTuple: t.persistedAck,
+                ReplayCursor:   t.remoteReplayCursor,
+                AnomalyReason:  "wal_read_failure",
+            }
+        }
+        if !haveData {
+            return AckOutcome{
+                Kind:           AckOutcomeAnomaly,
+                PersistedTuple: t.persistedAck,
+                ReplayCursor:   t.remoteReplayCursor,
+                AnomalyReason:  "unwritten_generation",
+            }
+        }
+        if serverSeq > maxDataSeq {
+            return AckOutcome{
+                Kind:           AckOutcomeAnomaly,
+                PersistedTuple: t.persistedAck,
+                ReplayCursor:   t.remoteReplayCursor,
+                AnomalyReason:  "server_ack_exceeds_local_data",
+            }
+        }
         t.persistedAck = server
         t.persistedAckPresent = true
         t.remoteReplayCursor = server
@@ -7769,7 +7901,7 @@ The snapshot-and-rollback shape used in Step 1b above keeps the helper as the si
 
 **Why snapshot-and-rollback rather than persist-first.** An alternative shape is "persist `(serverGen, serverSeq)` first, then mutate `t.persistedAck/remoteReplayCursor` only on success." That shape is cleaner in isolation, but the helper as written today is the canonical clamp logic — it knows about first-apply, lex-compare, stale-server adoption, AND the true-anomaly check. Refactoring it into a "decide which value to persist" pure function plus a "commit or noop" mutator doubles the surface area and forces every caller to recompute the lex compare and the anomaly check to know what value to persist. The snapshot-and-rollback shape keeps the helper as the single source of truth and the test in Step 4 below (`TestApplyServerAckTuple_DoesNotAdvanceOnMarkAckedFailure`) locks in the rollback contract.
 
-**Step 1c: Seed Transport ack cursors from `wal.Meta` on construction.** The spec (design.md:180) says SessionInit's `wal_high_watermark_seq` comes "from disk." Today's `transport.New` defaults the cursors to `(0, 0)`. After a restart, the very first SessionInit lies about the local watermark. Round-6: model "ack present" explicitly via a `Present` flag on the seed and a matching `t.persistedAckPresent` field on Transport, and let `applyServerAckTuple` handle first-apply by adopting the server tuple wholesale (no anomaly, no WARN).
+**Step 1c: Seed Transport ack cursors from `wal.Meta` on construction.** The spec (design.md:180) says SessionInit's `wal_high_watermark_seq` comes "from disk." Today's `transport.New` defaults the cursors to `(0, 0)`. After a restart, the very first SessionInit lies about the local watermark. Round-6: model "ack present" explicitly via a `Present` flag on the seed and a matching `t.persistedAckPresent` field on Transport, and let `applyServerAckTuple` handle first-apply by validating the server tuple against local WAL data (round-15 Finding 1 + round-16 Finding 1) BEFORE adopting — never wholesale-adopt, because a server tuple pointing past anything we ever wrote would lex-over-ack and discard records the WAL has not yet delivered.
 
 ```go
 // AckTuple is the persisted (gen, seq) ack watermark tuple — the
@@ -7785,9 +7917,13 @@ type AckTuple struct {
     Generation uint32
     // Present is the explicit "ack present" flag — mirrors
     // wal.Meta.AckRecorded. False means "no ack has ever been observed";
-    // the clamp helper short-circuits on the first apply by adopting the
-    // server tuple wholesale (no anomaly, no WARN) and flipping
-    // t.persistedAckPresent to true.
+    // the clamp helper enters the first-apply branch which validates the
+    // server tuple against local WAL data BEFORE adopting (round-15 +
+    // round-16 Finding 1 — never wholesale-adopt, because a server tuple
+    // beyond local data lex-over-acks lower-gen records). The branch
+    // either Adopts and flips t.persistedAckPresent to true, or returns
+    // an Anomaly and leaves the cursors untouched (next ack-bearing
+    // frame retries the seed gate).
     Present bool
 }
 ```
@@ -7845,7 +7981,16 @@ if opts.InitialAckTuple != nil && opts.InitialAckTuple.Present {
 
 **Test #3 (`TestApplyServerAckTuple_EqualTuple`):** Setup: `InitialAckTuple = &AckTuple{Sequence: 100, Generation: 7, Present: true}`. Call `t.applyServerAckTuple(7, 100)`. Assert: `outcome.Kind == AckOutcomeNoOp`, both cursors unchanged at `AckCursor{100, 7}`. No `wal.MarkAcked` call, no metric emission, no log entries (INFO or WARN).
 
-**Test #4 (`TestApplyServerAckTuple_FirstApplyAdoptsServer`)** — explicit "ack present" model: Setup: `Options.InitialAckTuple = nil` (or `&AckTuple{Present: false}`); permissive limiter; logger capture. Call `t.applyServerAckTuple(8, 100)`. Assert: `outcome.Kind == AckOutcomeAdopted`, `t.persistedAck == AckCursor{100, 8}`, `t.remoteReplayCursor == AckCursor{100, 8}`, `t.persistedAckPresent == true` post-call. After side-effect contract runs, `wal.MarkAcked(8, 100)` was called (a no-op-friendly first ack). A second call with `t.applyServerAckTuple(8, 50)` then exercises the now-present same-gen lex-lower path — assert `ResendNeeded` (server lex-lower than the just-seeded persistedAck within the same generation), `t.persistedAck == AckCursor{100, 8}` (unchanged), `t.remoteReplayCursor == AckCursor{50, 8}`. (Cross-gen second-call variants — `(7, 50)` returns `Anomaly("stale_generation")` per Test #5a; `(9, 50)` returns `Adopted` per Test #5b if `WrittenDataHighWater(9)` returns `(maxDataSeq>=50, true)`, `Anomaly("server_ack_exceeds_local_data")` if it returns `(maxDataSeq<50, true)`, or `Anomaly("unwritten_generation")` per Test #5c if it returns `(_, false)`.)
+**Test #4 (`TestApplyServerAckTuple_FirstApplyValidatesBeforeAdopt`)** — round-15 + round-16 Finding 1 model: first-apply NEVER wholesale-adopts; it MUST validate the server tuple against local WAL data before seeding. Setup: `Options.InitialAckTuple = nil` (or `&AckTuple{Present: false}`); permissive limiter; logger capture. Drive sub-cases (each uses a fresh `Transport` over a fresh `*wal.WAL` so `persistedAckPresent` resets):
+- *Sub-case A — `serverSeq > 0` over a populated gen, in-bounds*: Append 100 RecordData in gen=8 (so `WrittenDataHighWater(8) == (100, true, nil)`). Call `t.applyServerAckTuple(8, 50)`. Assert: `outcome.Kind == AckOutcomeAdopted`, `t.persistedAck == AckCursor{50, 8}`, `t.remoteReplayCursor == AckCursor{50, 8}`, `t.persistedAckPresent == true`. After side-effect contract: `wal.MarkAcked(8, 50)` was called. WARN buffer empty.
+- *Sub-case B — `serverSeq > 0` over a populated gen, out-of-bounds*: Append 100 RecordData in gen=8. Call `t.applyServerAckTuple(8, 200)` (server is past local data tip). Assert: `outcome.Kind == AckOutcomeAnomaly`, `outcome.AnomalyReason == "server_ack_exceeds_local_data"`, BOTH cursors stay zero AND `t.persistedAckPresent == false`. WARN entry recorded; metrics fake records `IncAnomalousAck("server_ack_exceeds_local_data")`. No `wal.MarkAcked` call.
+- *Sub-case C — `serverSeq > 0` over an unwritten gen*: Append 100 RecordData in gen=7 (gen=8 has no segment). Call `t.applyServerAckTuple(8, 50)`. Assert: `outcome.Kind == AckOutcomeAnomaly`, `outcome.AnomalyReason == "unwritten_generation"`, cursors stay zero AND `persistedAckPresent == false`. WARN + `IncAnomalousAck("unwritten_generation")`. No `wal.MarkAcked` call.
+- *Sub-case D — `serverSeq == 0` against fresh WAL*: Open WAL, no records. Call `t.applyServerAckTuple(8, 0)`. Assert: `outcome.Kind == AckOutcomeAdopted` (vacuous adopt), `t.persistedAck == AckCursor{0, 8}`, `t.remoteReplayCursor == AckCursor{0, 8}`, `t.persistedAckPresent == true`. `wal.MarkAcked(8, 0)` was called. WARN buffer empty. (This is the "cold start, server is also fresh" path.)
+- *Sub-case E — round-16 Finding 1 regression: `serverSeq == 0` over a higher gen with lower-gen data*: Append 100 RecordData in gen=7 (so `HasDataBelowGeneration(8) == (true, nil)`). Call `t.applyServerAckTuple(8, 0)`. Assert: `outcome.Kind == AckOutcomeAnomaly`, `outcome.AnomalyReason == "server_ack_exceeds_local_data"`, BOTH cursors stay zero AND `persistedAckPresent == false`. WARN + `IncAnomalousAck("server_ack_exceeds_local_data")`. No `wal.MarkAcked` call. CRITICAL: re-read meta.json AND list segments — assert gen=7 segments are still on disk and not GC'd. **Without the round-16 fix, the helper would have wholesale-adopted `(8, 0)` and the next `wal.MarkAcked(8, 0)` would have lex-over-acked every gen=7 record (`segmentFullyAckedLocked` reclaims any segment with `segGen < ackHighGen`), silently destroying unsent gen=7 history on the next GC pass.** This sub-case locks in the data-loss regression.
+- *Sub-case F — round-16 Finding 1 boundary: `serverSeq == 0` against same-gen data only*: Append 100 RecordData in gen=8 (so `HasDataBelowGeneration(8) == (false, nil)` because gen=8 is not "below" 8). Call `t.applyServerAckTuple(8, 0)`. Assert: `outcome.Kind == AckOutcomeAdopted`, cursors seeded to `(0, 8)`, `persistedAckPresent == true`. `wal.MarkAcked(8, 0)` was called. WARN buffer empty. (Vacuous "I haven't acked anything yet" within the writer's current generation is safe.)
+- *Sub-case G — round-16 Finding 1 sibling: `wal.HasDataBelowGeneration` returns `(_, walErr != nil)`*: Setup uses the `walHasDataBelowGenerationFn` test seam to inject `(false, errors.New("EIO"))` on the next call. Call `t.applyServerAckTuple(8, 0)`. Assert: `outcome.Kind == AckOutcomeAnomaly`, `outcome.AnomalyReason == "wal_read_failure"`, cursors stay zero AND `persistedAckPresent == false` (the next ack-bearing frame retries). WARN + `IncAnomalousAck("wal_read_failure")`. No `wal.MarkAcked` call.
+
+After Sub-case A succeeds, a follow-up call with `t.applyServerAckTuple(8, 30)` exercises the now-present same-gen lex-lower path — assert `ResendNeeded` (server lex-lower than the just-seeded persistedAck within the same generation), `t.persistedAck == AckCursor{50, 8}` (unchanged), `t.remoteReplayCursor == AckCursor{30, 8}`. (Cross-gen second-call variants — `(7, 50)` returns `Anomaly("stale_generation")` per Test #5a; `(9, 50)` returns `Adopted` per Test #5b if `WrittenDataHighWater(9)` returns `(maxDataSeq>=50, true)`, `Anomaly("server_ack_exceeds_local_data")` if it returns `(maxDataSeq<50, true)`, or `Anomaly("unwritten_generation")` per Test #5c if it returns `(_, false)`.)
 
 **Test #5 (`TestApplyServerAckTuple_ServerAckExceedsLocalSeqIsAnomaly`)** — round-12 RENAMED (Finding 5; from round-9's `_BeyondWALHighSeqIsAnomaly`): anomaly sub-case 1 (server claims ack beyond what the WAL has ever produced for the persisted gen). Setup: `Options.WAL` wired to a real `*wal.WAL` with `Append` driven to seqs 1..50 in gen=7 (so `WrittenDataHighWater(7) == (50, true, nil)`); `InitialAckTuple = &AckTuple{Sequence: 30, Generation: 7, Present: true}`; permissive limiter; logger capture. Call `t.applyServerAckTuple(7, 60)` (server claims ack at seq=60 in current gen, but the WAL has only emitted up to seq=50). Assert: `outcome.Kind == AckOutcomeAnomaly`, `outcome.AnomalyReason == "server_ack_exceeds_local_seq"` (round-12 rename of round-11's `beyond_wal_high_water_seq` — the same-gen branch now reuses the cross-gen branch's `WrittenDataHighWater(serverGen)` predicate per round-12 Finding 5), BOTH cursors unchanged at `(30, 7)`. After the SessionAck handler runs the anomaly branch, exactly one WARN entry captured carrying `reason="server_ack_exceeds_local_seq", server_seq=60, server_gen=7, local_persisted_seq=30, local_persisted_gen=7, wal_written_data_high_seq=50, wal_written_data_high_ok=true, session_id=...`; metrics fake records exactly one `IncAnomalousAck("server_ack_exceeds_local_seq")` call. No `wal.MarkAcked` call, no `SetAckHighWatermark` emission.
 

@@ -40,6 +40,14 @@ func SetWALHighGenerationFnForTest(t *Transport, fn func() uint32) {
 	t.walHighGenerationFn = fn
 }
 
+// SetWALHasDataBelowGenerationFnForTest swaps the test seam used inside
+// applyServerAckTuple's first-apply (gen, seq=0) gate. Override to inject
+// the lower-generation-data flag without having to populate a real WAL
+// across multiple generations.
+func SetWALHasDataBelowGenerationFnForTest(t *Transport, fn func(threshold uint32) (bool, error)) {
+	t.walHasDataBelowGenerationFn = fn
+}
+
 // SetAckAnomalyLimiterForTest swaps the rate limiter that gates the WARN
 // emitted on Anomaly outcomes. Tests pass either a permissive limiter
 // (rate.Inf) or a strict one (rate.Every(time.Hour)) to exercise the
