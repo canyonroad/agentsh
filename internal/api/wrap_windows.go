@@ -128,7 +128,8 @@ func (a *App) wrapInitWindows(ctx context.Context, s *session.Session, sessionID
 
 	// On Windows, no wrapper binary is needed — the driver intercepts system-wide.
 	return types.WrapInitResponse{
-		StubBinary: stubPath,
+		SafeToBypassShellShim: true,
+		StubBinary:            stubPath,
 	}, http.StatusOK, nil
 }
 

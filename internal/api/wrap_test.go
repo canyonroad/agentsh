@@ -350,6 +350,99 @@ func TestWrapInit_RejectsNegativeCallerUID(t *testing.T) {
 	}
 }
 
+func TestWrapInit_SafeToBypassShellShim_Ptrace(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap ptrace mode is Linux-only")
+	}
+
+	cfg := &config.Config{}
+	app, mgr := newTestAppForWrap(t, cfg)
+	app.ptraceTracer = struct{}{}
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+	if !resp.SafeToBypassShellShim {
+		t.Fatal("expected ptrace mode to be safe to bypass the shell shim")
+	}
+}
+
+func TestWrapInit_SafeToBypassShellShim_SeccompExecveEnabled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap seccomp mode is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	cfg.Sandbox.Seccomp.Execve.Enabled = true
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+	if !resp.SafeToBypassShellShim {
+		t.Fatal("expected execve-enabled seccomp mode to be safe to bypass the shell shim")
+	}
+}
+
+func TestWrapInit_SafeToBypassShellShim_SeccompExecveDisabled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap seccomp mode is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	cfg.Sandbox.Seccomp.Execve.Enabled = false
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+	if resp.SafeToBypassShellShim {
+		t.Fatal("expected execve-disabled seccomp mode to require the shell shim")
+	}
+}
+
 func TestWrapInit_Success(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("wrap is Linux-only")
