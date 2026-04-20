@@ -32,6 +32,14 @@ func SetWALEarliestDataSequenceFnForTest(t *Transport, fn func(gen uint32) (uint
 	t.walEarliestDataSequenceFn = fn
 }
 
+// SetWALHighGenerationFnForTest swaps the test seam used inside
+// computeReplayPlan to drive wal.HighGeneration. Override to inject a
+// specific upper bound on the multi-stage iteration without having to
+// append records into a real WAL.
+func SetWALHighGenerationFnForTest(t *Transport, fn func() uint32) {
+	t.walHighGenerationFn = fn
+}
+
 // SetAckAnomalyLimiterForTest swaps the rate limiter that gates the WARN
 // emitted on Anomaly outcomes. Tests pass either a permissive limiter
 // (rate.Inf) or a strict one (rate.Every(time.Hour)) to exercise the
@@ -67,6 +75,13 @@ func ApplyServerAckTupleForTest(t *Transport, gen uint32, seq uint64) AckOutcome
 // Run loop.
 func ComputeReplayStartForTest(t *Transport, replay AckCursor, persisted AckCursor) (*wal.LossRecord, uint64, error) {
 	return t.computeReplayStart(replay, persisted)
+}
+
+// ComputeReplayPlanForTest invokes the unexported computeReplayPlan
+// helper directly so unit tests can exercise the multi-generation
+// orchestration without driving the Run loop or opening real Readers.
+func ComputeReplayPlanForTest(t *Transport, replay AckCursor, persisted AckCursor) ([]ReplayStage, error) {
+	return t.computeReplayPlan(replay, persisted)
 }
 
 // LoggerForTest returns the resolved logger so tests can sanity-check the

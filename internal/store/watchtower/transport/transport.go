@@ -202,14 +202,15 @@ type Transport struct {
 	metrics           Metrics
 	ackAnomalyLimiter *rate.Limiter
 
-	// walMarkAckedFn / walWrittenDataHighWaterFn / walEarliestDataSequenceFn
-	// are seams the helper calls instead of t.wal.* directly. New() wires
-	// them to t.wal.* when wal != nil and to safe stubs (no-op success /
-	// ok=false) otherwise. Test code overrides via SetWAL*FnForTest in
-	// seams_export_test.go to inject error paths.
+	// walMarkAckedFn / walWrittenDataHighWaterFn / walEarliestDataSequenceFn /
+	// walHighGenerationFn are seams the helper calls instead of t.wal.*
+	// directly. New() wires them to t.wal.* when wal != nil and to safe stubs
+	// (no-op success / ok=false / 0) otherwise. Test code overrides via
+	// SetWAL*FnForTest in seams_export_test.go to inject error paths.
 	walMarkAckedFn            func(gen uint32, seq uint64) error
 	walWrittenDataHighWaterFn func(gen uint32) (uint64, bool, error)
 	walEarliestDataSequenceFn func(gen uint32) (uint64, bool, error)
+	walHighGenerationFn       func() uint32
 
 	// rejectReason is populated when the server rejects the session
 	// (SessionAck.accepted=false). Surfaced via RejectReason().
@@ -255,10 +256,12 @@ func New(opts Options) (*Transport, error) {
 		t.walMarkAckedFn = t.wal.MarkAcked
 		t.walWrittenDataHighWaterFn = t.wal.WrittenDataHighWater
 		t.walEarliestDataSequenceFn = t.wal.EarliestDataSequence
+		t.walHighGenerationFn = t.wal.HighGeneration
 	} else {
 		t.walMarkAckedFn = func(uint32, uint64) error { return nil }
 		t.walWrittenDataHighWaterFn = func(uint32) (uint64, bool, error) { return 0, false, nil }
 		t.walEarliestDataSequenceFn = func(uint32) (uint64, bool, error) { return 0, false, nil }
+		t.walHighGenerationFn = func() uint32 { return 0 }
 	}
 	return t, nil
 }
@@ -307,8 +310,61 @@ func (t *Transport) sessionInit() *wtpv1.ClientMessage {
 func (t *Transport) applyServerAckTuple(serverGen uint32, serverSeq uint64) AckOutcome {
 	server := AckCursor{Sequence: serverSeq, Generation: serverGen}
 
-	// First-apply: seed both cursors from the server tuple.
+	// First-apply: seed both cursors from the server tuple, but ONLY after
+	// validating it against local WAL data — otherwise a server ack pointing
+	// past anything we ever wrote (e.g. stale durable state on the server
+	// after the agent's WAL was wiped/restored from a snapshot) would seed
+	// persistedAck at an impossible position, advance the GC predicate, and
+	// permanently delete records that have not yet been delivered.
+	//
+	// Validation rules (mirror the cross-gen and same-gen-advance branches):
+	//   - serverSeq == 0: vacuous "I haven't acked anything yet" — adopt
+	//     unconditionally; no record can be over-acked.
+	//   - WAL read failure → Anomaly("wal_read_failure"). Cursors UNCHANGED;
+	//     persistedAckPresent stays false so the next ack re-runs the seed
+	//     gate against a (presumably) recovered WAL.
+	//   - WrittenDataHighWater(serverGen) ok=false → Anomaly(
+	//     "unwritten_generation"): no data ever written for this generation
+	//     locally, so the server cannot legitimately ack any seq in it.
+	//   - serverSeq > maxDataSeq → Anomaly("server_ack_exceeds_local_data"):
+	//     the server is past our highest local data-bearing seq.
 	if !t.persistedAckPresent {
+		if serverSeq == 0 {
+			t.persistedAck = server
+			t.persistedAckPresent = true
+			t.remoteReplayCursor = server
+			return AckOutcome{
+				Kind:              AckOutcomeAdopted,
+				PersistedTuple:    server,
+				ReplayCursor:      server,
+				PersistedAdvanced: true,
+			}
+		}
+		maxDataSeq, haveData, walErr := t.walWrittenDataHighWaterFn(serverGen)
+		if walErr != nil {
+			return AckOutcome{
+				Kind:           AckOutcomeAnomaly,
+				PersistedTuple: t.persistedAck,
+				ReplayCursor:   t.remoteReplayCursor,
+				AnomalyReason:  "wal_read_failure",
+			}
+		}
+		if !haveData {
+			return AckOutcome{
+				Kind:           AckOutcomeAnomaly,
+				PersistedTuple: t.persistedAck,
+				ReplayCursor:   t.remoteReplayCursor,
+				AnomalyReason:  "unwritten_generation",
+			}
+		}
+		if serverSeq > maxDataSeq {
+			return AckOutcome{
+				Kind:           AckOutcomeAnomaly,
+				PersistedTuple: t.persistedAck,
+				ReplayCursor:   t.remoteReplayCursor,
+				AnomalyReason:  "server_ack_exceeds_local_data",
+			}
+		}
 		t.persistedAck = server
 		t.persistedAckPresent = true
 		t.remoteReplayCursor = server
@@ -479,4 +535,102 @@ func (t *Transport) computeReplayStart(remoteReplayCursor AckCursor, persistedAc
 			slog.String("session_id", t.opts.SessionID))
 	}
 	return prefixLoss, readerStart, nil
+}
+
+// ReplayStage is one entry in the multi-generation replay plan returned by
+// computeReplayPlan. Each stage maps to one generation-scoped wal.Reader
+// the Replaying state will open in sequence.
+//
+// Stages are returned in ascending generation order. The first stage covers
+// persistedAck.Generation and may carry an in-memory PrefixLoss synthesized
+// by computeReplayStart for an ack_regression_after_gc gap. Subsequent
+// stages cover gen=persistedAck.Generation+1 .. HighGeneration() and start
+// at seq=0 (the WAL Reader handles header-record skipping internally); they
+// never carry a PrefixLoss because the cursor split has no per-generation
+// state for "future" generations.
+type ReplayStage struct {
+	// Generation is the WAL generation this stage will replay. The
+	// Replaying state opens a Reader pinned to this generation via
+	// ReaderOptions.Generation (Task 14b).
+	Generation uint32
+	// StartSeq is the seq the Reader should be opened at. For the first
+	// stage this is computeReplayStart's readerStart; for later stages it
+	// is 0 ("from the start of this generation").
+	StartSeq uint64
+	// PrefixLoss is the in-memory wal.LossRecord the Replayer should
+	// surface as the first record of the first NextBatch via
+	// ReplayerOptions.PrefixLoss. nil for stages that have no synthesized
+	// loss. Only the first stage may have a non-nil PrefixLoss.
+	PrefixLoss *wal.LossRecord
+}
+
+// computeReplayPlan returns the ordered list of replay stages the
+// Replaying state should drain before transitioning to Live. The plan
+// covers persistedAck.Generation (with the four-case decision tree from
+// computeReplayStart) plus every higher generation that has data on
+// disk, up to and including HighGeneration().
+//
+// Why multi-stage: the WAL is generation-scoped (Task 14b). After a
+// reconnect that lands in StateConnecting → StateReplaying, the plan must
+// cover BOTH the still-unacked tail of persistedAck.Generation AND any
+// records in later generations that were appended before the disconnect
+// (e.g. the agent rolled to gen+1 mid-session, wrote 100 records, then
+// the link died before the server could ack into gen+1). Without this
+// orchestrator the Replaying state would only drain persistedAck.Generation
+// and hand off to Live, dropping the later-gen backlog on the floor — the
+// reconnect would not surface those records until the agent appended a new
+// record to wake the Live Reader, and even then only the post-wake records
+// would be sent.
+//
+// Stages are returned in strictly ascending generation order. The
+// Replaying state handler is responsible for opening one Reader per stage,
+// draining via Replayer.NextBatch, and only entering Live after the LAST
+// stage's done flag is true. (Task 22 wires this orchestration; Task
+// 17/18 land the recv multiplexer that the Replaying state still depends
+// on per state_replaying.go runReplaying header.)
+//
+// Returns:
+//   - []ReplayStage: at least one stage (the persistedAck.Generation stage
+//     is always present, even if it has no records to drain — the caller
+//     decides whether to skip it based on Reader.TryNext returning ok=false
+//     immediately).
+//   - err != nil: a hard I/O error reading WAL state. The caller MUST
+//     treat this as a transport error and reconnect. Errors from
+//     computeReplayStart (the first-stage call) and from
+//     walWrittenDataHighWaterFn (later-stage probes) are both surfaced
+//     here unchanged; on error the partial plan is discarded.
+func (t *Transport) computeReplayPlan(remoteReplayCursor AckCursor, persistedAck AckCursor) ([]ReplayStage, error) {
+	prefixLoss, readerStart, err := t.computeReplayStart(remoteReplayCursor, persistedAck)
+	if err != nil {
+		return nil, err
+	}
+	stages := []ReplayStage{{
+		Generation: persistedAck.Generation,
+		StartSeq:   readerStart,
+		PrefixLoss: prefixLoss,
+	}}
+
+	highGen := t.walHighGenerationFn()
+	// Iterate strictly past persistedAck.Generation. HighGeneration() is
+	// the highest generation the WAL has observed (set from segment
+	// headers); per Task 14b the Reader is generation-scoped, so we probe
+	// each later gen in turn and skip those with no data-bearing records
+	// (e.g. an empty rolled generation that only has a header). Bail on
+	// uint32 wraparound: persistedAck.Generation == math.MaxUint32 is a
+	// degenerate state but skipping the loop is the safe action.
+	for gen := persistedAck.Generation + 1; gen <= highGen && gen > persistedAck.Generation; gen++ {
+		_, haveData, walErr := t.walWrittenDataHighWaterFn(gen)
+		if walErr != nil {
+			return nil, fmt.Errorf("computeReplayPlan: wal.WrittenDataHighWater(gen=%d): %w", gen, walErr)
+		}
+		if !haveData {
+			continue
+		}
+		stages = append(stages, ReplayStage{
+			Generation: gen,
+			StartSeq:   0,
+			PrefixLoss: nil,
+		})
+	}
+	return stages, nil
 }

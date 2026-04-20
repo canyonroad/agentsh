@@ -357,3 +357,167 @@ func TestComputeReplayStart_MixedGenerationsOnDisk_DetectsLossInOlderGeneration(
 		})
 	}
 }
+
+// ===== Test #12 =====
+// TestComputeReplayPlan_MultiGenerationCoversLaterGens — round-14 Finding 2
+// regression. The orchestrator MUST emit one stage per generation that has
+// data on disk, in strictly ascending order, starting from
+// persistedAck.Generation. Without this, a reconnect that lands when the
+// agent has already rolled to a newer generation drops the later-gen
+// backlog because the Replaying state would only drain
+// persistedAck.Generation before handing off to Live.
+//
+// Sub-cases:
+//
+//  1. happy_multi_gen_three_stages: persistedAck=(50, 1), gen=2 has data,
+//     gen=3 is empty (header only), gen=4 has data, gen=5 is the high gen
+//     with data. Expect 4 stages: (gen=1,start=51), (gen=2,start=0),
+//     (gen=4,start=0), (gen=5,start=0). gen=3 is skipped because
+//     WrittenDataHighWater(3) reports ok=false. The first stage's
+//     PrefixLoss is nil (Case B no-gap on gen=1 — earliestOnDisk=1 <=
+//     gapStart=51).
+//
+//  2. only_persisted_gen_no_later: HighGeneration() == persistedAck.Generation.
+//     Expect exactly one stage covering persistedAck.Generation.
+//
+//  3. wal_failure_on_later_gen_propagates: WrittenDataHighWater(2) returns
+//     an error. Expect computeReplayPlan to return that error wrapped.
+func TestComputeReplayPlan_MultiGenerationCoversLaterGens(t *testing.T) {
+	t.Run("happy_multi_gen_three_stages", func(t *testing.T) {
+		env := newClampTestEnv(t, Options{
+			InitialAckTuple: &AckTuple{Sequence: 50, Generation: 1, Present: true},
+		})
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+
+		// First-stage decision tree: Case B (no gap).
+		SetWALEarliestDataSequenceFnForTest(env.tr, func(gen uint32) (uint64, bool, error) {
+			if gen != 1 {
+				t.Errorf("EarliestDataSequence: got gen=%d, want 1 (first stage only)", gen)
+			}
+			return 1, true, nil
+		})
+		// Multi-gen probe: gen=2 has data, gen=3 is empty (header only),
+		// gen=4 has data, gen=5 has data. Track call ordering to confirm
+		// the iteration goes in strictly ascending generation order.
+		var probedGens []uint32
+		SetWALWrittenDataHighWaterFnForTest(env.tr, func(gen uint32) (uint64, bool, error) {
+			probedGens = append(probedGens, gen)
+			switch gen {
+			case 2:
+				return 100, true, nil
+			case 3:
+				return 0, false, nil
+			case 4:
+				return 75, true, nil
+			case 5:
+				return 25, true, nil
+			}
+			return 0, false, errors.New("unexpected gen")
+		})
+		SetWALHighGenerationFnForTest(env.tr, func() uint32 { return 5 })
+
+		stages, err := ComputeReplayPlanForTest(env.tr,
+			AckCursor{Sequence: 50, Generation: 1},
+			AckCursor{Sequence: 50, Generation: 1})
+		if err != nil {
+			t.Fatalf("computeReplayPlan: %v", err)
+		}
+		if len(stages) != 4 {
+			t.Fatalf("stages: got %d, want 4 (gen=1, 2, 4, 5; gen=3 skipped): %+v", len(stages), stages)
+		}
+
+		want := []ReplayStage{
+			{Generation: 1, StartSeq: 51, PrefixLoss: nil},
+			{Generation: 2, StartSeq: 0, PrefixLoss: nil},
+			{Generation: 4, StartSeq: 0, PrefixLoss: nil},
+			{Generation: 5, StartSeq: 0, PrefixLoss: nil},
+		}
+		for i, w := range want {
+			if stages[i].Generation != w.Generation {
+				t.Errorf("stage[%d].Generation: got %d, want %d", i, stages[i].Generation, w.Generation)
+			}
+			if stages[i].StartSeq != w.StartSeq {
+				t.Errorf("stage[%d].StartSeq: got %d, want %d", i, stages[i].StartSeq, w.StartSeq)
+			}
+			if stages[i].PrefixLoss != nil {
+				t.Errorf("stage[%d].PrefixLoss: got %+v, want nil", i, *stages[i].PrefixLoss)
+			}
+		}
+
+		// Probe order must be strictly ascending past persistedAck.Generation.
+		wantProbed := []uint32{2, 3, 4, 5}
+		if len(probedGens) != len(wantProbed) {
+			t.Fatalf("probedGens: got %v, want %v", probedGens, wantProbed)
+		}
+		for i, g := range wantProbed {
+			if probedGens[i] != g {
+				t.Errorf("probedGens[%d]: got %d, want %d", i, probedGens[i], g)
+			}
+		}
+	})
+
+	t.Run("only_persisted_gen_no_later", func(t *testing.T) {
+		env := newClampTestEnv(t, Options{
+			InitialAckTuple: &AckTuple{Sequence: 50, Generation: 7, Present: true},
+		})
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+
+		SetWALEarliestDataSequenceFnForTest(env.tr, func(uint32) (uint64, bool, error) {
+			return 1, true, nil
+		})
+		// HighGeneration == persistedAck.Generation: no later-gen probe should fire.
+		SetWALWrittenDataHighWaterFnForTest(env.tr, func(gen uint32) (uint64, bool, error) {
+			t.Errorf("WrittenDataHighWater MUST NOT be called when HighGeneration == persistedAck.Generation; got gen=%d", gen)
+			return 0, false, nil
+		})
+		SetWALHighGenerationFnForTest(env.tr, func() uint32 { return 7 })
+
+		stages, err := ComputeReplayPlanForTest(env.tr,
+			AckCursor{Sequence: 50, Generation: 7},
+			AckCursor{Sequence: 50, Generation: 7})
+		if err != nil {
+			t.Fatalf("computeReplayPlan: %v", err)
+		}
+		if len(stages) != 1 {
+			t.Fatalf("stages: got %d, want 1: %+v", len(stages), stages)
+		}
+		if stages[0].Generation != 7 {
+			t.Fatalf("stage[0].Generation: got %d, want 7", stages[0].Generation)
+		}
+		if stages[0].StartSeq != 51 {
+			t.Fatalf("stage[0].StartSeq: got %d, want 51", stages[0].StartSeq)
+		}
+	})
+
+	t.Run("wal_failure_on_later_gen_propagates", func(t *testing.T) {
+		env := newClampTestEnv(t, Options{
+			InitialAckTuple: &AckTuple{Sequence: 50, Generation: 1, Present: true},
+		})
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+
+		SetWALEarliestDataSequenceFnForTest(env.tr, func(uint32) (uint64, bool, error) {
+			return 1, true, nil
+		})
+		injErr := errors.New("simulated wal failure on gen=2")
+		SetWALWrittenDataHighWaterFnForTest(env.tr, func(gen uint32) (uint64, bool, error) {
+			if gen == 2 {
+				return 0, false, injErr
+			}
+			return 0, false, nil
+		})
+		SetWALHighGenerationFnForTest(env.tr, func() uint32 { return 5 })
+
+		stages, err := ComputeReplayPlanForTest(env.tr,
+			AckCursor{Sequence: 50, Generation: 1},
+			AckCursor{Sequence: 50, Generation: 1})
+		if err == nil {
+			t.Fatalf("computeReplayPlan: got err=nil, stages=%+v; want wrapped wal failure", stages)
+		}
+		if !errors.Is(err, injErr) {
+			t.Fatalf("computeReplayPlan: err does not wrap injected error: %v", err)
+		}
+		if stages != nil {
+			t.Fatalf("stages: got %+v, want nil on error", stages)
+		}
+	})
+}

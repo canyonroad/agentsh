@@ -826,3 +826,103 @@ func TestApplyServerAckTuple_EmitsMetricOnAdopted(t *testing.T) {
 			len(env.metrics.ackHWMs), prevHWMs)
 	}
 }
+
+// TestApplyServerAckTuple_FirstApplyValidatesAgainstWAL — round-14 Finding 1
+// regression. Without InitialAckTuple (persistedAckPresent=false), the
+// helper MUST validate the server tuple against local WAL data before
+// adopting; an unbounded server tuple cannot be allowed to seed the
+// persistedAck cursor (which drives the GC predicate) at an impossible
+// position. Three sub-cases mirror the production validation rules:
+//
+//  1. server_seq_zero_adopts: seq=0 is vacuous, adopted unconditionally.
+//  2. server_seq_beyond_local_data: WAL has gen=8 records 1..50, server
+//     reports (gen=8, seq=200). Helper MUST return Anomaly(
+//     "server_ack_exceeds_local_data") with cursors UNCHANGED and
+//     persistedAckPresent still false.
+//  3. unwritten_generation: WAL has gen=7 only, server reports (gen=8,
+//     seq=10). Helper MUST return Anomaly("unwritten_generation") with
+//     cursors UNCHANGED and persistedAckPresent still false.
+//
+// The fourth sub-case (wal_read_failure) is exercised separately via the
+// WrittenDataHighWater seam below.
+func TestApplyServerAckTuple_FirstApplyValidatesAgainstWAL(t *testing.T) {
+	t.Run("server_seq_zero_adopts", func(t *testing.T) {
+		env := newClampTestEnv(t, Options{}) // no InitialAckTuple
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+
+		outcome := ApplyServerAckTupleForTest(env.tr, 5, 0)
+		if outcome.Kind != AckOutcomeAdopted {
+			t.Fatalf("kind: got %v, want Adopted (seq=0 vacuous case)", outcome.Kind)
+		}
+		if !outcome.PersistedAdvanced {
+			t.Fatal("PersistedAdvanced must be true on first-apply Adopted")
+		}
+		if !PersistedAckPresentForTest(env.tr) {
+			t.Fatal("persistedAckPresent must flip to true on first-apply Adopted")
+		}
+		if got := PersistedAckForTest(env.tr); got != (AckCursor{Sequence: 0, Generation: 5}) {
+			t.Fatalf("persistedAck: got %+v, want {0,5}", got)
+		}
+	})
+
+	t.Run("server_seq_beyond_local_data_is_anomaly", func(t *testing.T) {
+		env := newClampTestEnv(t, Options{}) // no InitialAckTuple
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		appendDataInGen(t, env.w, 1, 8, 50) // gen=8 records 1..50 only
+
+		outcome := ApplyServerAckTupleForTest(env.tr, 8, 200)
+		if outcome.Kind != AckOutcomeAnomaly {
+			t.Fatalf("kind: got %v, want Anomaly", outcome.Kind)
+		}
+		if outcome.AnomalyReason != "server_ack_exceeds_local_data" {
+			t.Fatalf("reason: got %q, want server_ack_exceeds_local_data", outcome.AnomalyReason)
+		}
+		if PersistedAckPresentForTest(env.tr) {
+			t.Fatal("persistedAckPresent must remain false on first-apply Anomaly")
+		}
+		if got := PersistedAckForTest(env.tr); got != (AckCursor{}) {
+			t.Fatalf("persistedAck mutated on first-apply Anomaly: %+v", got)
+		}
+		if got := RemoteReplayCursorForTest(env.tr); got != (AckCursor{}) {
+			t.Fatalf("remoteReplayCursor mutated on first-apply Anomaly: %+v", got)
+		}
+	})
+
+	t.Run("unwritten_generation_is_anomaly", func(t *testing.T) {
+		env := newClampTestEnv(t, Options{}) // no InitialAckTuple
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		appendDataInGen(t, env.w, 1, 7, 50) // only gen=7 has data
+
+		outcome := ApplyServerAckTupleForTest(env.tr, 8, 10)
+		if outcome.Kind != AckOutcomeAnomaly {
+			t.Fatalf("kind: got %v, want Anomaly", outcome.Kind)
+		}
+		if outcome.AnomalyReason != "unwritten_generation" {
+			t.Fatalf("reason: got %q, want unwritten_generation", outcome.AnomalyReason)
+		}
+		if PersistedAckPresentForTest(env.tr) {
+			t.Fatal("persistedAckPresent must remain false on first-apply Anomaly")
+		}
+	})
+
+	t.Run("wal_read_failure_is_anomaly", func(t *testing.T) {
+		env := newClampTestEnv(t, Options{}) // no InitialAckTuple
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		// Inject a hard read failure from WrittenDataHighWater.
+		injErr := errors.New("simulated wal read failure")
+		SetWALWrittenDataHighWaterFnForTest(env.tr, func(uint32) (uint64, bool, error) {
+			return 0, false, injErr
+		})
+
+		outcome := ApplyServerAckTupleForTest(env.tr, 8, 5)
+		if outcome.Kind != AckOutcomeAnomaly {
+			t.Fatalf("kind: got %v, want Anomaly", outcome.Kind)
+		}
+		if outcome.AnomalyReason != "wal_read_failure" {
+			t.Fatalf("reason: got %q, want wal_read_failure", outcome.AnomalyReason)
+		}
+		if PersistedAckPresentForTest(env.tr) {
+			t.Fatal("persistedAckPresent must remain false on first-apply WAL failure")
+		}
+	})
+}
