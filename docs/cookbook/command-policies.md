@@ -159,8 +159,8 @@ Nested shell behavior depends on the active wrap mode. In strong interception
 paths such as ptrace or execve-intercepting wrap, descendant `sh`/`bash`
 processes bypass the shell shim because wrap is already enforcing exec policy
 for the whole tree. In fallback or no-`execve` modes, nested shells still
-depend on the shim for command steering, so `AGENTSH_IN_SESSION` is not
-injected.
+depend on the shim for command steering, so `AGENTSH_IN_SESSION` is
+intentionally not injected.
 
 ### Electron sharp edges
 
