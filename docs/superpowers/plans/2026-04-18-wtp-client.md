@@ -5702,7 +5702,7 @@ Run `/roborev-design-review` and address findings.
 **Files:**
 - Modify: `internal/store/watchtower/wal/wal.go` (extend `Options` with `SessionID string` and `KeyFingerprint string`; in `Open`, after the existing `ReadMeta` call, validate identity if meta is present-and-non-empty; refactor the `MarkAcked` `WriteMeta` call to include identity from `w.opts`; expose `w.SessionID()` / `w.KeyFingerprint()` accessors so tests can assert what the WAL has staged for the next meta write; **add `(w *WAL) EarliestDataSequence() (uint64, bool, error)`, `(w *WAL) HighWaterSequence() uint64`, AND `(w *WAL) WrittenDataHighWater(gen uint32) (uint64, bool)` accessors** — see Step 3a for the contract. Round-11 SAFETY (Finding 1): the per-generation, data-bearing accessor `WrittenDataHighWater(gen)` REPLACES the round-10 `WrittenHighGeneration() uint32` because the latter is unsafe — `w.highGen` is seeded from segment headers during recovery (wal.go:340) BEFORE any RecordData lands, so a header-only generation is indistinguishable from a generation with actual data; admitting an ack for an unwritten generation lets `wal.MarkAcked` accept the ack and lex GC discard surviving lower-gen segments holding unsent records.)
 - Test: `internal/store/watchtower/wal/wal_identity_test.go` (new file — keeps the four identity-focused tests grouped without bloating `wal_test.go`)
-- Test: extend `internal/store/watchtower/wal/wal_test.go` (NOT `wal_identity_test.go` — these accessors are general-purpose, not identity-related) with eight new tests for the accessors (Step 3a — `TestWAL_HighWaterSequenceMatchesReader`, `TestWAL_EarliestDataSequence`, plus the FIVE round-11 per-gen data-bearing HW tests `TestWAL_WrittenDataHighWaterReturnsFalseForFutureGen`, `TestWAL_WrittenDataHighWaterReturnsFalseForGenWithOnlyHeader`, `TestWAL_WrittenDataHighWaterTracksAppend`, `TestWAL_WrittenDataHighWaterAfterRoll`, `TestWAL_WrittenDataHighWaterIgnoresLossMarkers`)
+- Test: extend `internal/store/watchtower/wal/wal_test.go` (NOT `wal_identity_test.go` — these accessors are general-purpose, not identity-related) with NINE new tests for the accessors (Step 3a — `TestWAL_HighWaterSequenceMatchesReader`, `TestWAL_EarliestDataSequence`, plus the FIVE round-11 per-gen data-bearing HW tests `TestWAL_WrittenDataHighWaterReturnsFalseForFutureGen`, `TestWAL_WrittenDataHighWaterReturnsFalseForGenWithOnlyHeader`, `TestWAL_WrittenDataHighWaterTracksAppend`, `TestWAL_WrittenDataHighWaterAfterRoll`, `TestWAL_WrittenDataHighWaterIgnoresLossMarkers`, plus the round-13 performance-budget test `TestWAL_WrittenDataHighWater_IsConstantTime`)
 
 **Spec rule (design.md §"Cold-start seed safety / stale meta detection"):** the persisted meta.json carries the WAL's installation identity. A WAL directory is bound to one (SessionID, KeyFingerprint) for its lifetime; reopening the directory with different values is a configuration error and MUST be surfaced rather than silently consumed.
 
@@ -5824,15 +5824,33 @@ if err := WriteMeta(w.opts.Dir, Meta{
 
 ```go
 // HighWaterSequence returns the highest user sequence ever appended to this
-// WAL. Mirrors the existing (r *Reader) WALHighWaterSequence() but on the WAL
-// itself so callers without a Reader handle (e.g. the transport's pre-replay
-// ack-regression check) can query it. Returns w.highSeq under w.mu.
+// WAL across ALL generations. Mirrors the existing (r *Reader)
+// WALHighWaterSequence() but on the WAL itself so callers without a Reader
+// handle (e.g. the transport's pre-replay ack-regression check, where the
+// caller wants the WAL-wide upper bound regardless of generation) can query
+// it. Returns w.highSeq under w.mu.
 //
 // Naming note: the existing (w *WAL) HighWatermark() (line 466) returns the
 // SAME value as this accessor and is retained for backward compatibility.
 // New callers SHOULD use HighWaterSequence() — the name aligns with the
 // Reader's WALHighWaterSequence() and disambiguates from the (gen, seq) ack
 // HighWatermark exposed by AckHighWatermark()/HighGeneration().
+//
+// Round-13 Finding 4 reconciliation — RESERVED USAGE.
+// `HighWaterSequence()` MUST NOT be used to validate a server-supplied
+// ack tuple, because it conflates generations: the writer's CURRENT
+// generation high-seq is not a valid bound for a server ack on an OLDER
+// generation (sequences reset on every roll; a current-gen high-seq of
+// K does not imply older-gen high-seq is K). Both the same-generation
+// AND cross-generation Adopted branches in `applyServerAckTuple` (Task
+// 15.1) MUST consult `WrittenDataHighWater(server.gen)` for the
+// per-generation, data-bearing bound. `HighWaterSequence()` is reserved
+// for the Replayer's tail-snapshot diagnostic path only and for any
+// future WAL-wide telemetry consumer that does not care about
+// per-generation correctness. Production callers other than the Replayer
+// SHOULD prefer `WrittenDataHighWater(gen)` even if "current generation"
+// happens to be the relevant generation today, because the call site
+// stays correct after a future generation roll.
 func (w *WAL) HighWaterSequence() uint64 {
     w.mu.Lock()
     defer w.mu.Unlock()
@@ -5901,25 +5919,43 @@ func (w *WAL) HighWaterSequence() uint64 {
 //     never return `err != nil` because the lookup is in-memory; the err
 //     path exists for the approach-2 (fresh segment scan) implementation.
 //
-// Implementation note (the implementer can pick either approach; the contract
-// alone is binding):
-//   1. **Per-generation tracking on the WAL struct.** Maintain a small
-//      `map[uint32]uint64` of `gen → maxDataSeq` updated on every Append
-//      that carries RecordData. Recovery rebuilds the map by scanning each
-//      segment for RecordData entries (loss markers and segment headers do
-//      NOT contribute). Lookup is O(1).
-//   2. **Fresh segment scan on call.** Open every segment whose header gen
-//      matches the request, decode records skipping loss markers, return the
-//      max RecordData seq. Lookup is O(segments-for-that-gen).
+// Implementation note (round-13 Missing A: approach 1 is MANDATORY for production;
+// approach 2 is described only to keep the contract self-explanatory):
+//   1. **Per-generation tracking on the WAL struct (REQUIRED for production).**
+//      Maintain a small `perGenDataHighWater map[uint64]uint64` of
+//      `gen → maxDataSeq` updated on every Append that carries RecordData.
+//      Recovery rebuilds the map by scanning each segment for RecordData
+//      entries (loss markers and segment headers do NOT contribute). Lookup
+//      is O(1) — strictly a map read under w.mu, no disk I/O. This is the
+//      mandated implementation per the round-13 "Performance budget" subsection
+//      below; the production WAL MUST adopt this shape.
+//   2. **Fresh segment scan on call (REJECTED for production; description
+//      retained only to ground the err-return contract above).** Open every
+//      segment whose header gen matches the request, decode records skipping
+//      loss markers, return the max RecordData seq. Lookup is O(segments-for-
+//      that-gen). REJECTED for `WrittenDataHighWater` because the accessor is
+//      consulted on the recv hot path (every BatchAck + ServerHeartbeat +
+//      SessionAck calls it via `applyServerAckTuple`), and a per-call disk
+//      scan would couple ack-validation latency to segment count. See
+//      "Performance budget" subsection at Task 14a end for the rationale.
 //
-// Mutex contract: takes w.mu briefly to copy the per-gen tracking snapshot
-// (approach 1) or the segment list (approach 2); RELEASES w.mu before any
-// disk I/O so Append is not blocked on a slow scan.
+// Mutex contract: takes w.mu briefly to copy the per-gen tracking map entry
+// (approach 1 — the only production path); RELEASES w.mu before returning.
+// No disk I/O occurs under this accessor in the production implementation,
+// so Append is never blocked.
 //
 // The transport (Task 15.1) calls this from the cross-generation Adopted
-// branch of `applyServerAckTuple`. The same-generation Adopted branch uses
-// `HighWaterSequence()` directly because it operates on the WAL's current
-// generation only.
+// branch of `applyServerAckTuple`. The same-generation Adopted branch ALSO
+// calls `WrittenDataHighWater(server.gen)` for consistency — round-13
+// Finding 4 reconciliation: BOTH branches use the per-gen, data-bearing
+// accessor so the validation predicate is identical regardless of whether
+// `server.gen == w.HighGeneration()` or `server.gen` is older. The legacy
+// `HighWaterSequence()` accessor (above) is RESERVED for the Replayer's
+// tail-snapshot diagnostic path only — it MUST NOT be used as the
+// authoritative bound on a server-supplied ack tuple, because it returns
+// the WAL's CURRENT-generation high-water and would silently misclassify
+// an ack on an older generation as `server_ack_exceeds_local_data` even
+// when that older generation has the seq covered.
 func (w *WAL) WrittenDataHighWater(gen uint32) (uint64, bool, error) {
     // Implementation outline — actual code lives in wal.go:
     //   1. Acquire w.mu.
@@ -6039,6 +6075,15 @@ func (w *WAL) EarliestDataSequence(gen uint32) (uint64, bool, error) {
 - *Post-GC same gen*: Append 50 records in gen=1 (configure SegmentSize small enough to force ≥3 segments). Drive `w.MarkAcked(gen=1, seq=20)` so segments 1+2 GC. Assert `seq, ok, err := w.EarliestDataSequence(1); ok && err == nil && seq == 21` (the first surviving record in gen=1).
 - *Mixed-gen on disk*: Append 5 records in gen=1, roll to gen=2, append 5 records in gen=2. Assert `seq1, ok1, err1 := w.EarliestDataSequence(1); ok1 && err1 == nil && seq1 == 1` AND `seq2, ok2, err2 := w.EarliestDataSequence(2); ok2 && err2 == nil && seq2 == 1` (sequences reset across generations; the accessor returns the lowest in EACH generation independently). Now drive `w.MarkAcked(gen=1, seqHigh)` so all gen=1 segments GC, leaving only gen=2 on disk. Assert `_, okPostGC1, errPostGC1 := w.EarliestDataSequence(1); !okPostGC1 && errPostGC1 == nil` (gen=1 is empty post-GC) AND `seqPostGC2, okPostGC2, errPostGC2 := w.EarliestDataSequence(2); okPostGC2 && errPostGC2 == nil && seqPostGC2 == 1` (gen=2 still has its records). This sub-case is the round-12 Finding 1 regression test: without the gen parameter, the post-GC query for gen=1 would surface gen=2's seq=1 and silently mask the GC'd-prefix loss.
 
+`TestWAL_WrittenDataHighWater_IsConstantTime` — Round-13 Missing A regression test for the performance budget. The test asserts `WrittenDataHighWater(gen)` does NOT scale with on-disk segment count, which is the binding contract for production wiring (the accessor is consulted on the recv hot path by every BatchAck + ServerHeartbeat + SessionAck via `applyServerAckTuple`; a per-call disk scan would couple ack-validation latency to segment count and violate the Phase-8 "state machine never holds the WAL mutex during recv-hot-path validation" invariant). Setup:
+- Open WAL with `SegmentSize` small enough that ~50 segments form. Append 5,000 RecordData entries in gen=1, NO MarkAcked (so all segments stay on disk). Assert `seq, ok, err := w.WrittenDataHighWater(1); ok && err == nil && seq == 5000` baseline.
+- Capture wall time of N=10,000 calls to `w.WrittenDataHighWater(1)` in a tight loop; record `tHigh := elapsed/N`.
+- Open a SECOND WAL fresh, append 50 RecordData entries in gen=1 (single segment). Capture wall time of N=10,000 calls; record `tLow := elapsed/N`.
+- Assert: `tHigh < 5 * tLow` (a 100x growth in segment count yields at most a 5x slowdown — the multiplier is generous to accommodate noisy CI but still fails decisively if the implementer accidentally adopts approach 2). Without approach 1 (the in-memory `perGenDataHighWater map[uint64]uint64`), the segment-scan implementation would yield `tHigh ≈ 100 * tLow` and the assertion trips. Test gated behind `testing.Short()` — `if testing.Short() { t.Skip("perf test") }` — so `go test -short` skips it but the standard `go test ./...` covers it.
+- Also assert: `WrittenDataHighWater(99 /* far-future gen */)` returns `(0, false, nil)` in O(1) — `tFutureGen ≈ tLow` (no scan needed for an absent gen). This sub-case catches the "approach-1 implementation forgets to short-circuit on missing-gen" bug.
+
+NOTE: This test is intrinsically timing-based and may be flaky under heavy CI load. The implementer SHOULD also include a non-timing assertion: instrument `wal.go` to expose `func (w *WAL) writtenDataHighWaterReadCount() int` (test-only, behind a build tag) that returns the number of disk reads performed during the most recent `WrittenDataHighWater` call. Approach 1 always returns 0; approach 2 returns >=1 for any populated gen. Assert `w.writtenDataHighWaterReadCount() == 0` after the high-segment-count call. The timing assertion catches accidental I/O introduced by future refactors; the read-count assertion catches the initial implementation choice.
+
 **Step ordering update:** insert these tests as part of Step 1 (write failing tests) and the accessor implementations as part of Step 3 (production edits). The accessors do not introduce new identity invariants, so they do NOT need a separate roborev pass — they ride alongside the identity work.
 
 **Step 4: Tests** (TDD-first — write the four tests below in `wal_identity_test.go` BEFORE the production edits in Steps 1-3; they MUST fail with `Options.SessionID` / `Options.KeyFingerprint` undefined or with "no error returned on mismatch"):
@@ -6069,6 +6114,301 @@ func (w *WAL) EarliestDataSequence(gen uint32) (uint64, bool, error) {
 - **v2 meta.json with empty identity** (the migration case from a hypothetical post-v2 / pre-Task-14a binary): same handling — Step-2 check skips on the empty persisted side, next WriteMeta populates.
 - **v2 meta.json with identity matching opts** (the steady-state production case after Task 14a + a few MarkAcked cycles): identity persists across opens, never errors, never re-WARNs.
 - **v2 meta.json with identity mismatching opts** (the case the gate exists to detect): Open errors. The store-wiring layer (Task 27) catches this error at `wal.Open` time and converts it into the round-7 "do not seed" + WARN behavior; OR (alternative wiring choice the implementer can take) catches it earlier by pre-reading meta.json itself and deciding whether to call `wal.Open` with the matching identity or to refuse to start. Both are valid; this plan task documents the WAL-side primitive only.
+
+**Forward reference (round-13 Task 14b):** the per-generation, data-bearing high-water accessor `WrittenDataHighWater(gen)` MUST be O(1) — see Task 14b "Performance budget" for the in-memory `perGenDataHighWater map[uint64]uint64` requirement. The two on-disk-scan accessors here (`EarliestDataSequence(gen)` is acceptable to scan; `WrittenDataHighWater(gen)` is NOT) have different cost profiles by design: the gap detector calls `EarliestDataSequence(gen)` at MOST once per Replaying entry (one I/O scan per reconnect is fine), but `WrittenDataHighWater(gen)` is consulted by EVERY ack-bearing frame on the recv hot path (BatchAck + ServerHeartbeat + SessionAck) and any per-call disk scan there would couple ack-validation latency to segment count. The round-13 fix locks `WrittenDataHighWater(gen)` to approach 1 (in-memory tracking map) rather than approach 2 (segment scan); the spec/comments above mention both approaches because the contract alone is binding, but the production implementation MUST pick approach 1.
+
+---
+
+### Task 14b: WAL Reader + Replayer generation-scoping (round-13 prerequisite for Task 15.1)
+
+**Status:** New WAL-package + Transport-package step added in round-13 to close a generation-scoping gap that round-12's `EarliestDataSequence(gen uint32)` only partially fixed. The accessor became generation-aware, but the `wal.Reader` itself is still keyed only by `start uint64` (`internal/store/watchtower/wal/reader.go:116` — `func (w *WAL) NewReader(start uint64) (*Reader, error)`), and `Replayer` snapshots its termination watermark as a scalar `tailSeq uint64` (`replayer.go:tailSeq`, captured from `rdr.WALHighWaterSequence()` at `NewReplayer` time). Both surfaces are vulnerable to the same generation-confusion shape that round-12 Finding 1 closed in `EarliestDataSequence`: sequences reset on every generation roll, so a Reader opened at `start=21` will surface RecordData with seq=21 from BOTH the GC'd-but-still-replayable older generation AND any later generation that has progressed past seq=20 — and the Replayer's scalar tail watermark cannot distinguish "the boundary record is in my replay generation" from "the boundary record is in a *later* generation" when sequences reset on the roll boundary. The round-13 fix locks the Reader and Replayer to the SAME generation-scoping contract `EarliestDataSequence(gen)` adopted in round-12: callers pass a `Generation` argument up front, the segment-iteration layer skips segments belonging to other generations, and the Replayer carries its termination watermark as a `(gen, seq)` tuple compared by lex order.
+
+**Why this task belongs to BOTH the WAL package AND the transport package.** The WAL-package change is the prerequisite: without a generation-scoped Reader, the Replayer cannot enforce a generation-scoped tail. The Replayer change cascades immediately (its `tailSeq` snapshot becomes a `(gen, seq)` tuple captured from `WrittenDataHighWater(gen)` instead of `WALHighWaterSequence()` to align with the per-gen, data-bearing contract Task 14a Step 3a establishes). Both lands in this single task because the Reader and Replayer share the same termination-correctness invariant — separating them would create a transient window where the Reader is generation-scoped but the Replayer's scalar tail still allows over-tail records from a later generation to surface, defeating the safety guarantee. Task 15.1 (Run-loop call site) consumes the new `wal.NewReader(opts ReaderOptions)` and `Replayer.LastReplayedSequence()` tuple shapes directly; Task 16 (Replayer construction) owns the in-package change to `ReplayerOptions` / `Replayer`.
+
+**Files:**
+- Modify: `internal/store/watchtower/wal/reader.go` — change `NewReader(start uint64) (*Reader, error)` to take `ReaderOptions{Generation uint64, Start uint64}` (the implementer can ALSO keep `NewReader(start uint64)` as a back-compat wrapper that synthesizes `ReaderOptions{Generation: 0 /*sentinel*/, Start: start}` IFF the segment-iteration filter accepts the zero sentinel as "no generation filter" — pre-Task-14b production callers do not exist yet because the only Reader call site is the Replayer constructed in Task 16; tests may call the back-compat shape). The segment-iteration layer's `rescanLocked` and `nextLocked` MUST filter by segment-header `Generation == opts.Generation` BEFORE the per-record `seq < nextSeq` filter runs. Skip segments of other generations entirely; do NOT decode their records and treat the seq filter as the gating layer. The reader's `lastGoodGen` field stays for loss-anchor calculations within the opened generation.
+- Modify: `internal/store/watchtower/transport/replayer.go` — change `Replayer.tailSeq uint64` to `Replayer.tail tuple{Generation uint64; Sequence uint64}` (the in-package Go type can be a small struct or the existing `wal.Position` shape — the implementer picks; the constraint is "the field carries both gen and seq"). `NewReplayer` snapshots the tail by calling `wal.WrittenDataHighWater(rdr.Generation())` (NOT `rdr.WALHighWaterSequence()`) so the snapshot is per-generation AND data-bearing — this is the round-13 alignment with Task 14a Step 3a. The hard-stop check in `NextBatch` becomes `RecordData (gen, seq) > tail` using lex compare (gen-first; on equal gen, seq); the existing scalar comparison `rec.Sequence > r.tailSeq` MUST be replaced. `LastReplayedSequence()` returns a `(gen, seq)` tuple — current callers (Task 17 / Task 22 Live state) reading the scalar must update to consume the tuple. `TailSequence()` becomes `Tail()` returning the same tuple shape (back-compat shim `TailSequence() uint64` MAY be retained to return `tail.Sequence` for diagnostic uses that do not care about generation, but MUST be marked deprecated in the docstring and MUST NOT be consumed by production termination logic).
+- Modify: `internal/store/watchtower/transport/state_replaying.go` — the `rdrFactory` callback signature in Task 22's Run-loop snippet MUST take a `(gen uint64, seq uint64)` tuple instead of just `start uint64`, OR pass the generation through `Options.WAL.NewReader(ReaderOptions{Generation: persistedAck.Generation, Start: readerStart})` directly at the call site. Both Task 15.1 (the Run-loop snippet shown there) AND Task 16 (the Replayer construction) MUST be updated in the round-13 sweep that lands this task.
+- Test: `internal/store/watchtower/wal/reader_test.go` — three new tests (Step 4 below): `TestReader_GenerationScoped_SkipsOtherGenerationsOnDisk`, `TestReader_GenerationScoped_DoesNotReturnLowerSeqFromOtherGen`.
+- Test: `internal/store/watchtower/transport/replayer_test.go` — one new test: `TestReplayer_TailIsTuple_HardStopsOnSeqExceedingTail`.
+
+**Step 1: Reader — generation-scoped segment iteration.**
+
+```go
+// ReaderOptions configures a wal.Reader. Round-13 introduces the
+// Generation field so the segment-iteration layer can skip segments of
+// other generations entirely — without this scoping, sequences reset
+// on every generation roll AND higher-generation segments coexist on
+// disk while lower-generation segments are GC'd, which means a Reader
+// opened at Start=21 in gen=1 would silently surface seq=21 records
+// from gen=2 (which the writer rolled to and emitted past seq=20). The
+// segment-iteration filter rejects segments whose SegmentHeader.Generation
+// != opts.Generation BEFORE the per-record seq filter runs.
+//
+// The per-record `seq < nextSeq` filter at reader.go's nextLocked
+// data-record branch is RETAINED — it ensures monotonic delivery
+// within the opened generation (records below the start cursor are
+// silently dropped). The segment-iteration generation filter and the
+// per-record seq filter are layered: the generation filter ensures
+// we never see records from a different generation in the first
+// place; the seq filter ensures we don't replay before the start
+// cursor within the opened generation.
+type ReaderOptions struct {
+    // Generation is the WAL generation the Reader operates within.
+    // Segments whose SegmentHeader.Generation != Generation are
+    // skipped entirely by the segment-iteration layer (NOT by the
+    // per-record seq filter — the segment is never opened, its
+    // records are never decoded). Loss markers within the requested
+    // generation are surfaced; loss markers within OTHER generations
+    // are skipped along with the rest of the segment.
+    Generation uint64
+    // Start is the lowest user sequence the Reader will surface
+    // (RecordData entries with Sequence < Start are dropped on the
+    // floor). Pass Start=0 to receive every user record from the
+    // beginning of the on-disk stream WITHIN the opened generation.
+    // RecordLoss entries within the opened generation are NOT
+    // filtered by Start.
+    Start uint64
+}
+
+// NewReader returns a Reader that surfaces RecordData entries from the
+// requested Generation with Sequence >= Start. Segments belonging to
+// other generations are skipped at the segment-iteration layer.
+//
+// Round-13 signature change: the prior `NewReader(start uint64)` was
+// generation-implicit, which let a Reader opened at start=21 in gen=1
+// silently surface a gen=2 record at seq=21 because the segment-
+// iteration layer had no generation filter. Callers MUST now pass
+// Generation explicitly. Pre-round-13 callers do not exist in the
+// codebase (the only Reader consumer is the Replayer constructed in
+// Task 16, which is being updated in this same task).
+func (w *WAL) NewReader(opts ReaderOptions) (*Reader, error) {
+    w.mu.Lock()
+    defer w.mu.Unlock()
+    if w.closed {
+        return nil, ErrClosed
+    }
+    r := &Reader{
+        w:         w,
+        notify:    make(chan struct{}, 1),
+        nextSeq:   opts.Start,
+        readerGen: opts.Generation,
+    }
+    if err := r.rescanLocked(); err != nil {
+        return nil, err
+    }
+    w.readers = append(w.readers, r)
+    return r, nil
+}
+
+// Reader gains a readerGen field alongside nextSeq:
+type Reader struct {
+    // ... existing fields ...
+
+    // readerGen is the WAL generation the Reader is scoped to. The
+    // segment-iteration layer (rescanLocked + nextLocked's segment
+    // boundary handling) skips segments whose SegmentHeader.Generation
+    // != readerGen entirely. Loss markers from skipped segments are NOT
+    // surfaced; loss markers from in-scope segments ARE surfaced
+    // regardless of nextSeq. Set once at NewReader; never mutated.
+    readerGen uint64
+
+    // ... existing nextSeq, lastEmittedSeq, lastGoodSeq, lastGoodGen ...
+}
+
+// Generation returns the generation the Reader is scoped to. Used by
+// the Replayer's NewReplayer constructor to pass the same generation
+// to wal.WrittenDataHighWater for the tail-tuple snapshot.
+func (r *Reader) Generation() uint64 {
+    return r.readerGen
+}
+```
+
+In `nextLocked` (and `rescanLocked`), wrap the segment-walk loop so segments whose header `Generation != r.readerGen` are skipped before any record-decode work. Concretely:
+
+```go
+// Inside nextLocked's segment-walk loop, BEFORE decoding records:
+hdr, err := readSegmentHeader(seg)
+if err != nil {
+    return Record{}, false, err
+}
+if hdr.Generation != r.readerGen {
+    // Skip the entire segment; advance to the next segment in the
+    // ascending-by-index list. Loss markers in the skipped segment
+    // are NOT surfaced — they belong to a different generation.
+    continue
+}
+// Existing record-decode loop runs here, with the per-record
+// `seq < nextSeq` filter applied to RecordData entries.
+```
+
+**Step 2: Replayer — tail as (gen, seq) tuple.**
+
+```go
+// Replayer's tail is the round-13 (gen, seq) tuple replacing the
+// scalar tailSeq uint64. The change is load-bearing: scalar tailSeq
+// could not distinguish "boundary record at seq=K in my replay
+// generation" from "boundary record at seq=K in a later generation"
+// when sequences reset on the roll. The lex compare on (gen, seq)
+// makes the over-tail check generation-correct.
+type Replayer struct {
+    rdr  *wal.Reader
+    opts ReplayerOptions
+    // tail is the HARD upper bound on (gen, seq) RecordData surfaced
+    // during replay. Snapshotted under the WAL lock at NewReplayer time
+    // by calling wal.WrittenDataHighWater(rdr.Generation()) — this is
+    // the per-generation, data-bearing high-water from Task 14a Step 3a,
+    // NOT the prior rdr.WALHighWaterSequence() scalar. The change ensures
+    // (a) the snapshot is generation-correct (sequences reset on roll;
+    // a later generation's high-seq is not a valid hard stop for the
+    // replay generation), and (b) the snapshot is data-bearing
+    // (segment-header-only generations cannot become a valid tail).
+    //
+    // Hard-stop predicate in NextBatch: RecordData (rec.Generation,
+    // rec.Sequence) > tail under lex compare (gen-first; on equal gen,
+    // seq). With the Reader generation-scoped to a single generation
+    // (Step 1), rec.Generation is always == tail.Generation in practice,
+    // so the lex compare collapses to a seq compare — but the tuple shape
+    // is retained so a future relaxation of the Reader-gen-scope
+    // invariant cannot silently re-introduce the scalar bug.
+    tail tailWatermark
+    // lastReplayedSeq becomes lastReplayed (gen, seq) — Task 22 Live
+    // reader-start consumers update accordingly.
+    lastReplayed tailWatermark
+    prefixLossEmitted bool
+}
+
+// tailWatermark is the small struct holding (gen, seq) for both the tail
+// snapshot and the last-replayed cursor. Lex compared via (a.Generation
+// > b.Generation) || (a.Generation == b.Generation && a.Sequence > b.Sequence).
+type tailWatermark struct {
+    Generation uint64
+    Sequence   uint64
+}
+
+// NewReplayer captures the per-generation, data-bearing tail watermark.
+// Calls wal.WrittenDataHighWater(rdr.Generation()) under the WAL lock
+// (the accessor is implemented to be O(1) per Task 14a's performance
+// budget — see "Performance budget" forward reference at Task 14a end).
+// On (ok=false) — the Reader's generation has no RecordData on disk —
+// tail is set to {rdr.Generation(), 0}, which means the lex-compare
+// predicate trips on ANY RecordData with seq>=1 in that generation
+// (matching the existing behavior where a fully-empty replay generation
+// yields no records).
+func NewReplayer(rdr *wal.Reader, opts ReplayerOptions) *Replayer {
+    seq, ok, err := rdr.WAL().WrittenDataHighWater(rdr.Generation())
+    if err != nil {
+        // Defensive: log + treat as ok=false so the Replayer drains
+        // zero records and returns done=true on first NextBatch. The
+        // Run loop's `wal_read_failure` Anomaly path (Task 15.1) is
+        // the canonical error surface; this is the constructor-time
+        // safety fallback.
+        seq, ok = 0, false
+    }
+    if !ok {
+        seq = 0
+    }
+    return &Replayer{
+        rdr:  rdr,
+        opts: opts,
+        tail: tailWatermark{Generation: rdr.Generation(), Sequence: seq},
+    }
+}
+
+// LastReplayedSequence returns the (gen, seq) tuple of the highest
+// RecordData surfaced by NextBatch so far. Round-13 signature change:
+// previously returned just `uint64`. Live state's reader-start
+// calculation in Task 22 now uses the tuple to position the next
+// Reader at the correct (gen, seq) — the ReaderOptions.Generation
+// parameter is the tuple's gen, and the ReaderOptions.Start is
+// max(tuple.Sequence + 1, ackHW.seq + 1).
+func (r *Replayer) LastReplayedSequence() (uint64, uint64) {
+    return r.lastReplayed.Generation, r.lastReplayed.Sequence
+}
+
+// Tail returns the (gen, seq) tuple captured at NewReplayer time.
+// Replaces the scalar TailSequence() returns.
+func (r *Replayer) Tail() (uint64, uint64) {
+    return r.tail.Generation, r.tail.Sequence
+}
+```
+
+In `NextBatch`, the hard-stop check becomes:
+
+```go
+// The lex compare. With the Reader generation-scoped to a single gen,
+// rec.Generation == r.tail.Generation in practice; the gen branch only
+// trips if a future relaxation of the Reader-gen-scope invariant lets
+// a different-gen record slip through.
+if rec.Kind == wal.RecordData {
+    overTail := rec.Generation > r.tail.Generation ||
+        (rec.Generation == r.tail.Generation && rec.Sequence > r.tail.Sequence)
+    if overTail {
+        batch.Records = append(batch.Records, rec)
+        r.lastReplayed = tailWatermark{Generation: rec.Generation, Sequence: rec.Sequence}
+        return batch, true, nil
+    }
+}
+```
+
+**Step 3: Run-loop call site (Task 15.1 / 22 sweep).**
+
+Task 15.1's Run-loop snippet (currently at lines 7307-7333 in this plan) MUST be updated to construct the Reader through the new generation-scoped API:
+
+```go
+// Round-13: pass remoteReplayCursor.Generation (== persistedAck.Generation
+// by the same-generation invariant) so the Reader skips other-generation
+// segments entirely.
+rdr, err := t.wal.NewReader(wal.ReaderOptions{
+    Generation: remoteReplayCursor.Generation,
+    Start:      readerStart,
+})
+```
+
+Task 22's StateLive reader-open MUST be updated similarly: it consumes `rep.LastReplayedSequence()` (now returning a (gen, seq) tuple) and constructs the Live Reader at `wal.ReaderOptions{Generation: lastReplayedGen, Start: max(lastReplayedSeq+1, ackHW.seq+1)}`. The `ackHW.seq+1` term is meaningful only when `ackHW.gen == lastReplayedGen` (steady-state); cross-generation ack-hand-off is handled by the explicit Replaying re-entry on the next reconnect, NOT by Live arithmetic.
+
+**Step 4: Tests.**
+
+`TestReader_GenerationScoped_SkipsOtherGenerationsOnDisk` — Setup: open WAL fresh, append seqs 1..5 in gen=1, roll the writer to gen=2 (production roll path), append seqs 1..5 in gen=2 (sequences reset per Task 12 contract). Open a Reader scoped to gen=1: `r1, _ := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 0})`. Drain via repeated `Next()` until `io.EOF`. Assertions:
+- The Reader surfaced exactly 5 records, all with `Generation == 1` and `Sequence ∈ {1, 2, 3, 4, 5}` in ascending order.
+- The Reader did NOT surface any record with `Generation == 2`. CRITICAL: under the round-12 design (no segment-gen filter), the Reader would have surfaced 10 records — 5 from each generation — silently, because seq=1..5 is in-scope for both segments.
+
+Open a second Reader scoped to gen=2: `r2, _ := w.NewReader(wal.ReaderOptions{Generation: 2, Start: 0})`. Drain. Assertions:
+- The Reader surfaced exactly 5 records, all with `Generation == 2` and `Sequence ∈ {1, 2, 3, 4, 5}` in ascending order.
+- The Reader did NOT surface any record with `Generation == 1`.
+
+`TestReader_GenerationScoped_DoesNotReturnLowerSeqFromOtherGen` — Round-13 regression test for the generation-confusion shape. Setup: open WAL, append seqs 1..50 in gen=1, drive `MarkAcked(1, 30)` so segments holding seqs 1..N (where N depends on segment size; pick segment sizes so some gen=1 segments survive), roll to gen=2, append seqs 1..5 in gen=2. Open a Reader scoped to gen=1 with `Start=21`: `r, _ := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 21})`. Drain. Assertions:
+- The Reader surfaced records ONLY from gen=1 with `Sequence ∈ {21..50}` (or whatever the surviving subset is) in ascending order.
+- The Reader did NOT surface a gen=2 record with seq=21 (or any other gen=2 record). CRITICAL: under the round-12 design the Reader would have surfaced gen=2's seq=21..25 records along with gen=1's seq=21..50 because the per-record seq filter accepts seq>=21 from any segment; the segment-gen filter is what blocks the gen=2 segments from being walked at all.
+
+`TestReplayer_TailIsTuple_HardStopsOnSeqExceedingTail` — Round-13 regression test for the Replayer's tail-tuple termination. Setup: open WAL, append seqs 1..3 in gen=1, drive `MarkAcked(1, 2)` so the WAL state has gen=1 RecordData up to seq=3 with ack at seq=2. Open a Reader scoped to gen=1 with `Start=3`: `rdr, _ := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 3})`. Construct a Replayer: `r := transport.NewReplayer(rdr, transport.ReplayerOptions{...})`. Assert: `gen, seq := r.Tail(); gen == 1 && seq == 3`. NOW append seqs 4 and 5 in gen=1 (post-NewReplayer appends — these MUST NOT extend replay per the existing hard-stop contract). NOW roll to gen=2 and append seq=1 in gen=2 (cross-gen append — these MUST NOT extend replay either). Drain via `NextBatch` until `done=true`. Assertions:
+- The first record surfaced is `Generation=1, Sequence=3` (the within-window record).
+- AT MOST one over-tail RecordData surfaces, and if it does it MUST be `Generation=1, Sequence=4` (the first gen=1 record past tail; gen=2 records are filtered by the segment-iteration layer because the Reader is gen=1-scoped).
+- NO record with `Generation=2` is surfaced.
+- `done=true` is returned by the time the over-tail boundary record is appended.
+- After completion: `gen, seq := r.LastReplayedSequence(); gen == 1 && seq ∈ {3, 4}` (depending on whether the boundary record surfaced).
+- `r.Tail()` is unchanged at `(1, 3)` (post-entry appends MUST NOT advance the tail snapshot).
+
+CRITICAL: under the round-12 design (scalar `tailSeq=3`), the Replayer would compare `rec.Sequence > 3` and surface gen=2's seq=4 as a within-window record (since the scalar compare ignores generation), then surface gen=2's seq=4 BEFORE returning done=true — silently leaking a different-generation record into the replay window. The tuple compare blocks this.
+
+**Step ordering for Task 14b:**
+
+- [ ] **Step 1:** Write the three failing tests above (two in `wal/reader_test.go`, one in `transport/replayer_test.go`).
+- [ ] **Step 2:** Run `go test ./internal/store/watchtower/...` to confirm they fail with the expected symbols (`wal.ReaderOptions` undefined; `wal.NewReader(ReaderOptions{...})` undefined; `Reader.Generation()` undefined; `Replayer.Tail()` returns the wrong shape; `Replayer.LastReplayedSequence()` returns `uint64` instead of `(uint64, uint64)`).
+- [ ] **Step 3:** Implement the Reader changes (Step 1 above): add `ReaderOptions` struct, change `NewReader` signature, add `Reader.readerGen` field + segment-iteration filter, add `Reader.Generation()` accessor.
+- [ ] **Step 4:** Implement the Replayer changes (Step 2 above): change `tailSeq uint64` → `tail tailWatermark`, change `lastReplayedSeq uint64` → `lastReplayed tailWatermark`, change `LastReplayedSequence()` return shape, replace scalar over-tail check with lex compare in `NextBatch`, update `NewReplayer` to call `WrittenDataHighWater(rdr.Generation())`.
+- [ ] **Step 5:** Update Task 15.1's Run-loop snippet AND Task 22's StateLive reader-open call site to pass `Generation` through `wal.ReaderOptions`. Update any in-package callers of `LastReplayedSequence()` to consume the tuple.
+- [ ] **Step 6:** Re-run `go test ./internal/store/watchtower/...` and verify the three new tests PASS and no existing test regressed.
+- [ ] **Step 7:** Cross-compile (`GOOS=windows go build ./...`).
+- [ ] **Step 8:** Commit with message `feat(wtp/wal,wtp/transport): generation-scope wal.Reader and Replayer tail tuple`.
+- [ ] **Step 9:** Run `/roborev-design-review` and address findings.
+
+**Hard dependency chain (round-13):**
+
+- **14a → 14b:** Task 14b's `NewReplayer` snapshot calls `wal.WrittenDataHighWater(rdr.Generation())` — the per-generation, data-bearing accessor introduced in Task 14a Step 3a. Without 14a's accessor (or under the unsafe round-10 `WrittenHighGeneration()` shape), the Replayer's tail would silently regress to the segment-header-seeded value and a header-only generation could become a valid tail watermark. 14b MUST land AFTER 14a.
+- **14b → 15.1:** Task 15.1's Run-loop snippet (the one that synthesizes `prefixLoss` via `computeReplayStart` and constructs the Reader) consumes the new `wal.NewReader(wal.ReaderOptions{Generation: ..., Start: ...})` shape. Without 14b, the snippet would still pass `start uint64` and the Reader would silently surface other-generation records. 14b MUST land BEFORE 15.1's snippet is updated; the round-13 sweep that adds 14b ALSO updates the snippet shown in 15.1.
+- **14b → 17.X:** Task 17.X's recv handler does NOT directly construct a Reader (the Replayer does), but Task 17.X DOES consume `Replayer.LastReplayedSequence()` indirectly through Task 22's Live state. 14b's tuple shape change cascades through Task 22's call site; 17.X's tests do not need to change but the integration test that exercises Replayer→Live hand-off MUST be updated in the same sweep.
+- **14b → 22b:** Task 22b's parity tests do not depend on 14b directly, but the round-13 commit message body MUST list 14b as a prerequisite for the Run-loop generation-scope correctness.
 
 ---
 
@@ -7289,7 +7629,23 @@ func (t *Transport) computeReplayStart(remoteReplayCursor AckCursor, persistedAc
         readerStart = gapStart
     }
     if prefixLoss != nil {
-        t.metrics.IncAckRegressionLoss() // Task 22b — counter
+        // Round-13 Finding 5: the metric increment used to fire here in
+        // computeReplayStart, which counts COMPUTED losses rather than
+        // EMITTED ones. The helper can be invoked, return a non-nil
+        // prefixLoss, and the Run loop can later abort the Replayer
+        // before its first NextBatch (e.g. dialer fault, ctx cancel,
+        // or any state transition between computeReplayStart return and
+        // Replayer.NextBatch first call) — and the metric would have
+        // already been bumped, double-counting on the inevitable
+        // reconnect that re-runs computeReplayStart from scratch. The
+        // round-13 fix moves the increment to the EMIT site: the
+        // Replayer fires `ReplayerOptions.OnPrefixLossEmitted` exactly
+        // once after batch-1 surfacing, and the Run loop wires that
+        // callback to `t.metrics.IncAckRegressionLoss()`. The INFO log
+        // stays here because it is "we computed a synthesized loss
+        // from these inputs," which is meaningful even if the loss is
+        // never emitted (the operator wants to see the inputs that led
+        // to the decision). The COUNTER moves; the LOG stays.
         t.opts.Logger.Info("ack_regression_check: synthesized in-memory loss for GC'd gap",
             slog.Uint64("from_seq", prefixLoss.FromSequence),
             slog.Uint64("to_seq", prefixLoss.ToSequence),
@@ -7308,18 +7664,22 @@ The Run-loop call site (see Task 22 StateReplaying case) is:
 
 ```go
 // Task 22 StateReplaying case — call computeReplayStart FIRST, then
-// open the reader at readerStart, then construct the Replayer with
-// PrefixLoss. The ordering matters: opening the reader at
-// remoteReplayCursor.Sequence + 1 unconditionally and then "fixing it
-// up" is wrong — the reader's start cursor is set at construction and
-// cannot be moved.
+// open the reader at readerStart with the gen-scoped wal.ReaderOptions
+// shape (round-13 Task 14b), then construct the Replayer with
+// PrefixLoss AND OnPrefixLossEmitted. The ordering matters: opening the
+// reader at remoteReplayCursor.Sequence + 1 unconditionally and then
+// "fixing it up" is wrong — the reader's start cursor is set at
+// construction and cannot be moved.
 prefixLoss, readerStart, lerr := t.computeReplayStart(t.remoteReplayCursor, t.persistedAck)
 if lerr != nil {
     rep = nil
     st = StateConnecting
     continue
 }
-rdr, err := rdrFactory(readerStart)
+rdr, err := t.wal.NewReader(wal.ReaderOptions{
+    Generation: t.remoteReplayCursor.Generation, // round-13 Task 14b: gen-scope the Reader
+    Start:      readerStart,
+})
 if err != nil {
     rep = nil
     st = StateConnecting
@@ -7329,6 +7689,22 @@ rep = NewReplayer(rdr, ReplayerOptions{
     MaxBatchRecords: liveOpts.Batcher.MaxRecords,
     MaxBatchBytes:   liveOpts.Batcher.MaxBytes,
     PrefixLoss:      prefixLoss, // round-10: in-memory loss marker
+    // Round-13 Finding 5: count EMITTED losses (not COMPUTED ones). The
+    // Replayer fires this callback exactly once, AFTER the in-memory
+    // PrefixLoss has been surfaced as record[0] of the FIRST NextBatch.
+    // If the Replayer is constructed with prefixLoss != nil but is
+    // aborted before its first NextBatch (dialer fault, ctx cancel,
+    // etc.), the callback does NOT fire and the metric does NOT
+    // increment — the inevitable reconnect re-runs computeReplayStart
+    // and re-derives the same prefixLoss from the same inputs (no double
+    // count). The callback fires synchronously inside NextBatch and runs
+    // on the Run loop's goroutine; the implementation MUST be cheap and
+    // non-blocking (just a counter Inc). When prefixLoss == nil the
+    // Replayer never invokes the callback regardless of subsequent
+    // batch surfacing.
+    OnPrefixLossEmitted: func() {
+        t.metrics.IncAckRegressionLoss() // Task 22a — counter (emit-time)
+    },
 })
 ```
 
@@ -7340,11 +7716,11 @@ The transport-level synthesis pivots on `ReplayerOptions.PrefixLoss` (added in T
 2. **Recovery on reconnect.** The fully-recompute design means transient errors (e.g. `EarliestDataSequence` returning an I/O error) are recovered on the next reconnect for free — `EarliestDataSequence()` returns the same value, the SessionAck handler's cursor state is unchanged, and the new state cycle re-derives the same `PrefixLoss` from the same inputs. No retry loop needed.
 3. **Single-state ownership.** The Replaying state is the only state that constructs a `Replayer`; centralising the loss-synthesis there keeps the in-memory `ReplayerOptions.PrefixLoss` plumbing trivially correct (synthesise → construct Replayer → first NextBatch returns PrefixLoss as record[0]).
 
-**Test #9 (`TestRunReplaying_SynthesizesPrefixLossOnPartialGCdGap`)** — round-10 RENAMED from `_SynthesizesAckRegressionLossOnGCdGap`: exercises the partial-GC producer end-to-end (Case A in the decision tree). Setup: open a real `*wal.WAL` with `MaxTotalBytes` small enough that GC is triggerable; append 100 records in gen=1; drive `wal.MarkAcked(1, 80)` so segments holding seqs 1..N (where N depends on segment size; pick segment size so seqs 1..50 GC and seqs 51..100 survive); `InitialAckTuple = &AckTuple{Sequence: 80, Generation: 1, Present: true}`. Drive a SessionAck handler with `(serverGen=1, serverSeq=20)` (lex-lower → `ResendNeeded`; `t.remoteReplayCursor` becomes `(20, 1)`, `t.persistedAck` stays `(80, 1)`). Now drive the runReplaying entry point. Assert: (a) `wal.EarliestDataSequence()` returned `(51, true, nil)` (or whatever the surviving earliest is); (b) `wal.AppendLoss` was NOT called (round-10: no on-disk write); (c) `transport.NewReplayer` was called with `ReplayerOptions.PrefixLoss == &wal.LossRecord{FromSequence: 21, ToSequence: 50, Generation: 1, Reason: "ack_regression_after_gc"}`; (d) the metrics fake recorded one `IncAckRegressionLoss()` call; (e) the Reader was opened at seq=51; (f) the first record the Replayer surfaces via `NextBatch` is a `RecordLoss` carrying the PrefixLoss values verbatim; (g) the second record the Replayer surfaces is the seq=51 data record from the surviving WAL; (h) the INFO log buffer contains exactly one entry naming `from_seq=21, to_seq=50, gen=1, remote_replay_seq=20, earliest_on_disk_present=true, earliest_on_disk_seq=51, local_persisted_seq=80`.
+**Test #9 (`TestRunReplaying_SynthesizesPrefixLossOnPartialGCdGap`)** — round-10 RENAMED from `_SynthesizesAckRegressionLossOnGCdGap`: exercises the partial-GC producer end-to-end (Case A in the decision tree). Setup: open a real `*wal.WAL` with `MaxTotalBytes` small enough that GC is triggerable; append 100 records in gen=1; drive `wal.MarkAcked(1, 80)` so segments holding seqs 1..N (where N depends on segment size; pick segment size so seqs 1..50 GC and seqs 51..100 survive); `InitialAckTuple = &AckTuple{Sequence: 80, Generation: 1, Present: true}`. Drive a SessionAck handler with `(serverGen=1, serverSeq=20)` (lex-lower → `ResendNeeded`; `t.remoteReplayCursor` becomes `(20, 1)`, `t.persistedAck` stays `(80, 1)`). Now drive the runReplaying entry point. Assert: (a) `wal.EarliestDataSequence()` returned `(51, true, nil)` (or whatever the surviving earliest is); (b) `wal.AppendLoss` was NOT called (round-10: no on-disk write); (c) `transport.NewReplayer` was called with `ReplayerOptions.PrefixLoss == &wal.LossRecord{FromSequence: 21, ToSequence: 50, Generation: 1, Reason: "ack_regression_after_gc"}` AND `ReplayerOptions.OnPrefixLossEmitted != nil` (round-13 Finding 5); (d) the metrics fake recorded EXACTLY ONE `IncAckRegressionLoss()` call AT EMIT TIME — round-13 Finding 5: assert the counter is STILL ZERO immediately after `transport.NewReplayer` returns and BEFORE the first `NextBatch` call; assert the counter increments to 1 ONLY after the first `NextBatch` returns the surfaced PrefixLoss as record[0]; (e) the Reader was opened at seq=51 via `wal.NewReader(wal.ReaderOptions{Generation: 1, Start: 51})` (round-13 Task 14b); (f) the first record the Replayer surfaces via `NextBatch` is a `RecordLoss` carrying the PrefixLoss values verbatim; (g) the second record the Replayer surfaces is the seq=51 data record from the surviving WAL; (h) the INFO log buffer contains exactly one entry naming `from_seq=21, to_seq=50, gen=1, remote_replay_seq=20, earliest_on_disk_present=true, earliest_on_disk_seq=51, local_persisted_seq=80` — round-13 Finding 5: the INFO entry is logged from `computeReplayStart` (compute-time) and is independent of whether the metric ever fires; both can be observed in the buffer regardless of whether NextBatch is invoked.
 
-**Test #10 (`TestRunReplaying_NoPrefixLossWhenNoGap`)** — round-10 RENAMED: negative case (Case B in the decision tree). Same setup as Test #9, but drive SessionAck with `(serverGen=1, serverSeq=70)` (still a `ResendNeeded`, but `gapStart=71` and `earliestOnDisk=51`, so `earliestOnDisk < gapStart` → no gap). Assert: `transport.NewReplayer` was called with `ReplayerOptions.PrefixLoss == nil`; metrics counter unchanged; Reader opened at seq=71; INFO log buffer empty (the no-gap path is silent).
+**Test #10 (`TestRunReplaying_NoPrefixLossWhenNoGap`)** — round-10 RENAMED: negative case (Case B in the decision tree). Same setup as Test #9, but drive SessionAck with `(serverGen=1, serverSeq=70)` (still a `ResendNeeded`, but `gapStart=71` and `earliestOnDisk=51`, so `earliestOnDisk < gapStart` → no gap). Assert: `transport.NewReplayer` was called with `ReplayerOptions.PrefixLoss == nil` (the OnPrefixLossEmitted callback MAY still be wired by the Run loop — Replayer treats it as a no-op when PrefixLoss is nil); metrics counter unchanged AT ALL TIMES (no compute-time increment, no emit-time increment); Reader opened at seq=71 via the gen-scoped `wal.ReaderOptions{Generation: 1, Start: 71}` (round-13 Task 14b); INFO log buffer empty (the no-gap path is silent at compute-time).
 
-**Test #11 (`TestRun_ResendNeededFullyGCdEmitsLossOverEntirePersistedRange`)** — round-10 NEW (Finding 2 + Case C in the decision tree): the worst regression-after-gc shape. Setup: open a real `*wal.WAL` with `MaxTotalBytes` small enough that GC is triggerable; append records and drive `wal.MarkAcked(1, 100)` AND configure GC so that ALL data records are GC'd (e.g. by appending only short-lived records and exhausting `MaxTotalBytes`); `InitialAckTuple = &AckTuple{Sequence: 100, Generation: 1, Present: true}`. Verify `wal.EarliestDataSequence()` returns `(0, false, nil)` before continuing. Drive a SessionAck handler with `(serverGen=1, serverSeq=20)` (lex-lower → `ResendNeeded`; `t.remoteReplayCursor` becomes `(20, 1)`, `t.persistedAck` stays `(100, 1)`). Now drive the runReplaying entry point. Assert: (a) `wal.AppendLoss` was NOT called; (b) `transport.NewReplayer` was called with `ReplayerOptions.PrefixLoss == &wal.LossRecord{FromSequence: 21, ToSequence: 100, Generation: 1, Reason: "ack_regression_after_gc"}` (the gapEnd is `persistedAck.Sequence`, NOT `earliestOnDisk - 1` which is meaningless when nothing remains on disk); (c) the metrics fake recorded one `IncAckRegressionLoss()` call; (d) the Reader was opened at seq=21 (gapStart, since there is no surviving data record to anchor on); (e) the first record the Replayer surfaces is the synthesized PrefixLoss covering [21, 100]; (f) the second `NextBatch` returns done=true (the Reader hits io.EOF immediately because the WAL is empty); (g) the INFO log buffer contains exactly one entry naming `from_seq=21, to_seq=100, gen=1, remote_replay_seq=20, earliest_on_disk_present=false, earliest_on_disk_seq=0, local_persisted_seq=100`. Without this test, the round-10 reviewer's "fully-GC'd case silently drops loss" finding would re-emerge.
+**Test #11 (`TestRun_ResendNeededFullyGCdEmitsLossOverEntirePersistedRange`)** — round-10 NEW (Finding 2 + Case C in the decision tree): the worst regression-after-gc shape. Setup: open a real `*wal.WAL` with `MaxTotalBytes` small enough that GC is triggerable; append records and drive `wal.MarkAcked(1, 100)` AND configure GC so that ALL data records are GC'd (e.g. by appending only short-lived records and exhausting `MaxTotalBytes`); `InitialAckTuple = &AckTuple{Sequence: 100, Generation: 1, Present: true}`. Verify `wal.EarliestDataSequence()` returns `(0, false, nil)` before continuing. Drive a SessionAck handler with `(serverGen=1, serverSeq=20)` (lex-lower → `ResendNeeded`; `t.remoteReplayCursor` becomes `(20, 1)`, `t.persistedAck` stays `(100, 1)`). Now drive the runReplaying entry point. Assert: (a) `wal.AppendLoss` was NOT called; (b) `transport.NewReplayer` was called with `ReplayerOptions.PrefixLoss == &wal.LossRecord{FromSequence: 21, ToSequence: 100, Generation: 1, Reason: "ack_regression_after_gc"}` AND `ReplayerOptions.OnPrefixLossEmitted != nil` (the gapEnd is `persistedAck.Sequence`, NOT `earliestOnDisk - 1` which is meaningless when nothing remains on disk); (c) the metrics fake recorded EXACTLY ONE `IncAckRegressionLoss()` call AT EMIT TIME — assert the counter is ZERO immediately after `transport.NewReplayer` returns and BEFORE the first `NextBatch` call, then ONE after the first `NextBatch` surfaces the PrefixLoss; (d) the Reader was opened at seq=21 (gapStart, since there is no surviving data record to anchor on) via `wal.NewReader(wal.ReaderOptions{Generation: 1, Start: 21})` (round-13 Task 14b); (e) the first record the Replayer surfaces is the synthesized PrefixLoss covering [21, 100]; (f) the second `NextBatch` returns done=true (the Reader hits io.EOF immediately because the WAL is empty); (g) the INFO log buffer contains exactly one entry naming `from_seq=21, to_seq=100, gen=1, remote_replay_seq=20, earliest_on_disk_present=false, earliest_on_disk_seq=0, local_persisted_seq=100`. Without this test, the round-10 reviewer's "fully-GC'd case silently drops loss" finding would re-emerge.
 
 **Test #11a (`TestComputeReplayStart_FullyGCdServerAtOrPastPersistedAckIsNoOp`)** — round-11 RENAMED from `TestRun_ResendNeededFullyGCdServerAtPersistedAckIsNoOp` (Finding 4): the round-10 framing exercised Case D through the Run loop, which is structurally awkward — Case D is defensive and the helper is the natural unit under test. Round-11 lifts this case to a direct helper-level unit test that calls `t.computeReplayStart(remoteReplayCursor, persistedAck)` with crafted cursors and a fake/in-memory WAL whose `EarliestDataSequence()` returns `(0, false, nil)`.
 
@@ -7861,6 +8237,41 @@ type ReplayerOptions struct {
 	// is a loss marker, not a data record) and does NOT contribute to
 	// MaxBatchBytes accounting. It is appended verbatim to batch.Records[0].
 	PrefixLoss *wal.LossRecord
+
+	// OnPrefixLossEmitted, when non-nil, is invoked by the Replayer EXACTLY
+	// ONCE — synchronously inside NextBatch — immediately after PrefixLoss
+	// has been appended as record[0] of the FIRST NextBatch call. The
+	// callback runs on the caller's goroutine (the Run loop's, in
+	// production), so the implementation MUST be cheap and non-blocking
+	// (typically a single counter Inc).
+	//
+	// Round-13 Finding 5 RATIONALE. The earlier round-12 design fired
+	// `t.metrics.IncAckRegressionLoss()` from inside `computeReplayStart`
+	// — i.e. at COMPUTE time, not EMIT time. That counts losses that the
+	// helper *intended* to surface, even when the Replayer is constructed
+	// with prefixLoss != nil but is aborted before its first NextBatch
+	// (dialer fault, ctx cancel, state transition) — and the inevitable
+	// reconnect re-runs computeReplayStart and double-counts the same
+	// logical loss. The round-13 fix moves the counter to the EMIT site
+	// via this callback so a one-to-one relationship exists between
+	// "loss marker observed by the receiver" and "counter increment."
+	// Compute-time INFO logging stays in `computeReplayStart` because the
+	// inputs to the decision are operationally meaningful even when the
+	// loss is never emitted.
+	//
+	// When PrefixLoss == nil the callback is NEVER invoked, regardless of
+	// other batch surfacing. When PrefixLoss != nil the callback is
+	// invoked EXACTLY ONCE in the Replayer's lifetime — the
+	// `prefixLossEmitted` gate that ensures one-shot PrefixLoss emission
+	// also gates the callback. Replayers that error out of NextBatch
+	// before appending PrefixLoss to record[0] do NOT invoke the callback.
+	//
+	// The callback is OPTIONAL. Test cases that do not care about
+	// emit-time observability MAY leave it nil; production wiring (Task
+	// 15.1 Run-loop snippet AND Task 17.X recv-handler-driven Replayer
+	// construction site) MUST set it to bump
+	// `wtp_ack_regression_loss_total`.
+	OnPrefixLossEmitted func()
 }
 
 // ReplayBatch is a chunk of WAL records returned by Replayer.NextBatch. The
@@ -8025,12 +8436,26 @@ func (r *Replayer) NextBatch(ctx context.Context) (ReplayBatch, bool, error) {
 	// yet been emitted, append it as batch.Records[0] before draining
 	// the Reader. Loss markers do not contribute to MaxBatchBytes and
 	// do not interact with the seq-vs-tailSeq termination check.
+	//
+	// Round-13 Finding 5: fire OnPrefixLossEmitted EXACTLY ONCE,
+	// IMMEDIATELY after the marker is appended. The callback is wired by
+	// the Run loop (Task 15.1) AND the recv-handler-driven Replayer
+	// construction site (Task 17.X) to bump the
+	// `wtp_ack_regression_loss_total` counter at the EMIT site so the
+	// counter never increments for a Replayer that is aborted before
+	// surfacing batch[0]. The gate `prefixLossEmitted = true` MUST be
+	// set BEFORE invoking the callback so that an extraordinary callback
+	// re-entry (the implementation MUST NOT be re-entrant; this is
+	// defense-in-depth) cannot double-fire the counter.
 	if !r.prefixLossEmitted && r.opts.PrefixLoss != nil {
 		batch.Records = append(batch.Records, wal.Record{
 			Kind: wal.RecordLoss,
 			Loss: *r.opts.PrefixLoss,
 		})
 		r.prefixLossEmitted = true
+		if r.opts.OnPrefixLossEmitted != nil {
+			r.opts.OnPrefixLossEmitted()
+		}
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -8313,6 +8738,38 @@ And four replayer-level tests in
   second `NextBatch` and assert PrefixLoss is NOT re-emitted (the
   `prefixLossEmitted` gate works). Drive a third `NextBatch` after
   exhausting the Reader and assert `done=true`.
+
+- `TestReplayer_OnPrefixLossEmittedFiresExactlyOnceWhenLossInBatch1`
+  — Round-13 Finding 5 regression test for the EMIT-time metric
+  callback. Setup: open a WAL, append 3 records (gen=1, seqs 1..3),
+  open a Reader scoped to gen=1 with `Start=0`. Construct a Replayer
+  with `ReplayerOptions{PrefixLoss: &wal.LossRecord{FromSequence: 10,
+  ToSequence: 20, Generation: 1, Reason: "ack_regression_after_gc"},
+  OnPrefixLossEmitted: func() { atomic.AddInt32(&n, 1) }}`. Phase 1:
+  immediately after `NewReplayer` returns, assert `atomic.LoadInt32(&n)
+  == 0` — the callback MUST NOT fire at construction time. Phase 2:
+  drive `NextBatch` once. Assert `atomic.LoadInt32(&n) == 1` AND
+  `batch.Records[0].Kind == wal.RecordLoss` (the marker surfaced) AND
+  `batch.Records[1..3].Kind == wal.RecordData`. Phase 3: drive
+  `NextBatch` a second time. Assert `atomic.LoadInt32(&n) == 1` (NOT
+  2 — the callback is one-shot, gated by `prefixLossEmitted`). Phase 4:
+  drive `NextBatch` a third time. Assert `atomic.LoadInt32(&n) == 1`
+  AND `done=true` (the Reader is drained; the callback stays at one).
+  CRITICAL: this test catches the regression where a future refactor
+  accidentally moves the callback invocation outside the
+  `prefixLossEmitted` gate — under the buggy code path the callback
+  would fire on every NextBatch and the counter assertion would be
+  >= the number of NextBatch calls.
+
+- `TestReplayer_OnPrefixLossEmittedDoesNotFireWhenPrefixLossNil` —
+  Round-13 Finding 5 regression test for the no-loss path. Setup: open
+  a WAL, append 3 records, open a Reader, construct a Replayer with
+  `ReplayerOptions{PrefixLoss: nil, OnPrefixLossEmitted: func()
+  { atomic.AddInt32(&n, 1) }}`. Drive `NextBatch` until exhaustion.
+  Assert `atomic.LoadInt32(&n) == 0` at every step (construction, after
+  each NextBatch, and at done=true). The callback MUST NOT fire when
+  PrefixLoss is nil — it would double-count on the next reconnect when
+  computeReplayStart re-derives a non-nil PrefixLoss for the same gap.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -13450,7 +13907,7 @@ type Collector struct {
 | Metric | Type | Labels | Accessor | Emit site | Alert threshold (operator-facing) |
 |---|---|---|---|---|---|
 | `wtp_resend_needed_total` | counter | none | `IncResendNeeded()` | `applyServerAckTuple` `ResendNeeded` branch (Task 15.1 SessionAck handler + Task 17.X recv handler) | >5/min sustained for >5min — investigate server-side ack persistence (gradual rollout / partition recovery is normal at low rate; sustained high rate indicates an actual server-side bug) |
-| `wtp_ack_regression_loss_total` | counter | none | `IncAckRegressionLoss()` | Replaying state's reader-open path (Task 15.1 Step 1b.5), incremented EXACTLY ONCE per `prefixLoss != nil` returned by `computeReplayStart` AND consumed by the Replayer. Concretely the call site is IMMEDIATELY AFTER `transport.NewReplayer(..., ReplayerOptions{PrefixLoss: prefixLoss, ...})` SUCCEEDS and BEFORE the Replayer produces its first batch (the synthetic `wal.LossRecord{Reason: "ack_regression_after_gc"}` is constructed in memory by `computeReplayStart` when `wal.EarliestDataSequence(persistedAck.gen)` indicates the server's last-seen position is BEHIND the GC'd tail; threaded into the Replayer via `ReplayerOptions.PrefixLoss`; surfaced as the FIRST record of the FIRST batch so it lands at the head of the replay stream, ordered correctly relative to surviving on-disk data). NO `wal.AppendLoss` call, no fsync, no on-disk pollution. The counter is NOT incremented when (a) `computeReplayStart` returned `prefixLoss == nil` (cases B/D of the §"Loss between replay cursor and persisted ack" 4-case table — the no-gap and fully-GC'd-but-server-at-or-past-persisted shapes do not synthesize a marker), (b) `computeReplayStart` returned a non-nil err (the `wal_read_failure` Anomaly path or any other I/O failure surfaces to the Run loop and forces a state transition; no Replayer materialises so no marker reaches the wire), (c) the Replayer is constructed with `PrefixLoss == nil` (the Replayer never re-derives the marker on its own; it only surfaces what the transport explicitly handed it), or (d) the Replaying state aborts after constructing the Replayer but before the Replayer flushes its first batch (e.g. transport.Conn closed by Run loop; the marker is dropped on the floor along with the Replayer). Net: this counter strictly counts "ack-regression-after-GC loss markers SUCCESSFULLY scheduled into the wire path" — the two-step definition (helper returns non-nil PrefixLoss AND Replayer consumes it) keeps the counter aligned with what the server actually observes on the receive side. (Round-10 Finding 3: the prior on-disk-AppendLoss design is abandoned because `AppendLoss` writes to the live WAL tail, which is out-of-order vs. the surviving older sequences AND latches the WAL into fatal on I/O failure — neither is acceptable for a per-reconnect transient signal.) | nonzero rate — investigate ack regression past GC'd WAL tail (this means the server believes data the client has already discarded; usually a server-side ack-persistence bug or a recovery-from-corruption event). A nonzero divergence between this counter and the receive-side `replay_loss_marker_total` family would indicate either (a) a transport bug dropping markers on close, or (b) a server-side classification bug; either is operator-actionable. |
+| `wtp_ack_regression_loss_total` | counter | none | `IncAckRegressionLoss()` | **Round-13 Finding 5: emit-time, NOT compute-time.** Fired by the `ReplayerOptions.OnPrefixLossEmitted` callback wired by Task 15.1's reader-open path (callback closes over `t.metrics.IncAckRegressionLoss()`). The Replayer invokes the callback synchronously inside its FIRST `NextBatch()` call AFTER the synthetic `wal.LossRecord{Reason: "ack_regression_after_gc"}` has been appended as record[0] of the batch AND AFTER the in-Replayer `prefixLossEmitted` gate has flipped to true. **This relocates the increment from the prior compute-time site (round-12: "IMMEDIATELY AFTER `transport.NewReplayer` SUCCEEDS and BEFORE the Replayer produces its first batch") to the emit-time site so the counter reflects "marker landed in a batch the receiver consumed" rather than "marker was scheduled to be consumed".** The synthetic loss record is constructed in memory by `computeReplayStart` when `wal.EarliestDataSequence(persistedAck.gen)` indicates the server's last-seen position is BEHIND the GC'd tail; threaded into the Replayer via `ReplayerOptions.PrefixLoss`; surfaced as the FIRST record of the FIRST batch so it lands at the head of the replay stream, ordered correctly relative to surviving on-disk data. NO `wal.AppendLoss` call, no fsync, no on-disk pollution. The counter is NOT incremented when (a) `computeReplayStart` returned `prefixLoss == nil` (cases B/D of the §"Loss between replay cursor and persisted ack" 4-case table — the no-gap and fully-GC'd-but-server-at-or-past-persisted shapes do not synthesize a marker; `OnPrefixLossEmitted` is only called by the Replayer when `r.opts.PrefixLoss != nil`), (b) `computeReplayStart` returned a non-nil err (the `wal_read_failure` Anomaly path or any other I/O failure surfaces to the Run loop and forces a state transition; no Replayer materialises so the callback never fires), (c) the Replayer is constructed with `PrefixLoss == nil` (the Replayer never re-derives the marker on its own; the callback is never fired), (d) the Replaying state aborts after constructing the Replayer but BEFORE the Replayer's first `NextBatch` returns successfully (e.g. transport.Conn closed by Run loop, ctx cancelled, gen-aware Reader fails to open at the resolved start; the callback is invoked synchronously at the end of `NextBatch` so any pre-emit failure aborts before increment), or (e) the Replaying state never enters the wire-send path because the Run loop tears down between callback fire and batch transmit (the receiver never sees the marker AND the counter incorrectly increments — this case is documented but not architectural: the test of record drives `OnPrefixLossEmitted` immediately after `prefixLossEmitted = true`, before `NextBatch` returns, so it is reachable only by a process abort between the gate flip and the function return; treated as acceptable rounding given the operator-visible signal a divergence between this counter and the receive-side `replay_loss_marker_total` would generate). Net: this counter counts "ack-regression-after-GC loss markers EMITTED into a batch by the Replayer" — strictly tighter than the round-12 "scheduled into the wire path" definition. (Round-10 Finding 3: the prior on-disk-AppendLoss design is abandoned because `AppendLoss` writes to the live WAL tail, which is out-of-order vs. the surviving older sequences AND latches the WAL into fatal on I/O failure — neither is acceptable for a per-reconnect transient signal.) | nonzero rate — investigate ack regression past GC'd WAL tail (this means the server believes data the client has already discarded; usually a server-side ack-persistence bug or a recovery-from-corruption event). A nonzero divergence between this counter and the receive-side `replay_loss_marker_total` family would indicate either (a) a transport bug dropping markers on close, or (b) a server-side classification bug; either is operator-actionable. |
 | `wtp_anomalous_ack_total` | counter | `reason ∈ {"server_ack_exceeds_local_seq", "stale_generation", "unwritten_generation", "server_ack_exceeds_local_data", "wal_read_failure"}` | `IncAnomalousAck(reason string)` | `applyServerAckTuple` `Anomaly` branch (all five sub-cases per Round-12 Findings 4+5) | nonzero rate on ANY label — investigate immediately. `server_ack_exceeds_local_seq` (round-12 RENAMED from `beyond_wal_high_water_seq`) indicates the server claims ack of records the client never sent (same-gen `serverSeq > wal.WrittenDataHighWater(server.gen)`). `stale_generation` indicates the server is replaying a closed past. `unwritten_generation` indicates the server named a generation whose segment-header exists on disk but whose RecordData the writer has not emitted — admitting this ack would let lex GC discard lower-gen segments holding unsent history. `server_ack_exceeds_local_data` indicates the server claims ack past the per-gen data-bearing high-water seq the writer has emitted in that generation — same safety class as `unwritten_generation`. `wal_read_failure` (round-12 NEW per Finding 4) indicates `wal.WrittenDataHighWater(server.gen)` returned a non-nil error (I/O failure in the WAL accessor) — the helper surfaces it as Anomaly so cursors stay frozen and the operator gets a discoverable signal instead of a silent ok=false fallback. None should ever fire under correct operation. |
 | `wtp_wal_quarantine_total` | counter | `reason ∈ {"session_id_mismatch", "key_fingerprint_mismatch", "unknown_identity_mismatch"}` | `IncWALQuarantine(reason WTPWALQuarantineReason)` | Store-layer `wal.Open` recovery path (Task 27 wiring) when `errors.As(err, &wal.ErrIdentityMismatch{})` triggers a rename of the existing WAL dir to `<dir>.quarantine.<unix-nanos>-<random4hex>` (per Round-10 Missing A — see spec §Quarantine policy) and a fresh `wal.Open` against the now-empty Dir. The reason label is derived from `ErrIdentityMismatch.Field` (`session_id` → `session_id_mismatch`, `key_fingerprint` → `key_fingerprint_mismatch`, anything else → `unknown_identity_mismatch`). The accessor validates the reason against `wtpWALQuarantineReasonsValid` and falls back to `unknown_identity_mismatch` on any unknown string (mirroring the `IncReconnects` reason-validation pattern in `wtp.go`). | nonzero rate on `session_id_mismatch` or `key_fingerprint_mismatch` — investigate WAL identity mismatch (legitimate operator action: key rotation / session reissue. RARE — sustained nonzero rate indicates a misconfigured restart loop or a session_id generator that does not persist across restarts.) `unknown_identity_mismatch` is a hard alert: it indicates `ErrIdentityMismatch.Field` carried a value the accessor did not enumerate, which is a programming error in the WAL package or in the wiring layer's classifier. |
 
@@ -13481,50 +13938,68 @@ func (w *WTPMetrics) IncResendNeeded() {
 }
 
 // IncAckRegressionLoss increments wtp_ack_regression_loss_total.
-// Called by the Replaying state's reader-open path when the local
-// WAL's earliest sequence is strictly past the server's last-seen
-// position (i.e. the server's belief is BEHIND the GC'd tail). The
-// transport synthesizes a wal.LossRecord IN MEMORY (Round-10 Finding 3:
-// NOT via wal.AppendLoss — see "Round-9 ack-cursor" series description
-// above for the rationale) and threads it into the Replayer via
-// ReplayerOptions.PrefixLoss; the Replayer surfaces it as the FIRST
+// Called from the `ReplayerOptions.OnPrefixLossEmitted` callback that
+// the Replaying state's reader-open path wires when constructing the
+// Replayer (Task 15.1 Step 1b.5; closure shape:
+// `func() { t.metrics.IncAckRegressionLoss() }`). The Replayer fires
+// this callback synchronously inside its FIRST `NextBatch()` call AFTER
+// the synthetic `wal.LossRecord{Reason: "ack_regression_after_gc"}`
+// has been appended as record[0] of the batch AND AFTER the in-Replayer
+// `prefixLossEmitted` gate has flipped to true. The transport synthesizes
+// the loss record IN MEMORY (Round-10 Finding 3: NOT via wal.AppendLoss —
+// see "Round-9 ack-cursor" series description above for the rationale)
+// inside `computeReplayStart` when the local WAL's earliest sequence is
+// strictly past the server's last-seen position (i.e. the server's
+// belief is BEHIND the GC'd tail) and threads it into the Replayer via
+// `ReplayerOptions.PrefixLoss`; the Replayer surfaces it as the FIRST
 // record of its FIRST batch so the receiver gets a single coalescable
 // loss notice ordered correctly relative to the surviving on-disk data,
 // instead of silent data drop.
 //
-// Counting semantics (round-12 Missing B): the counter is incremented
-// EXACTLY ONCE per `prefixLoss != nil` returned by
-// `computeReplayStart` AND consumed by the Replayer. Concretely the
-// emit site is the Replaying state's reader-construction path
-// IMMEDIATELY AFTER `transport.NewReplayer(..., ReplayerOptions{
-// PrefixLoss: prefixLoss, ...})` SUCCEEDS and BEFORE the Replayer
-// produces its first batch. The counter is NOT incremented when:
+// Counting semantics (round-13 Finding 5: emit-time, NOT compute-time).
+// The counter is incremented EXACTLY ONCE per batch that successfully
+// emits a synthetic PrefixLoss as record[0]. Concretely the call site
+// is the Replayer's `NextBatch()` method, immediately AFTER the
+// `prefixLossEmitted` gate has been set to true (defense-in-depth
+// against re-entry: the Replayer cannot re-fire the callback even if
+// `NextBatch` is somehow re-entered before the gate flip is observed).
+// **This relocates the increment from the prior compute-time site
+// (round-12: "IMMEDIATELY AFTER `transport.NewReplayer(...)` SUCCEEDS
+// and BEFORE the Replayer produces its first batch") to the emit-time
+// site so the counter reflects "marker landed in a batch the receiver
+// consumed" rather than "marker was scheduled to be consumed".** The
+// counter is NOT incremented when:
 //   - `computeReplayStart` returns `prefixLoss == nil` (cases B, D
 //     of the §"Loss between replay cursor and persisted ack" 4-case
 //     table — the no-gap and fully-GC'd-but-server-at-or-past-
-//     persisted shapes do not synthesize a marker);
+//     persisted shapes do not synthesize a marker; `OnPrefixLossEmitted`
+//     is only called by the Replayer when `r.opts.PrefixLoss != nil`);
 //   - `computeReplayStart` returns a non-nil err (case `wal_read_failure`
 //     or any other I/O failure — the helper surfaces the error to the
 //     Run loop which forces a state transition, and no Replayer
-//     materialises so no marker reaches the wire);
+//     materialises so the callback never fires);
 //   - the Replayer is constructed with `PrefixLoss == nil` (the
-//     Replayer never re-derives the marker on its own; it only
-//     surfaces what the transport explicitly handed it);
-//   - the Replaying state aborts after constructing the Replayer
-//     but before the Replayer flushes its first batch (e.g. the
-//     transport.Conn is closed by Run loop; in that case the
-//     marker is dropped on the floor along with the Replayer).
+//     Replayer never re-derives the marker on its own; the callback
+//     is never fired);
+//   - the Replaying state aborts after constructing the Replayer but
+//     BEFORE the Replayer's first `NextBatch` returns successfully
+//     (e.g. transport.Conn closed by Run loop, ctx cancelled, gen-aware
+//     Reader fails to open at the resolved start; the callback is
+//     invoked synchronously at the end of `NextBatch` so any pre-emit
+//     failure aborts before increment);
+//   - `OnPrefixLossEmitted` is left nil by the caller (the Replayer
+//     guards the callback invocation with `if r.opts.OnPrefixLossEmitted
+//     != nil` — production wiring MUST set it; the option is nil-safe
+//     so unit tests can construct a Replayer without the metric
+//     dependency).
 // In other words: this counter strictly counts "ack-regression-after-
-// GC loss markers SUCCESSFULLY scheduled into the wire path" — NOT
-// "computeReplayStart calls that returned a non-nil prefixLoss" and
-// NOT "Replayers constructed with PrefixLoss". The two-step
-// definition (helper returns non-nil PrefixLoss AND Replayer
-// consumes it) keeps the counter aligned with what the server
-// actually observes on the receive side. A nonzero divergence
-// between this counter and the receive-side `replay_loss_marker_total`
-// (server-side) family would indicate either (a) a transport bug
-// dropping markers on close, or (b) a server-side classification
-// bug; either is operator-actionable.
+// GC loss markers EMITTED INTO A BATCH BY THE REPLAYER" — strictly
+// tighter than the round-12 "scheduled into the wire path" definition.
+// A nonzero divergence between this counter and the receive-side
+// `replay_loss_marker_total` (server-side) family would indicate
+// either (a) a transport bug dropping markers on close (the marker
+// emitted but the batch never crossed the wire), or (b) a server-side
+// classification bug; either is operator-actionable.
 func (w *WTPMetrics) IncAckRegressionLoss() {
 	if w == nil || w.c == nil {
 		return
@@ -14157,6 +14632,47 @@ git commit -m "feat(metrics): cross-task parity test + shared classifier_bypass 
 - [ ] **Step 8: Roborev**
 
 Run `/roborev-design-review` and address findings.
+
+**Round-13 Missing B: `wtp_anomalous_ack_total` label-rename migration runbook (`beyond_wal_high_water_seq` → `server_ack_exceeds_local_seq`).**
+
+Round-12 Findings 4 + 5 introduced a 5-reason taxonomy for `wtp_anomalous_ack_total` (`stale_generation`, `unwritten_generation`, `server_ack_exceeds_local_seq`, `server_ack_exceeds_local_data`, `wal_read_failure`) — replacing the round-9 names (`stale_generation`, `future_generation`, `beyond_wal_high_water_seq`). The `future_generation` → `unwritten_generation`/`server_ack_exceeds_local_data` split was already documented in spec §"Migration from pre-split `future_generation`" (round-11). The remaining label rename — `beyond_wal_high_water_seq` → `server_ack_exceeds_local_seq` — has no migration documented yet because Round 12's Finding 5 was scoped to "rename the label so same-gen and cross-gen ack-overshoot use the parallel `server_ack_exceeds_local_*` shape." This Round-13 Missing B note closes that gap.
+
+**Migration shape — clean swap (NO dual-emit window).** Per the round-9 release notes, this metric series shipped in the same release as the WTP client client-side cursor model (no WTP client deployment ever observed `wtp_anomalous_ack_total{reason="beyond_wal_high_water_seq"}` in production); operators have not yet built dashboards or alerts against the round-9 / round-11 / round-12 label set. **The migration is therefore a clean swap** (compile-time symbol rename + `wtpAnomalousAckReasons*` table swap + parity-test update + spec/plan rename), NOT a backward-compatible dual-emit window. Operators consuming the round-9 / round-11 / round-12 prerelease names MUST update their dashboards and alerts in lock-step with the upgrade.
+
+The migration steps below are sequenced so the parity test (Task 22b Step 3 above) catches any drift between the metrics-side enumeration and the wiring-layer call sites. Each step's expected git diff is bounded so reviewers can confirm the swap is clean.
+
+**Migration steps:**
+
+1. **Rename the metrics-side constant.** In `internal/metrics/wtp.go`, replace the `WTPAnomalousAckReasonBeyondWALHighWaterSeq` constant with `WTPAnomalousAckReasonServerAckExceedsLocalSeq`. Update the string value: `"beyond_wal_high_water_seq"` → `"server_ack_exceeds_local_seq"`. Update the `wtpAnomalousAckReasonsValid` map and `wtpAnomalousAckReasonsEmitOrder` slice in lock-step. Confirm the `IncAnomalousAck` accessor docstring lists the five round-12 / round-13 reason names (this round-13 commit already updates the docstring at lines 13993-14005 above).
+
+2. **Sweep the wiring-layer call sites.** In `internal/store/watchtower/transport/conn.go` (or wherever `applyServerAckTuple` lives — see Task 15.1 step 1 + Task 17.X step 4), replace ALL `IncAnomalousAck("beyond_wal_high_water_seq")` calls with `IncAnomalousAck("server_ack_exceeds_local_seq")`. The same-gen `serverSeq > wal.WrittenDataHighWater(server.gen)` branch (the only Anomaly emitter for this reason) now mirrors the cross-gen `server_ack_exceeds_local_data` shape. Confirm the round-12 plan + spec invariant docstrings already use the new name (the round-12 commit + this round-13 commit established that — no further sweep needed).
+
+3. **Run the Task 22b parity test.** Re-run `go test ./internal/metrics/... ./internal/store/watchtower/transport/... -run TestApplyServerAckTuple_ReasonLabelsMatchValidator -count=1` (the parity test name documented in Task 22b Step 3 — adapt to the actual test name landed by the implementer). Expected: PASS — the `applyServerAckTuple` Anomaly emitter and the `wtpAnomalousAckReasonsValid` table agree on the five round-12 / round-13 reason names.
+
+4. **Update operator-facing docs.** This step is a documentation-only sweep:
+   - `docs/superpowers/specs/2026-04-18-wtp-client-design.md` §"Operational signals" → confirm the `wtp_anomalous_ack_total` row enumerates the five round-12 / round-13 reason names (NOT the round-9 `beyond_wal_high_water_seq` name). The round-12 commit already established this rename in the spec; this round-13 step is a re-grep to confirm.
+   - Internal runbooks: any markdown / wiki page that names the metric label MUST be updated in the same commit that lands the rename. Use `git grep -l beyond_wal_high_water_seq -- docs/` to find stragglers; expected outcome is zero matches after this round-13 commit lands. (The round-13 commit also greps the codebase to confirm zero remaining `beyond_wal_high_water_seq` references in non-historical files; see step 6 below.)
+
+5. **Acceptance criteria.** No backward compatibility shim is shipped (the prerelease design contract is explicit: round-9 / round-11 / round-12 names are NOT operator-visible). After the swap:
+   - `git grep beyond_wal_high_water_seq` returns ONLY historical references (commit messages, plan/spec change-log entries, comments documenting the rename — NOT live code or live operator-facing strings).
+   - `wtp_anomalous_ack_total{reason="server_ack_exceeds_local_seq"}` appears at zero on the always-emit Prometheus exposition (per Task 22a Step 3 zero-init contract — the new label MUST be in `wtpAnomalousAckReasonsEmitOrder` so it always emits).
+   - `wtp_anomalous_ack_total{reason="beyond_wal_high_water_seq"}` does NOT appear in the exposition (the old constant was removed from the table).
+
+6. **Rename-coverage assertion (test-time defense in depth).** Optional but recommended for ANY developer-facing dashboard regression detection: extend the Task 22b parity test (or add a sibling assertion in `wtp_parity_test.go`) to grep the running test binary's `wtpAnomalousAckReasonsValid` table for the absence of the round-9 string and the presence of the round-12 / round-13 string. Sketch:
+
+```go
+func TestAnomalousAckLabel_NoLegacyName(t *testing.T) {
+    valid := metrics.ValidWTPAnomalousAckReasons()  // returns the validation map
+    if _, ok := valid[metrics.WTPAnomalousAckReason("beyond_wal_high_water_seq")]; ok {
+        t.Errorf("wtpAnomalousAckReasonsValid still contains the round-9 legacy name `beyond_wal_high_water_seq`; the round-13 Missing B migration removed this — see plan §`Round-13 Missing B: wtp_anomalous_ack_total label-rename migration runbook`")
+    }
+    if _, ok := valid[metrics.WTPAnomalousAckReason("server_ack_exceeds_local_seq")]; !ok {
+        t.Errorf("wtpAnomalousAckReasonsValid is missing the round-12/round-13 name `server_ack_exceeds_local_seq`; add the constant per plan §`Round-13 Missing B`")
+    }
+}
+```
+
+This assertion is OPTIONAL because the broader parity test in Step 3 already catches drift between the wiring-layer call sites and the validation table. The targeted assertion exists as a cheap regression net for the specific round-13 rename.
 
 **Future enhancement (deferred — round-8 scope reduction):** Task 22b
 intentionally does NOT extend `wtp_ack_high_watermark` to a `(gen, seq)`
