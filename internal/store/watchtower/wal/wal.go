@@ -220,6 +220,33 @@ type WAL struct {
 	// Mutated only under w.mu.
 	perGenDataHighWater map[uint32]uint64
 
+	// perGenAnyReplayable is the set of generations for which AT LEAST ONE
+	// payload — RecordData OR loss marker — has been durably written to a
+	// segment whose header carries that generation. It is the guard the
+	// transport's computeReplayPlan uses (round-16 Finding 2) to decide
+	// whether to schedule a replay stage for an intermediate generation.
+	//
+	// perGenDataHighWater alone is insufficient: it is data-only, so a
+	// generation that exists on disk but contains ONLY loss markers (e.g.
+	// produced by overflow GC mid-session, with no subsequent Append before
+	// disconnect) reports ok=false from WrittenDataHighWater and would be
+	// silently dropped from the replay plan — leaving the server unaware of
+	// the gap. perGenAnyReplayable closes that hole by tracking the
+	// segment's generation key whenever any payload is written.
+	//
+	// Populated at Open() via a single recovery scan of every segment file
+	// (header generation is keyed for any framed payload, including loss
+	// markers and data records); updated by every successful Append for
+	// RecordData, every AppendLoss / appendLossLocked for loss markers.
+	// Header-only segments (segment header but no records) NEVER contribute
+	// — segment headers alone do not constitute a replayable payload.
+	//
+	// GC-aware: pruned by prunePerGenMapsLocked when the LAST surviving
+	// segment for a generation is removed, mirroring perGenDataHighWater.
+	//
+	// Mutated only under w.mu.
+	perGenAnyReplayable map[uint32]struct{}
+
 	// readers tracks open Reader instances so Append/AppendLoss can wake them
 	// via notifyReaders, and Close can drop their file handles. Mutated only
 	// under w.mu.
@@ -269,7 +296,7 @@ func Open(opts Options) (*WAL, error) {
 	if err := os.MkdirAll(segDir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir segments: %w", err)
 	}
-	w := &WAL{opts: opts, maxRec: maxRec, segDir: segDir, perGenDataHighWater: make(map[uint32]uint64)}
+	w := &WAL{opts: opts, maxRec: maxRec, segDir: segDir, perGenDataHighWater: make(map[uint32]uint64), perGenAnyReplayable: make(map[uint32]struct{})}
 	// Load the ack watermark BEFORE recover() so the overflow path (which
 	// can fire on the very first Append after Open) sees a consistent
 	// view: sealed segments fully covered by ack are silently GC'd, while
@@ -466,9 +493,14 @@ func (w *WAL) recover() error {
 			// of an encodeSeqGenFrame, so feeding their bytes to
 			// parseSeqGen would yield a junk seq (the sentinel bytes
 			// decode as ~0x0057545050... = a huge number) and corrupt
-			// the recovered high-watermark. Skip them here — they do
-			// not advance the user-record stream.
+			// the recovered high-watermark. Skip them for the
+			// data-watermark seed below — they do not advance the
+			// user-record stream — but DO seed perGenAnyReplayable
+			// (round-16 Finding 2): a loss marker is itself a payload
+			// the replayer must surface to the server, so its presence
+			// alone makes the segment's generation replayable.
 			if isLossMarker(payload) {
+				w.perGenAnyReplayable[hdr.Generation] = struct{}{}
 				continue
 			}
 			if seq, gen, ok := parseSeqGen(payload); ok {
@@ -483,6 +515,10 @@ func (w *WAL) recover() error {
 				if cur, exists := w.perGenDataHighWater[gen]; !exists || seq > cur {
 					w.perGenDataHighWater[gen] = seq
 				}
+				// A data record is a replayable payload too — seed
+				// perGenAnyReplayable on the header generation so
+				// recovery covers both kinds of payload uniformly.
+				w.perGenAnyReplayable[hdr.Generation] = struct{}{}
 			}
 		}
 	}
@@ -568,13 +604,16 @@ func (w *WAL) recover() error {
 	// state, not just the last segment scanned by scanForRecovery above.
 	// Only RecordData entries contribute; loss markers and header-only
 	// segments are excluded by isLossMarker / no-payload, matching the
-	// Append path's invariants.
+	// Append path's invariants. Also seed perGenAnyReplayable for any
+	// segment carrying ANY payload (data record OR loss marker) so the
+	// round-16 Finding 2 transport replay-plan accessor sees loss-only
+	// generations as replayable; header-only segments are excluded.
 	allSegments := make([]segmentEntry, 0, len(sealed)+len(inProgress))
 	allSegments = append(allSegments, sealed...)
 	allSegments = append(allSegments, inProgress...)
 	for _, e := range allSegments {
 		path := filepath.Join(w.segDir, e.name)
-		hi, hasUser, segGen, scanErr := segmentHighSeqAndGen(path, w.maxRec)
+		hi, hasUser, segGen, hasAnyPayload, scanErr := segmentHighSeqAndGen(path, w.maxRec)
 		if scanErr != nil {
 			// Skip individual segment errors here — the active scan
 			// path above already surfaced them on the live/last
@@ -583,6 +622,9 @@ func (w *WAL) recover() error {
 			// segment leaves its perGenDataHighWater entry absent
 			// (best-effort recovery).
 			continue
+		}
+		if hasAnyPayload {
+			w.perGenAnyReplayable[segGen] = struct{}{}
 		}
 		if !hasUser {
 			continue
@@ -673,7 +715,7 @@ func (w *WAL) WrittenDataHighWater(gen uint32) (uint64, bool, error) {
 // data-bearing record below that generation — either because the agent was
 // truly cold (Open scan filled perGenDataHighWater with nothing) or because
 // every lower-gen record has already been GC'd via a prior ack (the map
-// entry was removed by prunePerGenDataHighWaterLocked when its last segment
+// entry was removed by prunePerGenMapsLocked when its last segment
 // went away). Without this guard a server that legitimately advanced beyond
 // our last on-disk position — e.g., after the agent restored from a
 // snapshot whose WAL is older than the server's persisted state — would
@@ -696,6 +738,42 @@ func (w *WAL) HasDataBelowGeneration(threshold uint32) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// HasReplayableRecords reports whether the WAL holds AT LEAST ONE replayable
+// payload — RecordData OR loss marker — in a segment whose header carries
+// the requested generation. It is the guard the transport's
+// computeReplayPlan uses (round-16 Finding 2) to decide whether to schedule
+// a replay stage for an intermediate generation.
+//
+// WrittenDataHighWater alone is insufficient: it answers data-only, so a
+// generation that exists on disk but contains ONLY loss markers (e.g.,
+// produced by overflow GC mid-session, with no subsequent RecordData
+// Append before disconnect) returns ok=false there and would be silently
+// dropped from the replay plan — leaving the server unaware of the gap.
+// HasReplayableRecords closes that hole by including loss-marker-only
+// generations in the replay plan; the receiver then observes the gap on
+// reconnect.
+//
+// Returns true when the in-memory perGenAnyReplayable set contains gen,
+// false otherwise. The set entry is created when the very first payload
+// (data or loss) for a generation is written, and removed when the LAST
+// surviving segment for that generation is GC'd by
+// prunePerGenMapsLocked. Header-only segments (segment header but no
+// records) NEVER contribute — segment headers alone are not a replayable
+// payload.
+//
+// O(1) under the WAL lock. Used by the reconnect/replay-plan computation,
+// not the recv hot path. Returns ErrClosed if the WAL has been closed;
+// never returns any other error.
+func (w *WAL) HasReplayableRecords(gen uint32) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return false, ErrClosed
+	}
+	_, ok := w.perGenAnyReplayable[gen]
+	return ok, nil
 }
 
 // EarliestDataSequence returns the lowest RecordData sequence still on
@@ -972,6 +1050,12 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 	if cur, exists := w.perGenDataHighWater[gen]; !exists || uint64(seq) > cur {
 		w.perGenDataHighWater[gen] = uint64(seq)
 	}
+	// Maintain the round-16 per-gen any-replayable set so
+	// HasReplayableRecords(gen) is O(1) on the reconnect path. Both
+	// Append (this site) and AppendLoss/appendLossLocked seed this map
+	// using the segment generation. They use the same key (gen here ==
+	// w.current.Generation() at the point of write).
+	w.perGenAnyReplayable[gen] = struct{}{}
 	// totalBytes accounting: framed already includes the 12-byte seq/gen
 	// prefix; the framing layer adds the 8-byte frame header on top.
 	w.totalBytes += int64(8 + len(framed))
@@ -1109,6 +1193,13 @@ func (w *WAL) AppendLoss(loss LossRecord) error {
 		return w.failAmbiguousLocked("sync-loss", err)
 	}
 	w.totalBytes += int64(8 + len(payload))
+	// Seed perGenAnyReplayable on the SEGMENT generation (not loss.Generation):
+	// the round-16 Finding 2 contract keys this map by the segment header
+	// generation since that is the unit the GC pruner reasons about. When
+	// w.current already exists, its generation may differ from
+	// loss.Generation — the loss marker is still a payload that must be
+	// surfaced from the segment's generation on reconnect.
+	w.perGenAnyReplayable[w.current.Generation()] = struct{}{}
 	w.notifyReaders()
 	return nil
 }
@@ -1235,7 +1326,7 @@ func (w *WAL) MarkAcked(gen uint32, seq uint64) error {
 	removed := false
 	for _, e := range sealed {
 		path := filepath.Join(w.segDir, e.name)
-		hi, hasUser, segGen, err := segmentHighSeqAndGen(path, w.maxRec)
+		hi, hasUser, segGen, _, err := segmentHighSeqAndGen(path, w.maxRec)
 		if err != nil {
 			continue
 		}
@@ -1254,54 +1345,69 @@ func (w *WAL) MarkAcked(gen uint32, seq uint64) error {
 		if err := syncDir(w.segDir); err != nil {
 			return err
 		}
-		// Drop perGenDataHighWater entries for any generation whose last
-		// surviving segment was just GC'd. Without this WrittenDataHighWater
-		// would keep returning the pre-GC value for data no longer on disk.
-		w.prunePerGenDataHighWaterLocked()
+		// Drop perGenDataHighWater AND perGenAnyReplayable entries for
+		// any generation whose last surviving segment was just GC'd.
+		// Without this WrittenDataHighWater would keep returning the
+		// pre-GC value for data no longer on disk, and
+		// HasReplayableRecords would over-report empty generations to
+		// the replay-plan accessor.
+		w.prunePerGenMapsLocked()
 	}
 	return nil
 }
 
 // segmentHighSeqAndGen returns the highest user-record sequence number, a
-// flag indicating whether the segment held any non-loss-marker records, and
-// the segment's generation (read from the segment header). A scan is
-// required because the WAL does not maintain a per-segment index. Used by
-// MarkAcked GC and by overflow GC to identify safe-to-drop segments.
+// flag indicating whether the segment held any non-loss-marker records, the
+// segment's generation (read from the segment header), and a flag indicating
+// whether the segment held ANY payload (RecordData OR loss marker). A scan
+// is required because the WAL does not maintain a per-segment index. Used by
+// MarkAcked GC and by overflow GC to identify safe-to-drop segments, and by
+// the Open seed scan to populate perGenAnyReplayable (round-16 Finding 2).
+//
+// hasUser reports only RecordData records; hasAnyPayload also includes loss
+// markers — the two flags together let the Open scan distinguish a fully
+// header-only segment (both false, no replay stage needed) from a
+// loss-only segment (hasUser=false, hasAnyPayload=true, replay stage IS
+// needed so the receiver observes the gap).
 //
 // Errors during the read loop (truncation, CRC mismatch, corrupt frames)
 // are treated as "stop scanning" so a partially-written segment still
 // reports its highest known-good seq rather than failing outright; the
 // caller decides whether that's safe to act on. Errors opening the file
 // or parsing the header are propagated.
-func segmentHighSeqAndGen(path string, maxPayload int) (hiSeq uint64, hasUser bool, gen uint32, err error) {
+func segmentHighSeqAndGen(path string, maxPayload int) (hiSeq uint64, hasUser bool, gen uint32, hasAnyPayload bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, false, 0, err
+		return 0, false, 0, false, err
 	}
 	defer f.Close()
 	hdr, err := ReadSegmentHeader(f)
 	if err != nil {
-		return 0, false, 0, err
+		return 0, false, 0, false, err
 	}
 	gen = hdr.Generation
 	for {
 		payload, readErr := ReadRecord(f, maxPayload)
 		if readErr == io.EOF {
-			return hiSeq, hasUser, gen, nil
+			return hiSeq, hasUser, gen, hasAnyPayload, nil
 		}
 		if readErr != nil {
-			return hiSeq, hasUser, gen, nil
+			return hiSeq, hasUser, gen, hasAnyPayload, nil
 		}
 		// Loss markers are sentinel-framed, not seq/gen-framed; feeding
 		// their bytes to parseSeqGen would synthesize a junk seq from
 		// the LossMarkerSentinel prefix and prevent MarkAcked from ever
-		// freeing this segment. Skip them — they do not represent a
-		// user record and so contribute nothing to the high-watermark.
+		// freeing this segment. Skip them for hiSeq/hasUser — they do
+		// not represent a user record and so contribute nothing to the
+		// high-watermark — but mark hasAnyPayload (a loss marker IS a
+		// replayable payload, the receiver must observe the gap).
 		if isLossMarker(payload) {
+			hasAnyPayload = true
 			continue
 		}
 		if seq, _, ok := parseSeqGen(payload); ok {
 			hasUser = true
+			hasAnyPayload = true
 			if seq > hiSeq {
 				hiSeq = seq
 			}
@@ -1322,6 +1428,12 @@ func (w *WAL) appendLossLocked(loss LossRecord) error {
 		return err
 	}
 	w.totalBytes += int64(8 + len(payload))
+	// Mirror AppendLoss: a loss marker is a replayable payload, so the
+	// segment's generation joins perGenAnyReplayable. This is the overflow
+	// path — an in-flight Append rolled segments and emitted a loss marker
+	// for the dropped tail; the marker must surface to the receiver on
+	// reconnect.
+	w.perGenAnyReplayable[w.current.Generation()] = struct{}{}
 	w.notifyReaders()
 	return nil
 }
@@ -1426,11 +1538,11 @@ func (w *WAL) dropOldestLocked() (loss LossRecord, dropped bool, hasUserRange bo
 		// Surface as ambiguous via the caller's failAmbiguousLocked.
 		return LossRecord{}, true, false, syncErr
 	}
-	// Drop perGenDataHighWater for hdr.Generation if this was the last
-	// segment for that generation. Overflow GC is per-segment so we must
-	// re-scan the directory each time; the helper handles the empty-set
-	// case cheaply.
-	w.prunePerGenDataHighWaterLocked()
+	// Drop perGenDataHighWater AND perGenAnyReplayable for hdr.Generation
+	// if this was the last segment for that generation. Overflow GC is
+	// per-segment so we must re-scan the directory each time; the helper
+	// handles the empty-set case cheaply.
+	w.prunePerGenMapsLocked()
 	// hasUserRange == !first: we observed at least one real record.
 	hasUserRange = !first
 	return LossRecord{FromSequence: fromSeq, ToSequence: toSeq, Generation: hdr.Generation, Reason: "overflow"}, true, hasUserRange, nil
@@ -1467,20 +1579,26 @@ func (w *WAL) segmentFullyAckedLocked(segGen uint32, segHi uint64, hasUser bool)
 	return false
 }
 
-// prunePerGenDataHighWaterLocked drops perGenDataHighWater entries for any
-// generation that no longer has a surviving segment on disk. Invoked by every
-// GC path (MarkAcked, gcAckedLocked, dropOldestLocked) after at least one
-// segment was removed — without this the map would leak stale max-seqs for
-// fully-GC'd generations, and WrittenDataHighWater(oldGen) would keep
-// returning a value for data that no longer exists on disk.
+// prunePerGenMapsLocked drops perGenDataHighWater AND perGenAnyReplayable
+// entries for any generation that no longer has a surviving segment on disk.
+// Invoked by every GC path (MarkAcked, gcAckedLocked, dropOldestLocked) after
+// at least one segment was removed — without this the maps would leak stale
+// entries for fully-GC'd generations:
+//   - WrittenDataHighWater(oldGen) would keep returning a value for data
+//     that no longer exists on disk.
+//   - HasReplayableRecords(oldGen) would keep reporting true for a
+//     generation that has no remaining segments, causing the round-16
+//     transport replay-plan accessor to schedule an empty stage.
 //
-// Rather than track the GC'd file set across every removal path, we take the
+// Both maps share the same surviving-generation set, so they are pruned
+// together to keep the GC contract atomic and the cost amortised. Rather
+// than track the GC'd file set across every removal path, we take the
 // simpler tack of reading the post-GC directory listing once and computing
 // the set of surviving generations via segment header reads. The O(segments)
 // cost amortises well against GC passes that typically remove several
 // segments at a time, and avoids the invariant-fragile approach of threading
 // per-GC-path bookkeeping through three call sites. Caller MUST hold w.mu.
-func (w *WAL) prunePerGenDataHighWaterLocked() {
+func (w *WAL) prunePerGenMapsLocked() {
 	entries, err := os.ReadDir(w.segDir)
 	if err != nil {
 		// Directory-read failure here is not fatal: the map entries are a
@@ -1520,6 +1638,11 @@ func (w *WAL) prunePerGenDataHighWaterLocked() {
 	for gen := range w.perGenDataHighWater {
 		if _, stillOnDisk := surviving[gen]; !stillOnDisk {
 			delete(w.perGenDataHighWater, gen)
+		}
+	}
+	for gen := range w.perGenAnyReplayable {
+		if _, stillOnDisk := surviving[gen]; !stillOnDisk {
+			delete(w.perGenAnyReplayable, gen)
 		}
 	}
 }
@@ -1569,7 +1692,7 @@ func (w *WAL) gcAckedLocked() (int, error) {
 	removed := 0
 	for _, e := range sealed {
 		path := filepath.Join(w.segDir, e.name)
-		hi, hasUser, segGen, scanErr := segmentHighSeqAndGen(path, w.maxRec)
+		hi, hasUser, segGen, _, scanErr := segmentHighSeqAndGen(path, w.maxRec)
 		if scanErr != nil {
 			// segmentHighSeqAndGen surfaces only open/header errors;
 			// scan-loop errors are swallowed. Treat as fatal here:
@@ -1592,9 +1715,10 @@ func (w *WAL) gcAckedLocked() (int, error) {
 		if err := syncDir(w.segDir); err != nil {
 			return removed, err
 		}
-		// Drop perGenDataHighWater entries for generations whose last
-		// segment was just reclaimed by ack-driven GC.
-		w.prunePerGenDataHighWaterLocked()
+		// Drop perGenDataHighWater AND perGenAnyReplayable entries for
+		// generations whose last segment was just reclaimed by
+		// ack-driven GC.
+		w.prunePerGenMapsLocked()
 	}
 	return removed, nil
 }

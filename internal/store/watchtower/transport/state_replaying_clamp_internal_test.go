@@ -367,20 +367,24 @@ func TestComputeReplayStart_MixedGenerationsOnDisk_DetectsLossInOlderGeneration(
 // backlog because the Replaying state would only drain
 // persistedAck.Generation before handing off to Live.
 //
+// Round-16 Finding 2: the multi-gen probe loop calls HasReplayableRecords
+// (data OR loss marker) rather than WrittenDataHighWater (data only) so
+// loss-only generations also receive a stage. Sub-cases stub the new seam.
+//
 // Sub-cases:
 //
-//  1. happy_multi_gen_three_stages: persistedAck=(50, 1), gen=2 has data,
-//     gen=3 is empty (header only), gen=4 has data, gen=5 is the high gen
-//     with data. Expect 4 stages: (gen=1,start=51), (gen=2,start=0),
-//     (gen=4,start=0), (gen=5,start=0). gen=3 is skipped because
-//     WrittenDataHighWater(3) reports ok=false. The first stage's
-//     PrefixLoss is nil (Case B no-gap on gen=1 — earliestOnDisk=1 <=
-//     gapStart=51).
+//  1. happy_multi_gen_three_stages: persistedAck=(50, 1), gen=2 has a
+//     replayable payload, gen=3 is empty (header only), gen=4 has a
+//     payload, gen=5 is the high gen with a payload. Expect 4 stages:
+//     (gen=1,start=51), (gen=2,start=0), (gen=4,start=0), (gen=5,start=0).
+//     gen=3 is skipped because HasReplayableRecords(3) reports false. The
+//     first stage's PrefixLoss is nil (Case B no-gap on gen=1 —
+//     earliestOnDisk=1 <= gapStart=51).
 //
 //  2. only_persisted_gen_no_later: HighGeneration() == persistedAck.Generation.
 //     Expect exactly one stage covering persistedAck.Generation.
 //
-//  3. wal_failure_on_later_gen_propagates: WrittenDataHighWater(2) returns
+//  3. wal_failure_on_later_gen_propagates: HasReplayableRecords(2) returns
 //     an error. Expect computeReplayPlan to return that error wrapped.
 func TestComputeReplayPlan_MultiGenerationCoversLaterGens(t *testing.T) {
 	t.Run("happy_multi_gen_three_stages", func(t *testing.T) {
@@ -396,23 +400,20 @@ func TestComputeReplayPlan_MultiGenerationCoversLaterGens(t *testing.T) {
 			}
 			return 1, true, nil
 		})
-		// Multi-gen probe: gen=2 has data, gen=3 is empty (header only),
-		// gen=4 has data, gen=5 has data. Track call ordering to confirm
-		// the iteration goes in strictly ascending generation order.
+		// Multi-gen probe (round-16 Finding 2): gen=2/4/5 have replayable
+		// payloads (data OR loss marker), gen=3 is empty (header only).
+		// Track call ordering to confirm the iteration goes in strictly
+		// ascending generation order.
 		var probedGens []uint32
-		SetWALWrittenDataHighWaterFnForTest(env.tr, func(gen uint32) (uint64, bool, error) {
+		SetWALHasReplayableRecordsFnForTest(env.tr, func(gen uint32) (bool, error) {
 			probedGens = append(probedGens, gen)
 			switch gen {
-			case 2:
-				return 100, true, nil
+			case 2, 4, 5:
+				return true, nil
 			case 3:
-				return 0, false, nil
-			case 4:
-				return 75, true, nil
-			case 5:
-				return 25, true, nil
+				return false, nil
 			}
-			return 0, false, errors.New("unexpected gen")
+			return false, errors.New("unexpected gen")
 		})
 		SetWALHighGenerationFnForTest(env.tr, func() uint32 { return 5 })
 
@@ -466,9 +467,9 @@ func TestComputeReplayPlan_MultiGenerationCoversLaterGens(t *testing.T) {
 			return 1, true, nil
 		})
 		// HighGeneration == persistedAck.Generation: no later-gen probe should fire.
-		SetWALWrittenDataHighWaterFnForTest(env.tr, func(gen uint32) (uint64, bool, error) {
-			t.Errorf("WrittenDataHighWater MUST NOT be called when HighGeneration == persistedAck.Generation; got gen=%d", gen)
-			return 0, false, nil
+		SetWALHasReplayableRecordsFnForTest(env.tr, func(gen uint32) (bool, error) {
+			t.Errorf("HasReplayableRecords MUST NOT be called when HighGeneration == persistedAck.Generation; got gen=%d", gen)
+			return false, nil
 		})
 		SetWALHighGenerationFnForTest(env.tr, func() uint32 { return 7 })
 
@@ -499,11 +500,11 @@ func TestComputeReplayPlan_MultiGenerationCoversLaterGens(t *testing.T) {
 			return 1, true, nil
 		})
 		injErr := errors.New("simulated wal failure on gen=2")
-		SetWALWrittenDataHighWaterFnForTest(env.tr, func(gen uint32) (uint64, bool, error) {
+		SetWALHasReplayableRecordsFnForTest(env.tr, func(gen uint32) (bool, error) {
 			if gen == 2 {
-				return 0, false, injErr
+				return false, injErr
 			}
-			return 0, false, nil
+			return false, nil
 		})
 		SetWALHighGenerationFnForTest(env.tr, func() uint32 { return 5 })
 
@@ -520,4 +521,94 @@ func TestComputeReplayPlan_MultiGenerationCoversLaterGens(t *testing.T) {
 			t.Fatalf("stages: got %+v, want nil on error", stages)
 		}
 	})
+}
+
+// ===== Test #13 =====
+// TestComputeReplayPlan_LossOnlyGenerationProducesStage — round-16 Finding 2
+// regression. A generation whose only on-disk payload is a loss marker
+// (e.g., produced by overflow GC sealing the previous gen, then emitting
+// an ack-regression-after-gc loss into a fresh gen with no subsequent
+// data Append) MUST receive a replay stage. The pre-fix code called
+// WrittenDataHighWater (data-only) and silently dropped such a
+// generation, leaving the server unaware of the gap.
+//
+// Setup mirrors the Round-16 fix:
+//   - persistedAck=(40, 1)
+//   - HighGeneration() == 3
+//   - HasReplayableRecords(2) returns true (loss-only gen)
+//   - HasReplayableRecords(3) returns true (data-bearing gen)
+//
+// Expect 3 stages: (gen=1,start=41), (gen=2,start=0), (gen=3,start=0).
+// The pre-fix transport would emit only 2 stages (gen=1, gen=3) because
+// WrittenDataHighWater(2) is ok=false for a loss-only gen.
+func TestComputeReplayPlan_LossOnlyGenerationProducesStage(t *testing.T) {
+	env := newClampTestEnv(t, Options{
+		InitialAckTuple: &AckTuple{Sequence: 40, Generation: 1, Present: true},
+	})
+	SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+
+	// First-stage decision tree: Case B (no gap on gen=1).
+	SetWALEarliestDataSequenceFnForTest(env.tr, func(gen uint32) (uint64, bool, error) {
+		if gen != 1 {
+			t.Errorf("EarliestDataSequence: got gen=%d, want 1 (first stage only)", gen)
+		}
+		return 1, true, nil
+	})
+	// Round-16 Finding 2: the multi-gen probe loop MUST consult
+	// HasReplayableRecords (set on data OR loss). gen=2 is loss-only;
+	// pre-fix code (WrittenDataHighWater) would have returned ok=false
+	// here and silently skipped the stage.
+	var probedGens []uint32
+	SetWALHasReplayableRecordsFnForTest(env.tr, func(gen uint32) (bool, error) {
+		probedGens = append(probedGens, gen)
+		switch gen {
+		case 2, 3:
+			return true, nil
+		}
+		return false, errors.New("unexpected gen")
+	})
+	// Guard: WrittenDataHighWater MUST NOT be called inside the multi-gen
+	// probe loop after the round-16 fix. (It is still consulted elsewhere
+	// — e.g., the WARN-context emitter on Anomaly outcomes — but those
+	// paths don't fire in this test.)
+	SetWALWrittenDataHighWaterFnForTest(env.tr, func(gen uint32) (uint64, bool, error) {
+		t.Errorf("WrittenDataHighWater MUST NOT be called by multi-gen probe loop after round-16 Finding 2 fix; got gen=%d", gen)
+		return 0, false, nil
+	})
+	SetWALHighGenerationFnForTest(env.tr, func() uint32 { return 3 })
+
+	stages, err := ComputeReplayPlanForTest(env.tr,
+		AckCursor{Sequence: 40, Generation: 1},
+		AckCursor{Sequence: 40, Generation: 1})
+	if err != nil {
+		t.Fatalf("computeReplayPlan: %v", err)
+	}
+	if len(stages) != 3 {
+		t.Fatalf("stages: got %d, want 3 (gen=1 with start=41, gen=2 loss-only with start=0, gen=3 with start=0): %+v", len(stages), stages)
+	}
+	want := []ReplayStage{
+		{Generation: 1, StartSeq: 41, PrefixLoss: nil},
+		{Generation: 2, StartSeq: 0, PrefixLoss: nil},
+		{Generation: 3, StartSeq: 0, PrefixLoss: nil},
+	}
+	for i, w := range want {
+		if stages[i].Generation != w.Generation {
+			t.Errorf("stage[%d].Generation: got %d, want %d", i, stages[i].Generation, w.Generation)
+		}
+		if stages[i].StartSeq != w.StartSeq {
+			t.Errorf("stage[%d].StartSeq: got %d, want %d", i, stages[i].StartSeq, w.StartSeq)
+		}
+		if stages[i].PrefixLoss != nil {
+			t.Errorf("stage[%d].PrefixLoss: got %+v, want nil", i, *stages[i].PrefixLoss)
+		}
+	}
+	wantProbed := []uint32{2, 3}
+	if len(probedGens) != len(wantProbed) {
+		t.Fatalf("probedGens: got %v, want %v", probedGens, wantProbed)
+	}
+	for i, g := range wantProbed {
+		if probedGens[i] != g {
+			t.Errorf("probedGens[%d]: got %d, want %d", i, probedGens[i], g)
+		}
+	}
 }

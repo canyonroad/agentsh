@@ -48,6 +48,15 @@ func SetWALHasDataBelowGenerationFnForTest(t *Transport, fn func(threshold uint3
 	t.walHasDataBelowGenerationFn = fn
 }
 
+// SetWALHasReplayableRecordsFnForTest swaps the test seam used inside
+// computeReplayPlan's intermediate-generation loop (round-16 Finding 2)
+// to drive wal.HasReplayableRecords. Override to inject the
+// any-payload-present flag for a generation without having to write
+// records (data or loss) into a real WAL.
+func SetWALHasReplayableRecordsFnForTest(t *Transport, fn func(gen uint32) (bool, error)) {
+	t.walHasReplayableRecordsFn = fn
+}
+
 // SetAckAnomalyLimiterForTest swaps the rate limiter that gates the WARN
 // emitted on Anomaly outcomes. Tests pass either a permissive limiter
 // (rate.Inf) or a strict one (rate.Every(time.Hour)) to exercise the

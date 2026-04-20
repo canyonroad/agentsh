@@ -519,6 +519,215 @@ func TestWAL_HasDataBelowGenerationAfterClose(t *testing.T) {
 	}
 }
 
+// TestWAL_HasReplayableRecords covers the round-16 Finding 2 accessor:
+// the transport's computeReplayPlan uses it to decide whether an
+// intermediate generation needs a replay stage. WrittenDataHighWater
+// alone is insufficient because a generation on disk that contains ONLY
+// loss markers (e.g., produced by overflow GC mid-session) returns
+// ok=false there but MUST still get a replay stage so the receiver
+// observes the gap.
+func TestWAL_HasReplayableRecords(t *testing.T) {
+	// Fresh WAL: nothing written, every generation returns false.
+	dir := t.TempDir()
+	w, err := Open(Options{Dir: dir, SegmentSize: 4 * 1024, MaxTotalBytes: 64 * 1024, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	for _, gen := range []uint32{0, 1, 5, 1 << 20} {
+		got, err := w.HasReplayableRecords(gen)
+		if err != nil || got {
+			t.Errorf("fresh HasReplayableRecords(%d) = (%v, %v); want (false, nil)", gen, got, err)
+		}
+	}
+
+	// Append data in gen=2: gen=2 returns true; other generations stay false.
+	if _, err := w.Append(1, 2, []byte("g2-data")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		gen  uint32
+		want bool
+	}{
+		{0, false},
+		{1, false},
+		{2, true},
+		{3, false},
+	} {
+		got, err := w.HasReplayableRecords(tc.gen)
+		if err != nil {
+			t.Errorf("gen=%d err = %v, want nil", tc.gen, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("HasReplayableRecords(%d) = %v; want %v", tc.gen, got, tc.want)
+		}
+	}
+
+	// AppendLoss while w.current is gen=2 must seed perGenAnyReplayable
+	// keyed by the SEGMENT generation (gen=2), not by loss.Generation.
+	// Pass a distinct loss.Generation to make the keying observable.
+	if err := w.AppendLoss(LossRecord{FromSequence: 2, ToSequence: 5, Generation: 99, Reason: "ack_regression_after_gc"}); err != nil {
+		t.Fatal(err)
+	}
+	got2, err := w.HasReplayableRecords(2)
+	if err != nil || !got2 {
+		t.Errorf("after AppendLoss into gen=2 segment, HasReplayableRecords(2) = (%v, %v); want (true, nil)", got2, err)
+	}
+	got99, err := w.HasReplayableRecords(99)
+	if err != nil {
+		t.Fatalf("HasReplayableRecords(99) err = %v", err)
+	}
+	if got99 {
+		t.Errorf("HasReplayableRecords(99) = true; want false — set keys on segment generation, not loss.Generation")
+	}
+}
+
+// TestWAL_HasReplayableRecords_LossOnlyGeneration covers the
+// loss-only-on-disk case: a segment whose header advertises a generation
+// for which the only payload is a loss marker. WrittenDataHighWater
+// returns ok=false for this generation, but HasReplayableRecords must
+// return true so the transport's replay plan still schedules a stage.
+// Mirrors the hand-constructed scenario in
+// TestWAL_WrittenDataHighWaterIgnoresLossMarkers.
+func TestWAL_HasReplayableRecords_LossOnlyGeneration(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(Options{Dir: dir, SegmentSize: 4 * 1024, MaxTotalBytes: 64 * 1024, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for s := int64(1); s <= 3; s++ {
+		if _, err := w.Append(s, 1, []byte("d")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Hand-construct a gen=2 segment containing ONLY a loss marker. This is
+	// the on-disk shape produced when overflow GC seals the gen=1 segments
+	// and a subsequent loss-only batch lands without any RecordData appends.
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	segDir := filepath.Join(dir, "segments")
+	idx := uint64(time.Now().UnixNano())
+	seg, err := OpenSegment(segDir, idx, SegmentHeader{Version: SegmentVersion, Flags: FlagGenInit, Generation: 2}, 4*1024-int(SegmentHeaderSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lossPayload := encodeLossPayload(LossRecord{FromSequence: 0, ToSequence: 0, Generation: 2, Reason: "crc_corruption"})
+	if err := seg.WriteRecord(lossPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := seg.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := seg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Re-Open: the recovery scan must seed perGenAnyReplayable[2] from the
+	// hand-constructed loss-only segment.
+	w2, err := Open(Options{Dir: dir, SegmentSize: 4 * 1024, MaxTotalBytes: 64 * 1024, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+	// WrittenDataHighWater(2) returns ok=false (data-only contract).
+	if seq, ok, whErr := w2.WrittenDataHighWater(2); whErr != nil || ok || seq != 0 {
+		t.Errorf("WrittenDataHighWater(2) = (%d, %v, %v); want (0, false, nil)", seq, ok, whErr)
+	}
+	// HasReplayableRecords(2) MUST return true — that is the whole point
+	// of the round-16 Finding 2 accessor.
+	got, err := w2.HasReplayableRecords(2)
+	if err != nil || !got {
+		t.Errorf("loss-only gen=2 HasReplayableRecords = (%v, %v); want (true, nil)", got, err)
+	}
+	// gen=1 still has data segments → still true.
+	got1, err := w2.HasReplayableRecords(1)
+	if err != nil || !got1 {
+		t.Errorf("HasReplayableRecords(1) = (%v, %v); want (true, nil)", got1, err)
+	}
+}
+
+// TestWAL_HasReplayableRecords_HeaderOnlySegmentDoesNotSeed asserts that
+// opening a fresh WAL (which writes a header-only segment) does NOT seed
+// perGenAnyReplayable for that segment's generation. A segment header by
+// itself is not a replayable payload — it carries no data, no loss
+// marker — so the round-16 accessor must return false until at least one
+// real record is written or recovered.
+func TestWAL_HasReplayableRecords_HeaderOnlySegmentDoesNotSeed(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(Options{Dir: dir, SegmentSize: 4 * 1024, MaxTotalBytes: 64 * 1024, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	// Open() created a live segment with a header carrying gen=0 (default)
+	// but no records. perGenAnyReplayable must be empty.
+	for _, gen := range []uint32{0, 1, 2} {
+		got, err := w.HasReplayableRecords(gen)
+		if err != nil || got {
+			t.Errorf("header-only gen=%d HasReplayableRecords = (%v, %v); want (false, nil)", gen, got, err)
+		}
+	}
+}
+
+// TestWAL_HasReplayableRecords_AfterFullGC asserts the prune helper
+// drops perGenAnyReplayable entries for any generation whose last
+// surviving segment is GC'd. Mirrors the WrittenDataHighWater post-GC
+// behaviour — without this, computeReplayPlan would keep scheduling
+// empty stages for ack-collected generations.
+func TestWAL_HasReplayableRecords_AfterFullGC(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(Options{Dir: dir, SegmentSize: 256, MaxTotalBytes: 64 * 1024, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	// Fill several gen=1 segments to give MarkAcked-driven GC something
+	// to remove. Each Append rolls the segment when SegmentSize is hit.
+	payload := bytes.Repeat([]byte("x"), 64)
+	var lastSeq int64
+	for s := int64(1); s <= 16; s++ {
+		if _, err := w.Append(s, 1, payload); err != nil {
+			t.Fatal(err)
+		}
+		lastSeq = s
+	}
+	// Seed perGenAnyReplayable[1] is established. Now ack everything in
+	// gen=1 and roll into gen=2 to force the gen=1 segments to be GC'd.
+	if _, err := w.Append(1, 2, []byte("g2-d")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.MarkAcked(1, uint64(lastSeq)); err != nil {
+		t.Fatal(err)
+	}
+	// All gen=1 segments now removed by the GC pass; perGenAnyReplayable[1]
+	// must be pruned alongside perGenDataHighWater[1].
+	if got, err := w.HasReplayableRecords(1); err != nil || got {
+		t.Errorf("after full GC of gen=1, HasReplayableRecords(1) = (%v, %v); want (false, nil)", got, err)
+	}
+	// gen=2 still has its live segment with a data record — must remain true.
+	if got, err := w.HasReplayableRecords(2); err != nil || !got {
+		t.Errorf("HasReplayableRecords(2) = (%v, %v); want (true, nil)", got, err)
+	}
+}
+
+// TestWAL_HasReplayableRecordsAfterClose asserts the accessor surfaces
+// ErrClosed once the WAL has been closed (matches the
+// HasDataBelowGeneration / WrittenDataHighWater closed-state contract).
+func TestWAL_HasReplayableRecordsAfterClose(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(Options{Dir: dir, SegmentSize: 4 * 1024, MaxTotalBytes: 64 * 1024, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.HasReplayableRecords(1); !errors.Is(err, ErrClosed) {
+		t.Errorf("HasReplayableRecords after Close = %v; want ErrClosed", err)
+	}
+}
+
 // TestWAL_WrittenDataHighWaterIgnoresLossMarkers asserts loss markers do
 // NOT advance the per-gen data high-water (the same-shape attack as a
 // header-only generation).

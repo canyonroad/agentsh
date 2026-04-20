@@ -206,16 +206,17 @@ type Transport struct {
 	ackAnomalyLimiter *rate.Limiter
 
 	// walMarkAckedFn / walWrittenDataHighWaterFn / walEarliestDataSequenceFn /
-	// walHighGenerationFn / walHasDataBelowGenerationFn are seams the helper
-	// calls instead of t.wal.* directly. New() wires them to t.wal.* when
-	// wal != nil and to safe stubs (no-op success / ok=false / 0 / false)
-	// otherwise. Test code overrides via SetWAL*FnForTest in
-	// seams_export_test.go to inject error paths.
+	// walHighGenerationFn / walHasDataBelowGenerationFn / walHasReplayableRecordsFn
+	// are seams the helper calls instead of t.wal.* directly. New() wires
+	// them to t.wal.* when wal != nil and to safe stubs (no-op success /
+	// ok=false / 0 / false) otherwise. Test code overrides via
+	// SetWAL*FnForTest in seams_export_test.go to inject error paths.
 	walMarkAckedFn              func(gen uint32, seq uint64) error
 	walWrittenDataHighWaterFn   func(gen uint32) (uint64, bool, error)
 	walEarliestDataSequenceFn   func(gen uint32) (uint64, bool, error)
 	walHighGenerationFn         func() uint32
 	walHasDataBelowGenerationFn func(threshold uint32) (bool, error)
+	walHasReplayableRecordsFn   func(gen uint32) (bool, error)
 
 	// rejectReason is populated when the server rejects the session
 	// (SessionAck.accepted=false). Surfaced via RejectReason().
@@ -263,12 +264,14 @@ func New(opts Options) (*Transport, error) {
 		t.walEarliestDataSequenceFn = t.wal.EarliestDataSequence
 		t.walHighGenerationFn = t.wal.HighGeneration
 		t.walHasDataBelowGenerationFn = t.wal.HasDataBelowGeneration
+		t.walHasReplayableRecordsFn = t.wal.HasReplayableRecords
 	} else {
 		t.walMarkAckedFn = func(uint32, uint64) error { return nil }
 		t.walWrittenDataHighWaterFn = func(uint32) (uint64, bool, error) { return 0, false, nil }
 		t.walEarliestDataSequenceFn = func(uint32) (uint64, bool, error) { return 0, false, nil }
 		t.walHighGenerationFn = func() uint32 { return 0 }
 		t.walHasDataBelowGenerationFn = func(uint32) (bool, error) { return false, nil }
+		t.walHasReplayableRecordsFn = func(uint32) (bool, error) { return false, nil }
 	}
 	return t, nil
 }
@@ -645,16 +648,20 @@ func (t *Transport) computeReplayPlan(remoteReplayCursor AckCursor, persistedAck
 	// Iterate strictly past persistedAck.Generation. HighGeneration() is
 	// the highest generation the WAL has observed (set from segment
 	// headers); per Task 14b the Reader is generation-scoped, so we probe
-	// each later gen in turn and skip those with no data-bearing records
-	// (e.g. an empty rolled generation that only has a header). Bail on
-	// uint32 wraparound: persistedAck.Generation == math.MaxUint32 is a
-	// degenerate state but skipping the loop is the safe action.
+	// each later gen in turn and skip those with no replayable records
+	// (round-16 Finding 2: a generation that contains ONLY loss markers
+	// — produced by overflow GC mid-session, with no subsequent Append
+	// before disconnect — must still get a stage so the receiver observes
+	// the gap; using HasReplayableRecords here, not WrittenDataHighWater,
+	// keeps loss-only generations on the replay schedule). Bail on uint32
+	// wraparound: persistedAck.Generation == math.MaxUint32 is a degenerate
+	// state but skipping the loop is the safe action.
 	for gen := persistedAck.Generation + 1; gen <= highGen && gen > persistedAck.Generation; gen++ {
-		_, haveData, walErr := t.walWrittenDataHighWaterFn(gen)
+		haveAny, walErr := t.walHasReplayableRecordsFn(gen)
 		if walErr != nil {
-			return nil, fmt.Errorf("computeReplayPlan: wal.WrittenDataHighWater(gen=%d): %w", gen, walErr)
+			return nil, fmt.Errorf("computeReplayPlan: wal.HasReplayableRecords(gen=%d): %w", gen, walErr)
 		}
-		if !haveData {
+		if !haveAny {
 			continue
 		}
 		stages = append(stages, ReplayStage{
