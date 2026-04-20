@@ -315,12 +315,17 @@ func setupWrapInterception(ctx context.Context, c client.CLIClient, sessID strin
 func buildWrapEnv(base []string, sessionID string, serverAddr string, bypassShellShim bool) []string {
 	env := make([]string, 0, len(base)+3)
 	for _, e := range base {
+		key, _, found := strings.Cut(e, "=")
+		if !found {
+			env = append(env, e)
+			continue
+		}
 		switch {
-		case strings.HasPrefix(e, "AGENTSH_SESSION_ID="):
+		case strings.EqualFold(key, "AGENTSH_SESSION_ID"):
 			continue
-		case strings.HasPrefix(e, "AGENTSH_SERVER="):
+		case strings.EqualFold(key, "AGENTSH_SERVER"):
 			continue
-		case strings.HasPrefix(e, "AGENTSH_IN_SESSION="):
+		case strings.EqualFold(key, "AGENTSH_IN_SESSION"):
 			continue
 		default:
 			env = append(env, e)

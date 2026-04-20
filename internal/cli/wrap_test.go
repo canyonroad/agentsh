@@ -380,6 +380,56 @@ func TestBuildWrapEnv_ReplacesInheritedAgentshVarsWhenBypassEnabled(t *testing.T
 	assert.Equal(t, 0, envMap["AGENTSH_SERVER=http://stale"])
 }
 
+func TestBuildWrapEnv_StripsInheritedMixedCaseAgentshVarsWhenBypassDisabled(t *testing.T) {
+	env := buildWrapEnv([]string{
+		"PATH=/usr/bin",
+		"agentsh_session_id=stale-session",
+		"Agentsh_Server=http://stale",
+		"agentsh_in_session=1",
+	}, "sess-123", "http://127.0.0.1:18080", false)
+
+	for _, e := range env {
+		if e == "agentsh_in_session=1" {
+			t.Fatal("did not expect mixed-case inherited AGENTSH_IN_SESSION when bypass is disabled")
+		}
+		if e == "agentsh_session_id=stale-session" {
+			t.Fatal("did not expect mixed-case stale AGENTSH_SESSION_ID to remain in env")
+		}
+		if e == "Agentsh_Server=http://stale" {
+			t.Fatal("did not expect mixed-case stale AGENTSH_SERVER to remain in env")
+		}
+	}
+
+	envMap := make(map[string]int)
+	for _, e := range env {
+		envMap[e]++
+	}
+	assert.Equal(t, 1, envMap["AGENTSH_SESSION_ID=sess-123"])
+	assert.Equal(t, 1, envMap["AGENTSH_SERVER=http://127.0.0.1:18080"])
+	assert.Equal(t, 0, envMap["AGENTSH_IN_SESSION=1"])
+}
+
+func TestBuildWrapEnv_ReplacesInheritedMixedCaseAgentshVarsWhenBypassEnabled(t *testing.T) {
+	env := buildWrapEnv([]string{
+		"PATH=/usr/bin",
+		"agentsh_session_id=stale-session",
+		"Agentsh_Server=http://stale",
+		"agentsh_in_session=1",
+	}, "sess-123", "http://127.0.0.1:18080", true)
+
+	envMap := make(map[string]int)
+	for _, e := range env {
+		envMap[e]++
+	}
+
+	assert.Equal(t, 1, envMap["AGENTSH_SESSION_ID=sess-123"])
+	assert.Equal(t, 1, envMap["AGENTSH_SERVER=http://127.0.0.1:18080"])
+	assert.Equal(t, 1, envMap["AGENTSH_IN_SESSION=1"])
+	assert.Equal(t, 0, envMap["agentsh_session_id=stale-session"])
+	assert.Equal(t, 0, envMap["Agentsh_Server=http://stale"])
+	assert.Equal(t, 0, envMap["agentsh_in_session=1"])
+}
+
 func TestWrapLaunchConfig_EnvContainsSessionAndWrapper(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("wrap interception requires Linux or macOS")
