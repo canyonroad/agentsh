@@ -82,12 +82,20 @@ type Reader struct {
 	lastGoodGenSet bool // true once lastGoodGen reflects a real seen generation.
 	// nextSeq is the lowest user sequence the Reader will surface; records
 	// with Sequence < nextSeq are dropped from RecordData yields. Set by
-	// NewReader from the inclusive `start` argument: the first RecordData
-	// returned has Sequence == start (or later, if start was acked-past).
-	// Pass start=0 to receive every user record from the beginning of the
-	// on-disk stream. Loss records are NOT filtered by nextSeq — the
-	// transport must propagate every loss notice regardless of cursor.
+	// NewReader from ReaderOptions.Start: the first RecordData returned has
+	// Sequence == Start (or later, if Start was acked-past). Pass Start=0 to
+	// receive every user record from the beginning of the on-disk stream.
+	// Loss records are NOT filtered by nextSeq — the transport must
+	// propagate every loss notice regardless of cursor.
 	nextSeq uint64
+	// readerGen is the generation this Reader is scoped to. Set from
+	// ReaderOptions.Generation; surfaced via Generation(). Used at the
+	// segment-iteration layer in nextLocked: segments whose SegmentHeader
+	// .Generation differs from readerGen are skipped without record
+	// decoding. Per Task 14b, this prevents a same-seq record from a
+	// different generation from being surfaced when the per-record
+	// nextSeq filter would otherwise pass it.
+	readerGen uint32
 	// lastEmittedSeq is the highest user sequence successfully returned to
 	// a caller so far, monotonic across the Reader's lifetime (does NOT
 	// reset on a generation change, unlike lastGoodSeq). Surfaced via
@@ -99,33 +107,64 @@ type Reader struct {
 	closed         bool
 }
 
-// NewReader returns a Reader that surfaces RecordData entries with sequence
-// >= start (i.e. the first record returned has Sequence == start or later).
-// Pass start=0 to receive every user record from the beginning of the
-// on-disk stream — the same behaviour Task 14 shipped. RecordLoss entries
-// are NOT filtered by start; the transport must propagate every loss notice
-// regardless of the caller's cursor.
+// ReaderOptions configures a new Reader. Generation pins the Reader to one
+// WAL generation: segments whose SegmentHeader.Generation differs from
+// Generation are skipped at the segment-iteration layer in nextLocked,
+// BEFORE per-record decoding. Per Task 14b this is the only thing that
+// keeps a same-seq RecordData from a different generation from being
+// surfaced through the per-record nextSeq filter — the filter is a single
+// uint64 compare and cannot distinguish (gen=1, seq=5) from (gen=2, seq=5).
 //
-// The on-disk stream is still walked in segment-index order; records that
-// predate start are read off the disk and dropped on the floor by Next /
-// TryNext. This keeps the API simple at the cost of skipping work — fast-
-// forward by segment-index hint is left as a future optimization.
+// Generation MUST match the value SegmentHeader.Generation will carry for
+// the run the caller wants to read; type uint32 mirrors
+// SegmentHeader.Generation, Record.Generation, and the
+// WrittenDataHighWater(gen uint32) accessor exactly so callers do not need
+// to widen.
 //
-// Callers replaying after an ack pass start = ackHighSeq + 1 to skip the
+// Start is the first user sequence the Reader will surface; RecordData
+// entries with Sequence < Start are dropped without decoding (loss markers
+// are NOT filtered by Start — the transport must propagate every loss
+// notice regardless of cursor).
+type ReaderOptions struct {
+	Generation uint32
+	Start      uint64
+}
+
+// NewReader returns a Reader scoped to opts.Generation that surfaces
+// RecordData entries with sequence >= opts.Start (i.e. the first record
+// returned has Sequence == opts.Start or later). Pass Start=0 to receive
+// every user record in opts.Generation from the beginning of the on-disk
+// stream. RecordLoss entries are NOT filtered by Start; the transport
+// must propagate every loss notice regardless of the caller's cursor.
+//
+// The on-disk stream is still walked in segment-index order; segments
+// whose header generation differs from opts.Generation are skipped at the
+// segment-iteration layer in nextLocked, BEFORE record decoding (see
+// ReaderOptions for why a per-record-only filter would not suffice).
+// Records inside an in-generation segment that predate opts.Start are
+// read off the disk and dropped on the floor by Next / TryNext.
+//
+// Callers replaying after an ack pass Start = ackHighSeq + 1 to skip the
 // already-acknowledged tail (Task 16's Replayer enforces this idiom).
-func (w *WAL) NewReader(start uint64) (*Reader, error) {
+func (w *WAL) NewReader(opts ReaderOptions) (*Reader, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
 		return nil, ErrClosed
 	}
-	r := &Reader{w: w, notify: make(chan struct{}, 1), nextSeq: start}
+	r := &Reader{w: w, notify: make(chan struct{}, 1), nextSeq: opts.Start, readerGen: opts.Generation}
 	if err := r.rescanLocked(); err != nil {
 		return nil, err
 	}
 	w.readers = append(w.readers, r)
 	return r, nil
 }
+
+// Generation returns the generation this Reader is scoped to (set from
+// ReaderOptions.Generation at NewReader time). Surfaced for callers like
+// the Replayer that need to capture an entry-time per-generation tail
+// watermark via wal.WrittenDataHighWater(rdr.Generation()).
+func (r *Reader) Generation() uint32 { return r.readerGen }
 
 // rescanLocked refreshes the segments queue from disk, picking up any segment
 // files added since the last scan (or since NewReader if this is the first
@@ -279,6 +318,22 @@ func (r *Reader) WALHighWaterSequence() uint64 {
 	return r.w.highSeq
 }
 
+// WrittenDataHighWater returns the per-generation data-bearing high-water
+// for this Reader's pinned generation, captured under the WAL lock. It is
+// the entry-time tail watermark the Replayer drains toward (Task 14b):
+// every RecordData with (gen=r.Generation(), seq <= seq) is guaranteed to
+// have been on disk at the moment of the call and visible to the Reader.
+//
+// Returns ok=false if no RecordData has ever been written for the
+// Reader's generation (e.g. a fresh generation that only has a segment
+// header). Errors only on a closed WAL — the Replayer surfaces this
+// directly because there is no replay to perform if the underlying WAL is
+// gone. Mirrors the contract of WAL.WrittenDataHighWater(gen) (the Reader
+// just supplies the gen for the caller).
+func (r *Reader) WrittenDataHighWater() (uint64, bool, error) {
+	return r.w.WrittenDataHighWater(r.readerGen)
+}
+
 // nextLocked drives the segment-walk loop and returns one of:
 //
 //	(rec, true,  nil)  — a record was decoded
@@ -345,6 +400,19 @@ func (r *Reader) nextLocked() (Record, bool, error) {
 			if err != nil {
 				_ = f.Close()
 				return Record{}, false, err
+			}
+			// Per Task 14b: skip segments whose header generation differs
+			// from the Reader's pinned generation BEFORE any record decode.
+			// The per-record nextSeq filter cannot distinguish (gen=A, seq=N)
+			// from (gen=B, seq=N), so without this segment-level skip a
+			// gen=B record at the same seq as a wanted gen=A record could
+			// silently surface. Loss markers in the wrong-gen segment are
+			// also skipped — they are gen-scoped and only meaningful to a
+			// reader pinned to that generation. (A reader scoped to a
+			// different generation never asked for that loss notice.)
+			if hdr.Generation != r.readerGen {
+				_ = f.Close()
+				continue
 			}
 			r.current = f
 			r.curHdr = hdr

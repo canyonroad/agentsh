@@ -76,7 +76,7 @@ func TestWAL_CRCFailureEmitsCoarseLossRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer w2.Close()
-	r, err := w2.NewReader(0)
+	r, err := w2.NewReader(ReaderOptions{Generation: 0, Start: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestReader_CRCInLaterSegmentReportsContinuingSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer w2.Close()
-	r, err := w2.NewReader(0)
+	r, err := w2.NewReader(ReaderOptions{Generation: 0, Start: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestReader_SurfacesAppendedLossMarker(t *testing.T) {
 	if _, err := w.Append(1, 0, []byte("b")); err != nil {
 		t.Fatal(err)
 	}
-	r, err := w.NewReader(0)
+	r, err := w.NewReader(ReaderOptions{Generation: 0, Start: 0})
 	if err != nil {
 		t.Fatal(err)
 	}

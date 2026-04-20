@@ -30,6 +30,140 @@ func openTestWAL(t *testing.T) *wal.WAL {
 	return w
 }
 
+// TestReplayer_TailIsTuple_HardStopsOnSeqExceedingTail regresses the Task 14b
+// tail-tuple termination contract. Setup: append seqs 1..3 in gen=1, drive
+// MarkAcked(1, 2) so the WAL state has gen=1 RecordData up to seq=3 with
+// ack at seq=2. Open a Reader scoped to gen=1 with Start=3. Construct a
+// Replayer; assert Tail() == (1, 3). Append seqs 4 and 5 in gen=1 (post-entry
+// — must NOT extend replay) and seq=1 in gen=2 (cross-gen — must NOT extend
+// replay either). Drain via NextBatch.
+//
+// Assertions:
+//  - First record surfaced is gen=1 seq=3 (within-window).
+//  - At most one over-tail RecordData surfaces (the boundary record), and if
+//    it does it must be gen=1 seq=4.
+//  - No record with Generation=2 is surfaced (the segment-iteration filter
+//    in Reader blocks gen=2 segments entirely).
+//  - done=true is returned.
+//  - LastReplayedSequence() returns (1, ∈{3,4}).
+//  - Tail() unchanged at (1, 3).
+//
+// CRITICAL: under the round-12 design (scalar tailSeq=3), the Replayer would
+// compare rec.Sequence > 3 and surface gen=2's seq=4 as a within-window record
+// (the scalar compare ignores generation), then surface gen=2's seq=4 BEFORE
+// returning done=true — silently leaking a different-generation record into
+// the replay window. The tuple compare blocks this.
+func TestReplayer_TailIsTuple_HardStopsOnSeqExceedingTail(t *testing.T) {
+	w := openTestWAL(t)
+
+	// Append gen=1 seqs 1..3, then ack through seq=2.
+	for i := int64(1); i <= 3; i++ {
+		if _, err := w.Append(i, 1, []byte{byte(i)}); err != nil {
+			t.Fatalf("append gen=1 seq=%d: %v", i, err)
+		}
+	}
+	if err := w.MarkAcked(1, 2); err != nil {
+		t.Fatalf("MarkAcked(1, 2): %v", err)
+	}
+
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 3})
+	if err != nil {
+		t.Fatalf("NewReader gen=1 start=3: %v", err)
+	}
+	defer rdr.Close()
+
+	r, err := transport.NewReplayer(rdr, transport.ReplayerOptions{
+		MaxBatchRecords: 100,
+		MaxBatchBytes:   16 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("NewReplayer: %v", err)
+	}
+	tailGen, tailSeq := r.Tail()
+	if tailGen != 1 || tailSeq != 3 {
+		t.Fatalf("Tail: got (%d, %d), want (1, 3)", tailGen, tailSeq)
+	}
+
+	// Inject post-entry appends: gen=1 seqs 4, 5 (must NOT extend replay
+	// past the boundary record); then roll to gen=2 seq=1 (cross-gen —
+	// must NOT surface at all).
+	if _, err := w.Append(4, 1, []byte{0x44}); err != nil {
+		t.Fatalf("append post-entry gen=1 seq=4: %v", err)
+	}
+	if _, err := w.Append(5, 1, []byte{0x55}); err != nil {
+		t.Fatalf("append post-entry gen=1 seq=5: %v", err)
+	}
+	if _, err := w.Append(1, 2, []byte{0x21}); err != nil {
+		t.Fatalf("append post-entry gen=2 seq=1: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	type seenRec struct {
+		gen uint32
+		seq uint64
+	}
+	var seen []seenRec
+	for {
+		batch, done, err := r.NextBatch(ctx)
+		if err != nil {
+			t.Fatalf("NextBatch: %v", err)
+		}
+		for _, rec := range batch.Records {
+			if rec.Kind != wal.RecordData {
+				continue
+			}
+			seen = append(seen, seenRec{gen: rec.Generation, seq: rec.Sequence})
+		}
+		if done {
+			break
+		}
+	}
+
+	if len(seen) == 0 {
+		t.Fatalf("no RecordData surfaced; want at least gen=1 seq=3")
+	}
+	// First record MUST be gen=1 seq=3 (the within-window record).
+	if seen[0].gen != 1 || seen[0].seq != 3 {
+		t.Fatalf("first surfaced: got (%d, %d), want (1, 3)", seen[0].gen, seen[0].seq)
+	}
+	// No gen=2 record may surface — the segment-iteration filter must skip
+	// the gen=2 segment entirely.
+	for _, s := range seen {
+		if s.gen == 2 {
+			t.Fatalf("gen=2 record surfaced: (%d, %d) — segment-iteration filter must skip gen=2 segments; full=%v", s.gen, s.seq, seen)
+		}
+	}
+	// At most one over-tail RecordData (gen=1 seq=4).
+	overTail := 0
+	for _, s := range seen {
+		if s.gen == 1 && s.seq > 3 {
+			overTail++
+			if s.seq != 4 {
+				t.Fatalf("over-tail seq: got %d, want 4 (only seq=4 may surface as the boundary record); seen=%v", s.seq, seen)
+			}
+		}
+	}
+	if overTail > 1 {
+		t.Fatalf("over-tail count: got %d, want <=1; seen=%v", overTail, seen)
+	}
+	// LastReplayedSequence is (1, 3) or (1, 4) depending on whether the
+	// boundary record surfaced.
+	lrGen, lrSeq := r.LastReplayedSequence()
+	if lrGen != 1 {
+		t.Fatalf("LastReplayedSequence gen: got %d, want 1", lrGen)
+	}
+	if !(lrSeq == 3 || lrSeq == 4) {
+		t.Fatalf("LastReplayedSequence seq: got %d, want 3 or 4 (boundary)", lrSeq)
+	}
+	// Tail must NOT have advanced from post-entry appends.
+	tg, ts := r.Tail()
+	if tg != 1 || ts != 3 {
+		t.Fatalf("Tail post-replay: got (%d, %d), want (1, 3) — post-entry appends must NOT advance the snapshot", tg, ts)
+	}
+}
+
 // TestReplayer_StopsAtTailWatermark verifies the hard-stop contract:
 // RecordData with seq > tailSeq terminates replay immediately. Three
 // records are appended, seq=2 is acked, one more (seq=3) is appended past
@@ -68,18 +202,21 @@ func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 		t.Fatalf("append 3: %v", err)
 	}
 
-	rdr, err := w.NewReader(3) // start = ack+1; first emit must be seq>=3
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 0, Start: 3}) // start = ack+1; first emit must be seq>=3
 	if err != nil {
 		t.Fatalf("new reader: %v", err)
 	}
 	defer rdr.Close()
 
-	r := transport.NewReplayer(rdr, transport.ReplayerOptions{
+	r, err := transport.NewReplayer(rdr, transport.ReplayerOptions{
 		MaxBatchRecords: 100,
 		MaxBatchBytes:   16 * 1024,
 	})
-	if got, want := r.TailSequence(), uint64(3); got != want {
-		t.Fatalf("tail seq: got %d, want %d", got, want)
+	if err != nil {
+		t.Fatalf("NewReplayer: %v", err)
+	}
+	if _, got := r.Tail(); got != uint64(3) {
+		t.Fatalf("tail seq: got %d, want %d", got, 3)
 	}
 
 	// Inject post-entry records. tailSeq was captured at NewReplayer time
@@ -149,22 +286,22 @@ func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 		if !haveData || lastDataSeq != 4 {
 			t.Fatalf("boundary record placement: last RecordData in final batch was seq=%d (haveData=%v), want seq=4 (the boundary record must be the LAST RecordData in the final batch)", lastDataSeq, haveData)
 		}
-		if got := r.LastReplayedSequence(); got != 4 {
+		if _, got := r.LastReplayedSequence(); got != 4 {
 			t.Fatalf("LastReplayedSequence: got %d, want 4 (boundary record was seq=4)", got)
 		}
 	} else {
 		// No boundary record surfaced — Reader observed ok=false before
 		// reading seq=4. LastReplayedSequence must reflect the last
 		// within-window emission (seq=3).
-		if got := r.LastReplayedSequence(); got != 3 {
+		if _, got := r.LastReplayedSequence(); got != 3 {
 			t.Fatalf("LastReplayedSequence: got %d, want 3 (no boundary record surfaced)", got)
 		}
 	}
 
-	// TailSequence is sampled once at NewReplayer time and MUST NOT
+	// Tail is sampled once at NewReplayer time and MUST NOT
 	// advance with post-entry appends.
-	if got, want := r.TailSequence(), uint64(3); got != want {
-		t.Fatalf("tail seq: got %d, want %d (the post-entry append must NOT advance tailSeq)", got, want)
+	if _, got := r.Tail(); got != uint64(3) {
+		t.Fatalf("tail seq: got %d, want %d (the post-entry append must NOT advance tailSeq)", got, 3)
 	}
 }
 
@@ -190,7 +327,7 @@ func TestReplayer_TerminatesUnderConcurrentAppends(t *testing.T) {
 		}
 	}
 
-	rdr, err := w.NewReader(0)
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 0})
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -203,12 +340,15 @@ func TestReplayer_TerminatesUnderConcurrentAppends(t *testing.T) {
 	// loop will never exit because the appender keeps the WAL tail
 	// moving ahead of TryNext, so NextBatch never returns and the test
 	// times out.
-	rep := transport.NewReplayer(rdr, transport.ReplayerOptions{
+	rep, err := transport.NewReplayer(rdr, transport.ReplayerOptions{
 		MaxBatchRecords: 0,
 		MaxBatchBytes:   0,
 	})
-	if got := rep.TailSequence(); got != 10 {
-		t.Fatalf("TailSequence: got %d, want 10", got)
+	if err != nil {
+		t.Fatalf("NewReplayer: %v", err)
+	}
+	if _, got := rep.Tail(); got != 10 {
+		t.Fatalf("Tail seq: got %d, want 10", got)
 	}
 
 	// Spin up an appender that keeps writing past tailSeq for the
@@ -277,7 +417,7 @@ func TestReplayer_TerminatesUnderConcurrentAppends(t *testing.T) {
 	// actually fires (replayer drains seed and exits via ok=false
 	// before appender writes anything), so we tolerate maxSeqSeen
 	// up to tailSeq+1 but reject anything further.
-	tailSeq := rep.TailSequence()
+	tailSeq := func() uint64 { _, s := rep.Tail(); return s }()
 	if maxSeqSeen > tailSeq+1 {
 		t.Fatalf("hard-stop violated: maxSeqSeen=%d, tailSeq=%d (must be <= tailSeq+1)", maxSeqSeen, tailSeq)
 	}
@@ -296,16 +436,19 @@ func TestReplayer_FiltersBeforeStartSequence(t *testing.T) {
 		}
 	}
 
-	rdr, err := w.NewReader(3) // emit seqs >= 3 only; 1, 2 must be filtered
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 0, Start: 3}) // emit seqs >= 3 only; 1, 2 must be filtered
 	if err != nil {
 		t.Fatalf("new reader: %v", err)
 	}
 	defer rdr.Close()
 
-	r := transport.NewReplayer(rdr, transport.ReplayerOptions{
+	r, err := transport.NewReplayer(rdr, transport.ReplayerOptions{
 		MaxBatchRecords: 100,
 		MaxBatchBytes:   16 * 1024,
 	})
+	if err != nil {
+		t.Fatalf("NewReplayer: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -406,16 +549,19 @@ func TestReplayer_DeliversLossMarkerBeforeStart(t *testing.T) {
 	// have covered. If reader.go ever regressed and started filtering
 	// loss markers by nextSeq, this Reader would surface zero RecordLoss
 	// entries despite at least one marker being on disk.
-	rdr, err := w.NewReader(20)
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 0, Start: 20})
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
 	defer rdr.Close()
 
-	r := transport.NewReplayer(rdr, transport.ReplayerOptions{
+	r, err := transport.NewReplayer(rdr, transport.ReplayerOptions{
 		MaxBatchRecords: 100,
 		MaxBatchBytes:   16 * 1024,
 	})
+	if err != nil {
+		t.Fatalf("NewReplayer: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -472,16 +618,19 @@ func TestReplayer_DeliversWithinWindowLossMarker(t *testing.T) {
 		}
 	}
 
-	rdr, err := w.NewReader(0)
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 0, Start: 0})
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
 	defer rdr.Close()
 
-	r := transport.NewReplayer(rdr, transport.ReplayerOptions{
+	r, err := transport.NewReplayer(rdr, transport.ReplayerOptions{
 		MaxBatchRecords: 100,
 		MaxBatchBytes:   16 * 1024,
 	})
+	if err != nil {
+		t.Fatalf("NewReplayer: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -522,16 +671,19 @@ func TestReplayer_LossOnlyScenario(t *testing.T) {
 		}
 	}
 
-	rdr, err := w.NewReader(0)
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 0, Start: 0})
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
 	defer rdr.Close()
 
-	r := transport.NewReplayer(rdr, transport.ReplayerOptions{
+	r, err := transport.NewReplayer(rdr, transport.ReplayerOptions{
 		MaxBatchRecords: 100,
 		MaxBatchBytes:   16 * 1024,
 	})
+	if err != nil {
+		t.Fatalf("NewReplayer: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 

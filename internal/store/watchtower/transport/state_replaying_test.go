@@ -73,7 +73,7 @@ func TestRunReplaying_HappyPathReturnsLiveAndRetainsConn(t *testing.T) {
 		}
 	}
 
-	rdr, err := w.NewReader(0)
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 0, Start: 0})
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -85,10 +85,13 @@ func TestRunReplaying_HappyPathReturnsLiveAndRetainsConn(t *testing.T) {
 	restore := transport.SetBuildEventBatchFnForTest(nonEmptyMsg)
 	defer restore()
 
-	r := transport.NewReplayer(rdr, transport.ReplayerOptions{
+	r, err := transport.NewReplayer(rdr, transport.ReplayerOptions{
 		MaxBatchRecords: 100,
 		MaxBatchBytes:   16 * 1024,
 	})
+	if err != nil {
+		t.Fatalf("NewReplayer: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -147,7 +150,7 @@ func TestRunReplaying_SendFailureClosesConn(t *testing.T) {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
-	rdr, err := w.NewReader(0)
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 0, Start: 0})
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -160,10 +163,13 @@ func TestRunReplaying_SendFailureClosesConn(t *testing.T) {
 	restore := transport.SetBuildEventBatchFnForTest(nonEmptyMsg)
 	defer restore()
 
-	r := transport.NewReplayer(rdr, transport.ReplayerOptions{
+	r, err := transport.NewReplayer(rdr, transport.ReplayerOptions{
 		MaxBatchRecords: 100,
 		MaxBatchBytes:   16 * 1024,
 	})
+	if err != nil {
+		t.Fatalf("NewReplayer: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -214,15 +220,18 @@ func TestRunReplaying_ReplayerErrorClosesConn(t *testing.T) {
 	if _, err := w.Append(0, 0, []byte{0}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	rdr, err := w.NewReader(0)
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 0, Start: 0})
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
 
-	r := transport.NewReplayer(rdr, transport.ReplayerOptions{
+	r, err := transport.NewReplayer(rdr, transport.ReplayerOptions{
 		MaxBatchRecords: 100,
 		MaxBatchBytes:   16 * 1024,
 	})
+	if err != nil {
+		t.Fatalf("NewReplayer: %v", err)
+	}
 
 	// Close the Reader BEFORE driving runReplaying so the very first
 	// TryNext returns ErrReaderClosed and the replay-error branch
@@ -302,7 +311,7 @@ func TestRunReplaying_CtxCancelClosesConn(t *testing.T) {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
-	rdr, err := w.NewReader(0)
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 0, Start: 0})
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -314,10 +323,13 @@ func TestRunReplaying_CtxCancelClosesConn(t *testing.T) {
 	restore := transport.SetBuildEventBatchFnForTest(nonEmptyMsg)
 	defer restore()
 
-	r := transport.NewReplayer(rdr, transport.ReplayerOptions{
+	r, err := transport.NewReplayer(rdr, transport.ReplayerOptions{
 		MaxBatchRecords: 1, // force one batch per record so the loop iterates
 		MaxBatchBytes:   16 * 1024,
 	})
+	if err != nil {
+		t.Fatalf("NewReplayer: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 

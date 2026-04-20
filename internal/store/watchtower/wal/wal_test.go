@@ -113,7 +113,7 @@ func TestWAL_HighWaterSequenceMatchesReader(t *testing.T) {
 			t.Fatalf("append seq=%d: %v", seq, err)
 		}
 	}
-	r, err := w.NewReader(0)
+	r, err := w.NewReader(ReaderOptions{Generation: 1, Start: 0})
 	if err != nil {
 		t.Fatal(err)
 	}

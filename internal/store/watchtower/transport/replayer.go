@@ -41,61 +41,107 @@ type ReplayBatch struct {
 type Replayer struct {
 	rdr  *wal.Reader
 	opts ReplayerOptions
-	// tailSeq is a HARD upper bound on RecordData surfaced during replay.
-	// It is the WAL high-water sequence captured under the WAL lock at
-	// NewReplayer time, so every record with seq <= tailSeq was already
-	// on disk by then and will be visible to the underlying Reader. The
-	// spec at docs/superpowers/specs/2026-04-18-wtp-client-design.md:586
-	// defines replay as the finite (ack_hw, wal_hw_at_entry] window
-	// before advancing to live; without a hard stop, sustained appends
-	// would prevent TryNext from ever returning ok=false and replay
-	// would never terminate.
+	// tail is a HARD upper bound on RecordData surfaced during replay,
+	// expressed as a (Generation, Sequence) tuple compared lexicographically:
+	// a record with (rec.Generation, rec.Sequence) > tail is the boundary
+	// record that ends replay (it is included in the final batch as a
+	// side effect of having been read from the Reader — we cannot push it
+	// back). Per Task 14b, the Reader is also generation-scoped via
+	// ReaderOptions.Generation, so in steady state every record surfaced
+	// has rec.Generation == tail.Generation; the lex compare degenerates
+	// to a seq compare. The tuple shape is retained to keep the
+	// generation context explicit on the call sites that consume the tail
+	// (Tail / LastReplayedSequence) and to fail-fast if a future Reader
+	// regression surfaces an other-generation record.
+	//
+	// The Sequence component is the per-generation data-bearing high-water
+	// captured under the WAL lock at NewReplayer time via
+	// wal.WrittenDataHighWater(rdr.Generation()): every RecordData with
+	// (gen=rdr.Generation(), seq <= tail.Sequence) was already on disk
+	// by then and will be visible to the underlying Reader. The spec at
+	// docs/superpowers/specs/2026-04-18-wtp-client-design.md:586 defines
+	// replay as the finite (ack_hw, wal_hw_at_entry] window before
+	// advancing to live; without a hard stop, sustained appends would
+	// prevent TryNext from ever returning ok=false and replay would
+	// never terminate.
 	//
 	// Loss markers (RecordLoss) are NOT subject to this hard stop — they
 	// always surface so the receiver can record the gap. See NextBatch
 	// for the trailing-loss-marker race that this carve-out addresses.
-	tailSeq uint64
-	// lastReplayedSeq tracks the highest RecordData.Sequence surfaced by
-	// NextBatch so far. Initialized to zero; updated whenever a RecordData
-	// is appended to a batch. Task 22 (Store integration) consumes this
-	// value via LastReplayedSequence() to position the Live-state Reader
-	// at max(lastReplayedSeq+1, ackHW+1) — see LastReplayedSequence for
-	// the rationale.
-	lastReplayedSeq uint64
+	tail Watermark
+	// lastReplayed tracks the highest RecordData (Generation, Sequence)
+	// surfaced by NextBatch so far, lexicographically. Initialized to the
+	// zero Watermark; updated whenever a RecordData is appended to a batch.
+	// Task 22 (Store integration) consumes this value via
+	// LastReplayedSequence() to position the Live-state Reader at
+	// max(lastReplayed.seq+1, ackHW+1) — see LastReplayedSequence for the
+	// rationale.
+	lastReplayed Watermark
 }
 
-// NewReplayer captures the current WAL high-water sequence as a hard upper
-// bound on RecordData surfaced during replay. Every RecordData with
-// seq <= tailSeq is guaranteed to be surfaced before NextBatch returns
-// done=true (the Reader will always reach it because tailSeq was sampled
-// under the WAL lock). Records appended after this point belong to the Live
-// state and MUST NOT extend replay; the boundary record (the first
-// RecordData with seq > tailSeq) is included in the final batch as a side
-// effect of having been read from the Reader (we cannot push it back), but
-// no further over-tail records are pulled.
-func NewReplayer(rdr *wal.Reader, opts ReplayerOptions) *Replayer {
-	return &Replayer{
-		rdr:     rdr,
-		opts:    opts,
-		tailSeq: rdr.WALHighWaterSequence(),
+// Watermark is a (Generation, Sequence) pair used by the Replayer to
+// express the entry-time tail bound and the running last-replayed cursor.
+// Compared lexicographically: (g1, s1) > (g2, s2) iff g1>g2 || (g1==g2 &&
+// s1>s2). The Generation field type mirrors wal.Reader.Generation /
+// SegmentHeader.Generation / Record.Generation exactly (uint32) so callers
+// pass the value through without widening.
+type Watermark struct {
+	Generation uint32
+	Sequence   uint64
+}
+
+// NewReplayer captures the current per-generation data-bearing high-water
+// (via wal.WrittenDataHighWater(rdr.Generation())) as a hard upper bound
+// on RecordData surfaced during replay. Every RecordData with
+// (gen=rdr.Generation(), seq <= tail.Sequence) is guaranteed to be
+// surfaced before NextBatch returns done=true (the Reader will always
+// reach it because the watermark was sampled under the WAL lock).
+// Records appended after this point belong to the Live state and MUST NOT
+// extend replay; the boundary record (the first RecordData with
+// (gen,seq) > tail) is included in the final batch as a side effect of
+// having been read from the Reader (we cannot push it back), but no
+// further over-tail records are pulled.
+//
+// Returns an error only if WrittenDataHighWater itself fails (the WAL is
+// closed). If no RecordData has ever been written for rdr.Generation()
+// (ok=false from WrittenDataHighWater — e.g. a fresh generation that
+// only has a segment header), tail.Sequence is 0 and replay drains
+// loss markers + any boundary record without surfacing a phantom highest
+// seq.
+func NewReplayer(rdr *wal.Reader, opts ReplayerOptions) (*Replayer, error) {
+	gen := rdr.Generation()
+	hw, _, err := rdr.WrittenDataHighWater()
+	if err != nil {
+		return nil, fmt.Errorf("replayer: WrittenDataHighWater(gen=%d): %w", gen, err)
 	}
+	return &Replayer{
+		rdr:  rdr,
+		opts: opts,
+		tail: Watermark{Generation: gen, Sequence: hw},
+	}, nil
 }
 
-// TailSequence returns the entry-time tail watermark this Replayer is
-// draining toward. Surfaced for diagnostics and tests; the live transport
-// uses it implicitly via the done flag from NextBatch.
-func (r *Replayer) TailSequence() uint64 { return r.tailSeq }
+// Tail returns the entry-time per-generation tail watermark this Replayer
+// is draining toward, as a (Generation, Sequence) tuple. Surfaced for
+// diagnostics and tests; the live transport uses it implicitly via the
+// done flag from NextBatch.
+func (r *Replayer) Tail() (uint32, uint64) { return r.tail.Generation, r.tail.Sequence }
 
-// LastReplayedSequence returns the highest RecordData.Sequence surfaced by
-// NextBatch so far. Zero before the first RecordData is emitted.
+// LastReplayedSequence returns the highest RecordData (Generation,
+// Sequence) surfaced by NextBatch so far, as a tuple. Zero before the
+// first RecordData is emitted. Per Task 14b the Reader is
+// generation-scoped, so the Generation component will equal the Reader's
+// pinned generation in steady state; it is returned anyway so callers
+// can carry the full tuple through to Live without re-deriving it.
 //
 // Task 22 (Store integration) consumes this value to position the Live
-// Reader at max(lastReplayedSeq+1, ackHW+1). The max() is required for
+// Reader at max(lastReplayed.seq+1, ackHW+1). The max() is required for
 // two reasons:
 //
-//  1. Avoid duplicate RecordData sends: replay may have over-shot tailSeq
-//     by ONE record (the boundary record per NextBatch's hard-stop rule),
-//     so Live MUST start at lastReplayedSeq+1, not ackHW+1.
+//  1. Avoid duplicate RecordData sends: replay may have over-shot
+//     tail.Sequence by ONE record (the boundary record per NextBatch's
+//     hard-stop rule), so Live MUST start at lastReplayed.seq+1, not
+//     ackHW+1.
 //  2. Still pass over the trailing-loss-marker WAL position: loss markers
 //     bypass the Reader's nextSeq filter (see wal/reader.go nextLocked
 //     near the isLossMarker branch), so Live's Reader will encounter and
@@ -106,7 +152,9 @@ func (r *Replayer) TailSequence() uint64 { return r.tailSeq }
 // Without this contract, the trailing-loss-marker race that motivated
 // the round-1 drain-until-ok=false fix would re-emerge as silent gap
 // loss in the Live state.
-func (r *Replayer) LastReplayedSequence() uint64 { return r.lastReplayedSeq }
+func (r *Replayer) LastReplayedSequence() (uint32, uint64) {
+	return r.lastReplayed.Generation, r.lastReplayed.Sequence
+}
 
 // NextBatch pulls records from the underlying Reader without blocking and
 // returns the next batch alongside a done flag. done=true means replay is
@@ -174,15 +222,30 @@ func (r *Replayer) NextBatch(ctx context.Context) (ReplayBatch, bool, error) {
 			// surfaced as a loss marker).
 			return batch, true, nil
 		}
-		if rec.Kind == wal.RecordData && rec.Sequence > r.tailSeq {
+		if rec.Kind == wal.RecordData && watermarkLess(r.tail, Watermark{Generation: rec.Generation, Sequence: rec.Sequence}) {
 			batch.Records = append(batch.Records, rec)
-			r.lastReplayedSeq = rec.Sequence
+			r.lastReplayed = Watermark{Generation: rec.Generation, Sequence: rec.Sequence}
 			return batch, true, nil
 		}
 		batch.Records = append(batch.Records, rec)
 		if rec.Kind == wal.RecordData {
 			bytes += len(rec.Payload)
-			r.lastReplayedSeq = rec.Sequence
+			r.lastReplayed = Watermark{Generation: rec.Generation, Sequence: rec.Sequence}
 		}
 	}
+}
+
+// watermarkLess returns true iff a < b under lex order on (Generation,
+// Sequence). Used by the NextBatch hard-stop check: a record at
+// (rec.Gen, rec.Seq) is past the tail iff watermarkLess(tail, recWM).
+// In steady state the Reader is generation-scoped (Task 14b) so all
+// records have rec.Generation == tail.Generation and the compare reduces
+// to seq>tail.Sequence; the lex form is retained so a future Reader
+// regression that surfaces an other-generation record fails fast at the
+// boundary check rather than silently pulling extra records.
+func watermarkLess(a, b Watermark) bool {
+	if a.Generation != b.Generation {
+		return a.Generation < b.Generation
+	}
+	return a.Sequence < b.Sequence
 }
