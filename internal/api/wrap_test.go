@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -440,6 +442,40 @@ func TestWrapInit_SafeToBypassShellShim_SeccompExecveDisabled(t *testing.T) {
 	}
 	if resp.SafeToBypassShellShim {
 		t.Fatal("expected execve-disabled seccomp mode to require the shell shim")
+	}
+}
+
+func TestWrapInit_HTTPResponseIncludesSafeToBypassShellShimFalse(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap response serialization is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Development.DisableAuth = true
+	cfg.Health.Path = "/health"
+	cfg.Health.ReadinessPath = "/ready"
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	cfg.Sandbox.Seccomp.Execve.Enabled = false
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	body := []byte(`{"agent_command":"/bin/echo","caller_uid":0}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+s.ID+"/wrap-init", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	app.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"safe_to_bypass_shell_shim":false`) {
+		t.Fatalf("expected serialized response to include safe_to_bypass_shell_shim=false, got %s", rr.Body.String())
 	}
 }
 
