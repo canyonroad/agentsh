@@ -5677,6 +5677,161 @@ Run `/roborev-design-review` and address findings.
 
 ---
 
+### Task 14a: WAL identity persistence — `SessionID` + `KeyFingerprint` written into `meta.json` (round-8 prerequisite for Task 15.1 / Task 22 identity gate)
+
+**Status:** New WAL-package step added in round-8 to close the gap between the cold-start identity check the round-7 store-wiring snippet promises (Task 27, lines 10566-10640: "compare the persisted meta's session_id and key_fingerprint against the values configured for the current process") and the actual on-disk meta.json contract today. `wal.Meta` already has `SessionID` and `KeyFingerprint` fields (`internal/store/watchtower/wal/meta.go:19-20`), but the only production caller of `WriteMeta` (`wal.MarkAcked` at `internal/store/watchtower/wal/wal.go:865-869`) writes a fresh `Meta{AckHighWatermarkSeq, AckHighWatermarkGen, AckRecorded}` literal that DROPS those identity fields on every persist. Result: the round-7 identity gate compares against fields that production never populates — every Store restart with a non-empty `cfg.SessionID` would log a spurious `meta session_id mismatch` WARN and refuse to seed, masking the case the gate actually exists to detect (a genuinely reused WAL dir from a different installation). Task 14a fixes the WAL so identity is persisted at every meta write, validated at every Open, immutable for the WAL's lifetime, and migrates pre-identity v2 meta.json forward without erroring.
+
+**Why this task belongs to the WAL package, not transport.** The transport package is downstream of the WAL — it reads `wal.ReadMeta` to build the `AckTuple` seed and never writes meta.json directly. The "first writer wins; later Open with different value errors" invariant is a WAL-side invariant (it protects the WAL directory's integrity against being silently retargeted to a new identity mid-lifetime). The cold-start gate in Task 27 layers on top by mapping a meta-mismatch into a "do not seed" decision rather than an error; that policy choice is the store-wiring layer's, but the underlying check (read meta, compare identity, refuse to mutate on mismatch) lives in the WAL.
+
+**Files:**
+- Modify: `internal/store/watchtower/wal/wal.go` (extend `Options` with `SessionID string` and `KeyFingerprint string`; in `Open`, after the existing `ReadMeta` call, validate identity if meta is present-and-non-empty; refactor the `MarkAcked` `WriteMeta` call to include identity from `w.opts`; expose `w.SessionID()` / `w.KeyFingerprint()` accessors so tests can assert what the WAL has staged for the next meta write)
+- Test: `internal/store/watchtower/wal/wal_identity_test.go` (new file — keeps the four identity-focused tests grouped without bloating `wal_test.go`)
+
+**Spec rule (design.md §"Cold-start seed safety / stale meta detection"):** the persisted meta.json carries the WAL's installation identity. A WAL directory is bound to one (SessionID, KeyFingerprint) for its lifetime; reopening the directory with different values is a configuration error and MUST be surfaced rather than silently consumed.
+
+**Step 1: Extend `wal.Options` with identity fields.**
+
+```go
+// Options configures a WAL. Defaults are not applied here — callers should
+// pre-validate via internal/config (which does apply defaults).
+type Options struct {
+    Dir           string
+    SegmentSize   int64
+    MaxTotalBytes int64
+    SyncMode      SyncMode
+    SyncInterval  time.Duration
+
+    // SessionID is the daemon's per-installation session identifier. It is
+    // written into meta.json on every WriteMeta call and is IMMUTABLE for
+    // the WAL directory's lifetime — first writer wins. If a later wal.Open
+    // is invoked with a different SessionID and meta.json on disk already
+    // carries a non-empty SessionID, Open errors out (this is the same
+    // logical condition the round-7 store-wiring identity gate detects, but
+    // surfaced one layer down so the WAL itself refuses to mutate). Empty
+    // SessionID is allowed for back-compat with pre-Task-14a callers and
+    // tests that don't care about identity; it disables both the persist
+    // and the Open validation. Production wiring (Task 27) MUST set this
+    // to opts.SessionID.
+    SessionID string
+
+    // KeyFingerprint is the daemon's signing-key fingerprint
+    // ("sha256:<hex>"). Same persistence and immutability rules as
+    // SessionID; same back-compat allowance for empty values.
+    KeyFingerprint string
+}
+```
+
+**Step 2: Validate identity at `Open` time.** Insert the check right after the existing `ReadMeta` block, BEFORE `recover()` runs (so we fail fast on a mismatch without committing any segment-level work). The mismatch is surfaced as a typed `*ErrIdentityMismatch` so the store-wiring layer (Task 27) can `errors.As` on it and decide whether to quarantine the WAL dir or refuse to start:
+
+```go
+// ErrIdentityMismatch is returned by Open when the persisted meta.json
+// carries a SessionID or KeyFingerprint that disagrees with the
+// caller-supplied opts. The persisted-vs-expected pairs are exposed so
+// upstream callers can include them in operator-facing logs without
+// re-parsing the error message.
+//
+// Both fields are populated even when only one mismatched — the
+// non-mismatching field carries the matching value on both sides
+// (so the operator sees the full identity context). The
+// MismatchedField string is one of "session_id" or "key_fingerprint"
+// and identifies which check tripped first; if both mismatched, the
+// session_id check runs first and is reported.
+type ErrIdentityMismatch struct {
+    MismatchedField         string // "session_id" or "key_fingerprint"
+    PersistedSessionID      string
+    ExpectedSessionID       string
+    PersistedKeyFingerprint string
+    ExpectedKeyFingerprint  string
+}
+
+func (e *ErrIdentityMismatch) Error() string {
+    if e.MismatchedField == "session_id" {
+        return fmt.Sprintf("wal.Open: session_id mismatch: persisted=%q opts=%q", e.PersistedSessionID, e.ExpectedSessionID)
+    }
+    return fmt.Sprintf("wal.Open: key_fingerprint mismatch: persisted=%q opts=%q", e.PersistedKeyFingerprint, e.ExpectedKeyFingerprint)
+}
+
+// In Open, after the existing ReadMeta block:
+if m, err := ReadMeta(opts.Dir); err == nil {
+    if m.AckRecorded {
+        w.ackHighSeq = m.AckHighWatermarkSeq
+        w.ackHighGen = m.AckHighWatermarkGen
+        w.ackPresent = true
+    }
+    // Identity check (Task 14a). Only validate when BOTH the on-disk
+    // value is non-empty AND the caller-supplied value is non-empty.
+    // The "either side empty" case is the v2-with-empty-identity
+    // migration: a pre-Task-14a meta.json had no identity fields, OR
+    // the test caller deliberately omits identity. In both, we adopt
+    // (don't error) — the next meta write will populate the field
+    // from opts.
+    if m.SessionID != "" && opts.SessionID != "" && m.SessionID != opts.SessionID {
+        return nil, &ErrIdentityMismatch{
+            MismatchedField:         "session_id",
+            PersistedSessionID:      m.SessionID,
+            ExpectedSessionID:       opts.SessionID,
+            PersistedKeyFingerprint: m.KeyFingerprint,
+            ExpectedKeyFingerprint:  opts.KeyFingerprint,
+        }
+    }
+    if m.KeyFingerprint != "" && opts.KeyFingerprint != "" && m.KeyFingerprint != opts.KeyFingerprint {
+        return nil, &ErrIdentityMismatch{
+            MismatchedField:         "key_fingerprint",
+            PersistedSessionID:      m.SessionID,
+            ExpectedSessionID:       opts.SessionID,
+            PersistedKeyFingerprint: m.KeyFingerprint,
+            ExpectedKeyFingerprint:  opts.KeyFingerprint,
+        }
+    }
+} else if !errors.Is(err, os.ErrNotExist) {
+    return nil, fmt.Errorf("read meta: %w", err)
+}
+```
+
+**Step 3: Persist identity on every `WriteMeta` call.** Today `MarkAcked` constructs a `Meta{}` literal that DROPS the identity fields. Fix: include `w.opts.SessionID` and `w.opts.KeyFingerprint` so every meta write carries the current identity. (No new `WriteMeta` callers are added in this task — `MarkAcked` is currently the only one. If future work adds a meta-write site, it MUST follow the same pattern.)
+
+```go
+// In MarkAcked, replace the literal:
+if err := WriteMeta(w.opts.Dir, Meta{
+    AckHighWatermarkSeq: w.ackHighSeq,
+    AckHighWatermarkGen: w.ackHighGen,
+    AckRecorded:         true,
+    SessionID:           w.opts.SessionID,    // Task 14a
+    KeyFingerprint:      w.opts.KeyFingerprint, // Task 14a
+}); err != nil {
+```
+
+**Step 4: Tests** (TDD-first — write the four tests below in `wal_identity_test.go` BEFORE the production edits in Steps 1-3; they MUST fail with `Options.SessionID` / `Options.KeyFingerprint` undefined or with "no error returned on mismatch"):
+
+`TestWAL_PersistsSessionIDAndKeyFingerprint` — Setup: `wal.Open(Options{Dir: t.TempDir(), SegmentSize: ..., SessionID: "s1", KeyFingerprint: "k1"})`. Append a record (`w.Append([]byte("x"))`). Drive `w.MarkAcked(1, 1)`. Assert: `wal.ReadMeta(opts.Dir)` returns `Meta{AckHighWatermarkSeq=1, AckHighWatermarkGen=1, AckRecorded=true, SessionID="s1", KeyFingerprint="k1"}`. Without the Step-3 fix, the assertion on `SessionID="s1"` fails (the meta on disk has the empty string).
+
+`TestWAL_OpenWithDifferentSessionIDErrors` — Setup: open WAL with `SessionID="s1"`, append + MarkAcked so meta.json on disk carries `SessionID="s1"`. Close the WAL. Re-open the same `Dir` with `Options{..., SessionID: "s2", KeyFingerprint: "k1"}`. Assert: `wal.Open` returns a non-nil error AND `errors.As(err, &wal.ErrIdentityMismatch{})` succeeds with `MismatchedField=="session_id"`, `PersistedSessionID=="s1"`, `ExpectedSessionID=="s2"`, `PersistedKeyFingerprint=="k1"`, `ExpectedKeyFingerprint=="k1"`. The returned `*WAL` is nil. The error message also contains both `"session_id"` and the persisted-vs-opts pair `"s1"`/`"s2"` (via the `Error()` method).
+
+`TestWAL_OpenWithDifferentKeyFingerprintErrors` — Mirror of the SessionID case: persist with `KeyFingerprint="k1"`, re-open with `KeyFingerprint="k2"` (and matching `SessionID`). Assert: `errors.As(err, &wal.ErrIdentityMismatch{})` succeeds with `MismatchedField=="key_fingerprint"`, persisted/expected fields populated for both sides. The error message mentions `"key_fingerprint"` and the persisted-vs-opts pair.
+
+`TestWAL_OpenAdoptsIdentityIntoEmptyV2Meta` — Migration test for the case where a pre-Task-14a writer left meta.json with empty `SessionID`/`KeyFingerprint`. Setup: hand-write `meta.json` directly via `os.WriteFile` carrying the v2 envelope WITHOUT identity (`{"format_version":2,"ack_high_watermark_seq":42,"ack_high_watermark_gen":7,"ack_recorded":true,"session_id":"","key_fingerprint":""}`). Open the WAL with `Options{..., SessionID: "s1", KeyFingerprint: "k1"}`. Assert: `wal.Open` succeeds (no error — empty persisted identity is the migration case, not a mismatch). Append + MarkAcked. Assert: `wal.ReadMeta` now returns `SessionID="s1"`, `KeyFingerprint="k1"` (the WAL adopted the caller-supplied identity into the next meta write). Negative sub-case: open the SAME directory a second time with `SessionID="s2"` after the first cycle wrote `s1` — the re-Open errors per the immutability invariant.
+
+**Step ordering for Task 14a:**
+
+- [ ] **Step 1:** Write the four failing tests in `wal_identity_test.go`.
+- [ ] **Step 2:** Run `go test ./internal/store/watchtower/wal/...` to confirm they fail with the expected symbols (`Options.SessionID` / `Options.KeyFingerprint` undefined; identity not persisted; mismatch not surfaced).
+- [ ] **Step 3:** Implement Steps 1-3 above (extend `Options`; validate at Open; persist on every WriteMeta).
+- [ ] **Step 4:** Re-run `go test ./internal/store/watchtower/wal/...` and verify the four new tests PASS and no existing WAL test regressed (in particular, existing tests construct `wal.Options` without `SessionID`/`KeyFingerprint` — the empty-string case MUST remain back-compat, not a hard error).
+- [ ] **Step 5:** Cross-compile (`GOOS=windows go build ./...`).
+- [ ] **Step 6:** Commit with message `feat(wtp/wal): persist SessionID and KeyFingerprint into meta.json with first-writer-wins immutability`.
+- [ ] **Step 7:** Run `/roborev-design-review` and address findings.
+
+**Hard dependency chain:** Task 22 restart-mismatch tests (`TestRun_RestartIgnoresAckOnSessionIDMismatch`, `TestRun_RestartIgnoresAckOnKeyFingerprintMismatch`, `TestRun_RestartLogsMismatchOnce` — currently at lines 9214-9272) MUST NOT execute until Task 14a has landed. Without Task 14a, the test setup ("persist meta with `SessionID=installation-A`") cannot be staged via `wal.MarkAcked` because the production code drops the identity fields from the meta literal — the test would have to hand-write meta.json (brittle and divorced from production behavior). Task 14a makes those tests use REAL `wal.Open`+`wal.MarkAcked` flows. Task 27 store-wiring snippet ALSO depends on Task 14a — without it, `wal.ReadMeta` always returns empty `SessionID`/`KeyFingerprint` after the first MarkAcked-driven persist, so the round-7 identity gate would either always WARN (`s1 != ""`) or always silently mismatch (the gate sees `meta.SessionID==""` and treats it as a fresh install, which contradicts `meta.AckRecorded==true`).
+
+**Migration / back-compat guarantees:**
+
+- **v1 meta.json** (written by pre-meta-v2 binaries; no identity fields and no `ack_recorded` field): `ReadMeta` already infers `AckRecorded=true` (line 46 `meta.go`). `SessionID`/`KeyFingerprint` decode as empty strings. The Step-2 identity check skips on either-side-empty, so no error. The next MarkAcked-driven WriteMeta upgrades the file to v2 with identity populated.
+- **v2 meta.json with empty identity** (the migration case from a hypothetical post-v2 / pre-Task-14a binary): same handling — Step-2 check skips on the empty persisted side, next WriteMeta populates.
+- **v2 meta.json with identity matching opts** (the steady-state production case after Task 14a + a few MarkAcked cycles): identity persists across opens, never errors, never re-WARNs.
+- **v2 meta.json with identity mismatching opts** (the case the gate exists to detect): Open errors. The store-wiring layer (Task 27) catches this error at `wal.Open` time and converts it into the round-7 "do not seed" + WARN behavior; OR (alternative wiring choice the implementer can take) catches it earlier by pre-reading meta.json itself and deciding whether to call `wal.Open` with the matching identity or to refuse to start. Both are valid; this plan task documents the WAL-side primitive only.
+
+---
+
 ## Phase 8 — Transport state machine
 
 The transport has four states: Connecting, Replaying, Live, Shutdown.
@@ -6078,6 +6233,19 @@ func validate(opts Options) error {
 
 // Transport runs the four-state WTP client state machine. It is owned by
 // a single goroutine — callers interact via channels.
+//
+// Round-8 note: this snippet shows the Task 15 production code as it
+// landed (single ack-tuple model with `ackedSequence`/`ackedGeneration`
+// fields). Task 15.1 below SUPERSEDES this struct shape with the two-
+// cursor model: `persistedAck` (monotonic-only mirror of `wal.Meta`,
+// drives `wal_high_watermark_seq` + segment GC) and `remoteReplayCursor`
+// (regressable, drives Replaying reader-start). The `sessionInit()` and
+// `runConnecting` snippets that follow likewise show the Task 15 shape
+// and are rewritten by Task 15.1 (`SessionInit` populates from
+// `persistedAck`; the SessionAck handler dispatches on
+// `applyServerAckTuple`'s `AckOutcome.Kind`). They are kept here as the
+// historical reference for Task 15 — Task 15.1 lands the round-8
+// rewrite on top of them.
 type Transport struct {
 	opts Options
 	conn Conn
@@ -6266,16 +6434,23 @@ Run `/roborev-design-review` and address findings.
 
 ---
 
-### Task 15.1 — Tuple-aware ack clamp + WAL meta seed (round-5/round-6 fix prerequisite)
+### Task 15.1 — Two-cursor ack clamp + WAL meta seed (round-8 rewrite)
 
-**Status:** New step, originally added in round-5 to schedule the spec-mandated clamp BEFORE Task 22 wires the Run loop to consume `t.ackedSequence`. Round-6 expanded scope: the clamp MUST operate on the `(gen, seq)` TUPLE under lex compare (not on `seq` alone with `gen` overwritten), AND the Transport's ack tuple MUST be seeded from `wal.Meta` at construction so the SessionInit watermark sent on the wire is correct on cold start. Task 15 was already complete when this step was added; it does NOT renumber any existing task. Task 22's StateReplaying / StateLive cases READ `t.ackedSequence` for their reader-start calculations and assume the field stores the EFFECTIVE (clamped) tuple value per spec line 601 — without this step, `state_connecting.go:59` copies the raw `ack.GetAckHighWatermarkSeq()` and a malicious or buggy server could rewind the client past locally-acked work or trick it into skipping records it has not yet acknowledged. Round-6 also caught that mixing local-seq with server-gen creates an impossible state under the WAL's lex `(gen, seq)` GC semantics (`wal/wal.go:852` `MarkAcked` and `wal/wal.go:1099` `segmentFullyAckedLocked`).
+**Status:** Round-8 rewrite. Round-7's "lower-server-adopts-and-persists" rule conflicted with the WAL's monotonic-only `MarkAcked` invariant (`internal/store/watchtower/wal/wal.go:852-913` — the `advance` predicate at line 859 is one-way; lower (gen, seq) tuples are silently dropped from the on-disk watermark, but segment GC keys off the un-advanced on-disk value, so a "lower-adopt" path's in-memory write would diverge from disk and from GC behavior). Round-8 splits the single ack tuple into TWO cursors with distinct invariants:
+
+- **`persistedAck` (gen, seq + Present flag)** — the durable, monotonic-only ack watermark. Mirror of `wal.Meta` `(AckHighWatermarkGen, AckHighWatermarkSeq, AckRecorded)`. Advances ONLY through `wal.MarkAcked`. Drives `wal_high_watermark_seq` on SessionInit AND segment GC. Lives in `t.persistedAck` (a struct holding `Sequence uint64`, `Generation uint32`) plus `t.persistedAckPresent bool`.
+- **`remoteReplayCursor` (gen, seq)** — the server-belief cursor. Where the server thinks its ack watermark sits. May be lex-LOWER than `persistedAck` if the server (gradual rollout / partition recovery) presents a stale tuple. Drives the Replaying state's reader-start (`remoteReplayCursor + 1`) so a stale-server case re-sends the gap. Lives in `t.remoteReplayCursor`.
+
+In the steady state `remoteReplayCursor == persistedAck`. They diverge briefly during stale-server recovery and reconverge on the next BatchAck for the re-sent records.
+
+Originally added in round-5 to schedule the spec-mandated clamp BEFORE Task 22 wires the Run loop. Round-6 expanded scope to `(gen, seq)` lex compare. Round-7 added the WAL persistence contract (then incorrectly required the helper to call `wal.MarkAcked` even on lex-lower server tuples). Round-8 reverses that decision: lex-lower server adoption is in-memory only and applies ONLY to `remoteReplayCursor`; `persistedAck` and `wal.MarkAcked` are touched ONLY when the server tuple advances persistedAck. Without this rewrite the helper would either (a) violate the WAL's monotonic invariant by attempting `MarkAcked(lower, lower)` (silently rejected, so the in-memory mirror diverges from disk), or (b) the helper's "rollback on MarkAcked failure" path would land in production permanently because `MarkAcked(lower, lower)` would never advance the on-disk watermark.
 
 **Files:**
-- Modify: `internal/store/watchtower/transport/transport.go` (add `AckTuple` type, `Options.InitialAckTuple`, `Options.Logger`, `t.ackedPresent` flag, `t.ackAnomalyLimiter`, and the `applyServerAckTuple` clamp helper)
-- Modify: `internal/store/watchtower/transport/state_connecting.go` (replace the bare `t.ackedSequence = ack.GetAckHighWatermarkSeq()` assignment with a call into `applyServerAckTuple` + the rate-limited anomaly WARN)
-- Test: `internal/store/watchtower/transport/state_connecting_test.go` (or extend the existing transport_test.go) — five new tuple-aware unit tests + the FirstApplyAdoptsServer seed test
+- Modify: `internal/store/watchtower/transport/transport.go` (add `AckTuple` type, `Options.InitialAckTuple`, `Options.Logger`, `Options.WAL`, `Options.Metrics`, `t.persistedAck`, `t.persistedAckPresent`, `t.remoteReplayCursor` fields, `t.ackAnomalyLimiter`, and the `applyServerAckTuple` clamp helper)
+- Modify: `internal/store/watchtower/transport/state_connecting.go` (replace the bare assignment with a call into `applyServerAckTuple` + the side-effect contract)
+- Test: `internal/store/watchtower/transport/state_connecting_test.go` (or extend the existing transport_test.go) — the cursor-aware tests below
 
-**Spec rule (design.md, §"Effective-ack tuple and clamp"):** the effective ack watermark is a `(generation, sequence)` TUPLE; on every server-supplied watermark (SessionAck, BatchAck, ServerHeartbeat) the client clamps via `applyServerAckTuple`: if `(server_gen, server_seq) < (local_gen, local_seq)` lex, ADOPT the server tuple wholesale (legitimate stale-watermark recovery during gradual rollout / partition recovery); if `(server_gen, server_seq) > (local_gen, local_seq)` lex, KEEP the local tuple wholesale and emit a rate-limited WARN with FULL tuple context (`server_gen`, `server_seq`, `local_gen`, `local_seq`); if equal, no-op. The two fields move together — mixing local-seq with server-gen creates an impossible state under the WAL's lex `(gen, seq)` GC semantics (see `wal/wal.go` `MarkAcked` / `segmentFullyAckedLocked`). First-apply (no prior tuple recorded) ADOPTS the server tuple wholesale without anomaly logging — first contact has no local baseline.
+**Spec rule (design.md, §"Effective-ack tuple and clamp"):** the effective ack watermark is split across two cursors. `applyServerAckTuple` returns one of three outcomes — `Adopted` (persistedAck advanced via `wal.MarkAcked`, both cursors moved to the server tuple), `ResendNeeded` (server is stale relative to persistedAck — `remoteReplayCursor` set to the server tuple, `persistedAck` UNCHANGED, no `wal.MarkAcked` call), or `NoOp` (server tuple equals persistedAck). A separate `Anomaly` outcome covers the only true anomaly — server claims an ack BEYOND the WAL's high-water sequence. Mixing `persistedAck.gen` with `remoteReplayCursor.seq` (or vice versa) creates an impossible state under the WAL's lex `(gen, seq)` GC semantics; both cursors are immutable structs that the helper assigns wholesale.
 
 **Offending site to replace** (`internal/store/watchtower/transport/state_connecting.go:59-60`):
 
@@ -6284,158 +6459,233 @@ t.ackedSequence = ack.GetAckHighWatermarkSeq()
 t.ackedGeneration = ack.GetGeneration()
 ```
 
-**Step 1a: Add the tuple-aware clamp helper.** Operate on the `(gen, seq)` tuple under lex compare so both fields move together. Mixing local-seq with server-gen creates an impossible state under the WAL's lex `(gen, seq)` GC semantics (round-6 reviewer). Reuse this exact helper as the canonical illustration:
+**Step 1a: Add the two-cursor clamp helper.** Operate on the `(gen, seq)` tuple under lex compare; persistedAck is monotonic only; remoteReplayCursor may regress.
 
 ```go
-// applyServerAckTuple clamps a server-supplied (gen, seq) onto the
-// Transport's effective ack watermark per spec §"Acknowledgement model"
-// (design.md:601). Returns (changed, anomaly):
-//   - changed=true means the local tuple was advanced (or first-applied);
-//     the caller MUST then run the side-effect contract documented in
-//     Step 1b.5 below — persist to wal.MarkAcked, emit
-//     wtp_ack_high_watermark, and ONLY THEN consider the advance
-//     committed. (Round-7 Finding 4: this helper's in-memory write must
-//     not be the only proof an ack advanced.)
-//   - anomaly=true means the server tuple was lex-higher than the local
-//     tuple; the local tuple is unchanged and the caller emits the
-//     rate-limited WARN.
-func (t *Transport) applyServerAckTuple(serverGen uint32, serverSeq uint64) (changed bool, anomaly bool) {
-    // First-apply (no prior ack): adopt server tuple wholesale, regardless
-    // of value. ackedPresent flips true so subsequent calls take the lex
-    // path. This is the "ack present" model the round-6 reviewer asked for
-    // (replaces the round-5 `local == 0` escape hatch).
-    if !t.ackedPresent {
-        t.ackedSequence = serverSeq
-        t.ackedGeneration = serverGen
-        t.ackedPresent = true
-        return true, false
+// AckOutcome is the discriminated result of applyServerAckTuple. Exactly
+// one of Adopted, ResendNeeded, NoOp, or Anomaly is true. Callers
+// dispatch on the kind field; the embedded fields hold the post-clamp
+// cursor values so the caller does not need to re-read t.persistedAck /
+// t.remoteReplayCursor.
+type AckOutcome struct {
+    Kind             AckOutcomeKind
+    PersistedTuple   AckCursor // == t.persistedAck after the clamp (unchanged on ResendNeeded/NoOp/Anomaly)
+    ReplayCursor     AckCursor // == t.remoteReplayCursor after the clamp
+    PersistedAdvanced bool     // true iff Kind==Adopted (the only kind that calls wal.MarkAcked)
+}
+
+type AckOutcomeKind int
+
+const (
+    AckOutcomeNoOp        AckOutcomeKind = iota // server == persistedAck; no cursor moved
+    AckOutcomeAdopted                           // server > persistedAck (lex); both cursors advanced; wal.MarkAcked required
+    AckOutcomeResendNeeded                      // server < persistedAck (lex); remoteReplayCursor set to server; persistedAck UNCHANGED; NO wal.MarkAcked
+    AckOutcomeAnomaly                           // server.gen == wal current gen AND server.seq > wal.highSeq; cursors UNCHANGED; WARN
+)
+
+// AckCursor is an immutable (gen, seq) ack tuple. Both cursors on
+// Transport (persistedAck and remoteReplayCursor) are this type so the
+// clamp helper assigns them wholesale and the callers cannot accidentally
+// mix one cursor's gen with another's seq.
+type AckCursor struct {
+    Sequence   uint64
+    Generation uint32
+}
+
+// applyServerAckTuple clamps a server-supplied (gen, seq) onto BOTH
+// transport ack cursors per spec §"Effective-ack tuple and clamp". The
+// helper itself NEVER calls wal.MarkAcked or emits metrics — those are
+// the SessionAck/BatchAck/ServerHeartbeat handler's responsibility based
+// on the returned AckOutcome.Kind. The helper is the SINGLE source of
+// truth for which kind a given (server tuple, current cursors, current
+// WAL high-water seq) maps to.
+//
+// Returned AckOutcome contract:
+//   - Adopted: server > persistedAck (lex). Both t.persistedAck and
+//     t.remoteReplayCursor have been set to the server tuple. The caller
+//     MUST then call wal.MarkAcked(serverGen, serverSeq) and emit
+//     wtp_ack_high_watermark on success; on MarkAcked failure the caller
+//     MUST roll back BOTH cursors via the snapshot-and-rollback shape
+//     in the side-effect contract below.
+//   - ResendNeeded: server < persistedAck (lex). t.remoteReplayCursor has
+//     been set to the server tuple. t.persistedAck is UNCHANGED. The
+//     caller MUST NOT call wal.MarkAcked (it would either be silently
+//     rejected by the WAL's monotonic invariant or, worse, would advance
+//     the on-disk watermark backward if the rejection check were ever
+//     loosened). The caller MAY log INFO with both tuples; this is
+//     normal recovery, not an anomaly.
+//   - NoOp: server == persistedAck (== remoteReplayCursor in the steady
+//     state). No cursor moved.
+//   - Anomaly: server.gen == t.persistedAck.gen AND
+//     server.seq > walHighSeq (the server claims ack beyond what the WAL
+//     ever wrote). Cursors UNCHANGED. The caller MUST emit a
+//     rate-limited WARN with FULL context (server tuple, persistedAck
+//     tuple, walHighSeq).
+//
+// First-apply: when t.persistedAckPresent==false, the helper returns
+// Adopted and seeds BOTH cursors from the server tuple, regardless of
+// value. This is "first contact between client and server" — there is
+// no local baseline to compare against and the server's seed is
+// authoritative.
+func (t *Transport) applyServerAckTuple(serverGen uint32, serverSeq uint64) AckOutcome {
+    server := AckCursor{Sequence: serverSeq, Generation: serverGen}
+    // First-apply: seed both cursors from the server tuple. The caller
+    // will call wal.MarkAcked(serverGen, serverSeq), which on a fresh
+    // WAL is a no-op-friendly write (the monotonic predicate's
+    // "!w.ackPresent" branch lets the very first ack land regardless
+    // of value).
+    if !t.persistedAckPresent {
+        t.persistedAck = server
+        t.persistedAckPresent = true
+        t.remoteReplayCursor = server
+        return AckOutcome{
+            Kind:              AckOutcomeAdopted,
+            PersistedTuple:    server,
+            ReplayCursor:      server,
+            PersistedAdvanced: true,
+        }
     }
-    // Lex compare on (gen, seq).
-    serverHigher := serverGen > t.ackedGeneration ||
-        (serverGen == t.ackedGeneration && serverSeq > t.ackedSequence)
-    serverLower := serverGen < t.ackedGeneration ||
-        (serverGen == t.ackedGeneration && serverSeq < t.ackedSequence)
+    // Lex compare server vs. persistedAck.
+    serverHigher := serverGen > t.persistedAck.Generation ||
+        (serverGen == t.persistedAck.Generation && serverSeq > t.persistedAck.Sequence)
+    serverLower := serverGen < t.persistedAck.Generation ||
+        (serverGen == t.persistedAck.Generation && serverSeq < t.persistedAck.Sequence)
     switch {
     case serverHigher:
-        // Anomalous — keep local. The WARN is the caller's responsibility
-        // (it has the rate-limited logger seam).
-        return false, true
+        // True anomaly check: same gen as persistedAck AND beyond what
+        // the WAL has ever written. Look up walHighSeq via the
+        // wal-injected accessor; if the WAL is not yet wired (test
+        // construction without Options.WAL), treat the lookup as
+        // "no anomaly possible" and fall through to Adopted.
+        if t.wal != nil && serverGen == t.persistedAck.Generation {
+            walHighSeq := t.wal.HighWatermarkSequence() // Task 14: existing accessor
+            if serverSeq > walHighSeq {
+                return AckOutcome{
+                    Kind:           AckOutcomeAnomaly,
+                    PersistedTuple: t.persistedAck,
+                    ReplayCursor:   t.remoteReplayCursor,
+                }
+            }
+        }
+        // Healthy advance: move both cursors to the server tuple.
+        // The caller persists via wal.MarkAcked.
+        t.persistedAck = server
+        t.remoteReplayCursor = server
+        return AckOutcome{
+            Kind:              AckOutcomeAdopted,
+            PersistedTuple:    server,
+            ReplayCursor:      server,
+            PersistedAdvanced: true,
+        }
     case serverLower:
-        // Stale-but-legitimate — adopt server tuple wholesale.
-        t.ackedSequence = serverSeq
-        t.ackedGeneration = serverGen
-        return true, false
+        // Stale-but-legitimate (gradual rollout / partition recovery /
+        // server-side ack-watermark reset). Move ONLY remoteReplayCursor;
+        // persistedAck stays in lock-step with the on-disk meta.json.
+        t.remoteReplayCursor = server
+        return AckOutcome{
+            Kind:           AckOutcomeResendNeeded,
+            PersistedTuple: t.persistedAck, // unchanged
+            ReplayCursor:   server,
+        }
     default:
-        return false, false
+        return AckOutcome{
+            Kind:           AckOutcomeNoOp,
+            PersistedTuple: t.persistedAck,
+            ReplayCursor:   t.remoteReplayCursor,
+        }
     }
 }
 ```
 
-The `applyServerAckTuple` helper is the SINGLE source of truth for the clamp logic; the SessionAck handler in `state_connecting.go` (this task), and the BatchAck / ServerHeartbeat handlers in the recv multiplexer (Task 17 sub-step 17.X), all dispatch through it.
+The `applyServerAckTuple` helper is the SINGLE source of truth for the clamp logic; the SessionAck handler in `state_connecting.go` (this task), and the BatchAck / ServerHeartbeat handlers in the recv multiplexer (Task 17 sub-step 17.X), all dispatch through it. Note: the helper's `t.wal.HighWatermarkSequence()` lookup uses an accessor that already exists for Task 16's Replayer (`wal.WAL.WALHighWaterSequence()` in production today; if naming differs, the helper takes a `func() uint64` indirection in `Options` for testability).
 
-**Step 1b: Wire the SessionAck handler into the helper.** Replace the bare `state_connecting.go:59` block with the call sequence below. The structure mirrors the contract laid out in Step 1b.5 (snapshot → clamp → WARN-on-anomaly → persist-on-change → rollback-on-failure → metric-on-success); BatchAck and ServerHeartbeat (Task 17 sub-step 17.X) run the SAME sequence:
+**Step 1b: Wire the SessionAck handler into the helper.** Replace the bare `state_connecting.go:59` block with the call sequence below. The sequence dispatches on `AckOutcome.Kind`:
 
 ```go
 serverGen := ack.GetGeneration()
 serverSeq := ack.GetAckHighWatermarkSeq()
 
-// Snapshot before the helper mutates — required for rollback per Step 1b.5.
-priorSeq := t.ackedSequence
-priorGen := t.ackedGeneration
-priorPresent := t.ackedPresent
+// Snapshot BOTH cursors before the helper mutates — required for rollback
+// on Adopted-then-MarkAcked-failure per Step 1b.5.
+priorPersisted := t.persistedAck
+priorReplay := t.remoteReplayCursor
+priorPresent := t.persistedAckPresent
 
-changed, anomaly := t.applyServerAckTuple(serverGen, serverSeq)
-if anomaly && t.ackAnomalyLimiter.Allow() {
-    // Per spec §"Acknowledgement model": log the FULL tuple context
-    // (server_gen, server_seq, local_gen, local_seq) so operators can
-    // diagnose without log correlation.
-    t.opts.Logger.Warn("session_ack: anomalous server ack tuple exceeds local; using local",
-        slog.Uint64("server_seq", serverSeq),
-        slog.Uint64("server_gen", uint64(serverGen)),
-        slog.Uint64("local_seq", t.ackedSequence),
-        slog.Uint64("local_gen", uint64(t.ackedGeneration)),
-        slog.String("session_id", t.opts.SessionID))
-}
-
-if changed {
-    if err := t.wal.MarkAcked(t.ackedGeneration, t.ackedSequence); err != nil {
-        t.opts.Logger.Warn("session_ack: wal.MarkAcked failed; rolling back in-memory ack tuple",
-            slog.Uint64("attempted_seq", t.ackedSequence),
-            slog.Uint64("attempted_gen", uint64(t.ackedGeneration)),
+outcome := t.applyServerAckTuple(serverGen, serverSeq)
+switch outcome.Kind {
+case AckOutcomeAnomaly:
+    if t.ackAnomalyLimiter.Allow() {
+        // Per spec §"Effective-ack tuple and clamp" — True anomaly:
+        // server claims ack beyond wal high-water seq.
+        t.opts.Logger.Warn("session_ack: anomalous server ack tuple beyond wal high-water seq",
+            slog.Uint64("server_seq", serverSeq),
+            slog.Uint64("server_gen", uint64(serverGen)),
+            slog.Uint64("local_persisted_seq", t.persistedAck.Sequence),
+            slog.Uint64("local_persisted_gen", uint64(t.persistedAck.Generation)),
+            slog.Uint64("wal_high_water_seq", t.wal.HighWatermarkSequence()),
+            slog.String("session_id", t.opts.SessionID))
+    }
+    // Cursors unchanged; nothing more to do.
+case AckOutcomeAdopted:
+    // persistedAck advanced; persist to WAL and emit metric.
+    if err := t.wal.MarkAcked(t.persistedAck.Generation, t.persistedAck.Sequence); err != nil {
+        // Persistence failed: roll back BOTH cursors so the in-memory
+        // mirrors stay in lock-step with the on-disk meta.json.
+        t.opts.Logger.Warn("session_ack: wal.MarkAcked failed; rolling back ack cursors",
+            slog.Uint64("attempted_seq", t.persistedAck.Sequence),
+            slog.Uint64("attempted_gen", uint64(t.persistedAck.Generation)),
             slog.String("err", err.Error()))
-        t.ackedSequence = priorSeq
-        t.ackedGeneration = priorGen
-        t.ackedPresent = priorPresent
+        t.persistedAck = priorPersisted
+        t.remoteReplayCursor = priorReplay
+        t.persistedAckPresent = priorPresent
         // Server will re-deliver this watermark on the next BatchAck or
         // ServerHeartbeat. No metric emission on the failure path.
     } else {
-        t.metrics.SetWTPAckHighWatermark(t.ackedSequence, t.ackedGeneration)
+        // SetAckHighWatermark currently takes a single seq (production
+        // signature today: `func (w *WTPMetrics) SetAckHighWatermark(seq int64)`).
+        // The metric remains a single unlabeled gauge for round-8;
+        // see Task 22b for the deferred schema-extension proposal.
+        t.metrics.SetAckHighWatermark(int64(t.persistedAck.Sequence))
     }
+case AckOutcomeResendNeeded:
+    // remoteReplayCursor moved; persistedAck unchanged; do NOT call
+    // wal.MarkAcked. Log INFO so operators can see the server is stale
+    // relative to local persistence (gradual rollout / partition
+    // recovery — normal, not anomalous).
+    t.opts.Logger.Info("session_ack: server ack tuple lower than persistedAck; remote replay cursor regressed",
+        slog.Uint64("server_seq", serverSeq),
+        slog.Uint64("server_gen", uint64(serverGen)),
+        slog.Uint64("local_persisted_seq", t.persistedAck.Sequence),
+        slog.Uint64("local_persisted_gen", uint64(t.persistedAck.Generation)),
+        slog.String("session_id", t.opts.SessionID))
+case AckOutcomeNoOp:
+    // No cursor moved; nothing to do.
 }
 ```
 
-`t.ackAnomalyLimiter` is a `*rate.Limiter` Transport field added in this step (defaulted in `New` to `rate.NewLimiter(rate.Every(time.Minute), 1)` so production emits at most one anomaly WARN per minute per Transport instance). Unit tests inject a permissive limiter (`rate.NewLimiter(rate.Inf, 1)` or a mock) so the inject-and-assert pattern below sees exactly one log per anomalous SessionAck. `t.opts.Logger` is the injected logger (see Step 1d below) — this is the only handle the Transport reaches for log output, so tests can substitute `slog.New(slog.NewJSONHandler(buf, ...))` to capture WARN lines without racing against parallel tests.
+`t.ackAnomalyLimiter` is a `*rate.Limiter` Transport field added in this step (defaulted in `New` to `rate.NewLimiter(rate.Every(time.Minute), 1)` so production emits at most one anomaly WARN per minute per Transport instance). Unit tests inject a permissive limiter (`rate.NewLimiter(rate.Inf, 1)` or a mock). `t.opts.Logger` is the injected logger (see Step 1d) — the only handle the Transport reaches for log output.
 
-**Step 1b.5: Side-effect contract for `applyServerAckTuple` returning `changed=true` (round-7 Finding 4).** Round-7 reviewer flagged that the existing helper comment said "the caller uses the boolean to decide whether to re-MarkAcked the WAL," but no plan step concretely scheduled what happens after `changed=true` — the recv sketch in Task 17 left "metrics / segment GC trigger" as a placeholder. This sub-step makes the contract explicit so SessionAck (here), BatchAck, and ServerHeartbeat (Task 17 sub-step 17.X) all run the same side-effect sequence in lock-step.
+**Step 1b.5: Side-effect contract for `applyServerAckTuple` returning `AckOutcomeAdopted`.** This sub-step makes the WAL-source-of-truth invariant explicit so SessionAck (here), BatchAck, and ServerHeartbeat (Task 17 sub-step 17.X) all run the same side-effect sequence in lock-step.
 
-**WAL is the source of truth — invariant.** The in-memory tuple `(t.ackedSequence, t.ackedGeneration, t.ackedPresent)` advances ONLY after `wal.MarkAcked` returns success. Two reasons:
+**WAL is the source of truth for `persistedAck` — invariant.** `t.persistedAck` and `t.persistedAckPresent` advance ONLY after `wal.MarkAcked` returns success. Two reasons:
 
-1. The WAL's segment GC keys off the persisted `meta.json` `(AckHighWatermarkGen, AckHighWatermarkSeq)`. If we advance the in-memory tuple but `MarkAcked` fails (disk full, fsync error, EIO), then on the next `state_connecting.go` cycle we would advertise the inflated in-memory watermark in `SessionInit.wal_high_watermark_seq` while the WAL on disk still has segments NOT GC'd at that watermark. The server then thinks records are durably acked that the client cannot prove are persisted past a crash.
-2. The cold-start seed read from `wal.ReadMeta` at restart MUST be the same value the previous run advertised on the wire. If the in-memory tuple ever diverges from the on-disk meta.json (even briefly), a crash window between the in-memory write and the failed `MarkAcked` would persist the wrong post-restart state.
+1. The WAL's segment GC keys off the persisted `meta.json` `(AckHighWatermarkGen, AckHighWatermarkSeq)`. If we advance the in-memory persistedAck but `MarkAcked` fails (disk full, fsync error, EIO), then on the next state cycle we would advertise the inflated in-memory watermark in `SessionInit.wal_high_watermark_seq` while the WAL on disk still has segments NOT GC'd at that watermark. The server then thinks records are durably acked that the client cannot prove are persisted past a crash.
+2. The cold-start seed read from `wal.ReadMeta` at restart MUST be the same value the previous run advertised on the wire. If the in-memory persistedAck ever diverges from on-disk meta.json (even briefly), a crash window between the in-memory write and the failed `MarkAcked` would persist the wrong post-restart state.
 
-Given the helper as written (which advances `t.ackedSequence/Generation/Present` IN-LINE before returning), the call sequence in BOTH `state_connecting.go` (SessionAck) AND the recv-arm dispatchers (BatchAck/ServerHeartbeat) MUST therefore look like this:
+`remoteReplayCursor` does NOT need rollback symmetry for `ResendNeeded` outcomes (those never call `MarkAcked` and never fail). It DOES need rollback symmetry for `Adopted` outcomes, because both cursors moved together — if `MarkAcked` fails after Adopted, both must roll back.
 
-```go
-// Snapshot the prior tuple BEFORE the helper mutates it, so we can
-// roll back on MarkAcked failure.
-priorSeq := t.ackedSequence
-priorGen := t.ackedGeneration
-priorPresent := t.ackedPresent
+The snapshot-and-rollback shape used in Step 1b above keeps the helper as the single source of truth for cursor advancement and adds three lines of bookkeeping per call site. The rollback set is `{persistedAck, remoteReplayCursor, persistedAckPresent}`.
 
-changed, anomaly := t.applyServerAckTuple(serverGen, serverSeq)
+**Why snapshot-and-rollback rather than persist-first.** An alternative shape is "persist `(serverGen, serverSeq)` first, then mutate `t.persistedAck/remoteReplayCursor` only on success." That shape is cleaner in isolation, but the helper as written today is the canonical clamp logic — it knows about first-apply, lex-compare, stale-server adoption, AND the true-anomaly check. Refactoring it into a "decide which value to persist" pure function plus a "commit or noop" mutator doubles the surface area and forces every caller to recompute the lex compare and the anomaly check to know what value to persist. The snapshot-and-rollback shape keeps the helper as the single source of truth and the test in Step 4 below (`TestApplyServerAckTuple_DoesNotAdvanceOnMarkAckedFailure`) locks in the rollback contract.
 
-if anomaly && t.ackAnomalyLimiter.Allow() {
-    t.opts.Logger.Warn(...) // FULL tuple context, per Step 1b.
-}
-
-if changed {
-    // Persist BEFORE we count the in-memory advance as committed.
-    if err := t.wal.MarkAcked(t.ackedGeneration, t.ackedSequence); err != nil {
-        // Persistence failed: roll back the in-memory tuple so it stays
-        // in lock-step with the on-disk meta.json. Log at WARN with the
-        // tuple we tried to persist, then treat the ack frame as
-        // effectively dropped — the server will re-deliver on the next
-        // BatchAck or ServerHeartbeat. NO metric emission on the
-        // failure path.
-        t.opts.Logger.Warn("ack: wal.MarkAcked failed; in-memory tuple rolled back",
-            slog.Uint64("attempted_seq", t.ackedSequence),
-            slog.Uint64("attempted_gen", uint64(t.ackedGeneration)),
-            slog.String("err", err.Error()))
-        t.ackedSequence = priorSeq
-        t.ackedGeneration = priorGen
-        t.ackedPresent = priorPresent
-        return // do NOT emit wtp_ack_high_watermark on failure.
-    }
-    // Persistence succeeded: now the in-memory advance is committed.
-    // Emit the gauge metric so operators see the new watermark.
-    t.metrics.SetWTPAckHighWatermark(t.ackedSequence, t.ackedGeneration)
-}
-```
-
-`t.wal` is the `*wal.WAL` reference Task 22 wires through `Options.WAL` (the existing `Options.WAL *wal.WAL` field that the StateLive case already uses for `NewReader`); `t.metrics` is the `*metrics.WTPMetrics` façade (`opts.Metrics.WTP()` per the Task 22 store-wiring snippet). The `wtp_ack_high_watermark` gauge MUST carry both `gen` and `seq` labels — see `internal/metrics/wtp.go`.
-
-**Why snapshot-and-rollback rather than persist-first.** An alternative shape is "persist `(serverGen, serverSeq)` first, then mutate `t.ackedSequence/Generation` only on success." That shape is cleaner in isolation, but the helper as written today is the canonical clamp logic — it knows about first-apply, lex-compare, and stale-server adoption. Refactoring it into a "decide which value to persist" pure function plus a "commit or noop" mutator doubles the surface area and forces every caller (SessionAck inline, BatchAck recv-arm, ServerHeartbeat recv-arm) to recompute the lex compare to know what value to persist. The snapshot-and-rollback shape keeps the helper as the single source of truth and adds three lines of bookkeeping to each caller, which the test in Step 4 below (`TestApplyServerAckTuple_DoesNotAdvanceOnMarkAckedFailure`) locks in.
-
-**Step 1c: Seed Transport ack tuple from `wal.Meta` on construction.** The spec (design.md:180) says SessionInit's `wal_high_watermark_seq` comes "from disk." Today's `transport.New` defaults the tuple to `(0, 0)`. After a restart, the very first SessionInit lies about the local watermark — `t.ackedSequence == 0` — and the round-5 clamp's `local == 0` escape hatch was compensating for this gap rather than fixing it. Round-6: model "ack present" explicitly via a `Present` flag on the seed and a matching `t.ackedPresent` field on Transport, and let `applyServerAckTuple` handle first-apply by adopting the server tuple wholesale (no anomaly, no WARN).
-
-Add a small `AckTuple` struct in the transport package:
+**Step 1c: Seed Transport ack cursors from `wal.Meta` on construction.** The spec (design.md:180) says SessionInit's `wal_high_watermark_seq` comes "from disk." Today's `transport.New` defaults the cursors to `(0, 0)`. After a restart, the very first SessionInit lies about the local watermark. Round-6: model "ack present" explicitly via a `Present` flag on the seed and a matching `t.persistedAckPresent` field on Transport, and let `applyServerAckTuple` handle first-apply by adopting the server tuple wholesale (no anomaly, no WARN).
 
 ```go
 // AckTuple is the persisted (gen, seq) ack watermark tuple — the
 // transport-package mirror of wal.Meta.AckHighWatermarkGen,
 // wal.Meta.AckHighWatermarkSeq, and wal.Meta.AckRecorded. It is the
 // seed type passed into Options.InitialAckTuple at construction so the
-// Transport's effective ack watermark is correct on cold start (the
+// Transport's persistedAck cursor is correct on cold start (the
 // SessionInit frame's wal_high_watermark_seq + generation come from
 // here). Pointer-typed in Options so callers can distinguish "no seed"
 // from "seed of (0, 0) with Present=true".
@@ -6446,27 +6696,34 @@ type AckTuple struct {
     // wal.Meta.AckRecorded. False means "no ack has ever been observed";
     // the clamp helper short-circuits on the first apply by adopting the
     // server tuple wholesale (no anomaly, no WARN) and flipping
-    // t.ackedPresent to true.
+    // t.persistedAckPresent to true.
     Present bool
 }
 ```
 
-Add an `Options.InitialAckTuple *AckTuple` field — pointer-typed so a caller passing `nil` means "no seed" (Transport stays in cold-start state with `ackedPresent=false`), distinct from a caller passing `&AckTuple{Present: false}` (also "no seed", but explicit).
+Add `Options.InitialAckTuple *AckTuple` — pointer-typed so a caller passing `nil` means "no seed" (Transport stays in cold-start state with `persistedAckPresent=false`), distinct from `&AckTuple{Present: false}` (also "no seed", but explicit).
 
-Add a private field on Transport:
+Transport private fields:
 
 ```go
 type Transport struct {
     opts Options
     conn Conn
 
-    ackedSequence   uint64
-    ackedGeneration uint32
-    // ackedPresent is the explicit "an ack tuple has been observed"
-    // flag — mirrors wal.Meta.AckRecorded. The clamp helper
-    // (applyServerAckTuple) short-circuits on the first apply when
-    // false, adopting the server tuple wholesale.
-    ackedPresent bool
+    // persistedAck mirrors wal.Meta (AckHighWatermarkGen, AckHighWatermarkSeq).
+    // Monotonic only — advances ONLY through wal.MarkAcked success.
+    // Drives SessionInit.wal_high_watermark_seq AND segment GC.
+    persistedAck        AckCursor
+    persistedAckPresent bool
+
+    // remoteReplayCursor is where the server thinks its ack watermark
+    // sits. May be lex-LOWER than persistedAck if the server presents
+    // a stale tuple (gradual rollout / partition recovery). Drives
+    // the Replaying state's reader-start (remoteReplayCursor + 1) so
+    // a stale-server case re-sends the gap.
+    //
+    // In the steady state remoteReplayCursor == persistedAck.
+    remoteReplayCursor AckCursor
 
     // ... rest unchanged ...
 }
@@ -6475,73 +6732,56 @@ type Transport struct {
 Apply the seed in `New`:
 
 ```go
-if opts.InitialAckTuple != nil {
-    t.ackedSequence = opts.InitialAckTuple.Sequence
-    t.ackedGeneration = opts.InitialAckTuple.Generation
-    t.ackedPresent = opts.InitialAckTuple.Present
+if opts.InitialAckTuple != nil && opts.InitialAckTuple.Present {
+    seed := AckCursor{
+        Sequence:   opts.InitialAckTuple.Sequence,
+        Generation: opts.InitialAckTuple.Generation,
+    }
+    t.persistedAck = seed
+    t.persistedAckPresent = true
+    // Steady-state init: both cursors equal at boot. The first ack
+    // frame from the server will diverge them only if the server is
+    // stale (ResendNeeded outcome).
+    t.remoteReplayCursor = seed
 }
 ```
 
-**Step 1d: Inject `slog.Logger` via Options.** The round-5 anomaly-log test seam relied on mutating `slog.Default()`. Transport tests already run in parallel (`state_connecting_internal_test.go:50` calls `t.Parallel()`), so global slog mutation is brittle — log lines from tests A and B race into the same shared stream. Round-6 reviewer: inject the logger via Options.
+**Step 1d: Inject `slog.Logger` via Options.** Add `Options.Logger *slog.Logger`. Default to `slog.Default()` in `New` when unset. Document that it is the ONLY handle the Transport reaches for log output; tests inject `slog.New(slog.NewJSONHandler(buf, ...))` to capture WARN lines without racing against parallel tests.
 
-Add `Options.Logger *slog.Logger`. Default to `slog.Default()` in `New` when unset. Document on the field that it is the ONLY handle the Transport reaches for log output; tests inject `slog.New(slog.NewJSONHandler(buf, ...))` to capture WARN lines without racing against parallel tests. Plan-only this round — production wiring lands in Task 22.
+**Test #1 (`TestApplyServerAckTuple_HigherServerAdvancesPersistedAck`)** — round-8: the new healthy-advance test (replaces the old `TestApplyServerAckTuple_HigherSeqSameGen` which previously WARN'd on this case). Setup: `Options.WAL` wired to a real `*wal.WAL` whose `HighWatermarkSequence()` returns 200; `InitialAckTuple = &AckTuple{Sequence: 50, Generation: 7, Present: true}`; permissive limiter; logger capture buffer. Call `t.applyServerAckTuple(7, 100)`. Assert: `outcome.Kind == AckOutcomeAdopted`, `t.persistedAck == AckCursor{100, 7}`, `t.remoteReplayCursor == AckCursor{100, 7}`, `outcome.PersistedAdvanced == true`. After the SessionAck handler runs the side-effect contract, assert `wal.ReadMeta` shows `(AckHighWatermarkSeq=100, AckHighWatermarkGen=7, AckRecorded=true)` AND the metrics fake recorded one `SetAckHighWatermark(100)`. WARN buffer empty.
 
-**Test #1 (`TestApplyServerAckTuple_LowerSeqSameGen`):**
+**Test #2 (`TestApplyServerAckTuple_LowerServerLeavesPersistedAck`)** — round-8: the new stale-server test (replaces the old `TestApplyServerAckTuple_LowerSeqSameGen` which previously called `wal.MarkAcked` on the lex-lower path). Setup: `Options.WAL` wired to a real `*wal.WAL` with `MarkAcked(7, 100)` already driven so meta.json holds `(7, 100, true)`; `InitialAckTuple = &AckTuple{Sequence: 100, Generation: 7, Present: true}`; permissive limiter; INFO-level logger capture. Call `t.applyServerAckTuple(7, 50)`. Assert: `outcome.Kind == AckOutcomeResendNeeded`, `t.persistedAck == AckCursor{100, 7}` (UNCHANGED), `t.remoteReplayCursor == AckCursor{50, 7}` (regressed to server tuple), `outcome.PersistedAdvanced == false`. After the SessionAck handler runs, assert: (a) `wal.MarkAcked` was NOT called (verifiable via re-reading meta.json — still `(7, 100, true)`); (b) the metrics fake recorded ZERO additional `SetAckHighWatermark` calls beyond the initial seed; (c) the INFO log buffer contains exactly one entry naming the regression with `server_seq=50, server_gen=7, local_persisted_seq=100, local_persisted_gen=7`; (d) the WARN buffer is empty (this is normal recovery, not anomaly). Cross-gen variant: lex-lower across generations (`InitialAckTuple = (gen=7, seq=0, Present=true)`, server `(6, 999999)`) — same `ResendNeeded` outcome.
 
-Setup: construct the Transport with `Options.InitialAckTuple = &AckTuple{Sequence: 100, Generation: 7, Present: true}`. Inject a permissive `*rate.Limiter` and a `slog.Logger` capture buffer. Call `t.applyServerAckTuple(7, 50)`.
+**Test #3 (`TestApplyServerAckTuple_EqualTuple`):** Setup: `InitialAckTuple = &AckTuple{Sequence: 100, Generation: 7, Present: true}`. Call `t.applyServerAckTuple(7, 100)`. Assert: `outcome.Kind == AckOutcomeNoOp`, both cursors unchanged at `AckCursor{100, 7}`. No `wal.MarkAcked` call, no metric emission, no log entries (INFO or WARN).
 
-Assert: `t.ackedSequence == 50`, `t.ackedGeneration == 7` (server tuple wins because it is lex-lower — the gradual-rollout / partition-recovery case from spec line 601), `changed == true`, `anomaly == false`, and the WARN log buffer is EMPTY.
+**Test #4 (`TestApplyServerAckTuple_FirstApplyAdoptsServer`)** — explicit "ack present" model: Setup: `Options.InitialAckTuple = nil` (or `&AckTuple{Present: false}`); permissive limiter; logger capture. Call `t.applyServerAckTuple(8, 100)`. Assert: `outcome.Kind == AckOutcomeAdopted`, `t.persistedAck == AckCursor{100, 8}`, `t.remoteReplayCursor == AckCursor{100, 8}`, `t.persistedAckPresent == true` post-call. After side-effect contract runs, `wal.MarkAcked(8, 100)` was called (a no-op-friendly first ack). A second call with `t.applyServerAckTuple(7, 50)` then exercises the now-present lex path — assert `ResendNeeded` (server lex-lower than the just-seeded persistedAck), `t.persistedAck == AckCursor{100, 8}` (unchanged), `t.remoteReplayCursor == AckCursor{50, 7}`.
 
-**Test #2 (`TestApplyServerAckTuple_HigherSeqSameGen`):**
+**Test #5 (`TestApplyServerAckTuple_TrueAnomalyClaimBeyondWALHighSeq`)** — round-8: the only case that produces a WARN. Setup: `Options.WAL` wired to a real `*wal.WAL` with `Append` driven to seqs 1..50 in gen=7 (so `HighWatermarkSequence() == 50`); `InitialAckTuple = &AckTuple{Sequence: 30, Generation: 7, Present: true}`; permissive limiter; logger capture. Call `t.applyServerAckTuple(7, 60)` (server claims ack at seq=60 in current gen, but the WAL has only emitted up to seq=50). Assert: `outcome.Kind == AckOutcomeAnomaly`, BOTH cursors unchanged at `(30, 7)`. After the SessionAck handler runs the anomaly branch, exactly one WARN entry captured carrying `server_seq=60, server_gen=7, local_persisted_seq=30, local_persisted_gen=7, wal_high_water_seq=50, session_id=...`. No `wal.MarkAcked` call, no metric emission. Cross-gen sub-case: server `(8, 0)` against `persistedAck=(7, 30)` and `walHighSeq=50` — server.gen != persistedAck.gen, so the anomaly branch is SKIPPED; the helper returns `Adopted` (cross-gen advances are healthy by construction; the previous gen's history is closed) and the side-effect contract calls `MarkAcked(8, 0)`.
 
-Setup: same Transport construction with `InitialAckTuple = &AckTuple{Sequence: 50, Generation: 7, Present: true}`. Call `t.applyServerAckTuple(7, 100)`.
+**Test #6 (rate-limit guard `TestSessionAck_AnomalyWarnRateLimited`)** — OPTIONAL but RECOMMENDED to lock in the rate-limiter contract: inject a strict `rate.NewLimiter(rate.Every(time.Hour), 1)` and drive five back-to-back true-anomaly SessionAck handlers. Assert exactly one WARN entry (the limiter absorbed four).
 
-Assert: `t.ackedSequence == 50`, `t.ackedGeneration == 7` (LOCAL tuple wins because the server tuple is lex-higher — anomalous), `changed == false`, `anomaly == true`. After the SessionAck handler emits the anomaly WARN through the rate-limited path, exactly one WARN log entry is captured with `server_gen=7, server_seq=100, local_gen=7, local_seq=50` fields (FULL tuple context, not just `server_hw`/`local_hw`).
+**Test #7 (`TestApplyServerAckTuple_AdoptedDoesNotAdvanceOnMarkAckedFailure`)** — snapshot-and-rollback path. Setup: `Options.WAL` is a fake `*wal.WAL` whose `MarkAcked` returns a non-nil error on the next call (the simplest seam is a `walMarkAckedFn func(gen uint32, seq uint64) error` indirection on Transport that defaults to `t.wal.MarkAcked` and is overridden in tests via a `_test.go`-only export — matching the existing `RunReplayingForTest` pattern); `InitialAckTuple = &AckTuple{Sequence: 50, Generation: 7, Present: true}`; logger capture. Drive SessionAck `(serverGen=7, serverSeq=100)` (lex-higher → helper returns `Adopted`, mutates BOTH cursors to `(100, 7)` in-line). Assert: (a) `MarkAcked(7, 100)` was called exactly once and returned the injected error; (b) BOTH cursors rolled back to the pre-helper snapshot — `t.persistedAck == AckCursor{50, 7}`, `t.remoteReplayCursor == AckCursor{50, 7}`, `t.persistedAckPresent == true`; (c) the metrics fake recorded ZERO calls to `SetAckHighWatermark` (failure path does not emit); (d) the WARN buffer contains exactly one entry naming the failure with `attempted_seq=100, attempted_gen=7`, the `err` field, and the action ("rolled back"); (e) the rate-limited ack-anomaly WARN buffer is empty (failure is not an anomaly).
 
-**Test #3 (`TestApplyServerAckTuple_LowerGenAnyLocalSeq`)** — cross-gen recovery:
-
-Setup: `InitialAckTuple = &AckTuple{Sequence: 0, Generation: 7, Present: true}`. Call `t.applyServerAckTuple(6, 999999)`.
-
-Assert: `t.ackedSequence == 999999`, `t.ackedGeneration == 6` (server tuple wins because it is lex-lower — `serverGen=6 < localGen=7`, so the seq value within the lower gen does not matter), `changed == true`, `anomaly == false`, no WARN. This is the cross-gen recovery case the round-6 reviewer flagged as missing — a per-seq compare alone would silently REJECT this stale tuple as "higher seq" and the client would never replay the gen=6 unacked tail.
-
-**Test #4 (`TestApplyServerAckTuple_HigherGenAnyLocalSeq`)** — cross-gen anomaly (the complement):
-
-Setup: `InitialAckTuple = &AckTuple{Sequence: 100, Generation: 7, Present: true}`. Call `t.applyServerAckTuple(8, 0)`.
-
-Assert: `t.ackedSequence == 100`, `t.ackedGeneration == 7` (LOCAL tuple wins — `serverGen=8 > localGen=7` is lex-higher even though `serverSeq=0 < localSeq=100`), `changed == false`, `anomaly == true`, exactly one WARN with FULL tuple context (`server_gen=8, server_seq=0, local_gen=7, local_seq=100`). Without this case, a fresh-from-restart server with a stale chain could blow away local progress merely by claiming `gen=8, seq=0`.
-
-**Test #5 (`TestApplyServerAckTuple_EqualTuple`):**
-
-Setup: `InitialAckTuple = &AckTuple{Sequence: 100, Generation: 7, Present: true}`. Call `t.applyServerAckTuple(7, 100)`.
-
-Assert: `t.ackedSequence == 100`, `t.ackedGeneration == 7` (no change), `changed == false`, `anomaly == false`, no WARN.
-
-**Test #6 (`TestApplyServerAckTuple_FirstApplyAdoptsServer`)** — explicit "ack present" model:
-
-Setup: construct the Transport with `Options.InitialAckTuple = nil` (or `&AckTuple{Present: false}`). Inject a permissive `*rate.Limiter` and a `slog.Logger` capture buffer. Call `t.applyServerAckTuple(8, 100)`.
-
-Assert: `t.ackedSequence == 100`, `t.ackedGeneration == 8` (server tuple adopted wholesale on first apply, regardless of value — could be (0,0), (8, 100), or (10000, 99999), all equivalent), `changed == true`, `anomaly == false`, `t.ackedPresent == true` post-call, no WARN. A second call with `t.applyServerAckTuple(7, 50)` then exercises the lex path normally (server lower → adopted → no WARN).
-
-**Test #7 (rate-limit guard `TestSessionAck_AnomalyWarnRateLimited`)** — OPTIONAL but RECOMMENDED to lock in the rate-limiter contract: inject a strict `rate.NewLimiter(rate.Every(time.Hour), 1)` and drive five back-to-back anomalous SessionAck handlers (each carrying `server_gen=8, server_seq=100` against `local_gen=7, local_seq=100`). Assert exactly one WARN entry (the limiter absorbed four).
-
-**Test #8 (`TestApplyServerAckTuple_PersistsToWALMetaOnAdvance`)** — round-7 Finding 4: side-effect contract on `changed=true`. Setup: open a `*wal.WAL` on a `t.TempDir()`, append seqs 1..50, drive `MarkAcked(gen=2, seq=10)` so meta.json starts at `(gen=2, seq=10, AckRecorded=true)`. Construct the Transport with `Options.WAL = w`, `InitialAckTuple = &AckTuple{Generation: 2, Sequence: 10, Present: true}`. Inject a fake metrics façade (`*metrics.WTPMetrics` is the type used in production; tests substitute a counting fake or a recording fake) and a permissive limiter. Drive a SessionAck handler with `(serverGen=2, serverSeq=20)` (lex-higher within the same gen — anomaly path? NO — this is the case where `applyServerAckTuple` sees `serverHigher=true` and returns `(changed=false, anomaly=true)`). Adjust the test to use the LOWER server tuple: `(serverGen=2, serverSeq=5)` triggers `serverLower=true` → helper returns `(changed=true, anomaly=false)` — the in-memory tuple advances to `(2, 5)`. Assert: (a) `wal.MarkAcked(2, 5)` was called exactly once (verifiable via re-reading meta.json: `wal.ReadMeta` returns `AckHighWatermarkSeq=5, AckHighWatermarkGen=2, AckRecorded=true`); (b) `t.ackedSequence == 5, t.ackedGeneration == 2`; (c) the metrics fake recorded exactly one `SetWTPAckHighWatermark(seq=5, gen=2)` call. Additional sub-case: drive a first-apply (start with `Options.InitialAckTuple = nil`, then SessionAck `(gen=3, seq=42)`) — assert helper returned `(changed=true, anomaly=false)`, `MarkAcked(3, 42)` was called, meta.json now has `(3, 42, true)`, and the metric was emitted with `(seq=42, gen=3)`.
-
-**Test #9 (`TestApplyServerAckTuple_DoesNotAdvanceOnMarkAckedFailure`)** — round-7 Finding 4: snapshot-and-rollback path. Setup: same as Test #8 but inject a `*wal.WAL` whose `MarkAcked` is configured to return a non-nil error on the next call (the simplest seam is a `walMarkAckedFn func(gen uint32, seq uint64) error` indirection on Transport that defaults to `t.wal.MarkAcked` and is overridden in tests via a `_test.go`-only export — matching the existing `RunReplayingForTest` pattern; alternatively, use a fake `*wal.WAL` from a doubles file). Pre-state: `t.ackedSequence=10, t.ackedGeneration=2, t.ackedPresent=true`. Drive SessionAck `(serverGen=2, serverSeq=5)` (lex-lower → helper returns `(changed=true, anomaly=false)` and mutates the tuple in-line). Inject a `slog.Logger` capture buffer. Assert: (a) `MarkAcked` was called with `(gen=2, seq=5)` exactly once and returned the injected error; (b) `t.ackedSequence == 10, t.ackedGeneration == 2, t.ackedPresent == true` (rolled back to the pre-helper snapshot — the in-memory advance is undone); (c) the metrics fake recorded ZERO calls to `SetWTPAckHighWatermark` (failure path does not emit); (d) the WARN buffer contains exactly one entry naming the failure with `attempted_seq=5, attempted_gen=2`, the `err` field, and the action ("rolled back"); (e) the rate-limited ack-anomaly WARN buffer is empty (failure is not an anomaly — it's a persistence failure that the server will recover from on the next ack-bearing frame).
-
-**Test #10 (`TestApplyServerAckTuple_EmitsMetricOnAdvance`)** — round-7 Finding 4: gauge emission contract. Setup: same as Test #8. Drive three sequential SessionAck handlers with lex-lower tuples: `(2, 8)`, `(2, 6)`, `(1, 999999)`. After each handler, assert: (a) `MarkAcked` was called with the post-clamp tuple; (b) the metrics fake recorded `SetWTPAckHighWatermark(...)` with the matching post-clamp `(seq, gen)` (assert the gauge holds the latest value, not the cumulative max — gauges overwrite); (c) the metric labels carry both `gen` and `seq` (assert the fake observed both, not just one). After the three calls, the metrics fake's last-recorded call MUST be `(seq=999999, gen=1)` because `(1, 999999)` is the lex-lowest of the three (each call wins the lex-lower clamp against the prior in-memory tuple). Negative sub-case: a fourth SessionAck with the equal-tuple `(1, 999999)` triggers helper return `(changed=false, anomaly=false)` — assert NO additional `MarkAcked` call, NO additional metric emission (the gauge does not re-emit on a no-op clamp).
+**Test #8 (`TestApplyServerAckTuple_EmitsMetricOnAdopted`)** — gauge emission contract. Setup: `Options.WAL` wired to a real `*wal.WAL` with `HighWatermarkSequence() >= 1000`; `InitialAckTuple = &AckTuple{Sequence: 50, Generation: 1, Present: true}`. Drive three sequential SessionAck handlers with monotonically lex-higher tuples: `(1, 100)`, `(1, 200)`, `(2, 0)`. After each, assert: (a) `MarkAcked` was called with the post-clamp tuple; (b) the metrics fake's last recorded call is `SetAckHighWatermark(seq)` with the matching post-clamp seq (production signature today is `func (w *WTPMetrics) SetAckHighWatermark(seq int64)` — single unlabeled gauge); (c) BOTH cursors equal at the new server tuple after each call. After the three calls, the metrics fake's last-recorded call is `SetAckHighWatermark(0)` (the gauge holds the latest value, not the cumulative max — gauges overwrite). Negative sub-case: a fourth SessionAck with the equal-tuple `(2, 0)` triggers `NoOp` — assert NO additional `MarkAcked` call, NO additional metric emission.
 
 **Step ordering for Task 15.1:**
 
-- [ ] **Step 1:** Write the failing tests (`TestApplyServerAckTuple_LowerSeqSameGen`, `TestApplyServerAckTuple_HigherSeqSameGen`, `TestApplyServerAckTuple_LowerGenAnyLocalSeq`, `TestApplyServerAckTuple_HigherGenAnyLocalSeq`, `TestApplyServerAckTuple_EqualTuple`, `TestApplyServerAckTuple_FirstApplyAdoptsServer`, optional `TestSessionAck_AnomalyWarnRateLimited`, AND the round-7 Finding 4 trio: `TestApplyServerAckTuple_PersistsToWALMetaOnAdvance`, `TestApplyServerAckTuple_DoesNotAdvanceOnMarkAckedFailure`, `TestApplyServerAckTuple_EmitsMetricOnAdvance`).
-- [ ] **Step 2:** Run tests to verify they fail with the expected symbols (`Transport.applyServerAckTuple` undefined, `Transport.ackedPresent` undefined, `Options.InitialAckTuple` / `Options.Logger` / `Options.WAL` / `Options.Metrics` / `transport.AckTuple` undefined, current SessionAck handler does not honor the clamp OR the side-effect contract).
-- [ ] **Step 3a:** Add the `AckTuple` struct, `Options.InitialAckTuple`, `Options.Logger`, `Options.WAL`, `Options.Metrics` (façade), `t.ackedPresent`, `t.ackAnomalyLimiter` fields, default `Logger` to `slog.Default()` and `ackAnomalyLimiter` to `rate.NewLimiter(rate.Every(time.Minute), 1)` in `New`, apply the seed in `New` if `InitialAckTuple != nil`.
-- [ ] **Step 3b:** Add the `applyServerAckTuple` helper to `transport.go`. Refactor the `state_connecting.go:59` SessionAck handler to call into the helper AND run the side-effect contract from Step 1b.5 (snapshot → clamp → WARN-on-anomaly → persist-on-change → rollback-on-failure → metric-on-success); emit the anomaly WARN (with FULL tuple context) through `t.opts.Logger.Warn(...)`.
+- [ ] **Step 1:** Write the failing tests above (Tests #1–#8) plus the optional rate-limit guard.
+- [ ] **Step 2:** Run tests to verify they fail with the expected symbols (`Transport.applyServerAckTuple` undefined or returning the wrong shape; `Transport.persistedAck` / `Transport.remoteReplayCursor` undefined; `Options.InitialAckTuple` / `Options.Logger` / `Options.WAL` / `Options.Metrics` / `transport.AckTuple` / `transport.AckCursor` / `transport.AckOutcome` undefined; current SessionAck handler does not honor the cursor split).
+- [ ] **Step 3a:** Add `AckTuple`, `AckCursor`, `AckOutcome`, `AckOutcomeKind` types; `Options.InitialAckTuple`, `Options.Logger`, `Options.WAL`, `Options.Metrics` fields; `t.persistedAck`, `t.persistedAckPresent`, `t.remoteReplayCursor` fields; `t.ackAnomalyLimiter`. Default `Logger` to `slog.Default()` and `ackAnomalyLimiter` to `rate.NewLimiter(rate.Every(time.Minute), 1)` in `New`. Apply the seed in `New` if `InitialAckTuple != nil && InitialAckTuple.Present`.
+- [ ] **Step 3b:** Add the `applyServerAckTuple` helper to `transport.go`. Refactor the `state_connecting.go:59` SessionAck handler to call into the helper AND dispatch on `AckOutcome.Kind` per Step 1b.
 - [ ] **Step 4:** Run the tests to verify they pass; run the full transport package test suite to verify no regression.
-- [ ] **Step 5:** Cross-compile (`GOOS=windows go build ./...`) — `golang.org/x/time/rate` is in the module already; if not, `go mod tidy`.
-- [ ] **Step 6:** Commit with message `fix(wtp/transport): tuple-aware ack clamp + WAL meta seed + injected logger`.
+- [ ] **Step 5:** Cross-compile (`GOOS=windows go build ./...`) — `golang.org/x/time/rate` is in the module already.
+- [ ] **Step 6:** Commit with message `fix(wtp/transport): two-cursor ack clamp + WAL meta seed + injected logger`.
 - [ ] **Step 7:** Run `/roborev-design-review` and address findings.
 
-**Hard dependency:** Task 22's StateReplaying / StateLive cases consume `t.ackedSequence` / `t.ackedGeneration` and assume both store the clamped tuple value. Task 22 MUST NOT commit its Run loop until Task 15.1 has landed (and the matching Task 17 sub-step for BatchAck/ServerHeartbeat has landed — see Task 17 sub-step "Tuple-aware ack clamp in BatchAck/ServerHeartbeat handlers" below). Until both clamp paths are wired, an unclamped raw server value would silently propagate into the reader-start calculation. Task 22's Store-wiring snippet (Step 2 of Task 22) MUST construct `*AckTuple` from `wal.ReadMeta` and pass it through `Options.InitialAckTuple` so the SessionInit watermark is seeded from disk per spec line 180.
+**Hard dependency (round-8 chain):**
+
+- **14a → 15.1:** Task 15.1's `Options.WAL` must be a `*wal.WAL` carrying the `Options.SessionID`/`KeyFingerprint` set by Task 14a, so the WAL persists identity on every `MarkAcked`. Without 14a, the round-7 cold-start identity gate compares against fields production never populates.
+- **15.1 → 17.X:** Task 17 sub-step 17.X (BatchAck/ServerHeartbeat clamp) reuses the `applyServerAckTuple` helper landed here. It MUST NOT proceed until Task 15.1 has landed.
+- **15.1 → 22:** Task 22's StateReplaying/StateLive cases consume `t.remoteReplayCursor` for their reader-start calculations. Task 22 MUST NOT commit its Run loop until BOTH Task 15.1 (SessionAck clamp) AND Task 17 sub-step 17.X (BatchAck/ServerHeartbeat clamp) have landed; without the cursor split, an unclamped raw server value would silently propagate into the reader-start calculation.
+
+Task 22's Store-wiring snippet (Step 2 of Task 22) MUST construct `*AckTuple` from `wal.ReadMeta` and pass it through `Options.InitialAckTuple` so the SessionInit watermark is seeded from disk per spec line 180.
 
 ---
 
@@ -7764,66 +8004,98 @@ func encodeBatchMessage(_ []wal.Record) (*wtpv1.ClientMessage, error) {
 
 **runLive lifecycle invariant (round-6 fix).** runLive's lifecycle invariant matches runReplaying's — every error path on a held Conn calls Close() exactly once and clears `t.conn = nil` before returning, so the Run loop's next StateConnecting iteration starts with a fresh dial. ctx cancellation also closes + clears (StateShutdown still tears down the conn — the caller doesn't need to know whether it returned by error or by shutdown to know it owns no conn now). Round-6 reviewer: prior to this fix, the runLive snippet's error returns just bubbled the error without touching `t.conn`, so the Run loop's StateLive case regressed to StateConnecting on top of a still-held conn reference. The pattern above (close + clear before each `return StateConnecting/StateShutdown, ...`) brings runLive into line with runReplaying's contract.
 
-**Sub-step 17.X: Tuple-aware ack clamp in BatchAck/ServerHeartbeat handlers (round-5/round-6 prerequisite for Task 22 ack consumption)**
+**Sub-step 17.X: Two-cursor ack clamp in BatchAck/ServerHeartbeat handlers (round-8 rewrite — depends on Task 15.1)**
 
-Per spec §"Acknowledgement model" (design.md:611-617), the recv multiplexer's `BatchAck` and `ServerHeartbeat` handlers BOTH carry an `ack_high_watermark_seq` + `generation` that ADVANCE the Transport-level `(t.ackedGeneration, t.ackedSequence)` TUPLE. Both paths MUST apply the same lex-tuple clamp rule that Task 15.1 wires into the SessionAck handler — adopt the server tuple wholesale when it is lex-lower (gradual rollout / partition recovery), KEEP local wholesale when it is lex-higher and emit a rate-limited WARN with FULL tuple context. Round-6: the clamp operates on the `(gen, seq)` TUPLE under lex compare; mixing local-seq with server-gen creates an impossible state under the WAL's lex `(gen, seq)` GC semantics (`wal/wal.go` `MarkAcked` / `segmentFullyAckedLocked`). Without this sub-step, a misbehaving server could rewind the client's effective ack via a stale `BatchAck` (potentially re-sending acked work) OR — worse — trick it into advancing past records the server has not actually acked via a forged-high `BatchAck` (silently dropping records from the WAL GC's protected window).
+Per spec §"Acknowledgement model" (design.md), the recv multiplexer's `BatchAck` and `ServerHeartbeat` handlers BOTH carry an `ack_high_watermark_seq` + `generation`. Both paths MUST run the SAME `applyServerAckTuple` clamp helper that Task 15.1 lands on Transport — the helper's two-cursor model (`persistedAck` monotonic + `remoteReplayCursor` regressable) is the SINGLE source of truth for cursor advancement. The recv-side wrapper, `applyAckFromRecv`, dispatches on the helper's `AckOutcome.Kind` and runs the same four-branch side-effect contract as the SessionAck handler in Step 1b of Task 15.1.
 
-Offending sites (will be added by this task — there is no production code to grep yet because the recv multiplexer does not exist; the sub-step's scope is to write the multiplexer with the clamp baked in from day one rather than retrofitting it later):
+Round-8: this sub-step is no longer about a `(changed, anomaly)`-bool helper. The helper now returns an `AckOutcome` discriminated value (see Task 15.1 for the type definitions). The wrapper reuses Task 15.1's monotonic invariant: ONLY the `Adopted` outcome calls `wal.MarkAcked` + emits the metric; the `ResendNeeded` outcome (server lex-lower than persistedAck) regresses ONLY `remoteReplayCursor` and logs INFO; the `Anomaly` outcome (true anomaly: server claims ack beyond walHighSeq within the same generation) emits a rate-limited WARN and leaves both cursors unchanged. Without this dispatch, a stale `BatchAck` would either silently regress the persisted ack watermark (under the old "lower-server-adopts-and-persists" model that breaks the WAL monotonic-only contract) OR — worse — trick the client into advancing `wal.MarkAcked` past records the server has not actually durably acked.
+
+Offending sites (will be added by this task — there is no production code to grep yet because the recv multiplexer does not exist; the sub-step's scope is to write the multiplexer with the two-cursor dispatch baked in from day one rather than retrofitting it later):
 
 - The `case *wtpv1.ServerMessage_BatchAck:` arm of the recv goroutine's typed dispatch (introduced in this task).
 - The `case *wtpv1.ServerMessage_ServerHeartbeat:` arm of the same dispatch.
 
-Reuse the canonical `applyServerAckTuple` helper Task 15.1 lands on Transport (operates on the `(gen, seq)` TUPLE under lex compare). The recv-side handlers wrap it with the same anomaly-WARN emission used by SessionAck (rate-limited via `t.ackAnomalyLimiter`, logger via `t.opts.Logger`) AND the same side-effect contract from Task 15.1 Step 1b.5 (snapshot-and-rollback around `wal.MarkAcked` + metric emission on success — round-7 Finding 4):
+Reuse the canonical `applyServerAckTuple` helper Task 15.1 lands on Transport (returns `AckOutcome` — see Task 15.1 type definitions). The recv-side handlers wrap it with the same `AckOutcome.Kind` dispatch used by SessionAck (rate-limited via `t.ackAnomalyLimiter`, logger via `t.opts.Logger`):
 
 ```go
 // applyAckFromRecv is the recv-side wrapper around applyServerAckTuple.
 // It is invoked from the main state-machine goroutine when a typed
 // recvBatchAck or recvServerHeartbeat event surfaces on the recv
-// channel; the recv goroutine NEVER touches t.ackedSequence /
-// t.ackedGeneration directly (single-owner invariant).
+// channel; the recv goroutine NEVER touches t.persistedAck /
+// t.remoteReplayCursor directly (single-owner invariant).
 //
 // `frame` is the proto frame name ("batch_ack" / "server_heartbeat")
 // used in the anomaly WARN's structured log so operators can tell which
 // frame type drove the anomaly. SessionAck logs through the SessionAck
 // site directly (with frame="session_ack") — same side-effect contract,
 // inlined there for the anomaly-WARN/rejectReason interleave.
+//
+// Round-8 — the four-branch dispatch matches Task 15.1 Step 1b. The
+// `Adopted` branch is the ONLY one that calls wal.MarkAcked + emits
+// the gauge; ResendNeeded logs INFO and regresses remoteReplayCursor
+// only; Anomaly logs WARN and leaves both cursors unchanged; NoOp
+// is silent.
 func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq uint64) {
-    // Snapshot before the helper mutates — required for rollback per
-    // Task 15.1 Step 1b.5.
-    priorSeq := t.ackedSequence
-    priorGen := t.ackedGeneration
-    priorPresent := t.ackedPresent
+    // Snapshot BOTH cursors before the helper mutates — required for
+    // rollback on Adopted-then-MarkAcked-failure per Task 15.1 Step 1b.5.
+    priorPersisted := t.persistedAck
+    priorReplay := t.remoteReplayCursor
+    priorPresent := t.persistedAckPresent
 
-    changed, anomaly := t.applyServerAckTuple(serverGen, serverSeq)
-    if anomaly && t.ackAnomalyLimiter.Allow() {
-        // Per spec §"Acknowledgement model": log the FULL tuple context
-        // (server_gen, server_seq, local_gen, local_seq) so operators
-        // can diagnose without log correlation.
-        t.opts.Logger.Warn("ack: anomalous server ack tuple exceeds local; using local",
+    outcome := t.applyServerAckTuple(serverGen, serverSeq)
+    switch outcome.Kind {
+    case AckOutcomeAnomaly:
+        if t.ackAnomalyLimiter.Allow() {
+            // Per spec §"Acknowledgement model": True anomaly — server
+            // claims ack beyond wal high-water seq inside the current
+            // generation. Log the FULL cursor context so operators can
+            // diagnose without log correlation.
+            t.opts.Logger.Warn("ack: anomalous server ack tuple beyond wal high-water seq",
+                slog.String("frame", frame),
+                slog.Uint64("server_seq", serverSeq),
+                slog.Uint64("server_gen", uint64(serverGen)),
+                slog.Uint64("local_persisted_seq", t.persistedAck.Sequence),
+                slog.Uint64("local_persisted_gen", uint64(t.persistedAck.Generation)),
+                slog.Uint64("wal_high_water_seq", t.wal.HighWatermarkSequence()),
+                slog.String("session_id", t.opts.SessionID))
+        }
+        // Cursors unchanged; nothing more to do.
+    case AckOutcomeAdopted:
+        // persistedAck advanced; persist to WAL and emit metric.
+        if err := t.wal.MarkAcked(t.persistedAck.Generation, t.persistedAck.Sequence); err != nil {
+            // Persistence failed: roll back BOTH cursors so the in-memory
+            // mirrors stay in lock-step with the on-disk meta.json.
+            t.opts.Logger.Warn("ack: wal.MarkAcked failed; rolling back ack cursors",
+                slog.String("frame", frame),
+                slog.Uint64("attempted_seq", t.persistedAck.Sequence),
+                slog.Uint64("attempted_gen", uint64(t.persistedAck.Generation)),
+                slog.String("err", err.Error()))
+            t.persistedAck = priorPersisted
+            t.remoteReplayCursor = priorReplay
+            t.persistedAckPresent = priorPresent
+            // Server will re-deliver this watermark on the next BatchAck
+            // or ServerHeartbeat. No metric emission on the failure path.
+            return
+        }
+        // SetAckHighWatermark currently takes a single seq (production
+        // signature today: `func (w *WTPMetrics) SetAckHighWatermark(seq int64)`).
+        // The metric remains a single unlabeled gauge for round-8;
+        // see Task 22b for the deferred schema-extension proposal.
+        t.metrics.SetAckHighWatermark(int64(t.persistedAck.Sequence))
+    case AckOutcomeResendNeeded:
+        // remoteReplayCursor moved; persistedAck unchanged; do NOT call
+        // wal.MarkAcked. Log INFO so operators can see the server is
+        // stale relative to local persistence (gradual rollout /
+        // partition recovery — normal, not anomalous).
+        t.opts.Logger.Info("ack: server ack tuple lower than persistedAck; remote replay cursor regressed",
             slog.String("frame", frame),
             slog.Uint64("server_seq", serverSeq),
             slog.Uint64("server_gen", uint64(serverGen)),
-            slog.Uint64("local_seq", t.ackedSequence),
-            slog.Uint64("local_gen", uint64(t.ackedGeneration)),
+            slog.Uint64("local_persisted_seq", t.persistedAck.Sequence),
+            slog.Uint64("local_persisted_gen", uint64(t.persistedAck.Generation)),
             slog.String("session_id", t.opts.SessionID))
-    }
-
-    if changed {
-        if err := t.wal.MarkAcked(t.ackedGeneration, t.ackedSequence); err != nil {
-            // Persistence failed: roll back the in-memory tuple so it
-            // stays in lock-step with on-disk meta.json. Server will
-            // re-deliver on the next ack-bearing frame; no metric.
-            t.opts.Logger.Warn("ack: wal.MarkAcked failed; rolling back in-memory ack tuple",
-                slog.String("frame", frame),
-                slog.Uint64("attempted_seq", t.ackedSequence),
-                slog.Uint64("attempted_gen", uint64(t.ackedGeneration)),
-                slog.String("err", err.Error()))
-            t.ackedSequence = priorSeq
-            t.ackedGeneration = priorGen
-            t.ackedPresent = priorPresent
-            return
-        }
-        t.metrics.SetWTPAckHighWatermark(t.ackedSequence, t.ackedGeneration)
+    case AckOutcomeNoOp:
+        // No cursor moved; nothing to do.
     }
 }
 ```
@@ -7832,13 +8104,14 @@ The two recv-arm dispatches then become trivial:
 
 ```go
 case recvBatchAck:
-    // applyAckFromRecv runs the full Step 1b.5 contract: clamp + WARN-on-
-    // anomaly + wal.MarkAcked + rollback-on-failure + metric-on-success.
-    // The "downstream metrics / segment GC trigger" placeholder that
-    // sat here in earlier rounds is GONE — segment GC is driven by
-    // wal.MarkAcked itself (see wal/wal.go segmentFullyAckedLocked),
-    // and the metric is emitted inside applyAckFromRecv. There is no
-    // additional downstream side-effect for the recv arm to perform.
+    // applyAckFromRecv runs the full four-branch contract: dispatch on
+    // AckOutcome.Kind + WARN-on-anomaly + wal.MarkAcked + rollback-on-
+    // failure + metric-on-success. The "downstream metrics / segment GC
+    // trigger" placeholder that sat here in earlier rounds is GONE —
+    // segment GC is driven by wal.MarkAcked itself (see wal/wal.go
+    // segmentFullyAckedLocked), and the metric is emitted inside
+    // applyAckFromRecv. There is no additional downstream side-effect
+    // for the recv arm to perform.
     t.applyAckFromRecv("batch_ack", e.gen, e.seq)
 case recvServerHeartbeat:
     t.applyAckFromRecv("server_heartbeat", e.gen, e.seq)
@@ -7847,30 +8120,47 @@ case recvServerHeartbeat:
     // applyAckFromRecv has already handled.
 ```
 
-Refactor Task 15.1's SessionAck handler to call into the same `applyServerAckTuple` (it already does per Task 15.1 Step 1b) so the three sites stay in lock-step: SessionAck wraps `applyServerAckTuple` inline (because it needs to set `t.rejectReason` etc.), BatchAck and ServerHeartbeat wrap it via `applyAckFromRecv`. All three call sites share `t.ackAnomalyLimiter` so a flapping peer cannot multiply the WARN volume by trying alternate ack-bearing frame types.
+The SessionAck handler in `state_connecting.go` already calls `applyServerAckTuple` directly (per Task 15.1 Step 1b) — it dispatches on `AckOutcome.Kind` inline because it needs to set `t.rejectReason` on certain failure cases. BatchAck and ServerHeartbeat funnel through `applyAckFromRecv` instead. All three call sites share `t.ackAnomalyLimiter` so a flapping peer cannot multiply the WARN volume by trying alternate ack-bearing frame types.
 
-Unit tests (mirror Task 15.1's tuple-aware suite, this time exercising the recv-side handlers via the recv-channel injection seam introduced earlier in Task 17). Tests use the injected `Options.Logger` (added in Task 15.1 Step 1d) writing to a `*bytes.Buffer` so the WARN content can be asserted byte-for-byte WITHOUT racing on the global `slog.Default()`:
+Unit tests (mirror Task 15.1's two-cursor test suite, this time exercising the recv-side handlers via the recv-channel injection seam introduced earlier in Task 17). Tests use the injected `Options.Logger` (added in Task 15.1 Step 1d) writing to a `*bytes.Buffer` so the WARN/INFO content can be asserted byte-for-byte WITHOUT racing on the global `slog.Default()`. `Options.WAL` is wired to a real `*wal.WAL` constructed via `wal.Open` with the Task 14a identity options (`SessionID`, `KeyFingerprint`) so `wal.MarkAcked` calls actually mutate `meta.json` and `wal.HighWatermarkSequence()` returns truthful values.
 
-- `TestRecvMultiplexer_BatchAckClampsServerTupleBelowLocal`: pre-seed `t.ackedSequence = 100, t.ackedGeneration = 7, t.ackedPresent = true`. Inject a `*wtpv1.ServerMessage_BatchAck` with `ack_high_watermark_seq = 50, generation = 7` onto the recv-channel injection seam. Assert `t.ackedSequence == 50, t.ackedGeneration == 7` post-handler, no WARN log.
-- `TestRecvMultiplexer_BatchAckIgnoresAnomalousHigherServerTuple`: pre-seed `t.ackedSequence = 50, t.ackedGeneration = 7, t.ackedPresent = true`. Inject BatchAck with `ack_high_watermark_seq = 100, generation = 7`. Assert `t.ackedSequence == 50, t.ackedGeneration == 7` (LOCAL wins), exactly one WARN log emitted with FULL tuple context (`server_gen=7, server_seq=100, local_gen=7, local_seq=50, frame="batch_ack"`).
-- `TestRecvMultiplexer_BatchAckLowerGenAdoptsServerTuple`: pre-seed `t.ackedSequence = 0, t.ackedGeneration = 7, t.ackedPresent = true`. Inject BatchAck with `ack_high_watermark_seq = 999999, generation = 6`. Assert `t.ackedSequence == 999999, t.ackedGeneration == 6` (server tuple is lex-lower because `serverGen < localGen`), no WARN.
-- `TestRecvMultiplexer_BatchAckHigherGenIgnoresServerTuple`: pre-seed `t.ackedSequence = 100, t.ackedGeneration = 7, t.ackedPresent = true`. Inject BatchAck with `ack_high_watermark_seq = 0, generation = 8`. Assert `t.ackedSequence == 100, t.ackedGeneration == 7` (LOCAL wins because `serverGen > localGen` is lex-higher), one WARN with `frame="batch_ack"`.
-- `TestRecvMultiplexer_ServerHeartbeatClampsServerTupleBelowLocal`: same as the `BatchAck` lower-tuple case but for ServerHeartbeat.
-- `TestRecvMultiplexer_ServerHeartbeatIgnoresAnomalousHigherServerTuple`: same as the `BatchAck` higher-tuple case but for ServerHeartbeat (assert `frame="server_heartbeat"` in the WARN).
+- `TestRecvMultiplexer_BatchAckLowerServerLeavesPersistedAck`: pre-seed via `Options.InitialAckTuple = &AckTuple{Sequence: 100, Generation: 7, Present: true}` and drive `wal.MarkAcked(7, 100)` so meta.json holds `(7, 100, true)`. Inject a `*wtpv1.ServerMessage_BatchAck` with `ack_high_watermark_seq = 50, generation = 7` onto the recv-channel injection seam. Assert post-handler: `t.persistedAck == AckCursor{100, 7}` (UNCHANGED), `t.remoteReplayCursor == AckCursor{50, 7}` (regressed to server tuple), `wal.ReadMeta` still shows `(7, 100, true)` (no `MarkAcked` call), the metrics fake recorded ZERO additional `SetAckHighWatermark` calls, the WARN buffer is empty, and the INFO buffer contains exactly one entry naming the regression with `frame="batch_ack", server_seq=50, server_gen=7, local_persisted_seq=100, local_persisted_gen=7`.
 
-Step ordering for sub-step 17.X (mirrors the Task 15.1 step shape):
+- `TestRecvMultiplexer_BatchAckHigherServerAdvancesPersistedAck`: pre-seed via `Options.InitialAckTuple = &AckTuple{Sequence: 50, Generation: 7, Present: true}`; ensure `Options.WAL.HighWatermarkSequence() >= 100` (drive `Append` past seq=100 in gen=7 first). Inject BatchAck with `ack_high_watermark_seq = 100, generation = 7`. Assert post-handler: `t.persistedAck == AckCursor{100, 7}` (advanced), `t.remoteReplayCursor == AckCursor{100, 7}` (advanced in lockstep), `wal.ReadMeta` shows `(7, 100, true)` (`MarkAcked` was called), the metrics fake's last call is `SetAckHighWatermark(100)`, the WARN buffer is empty, and the INFO buffer is empty.
 
-- [ ] **Sub-step 17.X.1:** Write the six failing tests above against the recv-channel injection seam.
-- [ ] **Sub-step 17.X.2:** Run tests to confirm they fail with the expected symbols (`Transport.applyAckFromRecv` undefined; recv handlers do not call into the shared tuple clamp).
-- [ ] **Sub-step 17.X.3:** Add `applyAckFromRecv` to `transport.go` (delegating to the `applyServerAckTuple` helper Task 15.1 already landed); wire the BatchAck/ServerHeartbeat recv arms.
+- `TestRecvMultiplexer_BatchAckTrueAnomalyClaimBeyondWALHighSeq`: pre-seed `InitialAckTuple = &AckTuple{Sequence: 30, Generation: 7, Present: true}`; drive WAL `Append` so `HighWatermarkSequence() == 50`. Inject BatchAck with `ack_high_watermark_seq = 60, generation = 7` (server claims ack at seq=60 inside current gen, but WAL has only emitted up to seq=50). Assert post-handler: BOTH cursors unchanged at `AckCursor{30, 7}`, exactly one WARN entry captured carrying `frame="batch_ack", server_seq=60, server_gen=7, local_persisted_seq=30, local_persisted_gen=7, wal_high_water_seq=50`, no `wal.MarkAcked` call, no metric emission.
+
+- `TestRecvMultiplexer_BatchAckLowerGenAdoptsServerTuple`: pre-seed `InitialAckTuple = &AckTuple{Sequence: 0, Generation: 7, Present: true}` (lex-higher than `(6, 999999)`). Inject BatchAck with `ack_high_watermark_seq = 999999, generation = 6` — lex-lower than persistedAck. Assert post-handler: `t.persistedAck == AckCursor{0, 7}` (UNCHANGED — persistedAck never regresses), `t.remoteReplayCursor == AckCursor{999999, 6}` (regressed to the server's older-gen tuple), no `MarkAcked` call, INFO log entry naming the regression. Cross-gen rationale: `(6, 999999) < (7, 0)` under lex compare, so this is the cross-generation `ResendNeeded` case (rare in production but a documented contract).
+
+- `TestRecvMultiplexer_BatchAckHigherGenAdvancesPersistedAck`: pre-seed `InitialAckTuple = &AckTuple{Sequence: 100, Generation: 7, Present: true}`. Inject BatchAck with `ack_high_watermark_seq = 0, generation = 8` (lex-higher because `serverGen > localGen`). The cross-gen anomaly check is SKIPPED (helper short-circuits on `serverGen != t.persistedAck.Generation` per Task 15.1 — cross-gen advances are healthy by construction; the previous gen's history is closed). Assert post-handler: `t.persistedAck == AckCursor{0, 8}` (advanced), `t.remoteReplayCursor == AckCursor{0, 8}` (advanced in lockstep), `wal.MarkAcked(8, 0)` was called, metrics fake recorded `SetAckHighWatermark(0)`, no WARN, no INFO.
+
+- `TestRecvMultiplexer_ServerHeartbeatLowerServerLeavesPersistedAck`: same setup as the BatchAck lower-server test but inject a `*wtpv1.ServerMessage_ServerHeartbeat` frame. Assert the same cursor split AND the INFO log entry has `frame="server_heartbeat"`.
+
+- `TestRecvMultiplexer_ServerHeartbeatTrueAnomalyClaimBeyondWALHighSeq`: same setup as the BatchAck true-anomaly test but for ServerHeartbeat. Assert WARN entry has `frame="server_heartbeat"`.
+
+- `TestRecvMultiplexer_BatchAckEmitsMetricOnAdopted`: gauge emission contract — mirror Task 15.1's `TestApplyServerAckTuple_EmitsMetricOnAdopted` for the recv path. Pre-seed `InitialAckTuple = &AckTuple{Sequence: 50, Generation: 1, Present: true}`; ensure `wal.HighWatermarkSequence() >= 1000`. Drive three sequential BatchAcks with monotonically lex-higher tuples: `(1, 100)`, `(1, 200)`, `(2, 0)`. After each, assert: `wal.MarkAcked` was called with the post-clamp tuple, the metrics fake's last call is `SetAckHighWatermark(seq)` with the matching post-clamp seq, and BOTH cursors equal at the new server tuple. After the three calls, the metrics fake's last call is `SetAckHighWatermark(0)` (gauge holds the latest, not the cumulative max). Negative sub-case: a fourth BatchAck with the equal tuple `(2, 0)` triggers `NoOp` — assert NO additional `MarkAcked` call, NO additional metric emission.
+
+- `TestRecvMultiplexer_BatchAckAdoptedDoesNotAdvanceOnMarkAckedFailure`: snapshot-and-rollback path mirrored from Task 15.1's `TestApplyServerAckTuple_AdoptedDoesNotAdvanceOnMarkAckedFailure`. Setup: `Options.WAL` is a fake whose `MarkAcked` returns a non-nil error on the next call (use the same `walMarkAckedFn` indirection seam Task 15.1 introduces); `InitialAckTuple = &AckTuple{Sequence: 50, Generation: 7, Present: true}`. Inject BatchAck `(serverGen=7, serverSeq=100)` (lex-higher → helper returns `Adopted`, mutates BOTH cursors to `(100, 7)` in-line). Assert: `MarkAcked(7, 100)` was called exactly once and returned the injected error; BOTH cursors rolled back to the pre-helper snapshot — `t.persistedAck == AckCursor{50, 7}`, `t.remoteReplayCursor == AckCursor{50, 7}`, `t.persistedAckPresent == true`; the metrics fake recorded ZERO calls to `SetAckHighWatermark` (failure path does not emit); the WARN buffer contains exactly one entry naming the failure with `frame="batch_ack", attempted_seq=100, attempted_gen=7`, the `err` field, and the action ("rolled back"); the rate-limited ack-anomaly WARN buffer is empty (failure is not an anomaly).
+
+Step ordering for sub-step 17.X (mirrors the Task 15.1 step shape — round-8 rewrite):
+
+- [ ] **Sub-step 17.X.1:** Write the eight failing tests above against the recv-channel injection seam (constructing `Options.WAL` via the real `wal.Open` with the Task 14a identity options so the `wal.MarkAcked` / `wal.HighWatermarkSequence` calls operate on a real disk-backed WAL).
+- [ ] **Sub-step 17.X.2:** Run tests to confirm they fail with the expected symbols (`Transport.applyAckFromRecv` undefined; recv handlers do not call into the shared `applyServerAckTuple` helper; `AckOutcome` / `AckOutcomeKind` symbols undefined — confirms hard dependency on Task 15.1).
+- [ ] **Sub-step 17.X.3:** Add `applyAckFromRecv` to `transport.go` (delegating to the `applyServerAckTuple` helper Task 15.1 already landed); wire the BatchAck/ServerHeartbeat recv arms to call it.
 - [ ] **Sub-step 17.X.4:** Run tests + cross-compile.
-- [ ] **Sub-step 17.X.5:** Commit with message `fix(wtp/transport): tuple-aware ack clamp in BatchAck/ServerHeartbeat handlers`.
+- [ ] **Sub-step 17.X.5:** Commit with message `fix(wtp/transport): two-cursor ack clamp in BatchAck/ServerHeartbeat handlers`.
 - [ ] **Sub-step 17.X.6:** Run `/roborev-design-review` and address findings.
 
-**Concurrency boundary for ack-watermark updates (single-owner invariant).** Transport is documented as single-goroutine-owned (`transport.go:76-77`). Once the recv multiplexer lands, the recv goroutine and the main state-machine goroutine BOTH would otherwise reach for `t.ackedSequence` / `t.ackedGeneration` — the recv goroutine to update on BatchAck/ServerHeartbeat/SessionAck, the state-machine goroutine to read for replay/Live reader-start calculations. There are two ways to keep them safe:
+**Hard dependency (round-8 chain):**
 
-1. **Mutex around `t.ackedSequence`/`t.ackedGeneration`/`t.ackedPresent`.** Simple but breaks the documented single-owner invariant — every state-handler read of `t.ackedSequence` (Replaying entry, Live entry) becomes a locked critical section, and any future state-machine goroutine code that does multi-field reads of Transport state has to remember to acquire the same mutex. The invariant becomes "single-owner except for these three fields, which require a mutex." That's the kind of subtle rule that breaks the next time someone adds a new ack-bearing field.
-2. **Typed events on a channel.** The recv goroutine sends typed events (e.g., `recvBatchAck{seq uint64, gen uint32}`, `recvServerHeartbeat{seq uint64, gen uint32}`) over channels that the main state-machine goroutine selects on alongside its other inputs (ctx.Done, rdr.Notify, ticker, t.stopCh). The state-machine goroutine's event handler invokes `applyAckFromRecv` (which delegates to `applyServerAckTuple`) — so the clamp logic runs on the main goroutine, the recv goroutine never touches `t.ackedSequence` / `t.ackedGeneration` / `t.ackedPresent` directly, and the single-owner invariant is preserved without locks.
+- **14a → 17.X:** Task 17.X's `Options.WAL` MUST be a `*wal.WAL` constructed via `wal.Open` with the `SessionID`/`KeyFingerprint` identity options Task 14a introduces. Without 14a, the WAL produced by these tests will have empty identity in meta.json — the round-7 cold-start identity gate would then accept ANY post-restart SessionInit reply (no fingerprint match), defeating the test scope. The dependency is also transitive through 15.1: 17.X reuses the helper 15.1 lands.
+- **15.1 → 17.X:** Task 17.X reuses the `applyServerAckTuple` helper, the `AckOutcome` / `AckOutcomeKind` types, `Options.InitialAckTuple`, `t.persistedAck` / `t.remoteReplayCursor` / `t.persistedAckPresent` fields, the `t.ackAnomalyLimiter`, and the `walMarkAckedFn` indirection seam — ALL of which are introduced in Task 15.1. Task 17.X MUST NOT proceed until Task 15.1 has landed and its tests are green.
+- **17.X → 22:** Task 22's StateLive case consumes `t.remoteReplayCursor` for its reader-start calculation when re-entering Live after a transient drop. Task 22 MUST NOT commit its Run loop until BOTH Task 15.1 (SessionAck clamp) AND Task 17.X (BatchAck/ServerHeartbeat clamp) have landed; without both, an unclamped raw server value could silently propagate into the reader-start calculation.
+
+**Concurrency boundary for ack-cursor updates (single-owner invariant).** Transport is documented as single-goroutine-owned (`transport.go:76-77`). Once the recv multiplexer lands, the recv goroutine and the main state-machine goroutine BOTH would otherwise reach for `t.persistedAck` / `t.remoteReplayCursor` / `t.persistedAckPresent` — the recv goroutine to update on BatchAck/ServerHeartbeat/SessionAck, the state-machine goroutine to read for replay/Live reader-start calculations. There are two ways to keep them safe:
+
+1. **Mutex around `t.persistedAck`/`t.remoteReplayCursor`/`t.persistedAckPresent`.** Simple but breaks the documented single-owner invariant — every state-handler read of `t.remoteReplayCursor` (Replaying entry, Live entry) becomes a locked critical section, and any future state-machine goroutine code that does multi-field reads of Transport state has to remember to acquire the same mutex. The invariant becomes "single-owner except for these three fields, which require a mutex." That's the kind of subtle rule that breaks the next time someone adds a new ack-bearing field.
+2. **Typed events on a channel.** The recv goroutine sends typed events (e.g., `recvBatchAck{seq uint64, gen uint32}`, `recvServerHeartbeat{seq uint64, gen uint32}`) over channels that the main state-machine goroutine selects on alongside its other inputs (ctx.Done, rdr.Notify, ticker, t.stopCh). The state-machine goroutine's event handler invokes `applyAckFromRecv` (which delegates to `applyServerAckTuple`) — so the clamp logic runs on the main goroutine, the recv goroutine never touches `t.persistedAck` / `t.remoteReplayCursor` / `t.persistedAckPresent` directly, and the single-owner invariant is preserved without locks.
 
 **This task picks option 2 (typed events on a channel).** Rationale:
 
@@ -8086,7 +8376,7 @@ default:
 
 `RecvBatchAckChForTest` is another test-only export (returns `<-chan recvBatchAck` — same pattern). With these three seams (`SetRecvHookForTest`, `RunRecvForTest`, `RecvBatchAckChForTest`), both backpressure acceptance tests run with zero timeouts and zero `runtime.Stack` parsing — every assertion is on a hook invocation that fires synchronously or on a channel state visible from the test goroutine via non-blocking select.
 
-**Hard requirement for Tasks 17/18 implementers:** do NOT introduce a mutex on `t.ackedSequence`/`t.ackedGeneration`/`t.ackedPresent`. The recv goroutine MUST send typed events; the main state-machine goroutine MUST be the only writer. Any patch that adds `sync.Mutex` to Transport for the ack-watermark fields is a regression against this contract.
+**Hard requirement for Tasks 17/18 implementers:** do NOT introduce a mutex on `t.persistedAck`/`t.remoteReplayCursor`/`t.persistedAckPresent`. The recv goroutine MUST send typed events; the main state-machine goroutine MUST be the only writer. Any patch that adds `sync.Mutex` to Transport for the ack-cursor fields is a regression against this contract.
 
 A new acceptance test `TestRun_ReadersUnregisterAcrossReconnect` is the leak regression guard for runLive's Reader lifecycle (see Task 22 acceptance-tests block below). It drives multiple reconnect cycles and asserts the WAL's registered-reader count never grows unboundedly — closing both `defer rdr.Close()` paths (success and error) and the StateReplaying explicit-Close path.
 
@@ -8749,61 +9039,74 @@ Add to `internal/store/watchtower/transport/transport.go`:
 // the Reader explicitly per state entry. `start` is the inclusive
 // lowest seq the returned Reader will surface for RecordData
 // (RecordLoss markers always surface — see wal/reader.go NewReader
-// docstring). Replaying opens at `t.ackedSequence + 1`, mirroring the
-// `wal.Reader.NewReader` "replay-after-ack callers pass ackHighSeq + 1"
-// idiom (reader.go:114) and the spec's `(ack_hw, wal_hw_at_entry]`
-// replay window (spec line 601). Without that +1, any reconnect with
-// `t.ackedSequence > 0` would re-read and re-send already-acknowledged
-// history. Replayer's entry-time tail watermark hard-stops drain at
-// the upper bound (over-tail records are surfaced once as the boundary
-// record). Live opens at max(rep.LastReplayedSequence()+1,
-// t.ackedSequence+1) so it picks up exactly past the boundary record
-// without re-emitting it AND without missing any trailing TransportLoss
-// marker overflow GC may have appended at the WAL tail mid-replay
-// (loss markers bypass the Reader's nextSeq filter — see
-// wal/reader.go nextLocked near the isLossMarker branch).
+// docstring). Replaying opens at `t.remoteReplayCursor.Sequence + 1`,
+// mirroring the `wal.Reader.NewReader` "replay-after-ack callers pass
+// ackHighSeq + 1" idiom (reader.go:114) and the spec's
+// `(remote_replay_cursor, wal_hw_at_entry]` replay window. Without
+// that +1, any reconnect with `t.remoteReplayCursor.Sequence > 0`
+// would re-read and re-send already-acknowledged history. Replayer's
+// entry-time tail watermark hard-stops drain at the upper bound
+// (over-tail records are surfaced once as the boundary record). Live
+// opens at max(rep.LastReplayedSequence()+1,
+// t.remoteReplayCursor.Sequence+1) so it picks up exactly past the
+// boundary record without re-emitting it AND without missing any
+// trailing TransportLoss marker overflow GC may have appended at the
+// WAL tail mid-replay (loss markers bypass the Reader's nextSeq filter
+// — see wal/reader.go nextLocked near the isLossMarker branch).
 //
-// `t.ackedSequence` is the local-seq half of the Transport's
-// EFFECTIVE ack tuple `(t.ackedGeneration, t.ackedSequence)`; the
-// tuple is owned by Transport (not by Conn) and is the clamped
-// value per spec §"Acknowledgement model" (design.md:601). The two
-// fields move together via `applyServerAckTuple`; mixing local-seq
-// with server-gen here would create an impossible state under the
-// WAL's lex-(gen, seq) GC semantics. Using `t.ackedSequence` alone
-// for the reader-start cursor is safe because the Reader operates
+// Round-8: the reader-start cursor is `remoteReplayCursor`, NOT
+// `persistedAck`. The two cursors diverge during stale-server recovery:
+// `persistedAck` is the durable, monotonic-only watermark mirroring
+// `wal.Meta`; `remoteReplayCursor` may be lex-LOWER (server is stale
+// relative to local persistence) so that the Replaying state RE-SENDS
+// the gap the server has not yet acked. Using `persistedAck` here
+// would silently drop the gap on the floor.
+//
+// `t.remoteReplayCursor.Sequence` is the local-seq half of the
+// regressable cursor `(t.remoteReplayCursor.Generation,
+// t.remoteReplayCursor.Sequence)`; the cursor is owned by Transport
+// (not by Conn) and is the post-clamp value per spec
+// §"Effective-ack tuple and clamp". The two fields move together via
+// `applyServerAckTuple` (Adopted advances both, ResendNeeded sets
+// remoteReplayCursor only). Using `t.remoteReplayCursor.Sequence`
+// alone for the reader-start cursor is safe because the Reader operates
 // within a single WAL generation — the cursor is generation-implicit,
 // scoped by whichever segment file the Reader opens.
 //
-// SEEDING: cold start seeds (`t.ackedGeneration`, `t.ackedSequence`)
-// from `wal.Meta` (`AckHighWatermarkGen`, `AckHighWatermarkSeq`) via
+// SEEDING: cold start seeds BOTH `t.persistedAck` and
+// `t.remoteReplayCursor` (lock-step) from `wal.Meta`
+// (`AckHighWatermarkGen`, `AckHighWatermarkSeq`) via
 // `Options.InitialAckTuple` constructed in the store-wiring layer
 // (Task 27); `AckRecorded` maps to the AckTuple's `Present` flag so
 // first-apply semantics work even when the persisted tuple is the
-// zero value.
+// zero value. In the steady state the two cursors equal each other.
 //
 // ADVANCEMENT: SessionAck (Task 15.1, state_connecting.go) and
 // BatchAck/ServerHeartbeat (Task 17 sub-step 17.X, recv multiplexer)
-// each call the shared `applyServerAckTuple` helper. The clamp:
-//   - if (server_gen, server_seq) < (local_gen, local_seq) lex:
-//     ADOPT the server tuple WHOLESALE (both fields).
-//   - if (server_gen, server_seq) > (local_gen, local_seq) lex:
-//     KEEP the local tuple WHOLESALE (both fields) and emit a
-//     rate-limited WARN with FULL tuple context (server_gen,
-//     server_seq, local_gen, local_seq).
-//   - if equal: no-op.
+// each call the shared `applyServerAckTuple` helper, which dispatches
+// on `AckOutcome.Kind`:
+//   - Adopted (server > persistedAck lex): advance BOTH cursors;
+//     persist via wal.MarkAcked.
+//   - ResendNeeded (server < persistedAck lex): regress ONLY
+//     remoteReplayCursor to the server tuple; persistedAck UNCHANGED;
+//     no wal.MarkAcked call (gradual rollout / partition recovery).
+//   - NoOp (server == persistedAck): no cursor moved.
+//   - Anomaly (server.gen == persistedAck.gen AND server.seq >
+//     wal.HighWatermarkSequence()): cursors UNCHANGED; rate-limited
+//     WARN with FULL cursor context.
 //
-// The state handlers READ the tuple for their reader-start
-// calculations; they DO NOT advance it and they DO NOT re-clamp it
-// — the clamp is the SessionAck/BatchAck/ServerHeartbeat handler's
+// The state handlers READ `remoteReplayCursor` for their reader-start
+// calculations; they DO NOT advance it and they DO NOT re-clamp it —
+// the clamp is the SessionAck/BatchAck/ServerHeartbeat handler's
 // responsibility, not the state-handler's. SessionUpdate is NOT an
-// acknowledgement (spec design.md:617) and never advances the
-// tuple.
+// acknowledgement (spec §"Acknowledgement model") and never advances
+// either cursor.
 //
 // HARD DEPENDENCY: Task 22's StateReplaying / StateLive cases assume
-// the effective-ack tuple stores the clamped value. Task 22 MUST NOT
-// commit its Run loop until BOTH Task 15.1 (SessionAck clamp + WAL
-// meta seed) and Task 17 sub-step 17.X (BatchAck/ServerHeartbeat
-// clamp) have landed. Without the clamp wired upstream, an unclamped
+// the two-cursor model is wired. Task 22 MUST NOT commit its Run loop
+// until BOTH Task 15.1 (SessionAck clamp + WAL meta seed + cursor
+// split) and Task 17 sub-step 17.X (BatchAck/ServerHeartbeat clamp)
+// have landed. Without the cursor split wired upstream, an unclamped
 // raw server value would silently propagate into the reader-start
 // calculation here, and without the WAL meta seed the first
 // SessionInit after restart would lie about the local watermark.
@@ -8862,13 +9165,17 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 			// reader at a recomputed start cursor — the two readers
 			// never overlap.
 			//
-			// Open at t.ackedSequence+1 to mirror the wal.Reader
-			// "replay-after-ack callers pass ackHighSeq + 1" idiom
-			// (reader.go:114) and the spec's (ack_hw, wal_hw_at_entry]
-			// replay window (spec line 601). Without that +1, a
-			// reconnect with t.ackedSequence > 0 would re-read and
-			// re-send already-acknowledged history.
-			rdr, err := rdrFactory(t.ackedSequence + 1)
+			// Open at t.remoteReplayCursor.Sequence+1 to mirror the
+			// wal.Reader "replay-after-ack callers pass ackHighSeq + 1"
+			// idiom (reader.go:114) and the spec's
+			// (remote_replay_cursor, wal_hw_at_entry] replay window. A
+			// reconnect with t.remoteReplayCursor.Sequence > 0 would
+			// re-read and re-send already-acknowledged history without
+			// the +1. The cursor is `remoteReplayCursor` (NOT
+			// `persistedAck`) — the regressable cursor — so a stale-
+			// server SessionAck/BatchAck causes the next Replaying entry
+			// to RE-SEND the gap rather than dropping it on the floor.
+			rdr, err := rdrFactory(t.remoteReplayCursor.Sequence + 1)
 			if err != nil {
 				rep = nil
 				st = StateConnecting
@@ -8900,7 +9207,8 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 			st = next
 		case StateLive:
 			// Live opens its Reader at max(rep.LastReplayedSequence()+1,
-			// t.ackedSequence+1). The max() avoids two failure modes:
+			// t.remoteReplayCursor.Sequence+1). The max() avoids two
+			// failure modes:
 			//   1. Re-emitting the boundary record (Replayer hard-stops
 			//      one past tailSeq; rep.LastReplayedSequence() captures
 			//      that over-tail record, so Live's start MUST be
@@ -8911,45 +9219,55 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 			//      branch), so Live's Reader will surface them even
 			//      though its start cursor is past their covered range.
 			//
-			// `t.ackedSequence` is the local-seq half of the EFFECTIVE
-			// ack tuple (`t.ackedGeneration`, `t.ackedSequence`) per
-			// spec §"Acknowledgement model" (design.md:601). The two
-			// fields move together via `applyServerAckTuple`; mixing
-			// local-seq with server-gen here would create an impossible
-			// state under the WAL's lex-(gen, seq) GC semantics. Using
-			// `t.ackedSequence` alone for the reader-start cursor is
-			// safe because the Reader operates within a single WAL
-			// generation — the cursor is generation-implicit, scoped by
-			// whichever segment file the Reader opens.
+			// Round-8: the cursor is `remoteReplayCursor` (NOT
+			// `persistedAck`) for the same reason as Replaying — it is
+			// the regressable cursor that captures where the SERVER
+			// thinks its ack-watermark sits. A stale-server case must
+			// re-send the gap from `remoteReplayCursor + 1`, not from
+			// the (higher) `persistedAck + 1` (which would silently drop
+			// the gap on the floor).
 			//
-			// SEEDING: cold start seeds (`t.ackedGeneration`,
-			// `t.ackedSequence`) from `wal.Meta` (`AckHighWatermarkGen`,
-			// `AckHighWatermarkSeq`) via `Options.InitialAckTuple`
-			// constructed in the store-wiring layer (Task 27); the
-			// `AckRecorded` flag in meta.json maps to the `Present`
-			// field of the AckTuple seed so first-apply semantics work
-			// even when the persisted tuple is the zero value.
+			// `t.remoteReplayCursor.Sequence` is the local-seq half of
+			// the regressable cursor `(t.remoteReplayCursor.Generation,
+			// t.remoteReplayCursor.Sequence)` per spec
+			// §"Effective-ack tuple and clamp". The two fields move
+			// together via `applyServerAckTuple` (Adopted advances both,
+			// ResendNeeded sets remoteReplayCursor only). Using
+			// `t.remoteReplayCursor.Sequence` alone for the reader-start
+			// cursor is safe because the Reader operates within a single
+			// WAL generation — the cursor is generation-implicit, scoped
+			// by whichever segment file the Reader opens.
+			//
+			// SEEDING: cold start seeds BOTH `t.persistedAck` and
+			// `t.remoteReplayCursor` (lock-step) from `wal.Meta`
+			// (`AckHighWatermarkGen`, `AckHighWatermarkSeq`) via
+			// `Options.InitialAckTuple` constructed in the store-wiring
+			// layer (Task 27); `AckRecorded` maps to the AckTuple's
+			// `Present` flag so first-apply semantics work even when
+			// the persisted tuple is the zero value.
 			//
 			// ADVANCEMENT: SessionAck (Task 15.1, state_connecting.go)
 			// and BatchAck/ServerHeartbeat (Task 17 sub-step 17.X, recv
 			// multiplexer) each call the shared `applyServerAckTuple`
-			// helper. The clamp:
-			//   - if (server_gen, server_seq) < (local_gen, local_seq)
-			//     lex: ADOPT the server tuple WHOLESALE (both fields).
-			//   - if (server_gen, server_seq) > (local_gen, local_seq)
-			//     lex: KEEP the local tuple WHOLESALE (both fields)
-			//     and emit a rate-limited WARN with FULL tuple context
-			//     (server_gen, server_seq, local_gen, local_seq).
-			//   - if equal: no-op.
+			// helper with `AckOutcome.Kind` dispatch:
+			//   - Adopted: server > persistedAck (lex). Both cursors
+			//     advance; wal.MarkAcked persists the new persistedAck.
+			//   - ResendNeeded: server < persistedAck (lex). ONLY
+			//     remoteReplayCursor moves to the server tuple;
+			//     persistedAck UNCHANGED; no wal.MarkAcked call.
+			//   - NoOp: server == persistedAck. Nothing moved.
+			//   - Anomaly: server.gen == persistedAck.gen AND
+			//     server.seq > wal.HighWatermarkSequence(). Cursors
+			//     UNCHANGED; rate-limited WARN.
 			//
-			// The Replaying and Live cases READ the tuple for their
-			// reader-start calculations; they DO NOT advance it and
-			// they DO NOT re-clamp it — the clamp is the SessionAck/
-			// BatchAck/ServerHeartbeat handler's responsibility, not
-			// the state-handler's. SessionUpdate is NOT an
-			// acknowledgement (spec design.md:617) and never advances
-			// the tuple.
-			start := t.ackedSequence + 1
+			// The Replaying and Live cases READ `remoteReplayCursor` for
+			// their reader-start calculations; they DO NOT advance it
+			// and they DO NOT re-clamp it — the clamp is the SessionAck/
+			// BatchAck/ServerHeartbeat handler's responsibility, not the
+			// state-handler's. SessionUpdate is NOT an acknowledgement
+			// (spec §"Acknowledgement model") and never advances either
+			// cursor.
+			start := t.remoteReplayCursor.Sequence + 1
 			if rep != nil {
 				if cand := rep.LastReplayedSequence() + 1; cand > start {
 					start = cand
@@ -9005,44 +9323,55 @@ The snippet above structurally depends on Tasks 17/18:
   Task 18 (heartbeat). The snippet visibly cannot compile without
   Task 17 landing first — that is the structural enforcement promised
   in the "Task 16 — Deferred to Task 17/18" subsection.
-- The ack watermark consumed by both state cases is the EFFECTIVE
-  ack tuple `(t.ackedGeneration, t.ackedSequence)` on the `Transport`
-  struct (`internal/store/watchtower/transport/transport.go:84`),
-  per spec §"Acknowledgement model" (design.md:601). The two fields
-  move TOGETHER under the WAL's lex-(gen, seq) GC semantics; mixing
-  local-seq with server-gen would create an impossible state.
-  The tuple is SEEDED on cold start from `wal.Meta`
+- The ack watermark consumed by both state cases is the
+  `t.remoteReplayCursor` (regressable cursor) on the `Transport`
+  struct, per spec §"Effective-ack tuple and clamp". Round-8 splits
+  the single ack tuple into TWO cursors: `persistedAck` (monotonic,
+  mirrors `wal.Meta`, drives SessionInit's `wal_high_watermark_seq`
+  + segment GC) and `remoteReplayCursor` (regressable, drives the
+  reader-start calculation here). The two cursors equal each other in
+  the steady state; they diverge briefly during stale-server recovery.
+  BOTH cursors are SEEDED on cold start from `wal.Meta`
   (`AckHighWatermarkGen`, `AckHighWatermarkSeq`, with `AckRecorded`
   → `Present`) via `Options.InitialAckTuple` constructed in the
-  store-wiring layer (Task 27); it is then ADVANCED by SessionAck
-  (Task 15.1, Connecting handler) and by BatchAck/ServerHeartbeat
-  (Task 17 sub-step 17.X, recv multiplexer), all via the shared
-  `applyServerAckTuple` helper. The clamp on every server-supplied
-  watermark:
-  - if `(server_gen, server_seq) < (local_gen, local_seq)` lex:
-    ADOPT the server tuple WHOLESALE (both fields) — the legitimate
-    stale-watermark recovery path during gradual rollout / partition
-    recovery.
-  - if `(server_gen, server_seq) > (local_gen, local_seq)` lex:
-    KEEP the local tuple WHOLESALE (both fields) and emit a rate-
-    limited WARN with FULL tuple context (`server_gen`, `server_seq`,
-    `local_gen`, `local_seq`).
-  - if equal: no-op.
+  store-wiring layer (Task 27); the cursors are then ADVANCED by
+  SessionAck (Task 15.1, Connecting handler) and by BatchAck/
+  ServerHeartbeat (Task 17 sub-step 17.X, recv multiplexer), all via
+  the shared `applyServerAckTuple` helper. The helper dispatches on
+  `AckOutcome.Kind`:
+  - Adopted (server > persistedAck lex): ADOPT the server tuple into
+    BOTH cursors; persist via `wal.MarkAcked`.
+  - ResendNeeded (server < persistedAck lex): set ONLY
+    `remoteReplayCursor` to the server tuple; `persistedAck`
+    UNCHANGED (the WAL is monotonic-only — see
+    `wal/wal.go` `MarkAcked` line 859); no `wal.MarkAcked` call.
+    Logs INFO (legitimate gradual-rollout / partition recovery).
+  - NoOp (server == persistedAck): no cursor moved.
+  - Anomaly (server.gen == persistedAck.gen AND server.seq >
+    `wal.HighWatermarkSequence()`): cursors UNCHANGED; rate-limited
+    WARN with FULL cursor context (`server_gen`, `server_seq`,
+    `local_persisted_seq`, `local_persisted_gen`,
+    `wal_high_water_seq`).
 
-  The state-handler cases here READ but do not write the tuple, and
-  they do NOT re-clamp — the clamp lives in the SessionAck / BatchAck /
-  ServerHeartbeat handlers, not the state-handler cases. SessionUpdate
-  is NOT an acknowledgement (spec design.md:617) and never advances
-  the tuple. No accessor on `Conn` is required — `Conn`'s surface
-  stays Send/Recv/CloseSend/Close (`conn.go:34`).
+  The state-handler cases here READ `remoteReplayCursor` but do NOT
+  write it, and they do NOT re-clamp — the clamp lives in the
+  SessionAck / BatchAck / ServerHeartbeat handlers, not the state-
+  handler cases. SessionUpdate is NOT an acknowledgement (spec
+  §"Acknowledgement model") and never advances either cursor. No
+  accessor on `Conn` is required — `Conn`'s surface stays
+  Send/Recv/CloseSend/Close (`conn.go:34`).
 
   HARD DEPENDENCY: Task 22 MUST NOT commit its Run loop until BOTH
-  Task 15.1 (SessionAck clamp + WAL meta seed) and Task 17 sub-step
-  17.X (BatchAck/ServerHeartbeat clamp) have landed. Without the
-  clamp wired upstream, an unclamped raw server value would silently
-  propagate into the reader-start calculation here, and without the
-  WAL meta seed the first SessionInit after restart would lie about
-  the local watermark.
+  Task 15.1 (SessionAck clamp + WAL meta seed + cursor split) and
+  Task 17 sub-step 17.X (BatchAck/ServerHeartbeat clamp) have landed.
+  Without the cursor split wired upstream, an unclamped raw server
+  value would silently propagate into the reader-start calculation
+  here, and without the WAL meta seed the first SessionInit after
+  restart would lie about the local watermark. Task 14a (WAL identity
+  persistence) is also a transitive prerequisite — without it, the
+  cold-start identity gate compares against meta.json fields production
+  never populates, and the seed decision is made against an empty
+  identity that can never match the configured Store identity.
 
 Acceptance tests in `internal/store/watchtower/transport/transport_run_test.go`
 exercise the Replaying → Live handoff and the round-6 tuple-clamp /
@@ -9055,56 +9384,63 @@ Reader-lifecycle invariants:
   final replay batch). Assert: Live's Reader is opened at
   `max(11+1, 0+1) = 12`, and no record with `seq <= 11` surfaces in any
   Live `EventBatch` (no duplicate boundary record on the wire). This
-  is the zero-ack happy path (`t.ackedSequence == 0`).
+  is the zero-cursor happy path (`t.remoteReplayCursor.Sequence == 0`).
 - `TestRun_LiveSurfacesTrailingLossMarker` — verifies the trailing-
   loss-marker race is closed by the Live handoff. Setup: drive overflow
   GC to append a `TransportLoss` marker covering seqs within the
-  `(ack_hw, tail_seq]` window AT THE WAL TAIL, AFTER `NewReplayer` has
-  captured `tailSeq`. Per the Replayer hard-stop rule, the marker is
-  NOT surfaced during replay if it sits past an over-tail `RecordData`
-  (NextBatch returns done=true on the boundary record before reaching
-  the trailing marker). Assert: after replay returns done=true with
-  the boundary record, Live's Reader (opened at
-  `max(rep.LastReplayedSequence()+1, t.ackedSequence+1)`) surfaces the
-  trailing `TransportLoss` marker via `EventBatch`. This works because
-  loss markers bypass `Reader.nextSeq` (see `wal/reader.go` near
+  `(remote_replay_cursor, tail_seq]` window AT THE WAL TAIL, AFTER
+  `NewReplayer` has captured `tailSeq`. Per the Replayer hard-stop
+  rule, the marker is NOT surfaced during replay if it sits past an
+  over-tail `RecordData` (NextBatch returns done=true on the boundary
+  record before reaching the trailing marker). Assert: after replay
+  returns done=true with the boundary record, Live's Reader (opened
+  at `max(rep.LastReplayedSequence()+1,
+  t.remoteReplayCursor.Sequence+1)`) surfaces the trailing
+  `TransportLoss` marker via `EventBatch`. This works because loss
+  markers bypass `Reader.nextSeq` (see `wal/reader.go` near
   `isLossMarker`), so the marker surfaces even though Live's start
   cursor is past the marker's covered seq range.
-- `TestRun_NonZeroAckSkipsAlreadyAckedHistory` — regression test for
-  the spec line 601 `(ack_hw, wal_hw_at_entry]` window. Setup: WAL with
-  records seqs 1..20. Pre-seed `t.ackedSequence = 10` (simulate a
+- `TestRun_NonZeroCursorSkipsAlreadyAckedHistory` — regression test
+  for the spec §"Effective-ack tuple and clamp" replay window. Setup:
+  WAL with records seqs 1..20. Pre-seed via
+  `Options.InitialAckTuple = &AckTuple{Sequence: 10, Generation: 0,
+  Present: true}` so BOTH cursors start at `(10, 0)` (simulate a
   SessionAck that came back with `ack_high_watermark_seq = 10`).
   `NewReplayer` captures `tailSeq=20`. Assert: the replay reader is
-  opened at `start=11` (i.e. `t.ackedSequence + 1`); no `EventBatch`
-  surfaces a `RecordData` with `seq <= 10`; the Replayer surfaces
-  records with seqs 11..20 inclusive (the within-window range) and
-  terminates. Live then opens at
-  `max(LastReplayedSequence()+1, t.ackedSequence+1) =
+  opened at `start=11` (i.e. `t.remoteReplayCursor.Sequence + 1`); no
+  `EventBatch` surfaces a `RecordData` with `seq <= 10`; the Replayer
+  surfaces records with seqs 11..20 inclusive (the within-window
+  range) and terminates. Live then opens at
+  `max(LastReplayedSequence()+1, t.remoteReplayCursor.Sequence+1) =
   max(21, 11) = 21` and waits for the next append. Without this test
   the round-3 `rdrFactory(0)` regression would slip through unnoticed
   because `TestRun_LiveResumesPastReplayBoundary` only exercises
-  `t.ackedSequence == 0`.
-- `TestRun_LiveStartsFromAdvancedAckHWIfReplayLagged` — REQUIRES
-  Tasks 17/18 recv multiplexer to land. Until then this test is a
-  PLACEHOLDER and SHOULD be `t.Skip`-gated with a message pointing at
-  Tasks 17/18 (e.g. `t.Skip("requires Task 17/18 recv multiplexer to
-  land — gates ack advancement during replay")`). Setup: WAL with
-  records 1..50. Pre-seed `t.ackedSequence = 5`. `NewReplayer`
-  captures `tailSeq=50`. During replay, simulate a `BatchAck` arriving
-  on the recv channel that advances `t.ackedSequence` to 30 (this is
-  why the test is gated on the recv multiplexer landing). Assert:
-  Live opens at `max(rep.LastReplayedSequence()+1, t.ackedSequence+1)`.
-  If `LastReplayedSequence()` is 50, Live starts at 51. If for any
-  reason `LastReplayedSequence() < t.ackedSequence` (e.g. early
-  termination plus an aggressive ack), the `t.ackedSequence+1 = 31`
-  branch wins so we do not re-replay records 6..30. This is the
-  regression test for the spec's clamp rule applied across the
-  state-handler boundary. It is the ONLY test that exercises ack
-  advancement DURING replay; without it, a future refactor that reads
-  `ackHW` only at Replaying entry (not at Live entry) would silently
-  re-send replay-era records on long replays.
-- `TestRun_NonZeroAckPopulatedViaSessionAckSkipsAlreadyAckedHistory` —
-  the round-5 sibling of `TestRun_NonZeroAckSkipsAlreadyAckedHistory`
+  `t.remoteReplayCursor.Sequence == 0`.
+- `TestRun_LiveStartsFromAdvancedRemoteCursorIfReplayLagged` —
+  REQUIRES Tasks 17/18 recv multiplexer to land. Until then this test
+  is a PLACEHOLDER and SHOULD be `t.Skip`-gated with a message
+  pointing at Tasks 17/18 (e.g. `t.Skip("requires Task 17/18 recv
+  multiplexer to land — gates ack advancement during replay")`).
+  Setup: WAL with records 1..50. Pre-seed `Options.InitialAckTuple`
+  so BOTH cursors start at `(5, 0)`. `NewReplayer` captures
+  `tailSeq=50`. During replay, simulate a `BatchAck` arriving on the
+  recv channel that advances BOTH cursors to `(30, 0)` via the
+  `Adopted` outcome (this is why the test is gated on the recv
+  multiplexer landing). Assert: Live opens at
+  `max(rep.LastReplayedSequence()+1,
+  t.remoteReplayCursor.Sequence+1)`. If `LastReplayedSequence()` is
+  50, Live starts at 51. If for any reason
+  `LastReplayedSequence() < t.remoteReplayCursor.Sequence` (e.g.
+  early termination plus an aggressive ack), the
+  `t.remoteReplayCursor.Sequence+1 = 31` branch wins so we do not
+  re-replay records 6..30. This is the regression test for the
+  spec's clamp rule applied across the state-handler boundary. It
+  is the ONLY test that exercises ack advancement DURING replay;
+  without it, a future refactor that reads the cursor only at
+  Replaying entry (not at Live entry) would silently re-send
+  replay-era records on long replays.
+- `TestRun_NonZeroCursorPopulatedViaSessionAckSkipsAlreadyAckedHistory`
+  — the round-5 sibling of `TestRun_NonZeroCursorSkipsAlreadyAckedHistory`
   that closes the "test bypasses real handler path" gap. Setup:
   REQUIRES Task 21 testserver fixture (or equivalent fakeConn dialer
   that can be programmed to respond to SessionInit with a typed
@@ -9113,58 +9449,70 @@ Reader-lifecycle invariants:
   programming")`. WAL has records seqs 1..20 already on disk before
   `Run` is called. Drive the dialer to respond to SessionInit with a
   SessionAck carrying `ack_high_watermark_seq = 10, accepted = true`.
-  DO NOT pre-seed `t.ackedSequence` — the test exercises the SessionAck
-  HANDLER's clamp + assignment, not its CONSUMPTION. Assert: after Run
-  progresses through Connecting → Replaying, `t.ackedSequence == 10`
-  (set by the handler), the replay reader was opened at `start=11`
-  (i.e. `t.ackedSequence + 1`), and no record with `seq <= 10`
-  surfaces in any `EventBatch`. This test catches a regression where
-  a future SessionAck handler change drops the watermark on the floor
-  or fails to clamp properly — the existing
-  `TestRun_NonZeroAckSkipsAlreadyAckedHistory` would still pass in
-  that case because it pre-seeds the field directly.
-- `TestRun_StaleLowerServerHWWinsOverLocal` (gated on Task 15.1
-  landing) — verifies the gradual-rollout / partition-recovery branch
-  of the spec §"Effective-ack tuple and clamp": when
-  `(server_gen, server_seq)` lex-precedes `(local_gen, local_seq)`,
-  the server tuple wins WHOLESALE so the client re-sends unacked
-  records rather than dropping the gap. Setup: pre-seed
-  `t.ackedGeneration = 1, t.ackedSequence = 10` with `Present=true`
-  (simulate a prior session's acked state preserved across reconnect
-  — the Transport struct is reused across reconnect cycles). Drive
-  the dialer to respond to SessionInit with a SessionAck carrying
-  `generation = 1, ack_high_watermark_seq = 5`. Assert: post-
-  handler, `t.ackedGeneration == 1 AND t.ackedSequence == 5` (server
-  wins WHOLESALE because the lex tuple is lower); replay reader
-  opens at `start=6`. Cross-generation variant: pre-seed
-  `(local_gen=3, local_seq=0)`, drive SessionAck `(server_gen=2,
-  server_seq=999)`. Lex `(2, 999) < (3, 0)` so SERVER wins; assert
-  `(t.ackedGeneration, t.ackedSequence) == (2, 999)` (the client
-  WHOLESALE adopts the server's older generation, dropping its own
-  newer-gen claim — legitimate when the server was rebuilt against
-  an older generation snapshot).
-- `TestRun_AnomalousHigherServerHWLogsAndKeepsLocal` (gated on Task
-  15.1 landing) — verifies the anomalous-server branch of the spec
-  §"Effective-ack tuple and clamp": when `(server_gen, server_seq)`
-  lex-exceeds `(local_gen, local_seq)`, the LOCAL tuple wins
-  WHOLESALE (the server claim is anomalous and is logged + ignored
-  with FULL tuple context). Setup: pre-seed `t.ackedGeneration = 1,
-  t.ackedSequence = 10` with `Present=true`, drive SessionAck with
-  `generation = 1, ack_high_watermark_seq = 20`, inject a permissive
-  `*rate.Limiter` and a `slog.Logger` capture buffer. Assert: post-
-  handler, `t.ackedGeneration == 1 AND t.ackedSequence == 10`
-  (LOCAL wins WHOLESALE per spec — both fields preserved); exactly
-  one WARN log is emitted via the rate-limited path with FOUR fields
-  `server_gen=1, server_seq=20, local_gen=1, local_seq=10`; replay
-  reader opens at `start=11` (i.e. `t.ackedSequence + 1` using the
-  LOCAL value). Cross-generation variant: pre-seed
-  `(local_gen=2, local_seq=5)` with `Present=true`, drive SessionAck
-  `(server_gen=3, server_seq=0)`. Lex `(3, 0) > (2, 5)` so LOCAL
-  wins; assert `(t.ackedGeneration, t.ackedSequence) == (2, 5)` AND
-  WARN carries `server_gen=3, server_seq=0, local_gen=2, local_seq=5`.
-  This case proves the bug round-6 named: a seq-only clamp would
-  have noticed `0 < 5` and silently retained `(local_gen, server_seq)
-  = (2, 0)` — an impossible state.
+  DO NOT pre-seed `Options.InitialAckTuple` — the test exercises the
+  SessionAck HANDLER's clamp + assignment, not its CONSUMPTION.
+  Assert: after Run progresses through Connecting → Replaying,
+  BOTH cursors equal `(10, 0)` (set by the handler via the `Adopted`
+  outcome's first-apply branch), the replay reader was opened at
+  `start=11` (i.e. `t.remoteReplayCursor.Sequence + 1`), and no
+  record with `seq <= 10` surfaces in any `EventBatch`. This test
+  catches a regression where a future SessionAck handler change
+  drops the watermark on the floor or fails to clamp properly — the
+  existing `TestRun_NonZeroCursorSkipsAlreadyAckedHistory` would
+  still pass in that case because it pre-seeds the field directly.
+- `TestRun_StaleLowerServerHWAdvancesRemoteCursorOnly` (gated on
+  Task 15.1 landing) — verifies the gradual-rollout / partition-
+  recovery `ResendNeeded` branch of the spec §"Effective-ack tuple
+  and clamp": when `(server_gen, server_seq)` lex-precedes
+  `(persistedAck.gen, persistedAck.seq)`, ONLY `remoteReplayCursor`
+  moves to the server tuple — `persistedAck` is UNCHANGED so
+  `wal.MarkAcked` is NOT called (the WAL is monotonic-only). Setup:
+  pre-seed via `Options.InitialAckTuple = &AckTuple{Sequence: 10,
+  Generation: 1, Present: true}`; drive `wal.MarkAcked(1, 10)` so
+  meta.json holds `(1, 10, true)` (simulate a prior session's acked
+  state preserved across reconnect). Drive the dialer to respond to
+  SessionInit with a SessionAck carrying
+  `generation = 1, ack_high_watermark_seq = 5`. Assert: post-handler,
+  `t.persistedAck == AckCursor{10, 1}` (UNCHANGED — persistedAck
+  never regresses), `t.remoteReplayCursor == AckCursor{5, 1}`
+  (regressed to server tuple); `wal.ReadMeta` still shows
+  `(1, 10, true)` (no MarkAcked call); the metrics fake recorded
+  ZERO additional `SetAckHighWatermark` calls; the INFO buffer
+  contains exactly one entry naming the regression with
+  `frame="session_ack"`; replay reader opens at
+  `start=6` (i.e. `t.remoteReplayCursor.Sequence + 1`). Cross-
+  generation variant: pre-seed `(local_gen=3, local_seq=0)`, drive
+  SessionAck `(server_gen=2, server_seq=999)`. Lex
+  `(2, 999) < (3, 0)` so `ResendNeeded`; assert
+  `t.remoteReplayCursor == AckCursor{999, 2}` and
+  `t.persistedAck == AckCursor{0, 3}` (unchanged); replay reader
+  opens at `start=1000` in segment files for gen=2.
+- `TestRun_AnomalousHigherServerHWLogsAndKeepsCursors` (gated on
+  Task 15.1 landing) — verifies the True-Anomaly branch of the spec
+  §"Effective-ack tuple and clamp": when `serverGen ==
+  persistedAck.gen AND serverSeq > wal.HighWatermarkSequence()`,
+  BOTH cursors stay UNCHANGED and a rate-limited WARN is emitted
+  with FULL cursor context. Setup: pre-seed
+  `Options.InitialAckTuple = &AckTuple{Sequence: 10, Generation: 1,
+  Present: true}` AND drive WAL `Append` so
+  `HighWatermarkSequence() == 15` in gen=1; drive SessionAck with
+  `generation = 1, ack_high_watermark_seq = 20` (server claims ack
+  beyond walHighSeq inside current gen — this is the only true
+  anomaly case); inject a permissive `*rate.Limiter` and a
+  `slog.Logger` capture buffer. Assert: post-handler, BOTH cursors
+  unchanged at `AckCursor{10, 1}`; exactly one WARN log emitted via
+  the rate-limited path with five fields `server_gen=1,
+  server_seq=20, local_persisted_seq=10, local_persisted_gen=1,
+  wal_high_water_seq=15`; replay reader opens at `start=11` (i.e.
+  `t.remoteReplayCursor.Sequence + 1` using the unchanged cursor).
+  Cross-generation variant: pre-seed `(local_gen=2, local_seq=5)`
+  with `Present=true`, drive SessionAck `(server_gen=3,
+  server_seq=0)`. The cross-gen advance is HEALTHY by construction
+  (the previous gen's history is closed), so the helper returns
+  `Adopted` (NOT `Anomaly`); assert BOTH cursors moved to
+  `AckCursor{0, 3}` and `wal.MarkAcked(3, 0)` was called. The
+  cross-gen lex-higher case is NEVER an anomaly per the round-8
+  helper contract.
 - `TestRun_ReadersUnregisterAcrossReconnect` — leak regression guard
   for runLive's Reader lifecycle (Finding 4). Drive multiple reconnect
   cycles (Connecting → Replaying → Live → stream error → Connecting
@@ -9181,94 +9529,158 @@ Reader-lifecycle invariants:
   every exit path, and (b) StateLive's `runLive` `defer rdr.Close()`
   unregisters its Live reader on every exit path. A non-zero count
   between cycles is the leak Finding 4 names.
-- `TestRun_RestartSeedsAckTupleFromWALMeta` (gated on Task 15.1
-  landing) — verifies the AckTuple WAL-meta seed closes the
-  cold-start gap that the round-5 `local == 0` escape hatch was
-  hiding (Finding 2). Setup: open a WAL on a fresh `t.TempDir()`,
-  Append records with seqs 1..50, drive `MarkAcked(gen=3, seq=30)`
-  so meta.json persists `(AckHighWatermarkGen=3,
-  AckHighWatermarkSeq=30, AckRecorded=true)` with fsync. Tear
-  down the in-memory `*wal.WAL` (close + nil) so the next open
-  is a true cold start. Re-open the WAL from the same directory
-  via `wal.Open` AND re-read meta.json via `wal.ReadMeta`. Build
-  a fresh `*Transport` via `transport.New(Options{...,
-  InitialAckTuple: &transport.AckTuple{Generation: meta.AckHighWatermarkGen,
+- `TestRun_RestartSeedsAckTupleFromWALMeta` (gated on Task 14a +
+  Task 15.1 landing) — verifies the AckTuple WAL-meta seed closes
+  the cold-start gap that the round-5 `local == 0` escape hatch
+  was hiding (Finding 2). Round-8 rewrite: this test runs against
+  a REAL `*wal.WAL` opened with `wal.Options{SessionID:"s1",
+  KeyFingerprint:"sha256:k1", ...}` — the test no longer mocks the
+  Store-options identity gate behavior the round-7 plan implicitly
+  assumed. Setup: open a WAL on a fresh `t.TempDir()` with
+  `wal.Options{SessionID:"s1", KeyFingerprint:"sha256:k1"}` (Task 14a
+  identity options). Append records with seqs 1..50, drive
+  `MarkAcked(gen=3, seq=30)` so meta.json persists
+  `(SessionID="s1", KeyFingerprint="sha256:k1",
+  AckHighWatermarkGen=3, AckHighWatermarkSeq=30, AckRecorded=true)`
+  with fsync. Close the WAL. Re-open the WAL from the same directory
+  via `wal.Open(wal.Options{SessionID:"s1",
+  KeyFingerprint:"sha256:k1", ...})` (matching identity → Open
+  succeeds AND seeds `w.ackHighSeq/Gen/Present` from meta) AND
+  re-read meta.json via `wal.ReadMeta`. Build a fresh `*Transport`
+  via `transport.New(Options{..., WAL: w, InitialAckTuple:
+  &transport.AckTuple{Generation: meta.AckHighWatermarkGen,
   Sequence: meta.AckHighWatermarkSeq, Present: meta.AckRecorded}})`.
   Use a `fakeConn` whose Recv returns a SessionAck with
   `(generation=3, ack_high_watermark_seq=30, accepted=true)` — the
-  matching no-op-clamp case. Run the Connecting handler.
-  Assert: (a) the FIRST `ClientMessage` sent on the conn is a
-  SessionInit carrying `wal_high_watermark_seq=30, generation=3`
-  (NOT the zero values that the round-5 transport would have sent
-  on cold start); (b) after the SessionAck no-op clamp,
-  `t.ackedSequence == 30` and `t.ackedGeneration == 3`; (c) the
-  replay reader (Replaying handler / Replayer) opens at
-  `start = t.ackedSequence + 1 = 31` (i.e. no record with seq <= 30
-  surfaces in any replay batch). Negative variant
-  `TestRun_RestartFromZeroAckOmitsSeed` covers the inverse: meta
-  with `AckRecorded=false` (or no meta.json) → `Options.InitialAckTuple`
-  is nil → SessionInit carries `wal_high_watermark_seq=0, generation=0`
+  matching no-op case (`AckOutcomeNoOp` from `applyServerAckTuple`).
+  Run the Connecting handler. Assert: (a) the FIRST `ClientMessage`
+  sent on the conn is a SessionInit carrying
+  `wal_high_watermark_seq=30, generation=3` (NOT the zero values
+  the round-5 transport would have sent on cold start); (b) after
+  the SessionAck no-op,
+  `t.persistedAck == AckCursor{Sequence:30, Generation:3}` AND
+  `t.remoteReplayCursor == AckCursor{Sequence:30, Generation:3}`
+  AND `t.persistedAckPresent == true` (both cursors mirror the
+  seed; the no-op branch updates neither); (c) the replay reader
+  opens at `start = t.remoteReplayCursor.Sequence + 1 = 31` (i.e.
+  no record with seq <= 30 surfaces in any replay batch). Negative
+  variant `TestRun_RestartFromZeroAckOmitsSeed` covers the inverse:
+  the WAL dir is opened FRESH (no meta.json) → `wal.Meta` reports
+  AckRecorded=false → `Options.InitialAckTuple` is nil →
+  SessionInit carries `wal_high_watermark_seq=0, generation=0`
   AND first SessionAck does not trip the anomaly WARN even if the
   server returns a non-zero tuple (first-apply branch in
-  `applyServerAckTuple` adopts wholesale without anomaly).
+  `applyServerAckTuple` returns `AckOutcomeAdopted` and adopts
+  wholesale; both cursors and `wal.MarkAcked` advance to the
+  server tuple).
 - `TestRun_RestartIgnoresAckOnSessionIDMismatch` (round-7 Finding 1,
-  gated on Task 15.1 + Task 27 store-wiring identity gate landing) —
-  verifies the cold-start identity check refuses to seed when the
-  persisted meta.json was written by a different installation. Setup:
-  open a WAL on a fresh `t.TempDir()`, Append seqs 1..50, drive
-  `MarkAcked(gen=3, seq=30)` so meta.json persists with
-  `(SessionID="installation-A", AckHighWatermarkGen=3,
-  AckHighWatermarkSeq=30, AckRecorded=true)` plus fsync. Tear down,
-  re-open the WAL from the same directory. Build the Store via
-  `New(ctx, Options{..., SessionID: "installation-B", ...})` (the
-  daemon was reconfigured to a new session ID; the WAL dir was reused
-  by accident or by a copy-and-paste deploy). Use a `fakeConn` whose
-  Recv returns a SessionAck with `(generation=99,
+  round-8 rewrite — gated on Task 14a + Task 15.1 + Task 27
+  store-wiring identity gate landing) — verifies the cold-start
+  identity check refuses to seed when the persisted meta.json was
+  written by a different installation, AND that the second `wal.Open`
+  with mismatched identity still succeeds (Task 14a's first-writer-
+  wins rule means Open must NOT clobber an existing different
+  identity; the Store's own seed-decision gate is what nils the
+  AckTuple, not the WAL itself). Round-8 rewrite: this test now
+  uses real `wal.Open` end-to-end — the round-7 mocked-Store-options
+  shape is gone. Setup phase 1 (writer): open WAL on a fresh
+  `t.TempDir()` with `wal.Options{SessionID:"installation-A",
+  KeyFingerprint:"sha256:k-A"}`. Append seqs 1..50, drive
+  `MarkAcked(gen=3, seq=30)` so meta.json persists with identity
+  `("installation-A", "sha256:k-A")` and watermark `(gen=3, seq=30)`,
+  AckRecorded=true. Close. Setup phase 2 (mismatched re-open at
+  the Store layer): the daemon was reconfigured to a new session ID
+  ("installation-B" with the same KeyFingerprint), and the WAL dir
+  was reused by accident or by a copy-and-paste deploy. The Store
+  computes `expectedSessionID="installation-B"` from its config,
+  reads meta.json via `wal.ReadMeta`, and compares against the
+  persisted `("installation-A", "sha256:k-A")`. The Store's own
+  identity gate sees the mismatch and (a) sets `Options.InitialAckTuple
+  = nil` for the Transport AND (b) emits a single WARN with
+  `persisted_session_id="installation-A"`,
+  `expected_session_id="installation-B"`, plus an explicit action
+  description. The Store then opens the WAL via `wal.Open` with
+  `wal.Options{SessionID:"installation-B",
+  KeyFingerprint:"sha256:k-A", ...}` — Task 14a's first-writer-wins
+  rule means the WAL Open ITSELF SHOULD ERROR when persisted identity
+  mismatches expected identity (this test exercises the Store-layer
+  recovery: on Open error, the Store either refuses to start the
+  Transport or quarantines the WAL dir; the choice is captured in
+  Task 27 wiring). The test variant covered here is the recovery-
+  path behavior: the Store quarantines the existing WAL dir (rename
+  to `wal.quarantine.<timestamp>`) and opens a FRESH WAL with
+  `("installation-B", "sha256:k-A")`. The fresh WAL has no meta.json
+  → `Options.InitialAckTuple` is nil. Use a `fakeConn` whose Recv
+  returns a SessionAck with `(generation=99,
   ack_high_watermark_seq=999, accepted=true)` — values deliberately
-  unrelated to the persisted (3, 30). Capture the slog logger output
-  to a `*bytes.Buffer`. Assert: (a) `Options.InitialAckTuple` passed
-  into `transport.New` was nil (verifiable via a test-only export on
-  Store, OR by asserting the FIRST SessionInit on the wire carries
-  `wal_high_watermark_seq=0, generation=0` even though meta.json on
-  disk says (3, 30)); (b) after the SessionAck is processed, the
-  first-apply branch adopts the server tuple wholesale —
-  `t.ackedSequence == 999` and `t.ackedGeneration == 99` — with NO
-  anomaly WARN (the rate-limited warn buffer for ack anomalies is
-  empty); (c) the buffer DOES contain exactly one WARN naming the
-  identity mismatch with `persisted_session_id="installation-A"`,
-  `expected_session_id="installation-B"`, and the action taken.
+  unrelated to the persisted (3, 30). Capture slog output to a
+  `*bytes.Buffer`. Assert: (a) the FIRST SessionInit on the wire
+  carries `wal_high_watermark_seq=0, generation=0` (fresh WAL has
+  no persisted ack); (b) after the SessionAck is processed, the
+  first-apply branch (`AckOutcomeAdopted`) adopts the server tuple
+  wholesale — `t.persistedAck == AckCursor{Sequence:999,
+  Generation:99}` AND `t.remoteReplayCursor ==
+  AckCursor{Sequence:999, Generation:99}` — with NO ack-anomaly
+  WARN (the rate-limited warn buffer for ack anomalies is empty);
+  (c) the buffer DOES contain exactly one WARN naming the identity
+  mismatch with `persisted_session_id="installation-A"`,
+  `expected_session_id="installation-B"`, and the action taken
+  (quarantine OR refuse-to-start, depending on Task 27's choice);
+  (d) if the chosen action is "quarantine," the original WAL dir
+  has been renamed to `wal.quarantine.<timestamp>` and a fresh WAL
+  dir has been created with the new identity (verify via
+  `os.ReadDir(parent)`).
 - `TestRun_RestartIgnoresAckOnKeyFingerprintMismatch` (round-7
-  Finding 1, same gating) — same shape as the SessionID mismatch
-  test, but with matching `SessionID` and mismatched
-  `KeyFingerprint`. Setup: persist meta with
-  `(SessionID="s1", KeyFingerprint="sha256:old", AckHighWatermarkGen=3,
-  AckHighWatermarkSeq=30, AckRecorded=true)`. Open Store with
-  `SessionID="s1", KeyFingerprint="sha256:new"`. Same fakeConn
-  SessionAck `(99, 999, accepted=true)`. Assert: (a) seed is nil →
-  SessionInit on the wire carries `(0, 0)`; (b) first-apply adopts
-  server tuple wholesale, no ack-anomaly WARN; (c) exactly one WARN
+  Finding 1, same round-8 rewrite + same gating as above) — same
+  shape as the SessionID mismatch test, but with matching
+  `SessionID` and mismatched `KeyFingerprint`. Setup phase 1:
+  persist meta via real `wal.Open` + `MarkAcked` with
+  `(SessionID:"s1", KeyFingerprint:"sha256:old",
+  AckHighWatermarkGen=3, AckHighWatermarkSeq=30, AckRecorded=true)`.
+  Setup phase 2: Store opens WAL with
+  `wal.Options{SessionID:"s1", KeyFingerprint:"sha256:new"}`; the
+  Store-layer identity gate detects the KeyFingerprint mismatch,
+  emits a single WARN naming the persisted vs. expected
+  fingerprints + action, sets `Options.InitialAckTuple = nil`, AND
+  takes the recovery path (quarantine the existing WAL dir, open a
+  fresh WAL with the new identity). Use the same fakeConn SessionAck
+  `(99, 999, accepted=true)`. Assert: (a) seed is nil → SessionInit
+  on the wire carries `(0, 0)`; (b) first-apply
+  (`AckOutcomeAdopted`) adopts server tuple wholesale —
+  `t.persistedAck == t.remoteReplayCursor == AckCursor{Sequence:999,
+  Generation:99}` — no ack-anomaly WARN; (c) exactly one WARN
   naming the key_fingerprint mismatch with the persisted vs.
-  expected fingerprints and the action taken.
-- `TestRun_RestartLogsMismatchOnce` (round-7 Finding 1, same gating)
-  — verifies that the identity-mismatch WARN is emitted EXACTLY
-  once per mismatched field, not on every reconnect cycle within
-  the same Store lifetime. Setup: same as the SessionID-mismatch
-  test, but drive five reconnect cycles via injected stream errors
-  on the fakeConn after each Live entry. Assert: the captured slog
-  buffer contains exactly ONE WARN line carrying
-  `persisted_session_id` (i.e. the identity-mismatch WARN is not
-  re-emitted on each reconnect; the seed decision is made once at
-  Store construction and not re-evaluated per reconnect). The
-  ack-anomaly WARN buffer remains empty across all five cycles
-  (each reconnect's first SessionAck takes the first-apply branch
-  because the previous cycle's `(t.ackedSequence,
-  t.ackedGeneration)` was not preserved across the Transport
-  reconstruction OR — if the Transport instance is reused — the
-  server returns the same `(99, 999)` tuple it returned last time,
-  which is now the equal-no-op case of the clamp). Variant: the
-  same test with `KeyFingerprint` mismatch instead of SessionID
-  mismatch — exactly one WARN with `persisted_key_fingerprint`,
-  zero ack-anomaly WARNs.
+  expected fingerprints and the action taken; (d) quarantine
+  filesystem assertion as in the SessionID-mismatch test.
+- `TestRun_RestartLogsMismatchOnce` (round-7 Finding 1, round-8
+  rewrite — same gating as above) — verifies that the identity-
+  mismatch WARN is emitted EXACTLY once per Store lifetime, NOT
+  on every reconnect cycle. Round-8 rewrite: drives the test
+  against the same real `wal.Open` + Store-layer identity gate as
+  the two prior tests. Setup: same as the SessionID-mismatch test
+  (persisted identity "installation-A", Store opens with
+  "installation-B", Store quarantines and opens fresh WAL). After
+  Store construction, drive five reconnect cycles via injected
+  stream errors on the fakeConn after each Live entry. Assert: the
+  captured slog buffer contains exactly ONE WARN line carrying
+  `persisted_session_id` across all five cycles (the identity-
+  mismatch decision is made ONCE at Store construction during the
+  `wal.Open` recovery path; reconnects do NOT re-evaluate identity
+  because the Transport is built against the post-quarantine fresh
+  WAL whose identity matches by construction). The ack-anomaly
+  WARN buffer remains empty across all five cycles: each
+  reconnect's first SessionAck for cycle N either (i) takes the
+  `AckOutcomeAdopted` first-apply branch on cycle 1 (cursors
+  initially zero), then (ii) takes the equal-no-op
+  (`AckOutcomeNoOp`) branch on cycles 2..5 because the server
+  returns the same `(99, 999)` tuple each time AND the cursors
+  carry forward across reconnect cycles within the same Transport
+  instance (per the round-8 spec note: cursors are NOT reset on
+  reconnect; the Transport instance is reused across reconnects,
+  and only Store teardown resets them). Variant: the same test
+  with `KeyFingerprint` mismatch instead of SessionID mismatch —
+  exactly one WARN with `persisted_key_fingerprint`, zero ack-
+  anomaly WARNs.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -10555,35 +10967,91 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	}
 
 	w, err := wal.Open(wal.Options{
-		Dir:          opts.WALDir,
-		SegmentSize:  opts.WALSegmentSize,
-		MaxTotalSize: opts.WALMaxTotalSize,
+		Dir:            opts.WALDir,
+		SegmentSize:    opts.WALSegmentSize,
+		MaxTotalSize:   opts.WALMaxTotalSize,
+		// Round-8 (Finding 2 / Task 14a): persist identity on every
+		// meta.json write so the persisted (gen, seq) watermark is
+		// cryptographically attributable to a known (SessionID,
+		// KeyFingerprint) installation. The WAL's own first-writer-
+		// wins rule (Task 14a) will REFUSE to open this Dir if
+		// meta.json on disk carries a mismatching SessionID or
+		// KeyFingerprint — the recovery path lives below in the
+		// `errors.As(err, &wal.ErrIdentityMismatch{})` branch.
+		SessionID:      opts.SessionID,
+		KeyFingerprint: opts.KeyFingerprint,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open WAL: %w", err)
+		// Round-8 recovery path: if wal.Open refused due to identity
+		// mismatch (Task 14a's first-writer-wins rule), quarantine the
+		// existing WAL dir (rename to wal.quarantine.<unix-nanos>) and
+		// open a fresh WAL with the new identity. The pre-existing
+		// meta.json that drove the refusal is preserved under the
+		// quarantine name for forensic inspection. Quarantine is the
+		// chosen action over "refuse to start" because a key rotation
+		// or session reissue is a legitimate operator action — the
+		// daemon SHOULD continue running against a fresh WAL rather
+		// than blocking on a stale meta.json the operator may not even
+		// remember.
+		var idErr *wal.ErrIdentityMismatch
+		if errors.As(err, &idErr) {
+			quarantine := opts.WALDir + ".quarantine." + strconv.FormatInt(time.Now().UnixNano(), 10)
+			opts.Logger.Warn("wtp: WAL identity mismatch; quarantining stale WAL dir",
+				"persisted_session_id", idErr.PersistedSessionID,
+				"expected_session_id", opts.SessionID,
+				"persisted_key_fingerprint", idErr.PersistedKeyFingerprint,
+				"expected_key_fingerprint", opts.KeyFingerprint,
+				"quarantine_dir", quarantine,
+				"action", "renamed stale WAL dir; opening fresh WAL with new identity")
+			if rerr := os.Rename(opts.WALDir, quarantine); rerr != nil {
+				return nil, fmt.Errorf("wtp: WAL identity mismatch and quarantine rename failed: %w (original: %v)", rerr, err)
+			}
+			// Re-open against the now-empty Dir; this WILL succeed because
+			// no meta.json exists to compare against.
+			w, err = wal.Open(wal.Options{
+				Dir:            opts.WALDir,
+				SegmentSize:    opts.WALSegmentSize,
+				MaxTotalSize:   opts.WALMaxTotalSize,
+				SessionID:      opts.SessionID,
+				KeyFingerprint: opts.KeyFingerprint,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("open WAL (post-quarantine): %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("open WAL: %w", err)
+		}
 	}
 
-	// Round-6 (Finding 2) + round-7 (Finding 1): seed the Transport's
-	// effective-ack tuple from the persisted WAL meta.json so the FIRST
-	// SessionInit after restart carries the actual local watermark — not a
-	// lying (0, 0). The AckTuple.Present flag mirrors wal.Meta.AckRecorded so
-	// first-apply semantics in applyServerAckTuple work even when the
-	// persisted tuple is the zero value.
+	// Round-6 (Finding 2) + round-7 (Finding 1) + round-8 (Finding 1):
+	// seed the Transport's persistedAck cursor from the persisted WAL
+	// meta.json so the FIRST SessionInit after restart carries the actual
+	// local watermark — not a lying (0, 0). The AckTuple.Present flag
+	// mirrors wal.Meta.AckRecorded so first-apply semantics in
+	// applyServerAckTuple work even when the persisted tuple is zero.
 	//
-	// IDENTITY GATE (round-7 Finding 1, design.md §"Cold-start seed safety
-	// / stale meta detection"). Before seeding, we MUST compare the
-	// persisted meta's session_id and key_fingerprint against the values
-	// configured for the current process. The fields exist precisely to
-	// defend against silently consuming meta from a previous installation
-	// or a rotated key — without this check, a reused WAL dir or a key
-	// rotation could advertise the wrong watermark on the first SessionInit
-	// after restart, causing the server to either re-deliver already-acked
-	// records (a dup-emit storm) or (worse) trust the inflated watermark
-	// and silently drop records the new installation never received.
+	// Round-8 note on the identity gate below: with Task 14a's identity
+	// enforcement built INTO wal.Open above, the meta-mismatch case is
+	// ALREADY caught by the quarantine recovery path — by the time we
+	// reach this block, `w` is either (a) opened against meta whose
+	// identity matches opts.SessionID/KeyFingerprint by construction, or
+	// (b) opened against a fresh post-quarantine Dir with no meta.json.
+	// The Store's pre-existing identity gate below is RETAINED as
+	// defense-in-depth observability: it captures the rare case where
+	// meta.json was written by a buggy older binary that didn't persist
+	// identity (Meta.SessionID == "" reads from disk, which never matches
+	// any non-empty opts.SessionID), and it provides a single chokepoint
+	// to seed `initialAck` consistently across all "should not seed"
+	// branches (no meta, mismatching meta, ack-not-recorded). The
+	// operator-facing WARN on mismatch is also useful for audit trails
+	// independent of the wal.Open quarantine path's WARN.
 	//
 	// Match/reset rules (mirror the spec table):
 	//   - meta.SessionID != cfg.SessionID  → seed = nil + WARN once
+	//     (defense-in-depth; the wal.Open path above usually catches this
+	//     first via Task 14a's first-writer-wins rule).
 	//   - meta.KeyFingerprint != cfg.KeyFingerprint → seed = nil + WARN once
+	//     (same defense-in-depth caveat).
 	//   - meta.AckRecorded == false → seed = nil (no anomaly; legitimate
 	//     pre-ack cold start whose meta.json was written by a prior failed
 	//     append, before any MarkAcked call).
@@ -10644,21 +11112,28 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		dialer = newGRPCDialer(opts)
 	}
 
+	// Resolve the WTP metrics façade BEFORE transport.New so we can
+	// inject it via Options.Metrics. opts.Metrics may be nil; the
+	// WTP() accessor is nil-safe and returns a *WTPMetrics whose
+	// mutators no-op when the underlying *Collector is nil.
+	mw := opts.Metrics.WTP()
+
 	tr, err := transport.New(transport.Options{
 		Dialer:           dialer,
 		AgentID:          opts.AgentID,
 		SessionID:        opts.SessionID,
 		InitialAckTuple:  initialAck,
 		Logger:           opts.Logger, // round-6 (Finding 4): inject for ack-anomaly WARN
+		// Round-8 (Finding 1): the Transport needs direct access to the WAL
+		// AND the metrics façade so applyServerAckTuple can call
+		// wal.MarkAcked + metrics.SetAckHighWatermark on the Adopted branch
+		// (the side-effect contract introduced in Task 15.1 Step 1b).
+		WAL:              w,
+		Metrics:          mw,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("transport.New: %w", err)
 	}
-
-	// Resolve the WTP metrics façade. opts.Metrics may be nil; the
-	// WTP() accessor is nil-safe and returns a *WTPMetrics whose
-	// mutators no-op when the underlying *Collector is nil.
-	mw := opts.Metrics.WTP()
 
 	s := &Store{
 		opts:    opts,
@@ -12232,6 +12707,22 @@ git commit -m "feat(metrics): cross-task parity test + shared classifier_bypass 
 - [ ] **Step 8: Roborev**
 
 Run `/roborev-design-review` and address findings.
+
+**Future enhancement (deferred — round-8 scope reduction):** Task 22b
+intentionally does NOT extend `wtp_ack_high_watermark` to a `(gen, seq)`
+labeled gauge. Production today exposes a single unlabeled gauge via
+`func (w *WTPMetrics) SetAckHighWatermark(seq int64)` (see
+`internal/metrics/wtp.go` line 137; `/metrics` text format at line 230
+emits a single `wtp_ack_high_watermark <value>` line). The round-8
+review deferred the schema change because: (a) extending the gauge to
+two labels is a backward-incompatible monitoring change that requires
+dashboard + alert audit, and (b) the two-cursor model already gives
+operators the diagnostic they need via the INFO log (regression naming
+both cursors) plus the WARN log (true-anomaly naming both cursors).
+A future task may extend the gauge to a labeled
+`wtp_ack_high_watermark{gen,seq}` shape after the dashboard/alert
+migration is planned; until then, the production signature is the
+single-int64 form and the plan + tests reflect that.
 
 ---
 
