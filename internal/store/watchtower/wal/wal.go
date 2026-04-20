@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,6 +37,54 @@ type Options struct {
 	MaxTotalBytes int64
 	SyncMode      SyncMode
 	SyncInterval  time.Duration
+
+	// SessionID is the daemon's per-installation session identifier. It is
+	// written into meta.json on every WriteMeta call and is IMMUTABLE for
+	// the WAL directory's lifetime — first writer wins. If a later wal.Open
+	// is invoked with a different SessionID and meta.json on disk already
+	// carries a non-empty SessionID, Open errors out (this is the same
+	// logical condition the round-7 store-wiring identity gate detects, but
+	// surfaced one layer down so the WAL itself refuses to mutate). Empty
+	// SessionID is allowed for back-compat with pre-Task-14a callers and
+	// tests that don't care about identity; it disables both the persist
+	// and the Open validation. Production wiring (Task 27) MUST set this
+	// to opts.SessionID.
+	SessionID string
+
+	// KeyFingerprint is the daemon's signing-key fingerprint
+	// ("sha256:<hex>"). Same persistence and immutability rules as
+	// SessionID; same back-compat allowance for empty values.
+	KeyFingerprint string
+}
+
+// ErrIdentityMismatch is returned by Open when the persisted meta.json
+// carries a SessionID or KeyFingerprint that disagrees with the
+// caller-supplied opts. The persisted-vs-expected pairs are exposed so
+// upstream callers can include them in operator-facing logs without
+// re-parsing the error message.
+//
+// Both fields are populated even when only one mismatched — the
+// non-mismatching field carries the matching value on both sides
+// (so the operator sees the full identity context). The
+// MismatchedField string is one of "session_id" or "key_fingerprint"
+// and identifies which check tripped first; if both mismatched, the
+// session_id check runs first and is reported.
+type ErrIdentityMismatch struct {
+	MismatchedField         string // "session_id" or "key_fingerprint"
+	PersistedSessionID      string
+	ExpectedSessionID       string
+	PersistedKeyFingerprint string
+	ExpectedKeyFingerprint  string
+}
+
+// Error implements the error interface for ErrIdentityMismatch. The message
+// shape ("wal.Open: <field> mismatch: persisted=%q opts=%q") is part of the
+// public contract so log scrapers and tests can match without re-parsing.
+func (e *ErrIdentityMismatch) Error() string {
+	if e.MismatchedField == "session_id" {
+		return fmt.Sprintf("wal.Open: session_id mismatch: persisted=%q opts=%q", e.PersistedSessionID, e.ExpectedSessionID)
+	}
+	return fmt.Sprintf("wal.Open: key_fingerprint mismatch: persisted=%q opts=%q", e.PersistedKeyFingerprint, e.ExpectedKeyFingerprint)
 }
 
 // AppendResult is returned by WAL.Append. GenerationRolled is set exactly when
@@ -149,6 +198,28 @@ type WAL struct {
 	ackHighGen uint32 // ack watermark generation; combined with ackHighSeq forms a (gen, seq) tuple
 	ackPresent bool   // true once an ack has been persisted; zero values are NOT a valid watermark
 
+	// perGenDataHighWater maps generation -> highest RecordData sequence on
+	// disk for that generation. Required by Task 14a's WrittenDataHighWater
+	// accessor: O(1) lookup on the recv hot path (every BatchAck +
+	// ServerHeartbeat + SessionAck calls it via applyServerAckTuple). Per
+	// the round-13 performance budget this map is the MANDATORY
+	// implementation of WrittenDataHighWater (no fallback to per-call
+	// segment scan).
+	//
+	// Populated at Open() via a single recovery scan of every segment file,
+	// updated by every successful Append for a RecordData entry. Loss
+	// markers and segment-header seeds (header-only generations) NEVER
+	// contribute. An entry's absence from the map means the writer has not
+	// emitted a RecordData for that generation; an entry's presence means
+	// at least one RecordData has been durably written and not yet GC'd.
+	//
+	// GC-aware: when MarkAcked / overflow GC removes the LAST surviving
+	// segment for a generation, the entry is deleted (so a fully-GC'd
+	// generation reports ok=false rather than a stale max).
+	//
+	// Mutated only under w.mu.
+	perGenDataHighWater map[uint32]uint64
+
 	// readers tracks open Reader instances so Append/AppendLoss can wake them
 	// via notifyReaders, and Close can drop their file handles. Mutated only
 	// under w.mu.
@@ -198,7 +269,7 @@ func Open(opts Options) (*WAL, error) {
 	if err := os.MkdirAll(segDir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir segments: %w", err)
 	}
-	w := &WAL{opts: opts, maxRec: maxRec, segDir: segDir}
+	w := &WAL{opts: opts, maxRec: maxRec, segDir: segDir, perGenDataHighWater: make(map[uint32]uint64)}
 	// Load the ack watermark BEFORE recover() so the overflow path (which
 	// can fire on the very first Append after Open) sees a consistent
 	// view: sealed segments fully covered by ack are silently GC'd, while
@@ -213,6 +284,32 @@ func Open(opts Options) (*WAL, error) {
 			w.ackHighSeq = m.AckHighWatermarkSeq
 			w.ackHighGen = m.AckHighWatermarkGen
 			w.ackPresent = true
+		}
+		// Identity check (Task 14a). Only validate when BOTH the on-disk
+		// value is non-empty AND the caller-supplied value is non-empty.
+		// The "either side empty" case is the v2-with-empty-identity
+		// migration: a pre-Task-14a meta.json had no identity fields, OR
+		// the test caller deliberately omits identity. In both, we adopt
+		// (don't error) — the next meta write will populate the field
+		// from opts. session_id check runs first; on simultaneous mismatch
+		// the session_id is reported.
+		if m.SessionID != "" && opts.SessionID != "" && m.SessionID != opts.SessionID {
+			return nil, &ErrIdentityMismatch{
+				MismatchedField:         "session_id",
+				PersistedSessionID:      m.SessionID,
+				ExpectedSessionID:       opts.SessionID,
+				PersistedKeyFingerprint: m.KeyFingerprint,
+				ExpectedKeyFingerprint:  opts.KeyFingerprint,
+			}
+		}
+		if m.KeyFingerprint != "" && opts.KeyFingerprint != "" && m.KeyFingerprint != opts.KeyFingerprint {
+			return nil, &ErrIdentityMismatch{
+				MismatchedField:         "key_fingerprint",
+				PersistedSessionID:      m.SessionID,
+				ExpectedSessionID:       opts.SessionID,
+				PersistedKeyFingerprint: m.KeyFingerprint,
+				ExpectedKeyFingerprint:  opts.KeyFingerprint,
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read meta: %w", err)
@@ -377,6 +474,15 @@ func (w *WAL) recover() error {
 			if seq, gen, ok := parseSeqGen(payload); ok {
 				w.highSeq = seq
 				w.highGen = gen
+				// Seed perGenDataHighWater so WrittenDataHighWater is
+				// O(1) at runtime. Only RecordData seqs land here —
+				// loss markers and segment-header seeds are excluded
+				// upstream (the loss-marker case is handled by the
+				// continue above; header-only segments produce no
+				// payloads at all).
+				if cur, exists := w.perGenDataHighWater[gen]; !exists || seq > cur {
+					w.perGenDataHighWater[gen] = seq
+				}
 			}
 		}
 	}
@@ -456,6 +562,35 @@ func (w *WAL) recover() error {
 		}
 		w.totalBytes += st.Size()
 	}
+
+	// Seed perGenDataHighWater across every segment on disk so the round-13
+	// O(1) WrittenDataHighWater accessor reflects the full multi-generation
+	// state, not just the last segment scanned by scanForRecovery above.
+	// Only RecordData entries contribute; loss markers and header-only
+	// segments are excluded by isLossMarker / no-payload, matching the
+	// Append path's invariants.
+	allSegments := make([]segmentEntry, 0, len(sealed)+len(inProgress))
+	allSegments = append(allSegments, sealed...)
+	allSegments = append(allSegments, inProgress...)
+	for _, e := range allSegments {
+		path := filepath.Join(w.segDir, e.name)
+		hi, hasUser, segGen, scanErr := segmentHighSeqAndGen(path, w.maxRec)
+		if scanErr != nil {
+			// Skip individual segment errors here — the active scan
+			// path above already surfaced them on the live/last
+			// segment, and the totalBytes loop above already covered
+			// stat failures. A scan failure on an older sealed
+			// segment leaves its perGenDataHighWater entry absent
+			// (best-effort recovery).
+			continue
+		}
+		if !hasUser {
+			continue
+		}
+		if cur, exists := w.perGenDataHighWater[segGen]; !exists || hi > cur {
+			w.perGenDataHighWater[segGen] = hi
+		}
+	}
 	return nil
 }
 
@@ -474,6 +609,164 @@ func (w *WAL) HighGeneration() uint32 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.highGen
+}
+
+// HighWaterSequence returns the highest sequence the WAL has durably
+// appended so far, across all generations. Alias for HighWatermark —
+// provided with the Task-14a name so transport-layer code (replayer tail
+// watermark, reader catch-up probe) can use the more explicit name without
+// every call site having to comment that "HighWatermark is a sequence, not
+// a byte count". Zero before any successful Append.
+//
+// Cross-generation: seqs restart at 0 on every generation roll, so a
+// higher-generation seq=3 can logically dominate a lower-generation seq=99.
+// HighWaterSequence does NOT reflect that ordering — it is strictly the
+// raw highest seq ever appended. Callers that need cross-generation
+// comparison should use the (gen, seq) tuple via HighGeneration +
+// HighWaterSequence or the Meta.AckHighWatermarkGen / Seq pair.
+func (w *WAL) HighWaterSequence() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.highSeq
+}
+
+// WrittenDataHighWater returns the highest RecordData sequence durably
+// written to disk for the given generation, or ok=false if no data-bearing
+// record has ever been appended for that generation.
+//
+// O(1): backed by the in-memory perGenDataHighWater map which Append
+// updates on every successful RecordData write and which Open seeds from
+// a full-disk scan at startup. Loss markers (AppendLoss / overflow GC) do
+// NOT update the map — they are not RecordData. Header-only segments (a
+// segment opened for gen=N but closed before any RecordData was written)
+// also do not update the map; WrittenDataHighWater(N) returns ok=false
+// for those, matching the contract documented on the map field itself.
+//
+// Returns an error only if the underlying WAL has been closed; in steady
+// state the result is (seq, true, nil) for every generation with data,
+// (0, false, nil) for every other generation the caller might probe.
+//
+// Used by Task 15.1 / 17.X (transport replay-start cursor selection) to
+// determine whether the server's reported high-watermark is a
+// post-generation-roll or a post-GC regression; per Task 14b the
+// replayer also filters Reader records to exactly the requested
+// generation using this ceiling as the termination signal.
+func (w *WAL) WrittenDataHighWater(gen uint32) (uint64, bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return 0, false, ErrClosed
+	}
+	seq, ok := w.perGenDataHighWater[gen]
+	return seq, ok, nil
+}
+
+// EarliestDataSequence returns the lowest RecordData sequence still on
+// disk for the given generation, or ok=false if no data-bearing segment
+// for that generation survives (either it was never opened, or every
+// segment for it has been GC'd).
+//
+// Unlike WrittenDataHighWater, this accessor performs a per-call scan —
+// it reads the segment directory, filters by header.Generation == gen,
+// opens the numerically-smallest one and returns the first RecordData
+// seq it finds. Header-only segments (gen header but no RecordData in
+// the file) are silently skipped so the accessor falls through to the
+// next segment for the same gen. Loss markers on-disk are ALSO skipped
+// for the same reason the high-water does: loss is not RecordData.
+//
+// ENOENT on individual segment files is silently tolerated — GC can
+// reclaim a segment between the ReadDir snapshot and the open, and
+// reporting that race as an error would make the accessor incorrectly
+// return a hard failure on steady-state concurrency. Every other I/O
+// error (header corruption, permission denied, etc.) is surfaced.
+//
+// Returns an error only if the underlying WAL has been closed, or on
+// unrecoverable I/O failure.
+//
+// Used by Task 15.1 / 17.X to answer "what's the oldest data we have
+// for gen G on disk?" when computing the replay-start cursor after an
+// ack-regression-by-GC is detected.
+func (w *WAL) EarliestDataSequence(gen uint32) (uint64, bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return 0, false, ErrClosed
+	}
+	entries, err := os.ReadDir(w.segDir)
+	if err != nil {
+		return 0, false, err
+	}
+	var candidates []segmentEntry
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, sealedSuffix) && !strings.HasSuffix(name, inprogressSuffix) {
+			continue
+		}
+		idx, parseOK := parseSegmentIndex(name)
+		if !parseOK {
+			continue
+		}
+		candidates = append(candidates, segmentEntry{name: name, idx: idx})
+	}
+	// Numeric sort so we examine segments in append order. If a later-
+	// indexed segment carries an earlier seq (impossible in steady state
+	// within one generation, but the loop is defensive), we still return
+	// the FIRST one we successfully decode — the contract is "earliest
+	// surviving", not "minimum across all", and within a single generation
+	// Append is monotonic in seq.
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].idx < candidates[j].idx })
+	for _, c := range candidates {
+		path := filepath.Join(w.segDir, c.name)
+		f, openErr := os.Open(path)
+		if openErr != nil {
+			if errors.Is(openErr, fs.ErrNotExist) {
+				// Concurrent GC raced us between ReadDir and Open —
+				// skip silently. The surviving segment for this gen
+				// (if any) will appear later in the sorted list.
+				continue
+			}
+			return 0, false, openErr
+		}
+		hdr, hdrErr := ReadSegmentHeader(f)
+		if hdrErr != nil {
+			_ = f.Close()
+			return 0, false, hdrErr
+		}
+		if hdr.Generation != gen {
+			_ = f.Close()
+			continue
+		}
+		// Segment belongs to the requested gen. Walk its records looking
+		// for the first RecordData. Loss markers are silently skipped;
+		// header-only segments simply fall through to the next candidate.
+		for {
+			payload, readErr := ReadRecord(f, w.maxRec)
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				// Corrupt or truncated frame — treat as "nothing here"
+				// and advance. Losing the exact seq for one bad segment
+				// is strictly better than refusing to serve a correct
+				// answer from a later segment.
+				break
+			}
+			if isLossMarker(payload) {
+				continue
+			}
+			seq, _, seqOK := parseSeqGen(payload)
+			if !seqOK {
+				continue
+			}
+			_ = f.Close()
+			return seq, true, nil
+		}
+		_ = f.Close()
+	}
+	return 0, false, nil
 }
 
 // failAmbiguousLocked latches the WAL into a fatal state and returns an
@@ -635,6 +928,13 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 
 	w.highSeq = uint64(seq)
 	w.highGen = gen
+	// Maintain the round-13 per-gen, data-bearing high-water map so
+	// WrittenDataHighWater(gen) is O(1) on the recv hot path. Loss markers
+	// and segment-header seeds NEVER bump this map (only Append-of-RecordData
+	// writes here; AppendLoss is intentionally excluded).
+	if cur, exists := w.perGenDataHighWater[gen]; !exists || uint64(seq) > cur {
+		w.perGenDataHighWater[gen] = uint64(seq)
+	}
 	// totalBytes accounting: framed already includes the 12-byte seq/gen
 	// prefix; the framing layer adds the 8-byte frame header on top.
 	w.totalBytes += int64(8 + len(framed))
@@ -862,10 +1162,19 @@ func (w *WAL) MarkAcked(gen uint32, seq uint64) error {
 		w.ackHighSeq = seq
 		w.ackPresent = true
 	}
+	// Persist identity alongside the ack tuple so a WAL opened with Task-14a
+	// identity options carries that identity into meta.json on the very next
+	// MarkAcked call. The fields are read-only after first persistence (the
+	// identity gate in Open enforces immutability), but writing them here is
+	// load-bearing for the migration path: an older directory whose meta.json
+	// has empty identity fields adopts the caller's values on the next ack
+	// and from that point on the gate locks them in.
 	if err := WriteMeta(w.opts.Dir, Meta{
 		AckHighWatermarkSeq: w.ackHighSeq,
 		AckHighWatermarkGen: w.ackHighGen,
 		AckRecorded:         true,
+		SessionID:           w.opts.SessionID,
+		KeyFingerprint:      w.opts.KeyFingerprint,
 	}); err != nil {
 		return err
 	}
@@ -908,6 +1217,10 @@ func (w *WAL) MarkAcked(gen uint32, seq uint64) error {
 		if err := syncDir(w.segDir); err != nil {
 			return err
 		}
+		// Drop perGenDataHighWater entries for any generation whose last
+		// surviving segment was just GC'd. Without this WrittenDataHighWater
+		// would keep returning the pre-GC value for data no longer on disk.
+		w.prunePerGenDataHighWaterLocked()
 	}
 	return nil
 }
@@ -1076,6 +1389,11 @@ func (w *WAL) dropOldestLocked() (loss LossRecord, dropped bool, hasUserRange bo
 		// Surface as ambiguous via the caller's failAmbiguousLocked.
 		return LossRecord{}, true, false, syncErr
 	}
+	// Drop perGenDataHighWater for hdr.Generation if this was the last
+	// segment for that generation. Overflow GC is per-segment so we must
+	// re-scan the directory each time; the helper handles the empty-set
+	// case cheaply.
+	w.prunePerGenDataHighWaterLocked()
 	// hasUserRange == !first: we observed at least one real record.
 	hasUserRange = !first
 	return LossRecord{FromSequence: fromSeq, ToSequence: toSeq, Generation: hdr.Generation, Reason: "overflow"}, true, hasUserRange, nil
@@ -1110,6 +1428,63 @@ func (w *WAL) segmentFullyAckedLocked(segGen uint32, segHi uint64, hasUser bool)
 		return true
 	}
 	return false
+}
+
+// prunePerGenDataHighWaterLocked drops perGenDataHighWater entries for any
+// generation that no longer has a surviving segment on disk. Invoked by every
+// GC path (MarkAcked, gcAckedLocked, dropOldestLocked) after at least one
+// segment was removed — without this the map would leak stale max-seqs for
+// fully-GC'd generations, and WrittenDataHighWater(oldGen) would keep
+// returning a value for data that no longer exists on disk.
+//
+// Rather than track the GC'd file set across every removal path, we take the
+// simpler tack of reading the post-GC directory listing once and computing
+// the set of surviving generations via segment header reads. The O(segments)
+// cost amortises well against GC passes that typically remove several
+// segments at a time, and avoids the invariant-fragile approach of threading
+// per-GC-path bookkeeping through three call sites. Caller MUST hold w.mu.
+func (w *WAL) prunePerGenDataHighWaterLocked() {
+	entries, err := os.ReadDir(w.segDir)
+	if err != nil {
+		// Directory-read failure here is not fatal: the map entries are a
+		// positive cache, and a stale entry is only user-visible if a
+		// subsequent Open cannot re-seed it — which will not happen,
+		// because Open's scan path consults the same directory. Skip
+		// pruning and let the next GC retry.
+		return
+	}
+	surviving := make(map[uint32]struct{})
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, sealedSuffix) && !strings.HasSuffix(name, inprogressSuffix) {
+			continue
+		}
+		if _, ok := parseSegmentIndex(name); !ok {
+			continue
+		}
+		path := filepath.Join(w.segDir, name)
+		// Use ReadSegmentHeader rather than segmentHighSeqAndGen here —
+		// we only need the generation, and a full scan per GC pass would
+		// turn pruning into an O(n) disk walk per generation.
+		f, openErr := os.Open(path)
+		if openErr != nil {
+			continue
+		}
+		hdr, hdrErr := ReadSegmentHeader(f)
+		_ = f.Close()
+		if hdrErr != nil {
+			continue
+		}
+		surviving[hdr.Generation] = struct{}{}
+	}
+	for gen := range w.perGenDataHighWater {
+		if _, stillOnDisk := surviving[gen]; !stillOnDisk {
+			delete(w.perGenDataHighWater, gen)
+		}
+	}
 }
 
 // gcAckedLocked removes every sealed segment fully covered by the (gen, seq)
@@ -1180,6 +1555,9 @@ func (w *WAL) gcAckedLocked() (int, error) {
 		if err := syncDir(w.segDir); err != nil {
 			return removed, err
 		}
+		// Drop perGenDataHighWater entries for generations whose last
+		// segment was just reclaimed by ack-driven GC.
+		w.prunePerGenDataHighWaterLocked()
 	}
 	return removed, nil
 }
