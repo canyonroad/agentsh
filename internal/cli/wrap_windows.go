@@ -15,11 +15,7 @@ import (
 // Like macOS, Windows uses a system-wide driver (agentsh.sys) for exec
 // interception, so the agent runs directly without a wrapper binary.
 func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, sessID string, agentPath string, agentArgs []string, cfg *clientConfig) (*wrapLaunchConfig, error) {
-	env := os.Environ()
-	env = append(env,
-		fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
-		fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
-	)
+	env := buildWrapEnv(os.Environ(), sessID, cfg.serverAddr, wrapResp.SafeToBypassShellShim)
 	for k, v := range wrapResp.WrapperEnv {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}

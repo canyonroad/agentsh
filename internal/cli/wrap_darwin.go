@@ -19,11 +19,7 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 	if wrapResp.WrapperBinary == "" {
 		// No wrapper needed on macOS — ES interception is handled by System Extension.
 		// The agent runs directly, and the ESF client intercepts its execs.
-		env := os.Environ()
-		env = append(env,
-			fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
-			fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
-		)
+		env := buildWrapEnv(os.Environ(), sessID, cfg.serverAddr, wrapResp.SafeToBypassShellShim)
 
 		return &wrapLaunchConfig{
 			command: agentPath,
@@ -37,11 +33,7 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 
 	// If the server returns a wrapper binary (e.g., agentsh-macwrap for sandboxing),
 	// use it as the launch command.
-	env := os.Environ()
-	env = append(env,
-		fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
-		fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
-	)
+	env := buildWrapEnv(os.Environ(), sessID, cfg.serverAddr, wrapResp.SafeToBypassShellShim)
 	for k, v := range wrapResp.WrapperEnv {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}

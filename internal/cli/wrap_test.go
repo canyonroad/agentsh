@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"os"
 	"net/url"
+	"os"
 	"runtime"
 	"syscall"
 	"testing"
@@ -129,10 +129,10 @@ func TestWrapCmd_RequiresCommandWithFlags(t *testing.T) {
 
 // mockWrapClient implements CLIClient for testing wrap interception setup.
 type mockWrapClient struct {
-	wrapInitCalled  bool
-	wrapInitReq     types.WrapInitRequest
-	wrapInitResp    types.WrapInitResponse
-	wrapInitErr     error
+	wrapInitCalled   bool
+	wrapInitReq      types.WrapInitRequest
+	wrapInitResp     types.WrapInitResponse
+	wrapInitErr      error
 	createSessCalled bool
 	getSessionCalled bool
 	getSessionFn     func(ctx context.Context, id string) (types.Session, error)
@@ -173,7 +173,7 @@ func (m *mockWrapClient) GetSession(ctx context.Context, id string) (types.Sessi
 	}
 	return types.Session{ID: id}, nil
 }
-func (m *mockWrapClient) DestroySession(ctx context.Context, id string) error    { return nil }
+func (m *mockWrapClient) DestroySession(ctx context.Context, id string) error { return nil }
 func (m *mockWrapClient) PatchSession(ctx context.Context, id string, req types.SessionPatchRequest) (types.Session, error) {
 	return types.Session{}, nil
 }
@@ -198,7 +198,9 @@ func (m *mockWrapClient) StreamSessionEvents(ctx context.Context, sessionID stri
 func (m *mockWrapClient) OutputChunk(ctx context.Context, sessionID, commandID string, stream string, offset, limit int64) (map[string]any, error) {
 	return nil, nil
 }
-func (m *mockWrapClient) ListApprovals(ctx context.Context) ([]map[string]any, error) { return nil, nil }
+func (m *mockWrapClient) ListApprovals(ctx context.Context) ([]map[string]any, error) {
+	return nil, nil
+}
 func (m *mockWrapClient) ResolveApproval(ctx context.Context, id string, decision string, reason string) error {
 	return nil
 }
@@ -309,6 +311,125 @@ func TestSetupWrapInterception_WrapInitError(t *testing.T) {
 	assert.Contains(t, err.Error(), "wrap-init")
 }
 
+func TestBuildWrapEnv_IncludesInSessionWhenBypassEnabled(t *testing.T) {
+	env := buildWrapEnv([]string{"PATH=/usr/bin"}, "sess-123", "http://127.0.0.1:18080", true)
+	envMap := make(map[string]bool)
+	for _, e := range env {
+		envMap[e] = true
+	}
+
+	assert.True(t, envMap["AGENTSH_SESSION_ID=sess-123"])
+	assert.True(t, envMap["AGENTSH_SERVER=http://127.0.0.1:18080"])
+	assert.True(t, envMap["AGENTSH_IN_SESSION=1"])
+}
+
+func TestBuildWrapEnv_OmitsInSessionWhenBypassDisabled(t *testing.T) {
+	env := buildWrapEnv([]string{"PATH=/usr/bin"}, "sess-123", "http://127.0.0.1:18080", false)
+	for _, e := range env {
+		if e == "AGENTSH_IN_SESSION=1" {
+			t.Fatal("did not expect AGENTSH_IN_SESSION when bypass is disabled")
+		}
+	}
+}
+
+func TestBuildWrapEnv_StripsInheritedAgentshVarsWhenBypassDisabled(t *testing.T) {
+	env := buildWrapEnv([]string{
+		"PATH=/usr/bin",
+		"AGENTSH_SESSION_ID=stale-session",
+		"AGENTSH_SERVER=http://stale",
+		"AGENTSH_IN_SESSION=1",
+	}, "sess-123", "http://127.0.0.1:18080", false)
+
+	for _, e := range env {
+		if e == "AGENTSH_IN_SESSION=1" {
+			t.Fatal("did not expect inherited AGENTSH_IN_SESSION when bypass is disabled")
+		}
+		if e == "AGENTSH_SESSION_ID=stale-session" {
+			t.Fatal("did not expect stale AGENTSH_SESSION_ID to remain in env")
+		}
+		if e == "AGENTSH_SERVER=http://stale" {
+			t.Fatal("did not expect stale AGENTSH_SERVER to remain in env")
+		}
+	}
+
+	envMap := make(map[string]int)
+	for _, e := range env {
+		envMap[e]++
+	}
+	assert.Equal(t, 1, envMap["AGENTSH_SESSION_ID=sess-123"])
+	assert.Equal(t, 1, envMap["AGENTSH_SERVER=http://127.0.0.1:18080"])
+}
+
+func TestBuildWrapEnv_ReplacesInheritedAgentshVarsWhenBypassEnabled(t *testing.T) {
+	env := buildWrapEnv([]string{
+		"PATH=/usr/bin",
+		"AGENTSH_SESSION_ID=stale-session",
+		"AGENTSH_SERVER=http://stale",
+		"AGENTSH_IN_SESSION=1",
+	}, "sess-123", "http://127.0.0.1:18080", true)
+
+	envMap := make(map[string]int)
+	for _, e := range env {
+		envMap[e]++
+	}
+
+	assert.Equal(t, 1, envMap["AGENTSH_SESSION_ID=sess-123"])
+	assert.Equal(t, 1, envMap["AGENTSH_SERVER=http://127.0.0.1:18080"])
+	assert.Equal(t, 1, envMap["AGENTSH_IN_SESSION=1"])
+	assert.Equal(t, 0, envMap["AGENTSH_SESSION_ID=stale-session"])
+	assert.Equal(t, 0, envMap["AGENTSH_SERVER=http://stale"])
+}
+
+func TestBuildWrapEnv_StripsInheritedMixedCaseAgentshVarsWhenBypassDisabled(t *testing.T) {
+	env := buildWrapEnv([]string{
+		"PATH=/usr/bin",
+		"agentsh_session_id=stale-session",
+		"Agentsh_Server=http://stale",
+		"agentsh_in_session=1",
+	}, "sess-123", "http://127.0.0.1:18080", false)
+
+	for _, e := range env {
+		if e == "agentsh_in_session=1" {
+			t.Fatal("did not expect mixed-case inherited AGENTSH_IN_SESSION when bypass is disabled")
+		}
+		if e == "agentsh_session_id=stale-session" {
+			t.Fatal("did not expect mixed-case stale AGENTSH_SESSION_ID to remain in env")
+		}
+		if e == "Agentsh_Server=http://stale" {
+			t.Fatal("did not expect mixed-case stale AGENTSH_SERVER to remain in env")
+		}
+	}
+
+	envMap := make(map[string]int)
+	for _, e := range env {
+		envMap[e]++
+	}
+	assert.Equal(t, 1, envMap["AGENTSH_SESSION_ID=sess-123"])
+	assert.Equal(t, 1, envMap["AGENTSH_SERVER=http://127.0.0.1:18080"])
+	assert.Equal(t, 0, envMap["AGENTSH_IN_SESSION=1"])
+}
+
+func TestBuildWrapEnv_ReplacesInheritedMixedCaseAgentshVarsWhenBypassEnabled(t *testing.T) {
+	env := buildWrapEnv([]string{
+		"PATH=/usr/bin",
+		"agentsh_session_id=stale-session",
+		"Agentsh_Server=http://stale",
+		"agentsh_in_session=1",
+	}, "sess-123", "http://127.0.0.1:18080", true)
+
+	envMap := make(map[string]int)
+	for _, e := range env {
+		envMap[e]++
+	}
+
+	assert.Equal(t, 1, envMap["AGENTSH_SESSION_ID=sess-123"])
+	assert.Equal(t, 1, envMap["AGENTSH_SERVER=http://127.0.0.1:18080"])
+	assert.Equal(t, 1, envMap["AGENTSH_IN_SESSION=1"])
+	assert.Equal(t, 0, envMap["agentsh_session_id=stale-session"])
+	assert.Equal(t, 0, envMap["Agentsh_Server=http://stale"])
+	assert.Equal(t, 0, envMap["agentsh_in_session=1"])
+}
+
 func TestWrapLaunchConfig_EnvContainsSessionAndWrapper(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("wrap interception requires Linux or macOS")
@@ -345,6 +466,72 @@ func TestWrapLaunchConfig_EnvContainsSessionAndWrapper(t *testing.T) {
 	}
 
 	// Clean up
+	for _, f := range lcfg.extraFiles {
+		if f != nil {
+			f.Close()
+		}
+	}
+}
+
+func TestWrapLaunchConfig_EnvIncludesInSessionWhenSafe(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("wrap interception requires Linux or macOS")
+	}
+
+	mc := &mockWrapClient{
+		wrapInitResp: types.WrapInitResponse{
+			WrapperBinary:         "/bin/true",
+			NotifySocket:          "/tmp/agentsh-notify-test.sock",
+			SafeToBypassShellShim: true,
+			WrapperEnv: map[string]string{
+				"AGENTSH_SECCOMP_CONFIG": `{"unix_socket_enabled":true}`,
+			},
+		},
+	}
+
+	cfg := &clientConfig{serverAddr: "http://127.0.0.1:18080"}
+	lcfg, err := setupWrapInterception(context.Background(), mc, "test-session", "/bin/echo", nil, cfg)
+	require.NoError(t, err)
+
+	envMap := make(map[string]bool)
+	for _, e := range lcfg.env {
+		envMap[e] = true
+	}
+	assert.True(t, envMap["AGENTSH_IN_SESSION=1"])
+
+	for _, f := range lcfg.extraFiles {
+		if f != nil {
+			f.Close()
+		}
+	}
+}
+
+func TestWrapLaunchConfig_EnvOmitsInSessionWhenUnsafe(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("wrap interception requires Linux or macOS")
+	}
+
+	mc := &mockWrapClient{
+		wrapInitResp: types.WrapInitResponse{
+			WrapperBinary:         "/bin/true",
+			NotifySocket:          "/tmp/agentsh-notify-test.sock",
+			SafeToBypassShellShim: false,
+			WrapperEnv: map[string]string{
+				"AGENTSH_SECCOMP_CONFIG": `{"unix_socket_enabled":true}`,
+			},
+		},
+	}
+
+	cfg := &clientConfig{serverAddr: "http://127.0.0.1:18080"}
+	lcfg, err := setupWrapInterception(context.Background(), mc, "test-session", "/bin/echo", nil, cfg)
+	require.NoError(t, err)
+
+	for _, e := range lcfg.env {
+		if e == "AGENTSH_IN_SESSION=1" {
+			t.Fatal("did not expect AGENTSH_IN_SESSION when wrap response marks bypass unsafe")
+		}
+	}
+
 	for _, f := range lcfg.extraFiles {
 		if f != nil {
 			f.Close()

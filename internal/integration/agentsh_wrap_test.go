@@ -161,3 +161,77 @@ func TestWrapAutoStart(t *testing.T) {
 		t.Error("expected 'hello' in output (echo command should have run)")
 	}
 }
+
+func TestWrapFallback_OmitsInSessionMarker(t *testing.T) {
+	ctx := context.Background()
+
+	bin := buildAgentshBinary(t)
+	temp := t.TempDir()
+
+	configPath := filepath.Join(temp, "config.yaml")
+	writeFile(t, configPath, wrapTestConfigYAML)
+
+	policiesDir := filepath.Join(temp, "policies")
+	mustMkdir(t, policiesDir)
+	writeFile(t, filepath.Join(policiesDir, "agent-default.yaml"), wrapTestPolicyYAML)
+
+	workspace := filepath.Join(temp, "workspace")
+	mustMkdir(t, workspace)
+
+	req := testcontainers.ContainerRequest{
+		Image: "debian:bookworm-slim",
+		Cmd: []string{
+			"/usr/local/bin/agentsh", "wrap", "--",
+			"/bin/sh", "-c", `if [ -n "$AGENTSH_IN_SESSION" ]; then echo MARKER_SET; else echo MARKER_UNSET; fi`,
+		},
+		Mounts: []testcontainers.ContainerMount{
+			testcontainers.BindMount(bin, "/usr/local/bin/agentsh"),
+			testcontainers.BindMount(configPath, "/config.yaml"),
+			testcontainers.BindMount(policiesDir, "/policies"),
+			testcontainers.BindMount(workspace, "/workspace"),
+		},
+		Env: map[string]string{
+			"AGENTSH_CONFIG":     "/config.yaml",
+			"AGENTSH_IN_SESSION": "1",
+		},
+		HostConfigModifier: func(hc *container.HostConfig) {
+			hc.SecurityOpt = []string{"apparmor:unconfined", "seccomp:unconfined"}
+		},
+		WaitingFor: wait.ForExit().WithExitTimeout(30 * time.Second),
+	}
+
+	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+	if err != nil {
+		t.Fatalf("start container: %v", err)
+	}
+	defer func() { _ = ctr.Terminate(context.Background()) }()
+
+	logs, err := ctr.Logs(ctx)
+	if err != nil {
+		t.Fatalf("get logs: %v", err)
+	}
+	defer logs.Close()
+
+	logBytes, err := io.ReadAll(logs)
+	if err != nil {
+		t.Fatalf("read logs: %v", err)
+	}
+	logOutput := string(logBytes)
+
+	state, err := ctr.State(ctx)
+	if err != nil {
+		t.Fatalf("get container state: %v", err)
+	}
+	if state.ExitCode != 0 {
+		t.Fatalf("container exited with code %d, expected 0; logs:\n%s", state.ExitCode, logOutput)
+	}
+	if !strings.Contains(logOutput, "MARKER_UNSET") {
+		t.Fatalf("expected MARKER_UNSET in fallback wrap output, got:\n%s", logOutput)
+	}
+	if strings.Contains(logOutput, "MARKER_SET") {
+		t.Fatalf("did not expect MARKER_SET in fallback wrap output, got:\n%s", logOutput)
+	}
+}

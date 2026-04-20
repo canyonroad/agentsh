@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/agentsh/agentsh/internal/client"
@@ -146,10 +147,7 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 		agentProc.Stdin = os.Stdin
 		agentProc.Stdout = os.Stdout
 		agentProc.Stderr = os.Stderr
-		agentProc.Env = append(os.Environ(),
-			fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
-			fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
-		)
+		agentProc.Env = buildWrapEnv(os.Environ(), sessID, cfg.serverAddr, false)
 	}
 
 	// If FUSE mount is active, add it to the environment and set the working
@@ -280,8 +278,8 @@ type wrapLaunchConfig struct {
 	env         []string
 	extraFiles  []*os.File
 	sysProcAttr *syscall.SysProcAttr
-	postStart   func() // Called after the process starts (e.g., to forward notify fd)
-	postWait    func() // Called after the process exits (e.g., to reclaim terminal)
+	postStart   func()    // Called after the process starts (e.g., to forward notify fd)
+	postWait    func()    // Called after the process exits (e.g., to reclaim terminal)
 	keepAlive   io.Closer // Held open during shell lifetime (e.g., ptrace handshake conn)
 	// ptracePostStart is called after the child is started with the child PID.
 	// It performs the ptrace handshake (send PID, wait for ACK).
@@ -312,6 +310,35 @@ func setupWrapInterception(ctx context.Context, c client.CLIClient, sessID strin
 
 	// Delegate to platform-specific code for socket pair creation and fd management
 	return platformSetupWrap(ctx, wrapResp, sessID, agentPath, agentArgs, cfg)
+}
+
+func buildWrapEnv(base []string, sessionID string, serverAddr string, bypassShellShim bool) []string {
+	env := make([]string, 0, len(base)+3)
+	for _, e := range base {
+		key, _, found := strings.Cut(e, "=")
+		if !found {
+			env = append(env, e)
+			continue
+		}
+		switch {
+		case strings.EqualFold(key, "AGENTSH_SESSION_ID"):
+			continue
+		case strings.EqualFold(key, "AGENTSH_SERVER"):
+			continue
+		case strings.EqualFold(key, "AGENTSH_IN_SESSION"):
+			continue
+		default:
+			env = append(env, e)
+		}
+	}
+	env = append(env,
+		fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessionID),
+		fmt.Sprintf("AGENTSH_SERVER=%s", serverAddr),
+	)
+	if bypassShellShim {
+		env = append(env, "AGENTSH_IN_SESSION=1")
+	}
+	return env
 }
 
 // fetchSessionForWrap resolves the session for runWrap, either by reusing
