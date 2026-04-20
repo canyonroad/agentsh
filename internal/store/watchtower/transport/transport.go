@@ -139,8 +139,11 @@ type Options struct {
 
 	// InitialAckTuple seeds persistedAck/remoteReplayCursor at construction.
 	// Populated by the Task 27 wiring layer from wal.ReadMeta. nil ⇒
-	// persistedAckPresent=false (first-apply path adopts the next server
-	// tuple wholesale).
+	// persistedAckPresent=false (first-apply path: next server tuple is
+	// adopted ONLY after wal.WrittenDataHighWater(serverGen) validates
+	// the seq is within local data; vacuous serverSeq==0 short-circuits
+	// to adopt; unwritten/over-tip server tuples take the Anomaly path
+	// per round-15 Finding 1).
 	InitialAckTuple *AckTuple
 	// Logger is the slog handle used for anomaly/info diagnostics.
 	// Defaults to slog.Default() in New() when nil.

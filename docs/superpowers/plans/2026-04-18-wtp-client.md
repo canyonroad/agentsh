@@ -10498,62 +10498,81 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 			rep = nil // fresh connect cycle — no stale handoff
 			st = next
 		case StateReplaying:
-			// The replay reader is OWNED by this case: it is opened
-			// here, threaded into the Replayer, and explicitly Closed
-			// on every exit path (success and error) so it
-			// unregisters from the WAL (see wal/reader.go Reader.Close
-			// near line 446). The StateLive case opens its own fresh
-			// reader at a recomputed start cursor — the two readers
-			// never overlap.
+			// The replay reader(s) are OWNED by this case: each stage's
+			// reader is opened here, threaded into a per-stage Replayer,
+			// and explicitly Closed on every exit path (success and
+			// error) so it unregisters from the WAL (see wal/reader.go
+			// Reader.Close near line 446). The StateLive case opens its
+			// own fresh reader at a recomputed start cursor — the
+			// replay readers and the Live reader never overlap.
 			//
-			// Round-11 ordering invariant: call computeReplayStart
-			// FIRST to obtain (prefixLoss, readerStart), THEN open
-			// the reader at readerStart. Opening the reader at
-			// t.remoteReplayCursor.Sequence + 1 unconditionally and
-			// then trying to "fix it up" is wrong — the reader's
-			// start cursor is set at construction. The helper is the
-			// single source of truth for the canonical 4-case decision
-			// tree (Task 15.1 Step 1b.5).
+			// Round-15 Finding 4: this case calls computeReplayPlan
+			// (NOT computeReplayStart) and iterates the returned
+			// []ReplayStage in strictly ascending generation order.
+			// Each stage opens a fresh Reader scoped to its generation
+			// (Task 14b's wal.NewReader(ReaderOptions{Generation, Start}))
+			// and a fresh Replayer over that reader. Only the FIRST
+			// stage carries a non-nil PrefixLoss (the synthetic
+			// ack_regression_after_gc marker); subsequent stages start
+			// at the generation's earliest sequence with PrefixLoss=nil
+			// because the loss is bounded to the original replay
+			// generation under the same-generation invariant of the
+			// 4-case decision tree (see spec §"Loss between replay
+			// cursor and persisted ack").
 			//
-			// computeReplayStart consumes the regressable cursor
-			// `remoteReplayCursor` (NOT `persistedAck`) — a stale-
-			// server SessionAck/BatchAck causes the next Replaying
-			// entry to RE-SEND the gap rather than dropping it on the
-			// floor. The helper is same-generation only by
-			// construction (cross-gen has already been classified as
-			// Anomaly in applyServerAckTuple); it returns a non-nil
-			// *wal.LossRecord (the in-memory ack_regression_after_gc
-			// marker, NOT persisted via wal.AppendLoss) when there is
-			// a GC'd gap, and the readerStart at which the WAL Reader
-			// should actually be opened (cases A/C/D in the decision
-			// tree all distinguish where to start).
-			prefixLoss, readerStart, lerr := t.computeReplayStart(t.remoteReplayCursor, t.persistedAck)
+			// Transition to Live ONLY after the LAST stage drains —
+			// transitioning earlier would silently skip the later-gen
+			// backlog because Live's Reader is scoped to the writer's
+			// current generation only and never re-reads older
+			// generations. The records remain on disk but no state
+			// would re-read them.
+			//
+			// computeReplayPlan internally calls computeReplayStart for
+			// the first stage (consuming `remoteReplayCursor` for the
+			// 4-case decision tree) and then probes
+			// wal.WrittenDataHighWater(gen) for each generation in
+			// (persistedAck.Generation, wal.HighGeneration()] to
+			// enumerate later-gen stages. Cost is O(N) where N is the
+			// count of WAL generations on disk (typically 1-3); the
+			// per-gen call is an in-memory map lookup with no disk I/O.
+			// See spec §"Cost bound for reconnect-time replay scan".
+			stages, lerr := t.computeReplayPlan(t.remoteReplayCursor, t.persistedAck)
 			if lerr != nil {
 				rep = nil
 				st = StateConnecting
 				continue
 			}
-			rdr, err := rdrFactory(readerStart)
-			if err != nil {
-				rep = nil
-				st = StateConnecting
-				continue
+			var stageErr error
+			for i := range stages {
+				stage := stages[i]
+				rdr, err := rdrFactoryGen(stage.Generation, stage.StartSeq)
+				if err != nil {
+					stageErr = err
+					break
+				}
+				rep = NewReplayer(rdr, ReplayerOptions{
+					MaxBatchRecords: liveOpts.Batcher.MaxRecords,
+					MaxBatchBytes:   liveOpts.Batcher.MaxBytes,
+					PrefixLoss:      stage.PrefixLoss, // nil for stages[1..]
+				})
+				next, err := t.runReplaying(ctx, rep)
+				_ = rdr.Close()
+				if err != nil {
+					// runReplaying tore down t.conn on its way out per
+					// its lifecycle rule. Back off and reconnect.
+					stageErr = err
+					break
+				}
+				if next != StateLive {
+					// Defensive: runReplaying signalled a different
+					// next state (e.g. Shutdown). Honour it without
+					// continuing to subsequent stages.
+					st = next
+					stageErr = nil
+					goto stageLoopDone
+				}
 			}
-			rep = NewReplayer(rdr, ReplayerOptions{
-				MaxBatchRecords: liveOpts.Batcher.MaxRecords,
-				MaxBatchBytes:   liveOpts.Batcher.MaxBytes,
-				PrefixLoss:      prefixLoss, // round-10: in-memory loss marker
-			})
-			next, err := t.runReplaying(ctx, rep)
-			// Replay reader lifecycle: close on every exit path so it
-			// unregisters from the WAL. Done before any state
-			// regression / continue so we never leak a registered
-			// reader across a reconnect cycle.
-			_ = rdr.Close()
-			if err != nil {
-				// runReplaying tore down t.conn on its way out per its
-				// lifecycle rule; back off and reconnect. Reset rep so
-				// no stale handoff leaks into the next Live entry.
+			if stageErr != nil {
 				rep = nil
 				st = StateConnecting
 				select {
@@ -10563,7 +10582,8 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 				}
 				continue
 			}
-			st = next
+			st = StateLive
+		stageLoopDone:
 		case StateLive:
 			// Live opens its Reader at max(rep.LastReplayedSequence()+1,
 			// t.remoteReplayCursor.Sequence+1). The max() avoids two
@@ -10979,10 +10999,14 @@ Reader-lifecycle invariants:
   AckRecorded=false → `Options.InitialAckTuple` is nil →
   SessionInit carries `wal_high_watermark_seq=0, generation=0`
   AND first SessionAck does not trip the anomaly WARN even if the
-  server returns a non-zero tuple (first-apply branch in
-  `applyServerAckTuple` returns `AckOutcomeAdopted` and adopts
-  wholesale; both cursors and `wal.MarkAcked` advance to the
-  server tuple).
+  server returns a non-zero tuple AND the WAL has emitted RecordData
+  in the server's generation (round-15 Finding 1: first-apply branch
+  in `applyServerAckTuple` returns `AckOutcomeAdopted` and adopts the
+  server tuple ONLY when the WAL data validation passes — vacuous
+  `serverSeq == 0`, OR `wal.WrittenDataHighWater(serverGen)` returns
+  `(maxDataSeq, true, nil)` AND `serverSeq <= maxDataSeq`. Both
+  cursors AND `wal.MarkAcked` advance to the server tuple in the
+  validated-adopt branch).
 - `TestRun_RestartIgnoresAckOnSessionIDMismatch` (round-7 Finding 1,
   round-8 rewrite — gated on Task 14a + Task 15.1 + Task 27
   store-wiring identity gate landing) — verifies the cold-start
@@ -11027,13 +11051,20 @@ Reader-lifecycle invariants:
   `*bytes.Buffer`. Assert: (a) the FIRST SessionInit on the wire
   carries `wal_high_watermark_seq=0, generation=0` (fresh WAL has
   no persisted ack); (b) after the SessionAck is processed, the
-  first-apply branch (`AckOutcomeAdopted`) adopts the server tuple
-  wholesale — `t.persistedAck == AckCursor{Sequence:999,
-  Generation:99}` AND `t.remoteReplayCursor ==
-  AckCursor{Sequence:999, Generation:99}` — with NO ack-anomaly
-  WARN (the rate-limited warn buffer for ack anomalies is empty);
-  (c) the buffer DOES contain exactly one WARN naming the identity
-  mismatch with `persisted_session_id="installation-A"`,
+  first-apply branch validates the server tuple against
+  `wal.WrittenDataHighWater(99)` per round-15 Finding 1; the fresh
+  WAL has emitted no data in gen=99 so the call returns
+  `(0, false, nil)` and the helper takes the Anomaly path with
+  `AnomalyReason="unwritten_generation"` — both cursors stay at
+  `AckCursor{}` (zero) AND `t.persistedAckPresent == false`
+  (cursors UNCHANGED on the Anomaly branch); the rate-limited
+  ack-anomaly warn buffer contains exactly ONE WARN with
+  `reason="unwritten_generation"`, `server_gen=99`,
+  `server_seq=999`, `wal_written_data_high_ok=false`, AND
+  `wtp_anomalous_ack_total{reason="unwritten_generation"}` was
+  incremented exactly once; (c) the buffer DOES contain exactly
+  one identity-mismatch WARN naming
+  `persisted_session_id="installation-A"`,
   `expected_session_id="installation-B"`, and the action taken
   (quarantine OR refuse-to-start, depending on Task 27's choice);
   (d) if the chosen action is "quarantine," the original WAL dir

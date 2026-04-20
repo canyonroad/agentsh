@@ -386,8 +386,16 @@ func TestApplyServerAckTuple_EqualTuple(t *testing.T) {
 
 // ===== Test #4 =====
 // TestApplyServerAckTuple_FirstApplyAdoptsServer — InitialAckTuple=nil;
-// helper (8, 100) → Adopted, both cursors=(100, 8), persistedAckPresent=true.
-// Then helper (8, 50) → ResendNeeded.
+// gen=8 pre-populated with 200 RecordData seqs so the round-15
+// Finding 1 first-apply WAL validation gate passes
+// (wal.WrittenDataHighWater(8) returns (200, true, nil) and
+// serverSeq=100 ≤ maxDataSeq=200). Helper (8, 100) → Adopted, both
+// cursors=(100, 8), persistedAckPresent=true. Then helper (8, 50)
+// → ResendNeeded. The first-apply branch is NOT a wholesale adopt;
+// see TestApplyServerAckTuple_FirstApplyValidatesAgainstWAL for the
+// full validation matrix (vacuous-zero adopt, unwritten_generation
+// anomaly, server_ack_exceeds_local_data anomaly, wal_read_failure
+// anomaly).
 func TestApplyServerAckTuple_FirstApplyAdoptsServer(t *testing.T) {
 	env := newClampTestEnv(t, Options{
 		// no InitialAckTuple
