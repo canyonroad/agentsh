@@ -6191,7 +6191,7 @@ NOTE: This test is intrinsically timing-based and may be flaky under heavy CI lo
 **Files:**
 - Modify: `internal/store/watchtower/wal/reader.go` — change `NewReader(start uint64) (*Reader, error)` to take `ReaderOptions{Generation uint64, Start uint64}` (the implementer can ALSO keep `NewReader(start uint64)` as a back-compat wrapper that synthesizes `ReaderOptions{Generation: 0 /*sentinel*/, Start: start}` IFF the segment-iteration filter accepts the zero sentinel as "no generation filter" — pre-Task-14b production callers do not exist yet because the only Reader call site is the Replayer constructed in Task 16; tests may call the back-compat shape). The segment-iteration layer's `rescanLocked` and `nextLocked` MUST filter by segment-header `Generation == opts.Generation` BEFORE the per-record `seq < nextSeq` filter runs. Skip segments of other generations entirely; do NOT decode their records and treat the seq filter as the gating layer. The reader's `lastGoodGen` field stays for loss-anchor calculations within the opened generation.
 - Modify: `internal/store/watchtower/transport/replayer.go` — change `Replayer.tailSeq uint64` to `Replayer.tail tuple{Generation uint64; Sequence uint64}` (the in-package Go type can be a small struct or the existing `wal.Position` shape — the implementer picks; the constraint is "the field carries both gen and seq"). `NewReplayer` snapshots the tail by calling `wal.WrittenDataHighWater(rdr.Generation())` (NOT `rdr.WALHighWaterSequence()`) so the snapshot is per-generation AND data-bearing — this is the round-13 alignment with Task 14a Step 3a. The hard-stop check in `NextBatch` becomes `RecordData (gen, seq) > tail` using lex compare (gen-first; on equal gen, seq); the existing scalar comparison `rec.Sequence > r.tailSeq` MUST be replaced. `LastReplayedSequence()` returns a `(gen, seq)` tuple — current callers (Task 17 / Task 22 Live state) reading the scalar must update to consume the tuple. `TailSequence()` becomes `Tail()` returning the same tuple shape (back-compat shim `TailSequence() uint64` MAY be retained to return `tail.Sequence` for diagnostic uses that do not care about generation, but MUST be marked deprecated in the docstring and MUST NOT be consumed by production termination logic).
-- Modify: `internal/store/watchtower/transport/state_replaying.go` — the `rdrFactory` callback signature in Task 22's Run-loop snippet MUST take a `(gen uint64, seq uint64)` tuple instead of just `start uint64`, OR pass the generation through `Options.WAL.NewReader(ReaderOptions{Generation: persistedAck.Generation, Start: readerStart})` directly at the call site. Both Task 15.1 (the Run-loop snippet shown there) AND Task 16 (the Replayer construction) MUST be updated in the round-13 sweep that lands this task.
+- Modify: `internal/store/watchtower/transport/state_replaying.go` — the `rdrFactory` callback signature in Task 22's Run-loop snippet MUST take a `(gen uint32, start uint64)` tuple instead of just `start uint64` (`uint32` matches `wal.ReaderOptions.Generation`, `wal.SegmentHeader.Generation`, `wal.Record.Generation`, and `wal.WrittenDataHighWater(gen uint32)` exactly so callers do not need to widen). Both Task 15.1 (the Run-loop snippet shown there) AND Task 16 (the Replayer construction) MUST be updated in the round-13 sweep that lands this task. See Step 3 below for the `rdrFactory` contract change in detail.
 - Test: `internal/store/watchtower/wal/reader_test.go` — three new tests (Step 4 below): `TestReader_GenerationScoped_SkipsOtherGenerationsOnDisk`, `TestReader_GenerationScoped_DoesNotReturnLowerSeqFromOtherGen`.
 - Test: `internal/store/watchtower/transport/replayer_test.go` — one new test: `TestReplayer_TailIsTuple_HardStopsOnSeqExceedingTail`.
 
@@ -6430,6 +6430,38 @@ rdr, err := t.wal.NewReader(wal.ReaderOptions{
 
 Task 22's StateLive reader-open MUST be updated similarly: it consumes `rep.LastReplayedSequence()` (now returning a (gen, seq) tuple) and constructs the Live Reader at `wal.ReaderOptions{Generation: lastReplayedGen, Start: max(lastReplayedSeq+1, ackHW.seq+1)}`. The `ackHW.seq+1` term is meaningful only when `ackHW.gen == lastReplayedGen` (steady-state); cross-generation ack-hand-off is handled by the explicit Replaying re-entry on the next reconnect, NOT by Live arithmetic.
 
+**Round-16 Finding 4: `rdrFactory` callback contract change.** Task 22's Run-loop (Step 4 of Task 18) wraps reader construction behind a `rdrFactory` callback so unit tests can inject a fake reader without spinning up a real WAL. Round-13 already changed the underlying `wal.NewReader` shape from `NewReader(start uint64)` to `NewReader(opts ReaderOptions)`; the round-16 review caught that the `rdrFactory` callback signature in Task 22's snippet was NOT updated in lock-step (Task 22 line 10613 declared `func(start uint64)` while line 10700's stage-iteration body called `rdrFactoryGen(stage.Generation, stage.StartSeq)` — internally inconsistent). The contract change documented here lands in the same round-13 sweep as Step 3 above and is the SOLE source of truth for the callback shape. Task 22's Step 4 snippet, the StateLive call site at Task 22 line 10826, and the test factory at Task 22 line 11484 ALL consume this contract — they MUST match exactly.
+
+```go
+// Round-13/16: rdrFactory takes BOTH the WAL generation AND the start
+// sequence so the caller can position the Reader explicitly per state
+// entry. `gen` is the WAL generation the Reader will be scoped to
+// (segments with a different SegmentHeader.Generation are skipped at
+// segment-iteration before record decoding); `start` is the inclusive
+// lowest seq the Reader will surface for RecordData (RecordLoss markers
+// always surface — see wal/reader.go NewReader docstring).
+//
+// uint32 mirrors wal.ReaderOptions.Generation, wal.SegmentHeader.Generation,
+// wal.Record.Generation, and wal.WrittenDataHighWater(gen uint32) exactly
+// so callers do not need to widen.
+//
+// Production callers in transport.New construct rdrFactory as a closure
+// over t.wal:
+//
+//   rdrFactory := func(gen uint32, start uint64) (*wal.Reader, error) {
+//       return t.wal.NewReader(wal.ReaderOptions{Generation: gen, Start: start})
+//   }
+//
+// Test callers (see Task 22 Step 4 test snippet) construct the same
+// closure over a test-owned *wal.WAL handle. The two arguments are
+// passed PER call so the same factory can serve both Replaying (one
+// call per ReplayStage) AND Live (a single call positioned at the
+// writer's current generation).
+type ReaderFactory func(gen uint32, start uint64) (*wal.Reader, error)
+```
+
+The factory's two-argument shape is deliberately symmetric with `wal.ReaderOptions` so the closure is a thin adapter and no information is lost between the Run loop and the WAL. Replaying calls `rdrFactory(stage.Generation, stage.StartSeq)` — one call per `ReplayStage` returned by `computeReplayPlan`; Live calls `rdrFactory(t.wal.HighGeneration(), start)` where `start` is the round-15-Finding-2 cursor (`max(rep.LastReplayedSequence().Sequence+1, t.remoteReplayCursor.Sequence+1)`) and `t.wal.HighGeneration()` is captured at StateLive entry to scope the Live Reader to the writer's current generation. (If the writer rolls to a new generation while Live is reading, the Reader hard-stops at the old generation's tail and the next reconnect re-enters Replaying with the new generation surfaced as a later-stage `ReplayStage` per Round-16 Finding 2's loss-only-generations contract.)
+
 **Step 4: Tests.**
 
 `TestReader_GenerationScoped_SkipsOtherGenerationsOnDisk` — Setup: open WAL fresh, append seqs 1..5 in gen=1, roll the writer to gen=2 (production roll path), append seqs 1..5 in gen=2 (sequences reset per Task 12 contract). Open a Reader scoped to gen=1: `r1, _ := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 0})`. Drain via repeated `Next()` until `io.EOF`. Assertions:
@@ -6460,7 +6492,7 @@ CRITICAL: under the round-12 design (scalar `tailSeq=3`), the Replayer would com
 - [ ] **Step 2:** Run `go test ./internal/store/watchtower/...` to confirm they fail with the expected symbols (`wal.ReaderOptions` undefined; `wal.NewReader(ReaderOptions{...})` undefined; `Reader.Generation()` undefined; `Replayer.Tail()` returns the wrong shape; `Replayer.LastReplayedSequence()` returns `uint64` instead of `(uint64, uint64)`).
 - [ ] **Step 3:** Implement the Reader changes (Step 1 above): add `ReaderOptions` struct, change `NewReader` signature, add `Reader.readerGen` field + segment-iteration filter, add `Reader.Generation()` accessor.
 - [ ] **Step 4:** Implement the Replayer changes (Step 2 above): change `tailSeq uint64` → `tail tailWatermark`, change `lastReplayedSeq uint64` → `lastReplayed tailWatermark`, change `LastReplayedSequence()` return shape, replace scalar over-tail check with lex compare in `NextBatch`, update `NewReplayer` to call `WrittenDataHighWater(rdr.Generation())`.
-- [ ] **Step 5:** Update Task 15.1's Run-loop snippet AND Task 22's StateLive reader-open call site to pass `Generation` through `wal.ReaderOptions`. Update any in-package callers of `LastReplayedSequence()` to consume the tuple.
+- [ ] **Step 5:** Update Task 15.1's Run-loop snippet AND Task 22's StateLive reader-open call site to pass `Generation` through `wal.ReaderOptions`. Update any in-package callers of `LastReplayedSequence()` to consume the tuple. ROUND-16 FINDING 4: ALSO update the `rdrFactory` callback signature in Task 22's Run-loop snippet (Step 4 of Task 18) from `func(start uint64) (*wal.Reader, error)` to `func(gen uint32, start uint64) (*wal.Reader, error)` per the contract documented in Step 3 above. Update ALL three call sites in lock-step: (a) the `Run` signature line; (b) the `StateReplaying` per-stage call inside the `for i := range stages` loop (use `rdrFactory(stage.Generation, stage.StartSeq)`); (c) the `StateLive` call (use `rdrFactory(t.wal.HighGeneration(), start)`); and (d) the test factory closure at Task 22 Step 4's test snippet (use `func(gen uint32, start uint64) (*wal.Reader, error) { return w.NewReader(wal.ReaderOptions{Generation: gen, Start: start}) }`).
 - [ ] **Step 6:** Re-run `go test ./internal/store/watchtower/...` and verify the three new tests PASS and no existing test regressed.
 - [ ] **Step 7:** Cross-compile (`GOOS=windows go build ./...`).
 - [ ] **Step 8:** Commit with message `feat(wtp/wal,wtp/transport): generation-scope wal.Reader and Replayer tail tuple`.
@@ -7655,7 +7687,7 @@ The detector lives in the **Replaying state's reader-open path** (Task 22 StateR
 
 The round-10 design synthesizes a **non-persistent** `wal.LossRecord` in memory and threads it through `ReplayerOptions.PrefixLoss`. The `Replayer` returns it as the FIRST record in its FIRST `NextBatch` — guaranteed to land at the head of the replay stream — and the Reader is opened at `earliestOnDisk` for the data records. No `wal.AppendLoss` call, no fsync, no on-disk pollution.
 
-**Round-11 helper extraction (Finding 3).** The decision tree below is the SINGLE source of truth for `(prefixLoss, readerStart)` and is encapsulated in a Transport method `computeReplayStart(remoteReplayCursor AckCursor, persistedAck AckCursor) (prefixLoss *wal.LossRecord, readerStart uint64, err error)`. The Run loop in Task 22 (StateReplaying case) MUST call `computeReplayStart` BEFORE opening the WAL Reader (the result `readerStart` is the argument to `rdrFactory`), and MUST thread `prefixLoss` into `ReplayerOptions.PrefixLoss`. Round-10 had a structural bug where the snippet computed `readerStart` AFTER opening the reader at `remoteReplayCursor.Sequence + 1` and discarded the readerStartOverride — round-11 fixes the ordering and locks in the canonical helper signature so every Replaying call site shares the same logic.
+**Round-11 helper extraction (Finding 3).** The decision tree below is the SINGLE source of truth for `(prefixLoss, readerStart)` and is encapsulated in a Transport method `computeReplayStart(remoteReplayCursor AckCursor, persistedAck AckCursor) (prefixLoss *wal.LossRecord, readerStart uint64, err error)`. The Run loop in Task 22 (StateReplaying case) MUST call `computeReplayStart` BEFORE opening the WAL Reader (the result `readerStart` is the `start` argument to `rdrFactory(gen, start)` per the round-13/16 (gen, start) signature; `gen` comes from `stage.Generation`), and MUST thread `prefixLoss` into `ReplayerOptions.PrefixLoss`. Round-10 had a structural bug where the snippet computed `readerStart` AFTER opening the reader at `remoteReplayCursor.Sequence + 1` and discarded the readerStartOverride — round-11 fixes the ordering and locks in the canonical helper signature so every Replaying call site shares the same logic.
 
 The helper:
 
@@ -7663,8 +7695,10 @@ The helper:
 // computeReplayStart is the canonical helper that returns the
 // (prefixLoss, readerStart) tuple for the Replaying state's reader-open
 // path. Called from the Run loop's StateReplaying case BEFORE the reader
-// is opened — `readerStart` is the argument to rdrFactory; `prefixLoss`
-// is threaded into ReplayerOptions.PrefixLoss.
+// is opened — `readerStart` is the `start` argument to rdrFactory (the
+// second positional arg per the round-13/16 (gen, start) signature; `gen`
+// is supplied by the StateReplaying caller from `stage.Generation`);
+// `prefixLoss` is threaded into ReplayerOptions.PrefixLoss.
 //
 // Same-generation only: the cursor split has already classified cross-gen
 // as Anomaly (cursors unchanged), so by the time we reach this code path
@@ -7887,6 +7921,32 @@ This test fails under any regression that:
 - Re-introduces a no-arg `EarliestDataSequence()` accessor (cross-generation contamination).
 - Forgets to pass `persistedAck.Generation` and instead passes `remoteReplayCursor.Generation` when those differ (the same-gen invariant means they don't differ here, but the test pins the contract).
 - Calls `wal.EarliestDataSequence(0)` or `EarliestDataSequence(remoteReplayCursor.Generation+1)` (either of which would return `ok=false` for the wrong reason).
+
+**Test #12 (`TestComputeReplayPlan_MultiGenerationCoversLaterGens`)** — round-15 Finding 4 + round-16 Finding 2 regression. Locks in the multi-generation orchestration contract: `computeReplayPlan` MUST emit one `ReplayStage` per generation in `[persistedAck.Generation, wal.HighGeneration()]` that has any replayable payload (data OR loss markers), in strictly ascending generation order. Without it, a reconnect that lands when the agent has already rolled to a newer generation drops the later-gen backlog because `Replaying` would only drain `persistedAck.Generation` before handing off to Live.
+
+Setup uses `Options.InitialAckTuple = &AckTuple{Sequence: 50, Generation: 1, Present: true}`; the WAL accessors are stubbed via the test seams (`SetWALEarliestDataSequenceFnForTest`, `SetWALHasReplayableRecordsFnForTest`, `SetWALHighGenerationFnForTest`) so the test does not need to spin up a real multi-gen WAL.
+
+Three sub-cases (table-driven over the writer state):
+
+- *Sub-case (a) — `happy_multi_gen_three_stages`*: `HighGeneration()` returns 5; `HasReplayableRecords(2)` returns `(true, nil)`, `HasReplayableRecords(3)` returns `(false, nil)` (header-only segment), `HasReplayableRecords(4)` returns `(true, nil)`, `HasReplayableRecords(5)` returns `(true, nil)`; `EarliestDataSequence(1)` returns `(1, true, nil)`. Call `t.computeReplayPlan(AckCursor{Sequence: 50, Generation: 1}, AckCursor{Sequence: 50, Generation: 1})`. Assert: exactly four stages — `(gen=1, start=51, prefixLoss=nil)`, `(gen=2, start=0, prefixLoss=nil)`, `(gen=4, start=0, prefixLoss=nil)`, `(gen=5, start=0, prefixLoss=nil)`. gen=3 is skipped because `HasReplayableRecords(3) == (false, nil)`. The first stage's `PrefixLoss` is nil (Case B no-gap on gen=1 — `earliestOnDisk=1 <= gapStart=51`). The probed-gen list is exactly `[2, 3, 4, 5]` (the loop visits every later gen in order; absence is determined by the accessor, not by skipping).
+- *Sub-case (b) — `only_persisted_gen_no_later`*: `HighGeneration() == persistedAck.Generation` (e.g., both equal 1). Assert: exactly one stage covering `persistedAck.Generation` with `start = persistedAck.Sequence + 1`; the multi-gen probe loop never fires; `HasReplayableRecords` is NOT called.
+- *Sub-case (c) — `wal_failure_on_later_gen_propagates`*: `HasReplayableRecords(2)` returns `(false, errors.New("EIO"))`. Assert: `computeReplayPlan` returns the error wrapped (`fmt.Errorf("HasReplayableRecords(2): %w", err)` or equivalent); no partial stages are returned (caller treats the error as fatal-for-this-cycle and bounces back through Connecting on the next reconnect).
+
+**Test #13 (`TestComputeReplayPlan_LossOnlyGenerationProducesStage`)** — round-16 Finding 2 + Finding 5 regression. The most important multi-gen regression test: a generation whose only on-disk payload is a loss marker (e.g., produced by overflow GC sealing the previous gen, then emitting an `ack_regression_after_gc` loss into a fresh gen with no subsequent `Append`) MUST receive a replay stage. The pre-fix code called `WrittenDataHighWater` (data-only) and silently dropped such a generation, leaving the server unaware of the gap. Without this test, a future "optimization" that swaps `HasReplayableRecords` back to `WrittenDataHighWater` would slip through unnoticed because `Test #12 sub-case (a)`'s gen=2 happens to have data — only this test exercises the loss-only branch where the two accessors diverge.
+
+Setup: `Options.InitialAckTuple = &AckTuple{Sequence: 40, Generation: 1, Present: true}`; permissive limiter; logger capture. WAL accessors stubbed via test seams:
+
+- `SetWALEarliestDataSequenceFnForTest`: returns `(1, true, nil)` for `gen=1`; errors for any other gen (asserts the helper queries gen=1 only — the first-stage decision tree is same-gen).
+- `SetWALHasReplayableRecordsFnForTest`: returns `(true, nil)` for gen=2 (loss-only) AND gen=3 (data-bearing); errors for any other gen.
+- `SetWALHighGenerationFnForTest`: returns 3.
+- `SetWALWrittenDataHighWaterFnForTest`: panics if called by the multi-gen probe loop (the accessor is still consulted by the WARN-context emitter on Anomaly outcomes; this test does not exercise that path, so any call from the probe loop is a regression).
+
+Call `t.computeReplayPlan(AckCursor{Sequence: 40, Generation: 1}, AckCursor{Sequence: 40, Generation: 1})`. Assert: exactly three stages — `(gen=1, start=41, prefixLoss=nil)` (Case B no-gap on gen=1 — `earliestOnDisk=1 <= gapStart=41`), `(gen=2, start=0, prefixLoss=nil)` (loss-only), `(gen=3, start=0, prefixLoss=nil)` (data-bearing). The probed-gen list is exactly `[2, 3]`. **Without the round-16 fix, the probe loop would have called `WrittenDataHighWater(2)` which returns `ok=false` for a loss-only gen, and gen=2 would have been silently skipped from the plan — the server would never observe the gap that the loss marker is supposed to surface.** This sub-case locks in the silent-drop regression.
+
+This test fails under any regression that:
+- Reverts `computeReplayPlan`'s multi-gen probe loop to call `WrittenDataHighWater(gen)` (data-only) instead of `HasReplayableRecords(gen)` (data OR loss).
+- Removes the `HasReplayableRecords` accessor or its loss-marker branch in `wal.go`.
+- Filters loss-only stages out of the plan as an optimization (e.g., "don't bother opening a Reader for a gen with no data" — the loss marker IS the payload that needs to surface).
 
 **Step 1b.6: Side-effect contract for `applyServerAckTuple` returning `AckOutcomeAdopted`.** This sub-step makes the WAL-source-of-truth invariant explicit so SessionAck (here), BatchAck, and ServerHeartbeat (Task 17 sub-step 17.X) all run the same side-effect sequence in lock-step.
 
@@ -10503,11 +10563,15 @@ Add to `internal/store/watchtower/transport/transport.go`:
 // Run loops the four-state state machine until ctx is cancelled.
 // It applies backoff between StateConnecting attempts.
 //
-// rdrFactory takes the WAL start sequence so the caller can position
-// the Reader explicitly per state entry. `start` is the inclusive
-// lowest seq the returned Reader will surface for RecordData
-// (RecordLoss markers always surface — see wal/reader.go NewReader
-// docstring). Replaying opens at the seq returned by
+// rdrFactory takes the WAL generation AND the start sequence so the
+// caller can position the Reader explicitly per state entry. `gen` is
+// the WAL generation the Reader will be scoped to (segments with a
+// different SegmentHeader.Generation are skipped at segment-iteration
+// before record decoding — see wal/reader.go ReaderOptions.Generation
+// and Task 14b Step 3); `start` is the inclusive lowest seq the
+// returned Reader will surface for RecordData (RecordLoss markers
+// always surface — see wal/reader.go NewReader docstring).
+// Replaying opens at the seq returned by
 // `t.computeReplayStart(t.remoteReplayCursor, t.persistedAck)`
 // (round-11 Finding 3): the canonical helper rolls together the
 // `t.remoteReplayCursor.Sequence + 1` start (mirroring the
@@ -10610,7 +10674,7 @@ Add to `internal/store/watchtower/transport/transport.go`:
 // WAL (see `wal/reader.go` Reader.Close near line 446); the Live case
 // then opens its own fresh reader at the recomputed start cursor. The
 // two readers never overlap.
-func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal.Reader, error), liveOpts LiveOptions) error {
+func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start uint64) (*wal.Reader, error), liveOpts LiveOptions) error {
 	bo := NewBackoff(BackoffOptions{
 		Initial: 200 * time.Millisecond,
 		Max:     30 * time.Second,
@@ -10684,8 +10748,15 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 			// receive a replay stage so the receiver observes the gap —
 			// WrittenDataHighWater would return ok=false for such a
 			// generation and silently drop it from the plan. Cost is
-			// O(N) where N is the count of WAL generations on disk
-			// (typically 1-3); the per-gen call is an in-memory map
+			// O(span) where span = wal.HighGeneration() -
+			// persistedAck.Generation — the iteration count is the
+			// RANGE of generation numbers, NOT the surviving on-disk
+			// count and NOT the post-filter stage count. In healthy
+			// operation span ≈ surviving-count ≈ 1-3; they diverge
+			// only when GC has pruned middle generations (e.g., span=10
+			// with surviving-count=3 if generations 11-13 were fully
+			// GC'd between persistedAck.Generation=10 and
+			// HighGeneration=20). The per-gen call is an in-memory map
 			// lookup with no disk I/O. See spec §"Cost bound for
 			// reconnect-time replay scan".
 			stages, lerr := t.computeReplayPlan(t.remoteReplayCursor, t.persistedAck)
@@ -10697,7 +10768,7 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 			var stageErr error
 			for i := range stages {
 				stage := stages[i]
-				rdr, err := rdrFactoryGen(stage.Generation, stage.StartSeq)
+				rdr, err := rdrFactory(stage.Generation, stage.StartSeq)
 				if err != nil {
 					stageErr = err
 					break
@@ -10823,7 +10894,18 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 			// after a reconnect cycle picks up the fresh value (or nil
 			// if no replay ran).
 			rep = nil
-			rdr, err := rdrFactory(start)
+			// Round-16 Finding 4: rdrFactory is the (gen, start) form
+			// per Task 14b Step 3 / Step 5. The Live Reader is scoped
+			// to the writer's CURRENT generation (`t.wal.HighGeneration()`)
+			// captured under the WAL lock at StateLive entry — Live
+			// only ever reads the writer's current generation; if the
+			// writer rolls mid-Live, the Reader hard-stops at the old
+			// generation's tail (segment-iteration filter rejects the
+			// new generation's segments) and the next reconnect re-enters
+			// Replaying with the new generation surfaced as a later-stage
+			// ReplayStage per Round-16 Finding 2's loss-only-generations
+			// contract.
+			rdr, err := rdrFactory(t.wal.HighGeneration(), start)
 			if err != nil {
 				st = StateConnecting
 				continue
@@ -10961,7 +11043,7 @@ Reader-lifecycle invariants:
   range) and terminates. Live then opens at
   `max(LastReplayedSequence()+1, t.remoteReplayCursor.Sequence+1) =
   max(21, 11) = 21` and waits for the next append. Without this test
-  the round-3 `rdrFactory(0)` regression would slip through unnoticed
+  the round-3 `rdrFactory(_, 0)` regression would slip through unnoticed
   because `TestRun_LiveResumesPastReplayBoundary` only exercises
   `t.remoteReplayCursor.Sequence == 0`.
 - `TestRun_LiveStartsFromAdvancedRemoteCursorIfReplayLagged` —
@@ -11481,8 +11563,8 @@ func TestShutdown_DrainsPendingThenCloses(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	doneCh := make(chan error, 1)
-	rdrFactory := func(start uint64) (*wal.Reader, error) {
-		return w.NewReader(start), nil
+	rdrFactory := func(gen uint32, start uint64) (*wal.Reader, error) {
+		return w.NewReader(wal.ReaderOptions{Generation: gen, Start: start})
 	}
 	go func() {
 		doneCh <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
