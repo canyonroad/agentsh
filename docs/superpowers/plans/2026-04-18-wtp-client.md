@@ -10466,6 +10466,8 @@ Run `/roborev-design-review` and address findings.
 
 ### Task 18: Transport — heartbeat, reconnect backoff, ack handling
 
+**Prerequisite (rollout-order gate):** Any fail-closed reconnect emitter wired by this task that targets a Task 22c label (`WTPReconnectReasonServerUpdateUnsupported`, `WTPReconnectReasonRecvUnknownFrame`) MUST land AFTER **Task 22c Steps 1–3** (the schema-only delta — adding the const values, validation-map entries, and emit-order entries). Schema-first ordering ensures the new labels are already registered (visible at zero on `/metrics` via the always-emit contract) before any emitter targets them, so emitters go straight to dedicated labels and there is no interim "emitter wired against legacy collapsed label, awaiting relabel" state. The existing seven-label emitters in this task (`WTPReconnectReasonHeartbeatTimeout`, etc.) have no prerequisite ordering against Task 22c — they target labels that have existed since Task 3.
+
 **Files:**
 - Create: `internal/store/watchtower/transport/heartbeat.go`
 - Create: `internal/store/watchtower/transport/backoff.go`
@@ -11636,6 +11638,8 @@ When the store is closed, the transport must:
 3. Send any remaining pending records up to a configurable drain deadline.
 4. CloseSend the stream.
 5. Return from Run.
+
+**Prerequisite (rollout-order gate):** Any fail-closed reconnect emitter wired by this task that targets a Task 22c label (`WTPReconnectReasonServerUpdateUnsupported`, `WTPReconnectReasonRecvUnknownFrame`) MUST land AFTER **Task 22c Steps 1–3** (the schema-only delta — adding the const values, validation-map entries, and emit-order entries). Schema-first ordering ensures the new labels are already registered (visible at zero on `/metrics` via the always-emit contract) before any emitter targets them, so emitters go straight to dedicated labels and there is no interim "emitter wired against legacy collapsed label, awaiting relabel" state. The Goaway emitter (`WTPReconnectReasonServerGoaway`) has no prerequisite ordering against Task 22c — that label has existed since Task 3.
 
 **Files:**
 - Modify: `internal/store/watchtower/transport/transport.go` (add Stop)
@@ -14612,23 +14616,23 @@ Run `/roborev-design-review` and address findings.
 
 ### Task 22c: WTP reconnect-reason schema expansion for fail-closed control frames
 
-This task owns the dedicated-label expansion of the `wtp_reconnects_total{reason}` family for the fail-closed recv branches documented in spec §"Operator observability for fail-closed recv branches". The Round-23 spec text introduced two new structured-log `reason` strings — `server_update_unsupported_in_phase_4` and `recv_unknown_frame_type` — that today MUST collapse onto the existing `server_goaway` / `unknown` metric labels because the labels for those branches do not yet exist. This task adds the dedicated labels (`server_update_unsupported`, `recv_unknown_frame`), wires the always-emit contract, and ships the operator-facing migration runbook.
+This task owns the dedicated-label expansion of the `wtp_reconnects_total{reason}` family for the fail-closed recv branches documented in spec §"Operator observability for fail-closed recv branches". The Round-23 spec text introduced two new structured-log `reason` strings — `server_update_unsupported_in_phase_4` and `recv_unknown_frame_type` — and this task adds the dedicated metric labels (`server_update_unsupported`, `recv_unknown_frame`), wires the always-emit contract (so the labels are visible at zero on `/metrics` from the moment Steps 1–3 land), and ships the operator-facing migration runbook. Round-27 made Steps 1–3 a hard prerequisite for the fail-closed emitters wired by Tasks 18/19, so by the time any non-test `IncReconnects(...)` for these branches exists in transport, the dedicated label is already registered and the emitter goes straight to it. There is NO interim state in which the fail-closed `ServerUpdate` / unknown-frame branches collapse onto the `unknown` metric label — that state was an artifact of an earlier dual-rollout design and was eliminated in Round-27.
 
 **Why a dedicated task.** Adding a metric label is a contract change for every dashboard, alert, and saved query that filters by `wtp_reconnects_total{reason=~...}`. Folding the change into Task 18 / Task 19 (where the reconnect plumbing lands) would have buried the migration story under unrelated state-machine work. This task makes the schema delta the unit of work, with its own roborev cycle and its own monitoring preflight.
 
-**Interim state (this is what the spec describes today, before this task lands).** Per spec §"Operator observability for fail-closed recv branches" walked-back wording (Round-24 Finding 1):
-- `Goaway` → drives `wtp_reconnects_total{reason="server_goaway"}` (existing label, no change after this task either).
-- `ServerUpdate` → drives `wtp_reconnects_total{reason="unknown"}` under the seven-label schema (interim); this task moves it to `wtp_reconnects_total{reason="server_update_unsupported"}`.
-- Unknown frame → drives `wtp_reconnects_total{reason="unknown"}` under the seven-label schema (interim); this task moves it to `wtp_reconnects_total{reason="recv_unknown_frame"}`.
+**Pre-task state (state 0 — what `/metrics` exposes today, before this task's Steps 1–3 land).** Per spec §"Operator observability for fail-closed recv branches":
+- `Goaway` → No producer today (no non-test `IncReconnects(...)` exists in transport). When Tasks 18/19 wire it post-22c-Steps-1–3, it will drive `wtp_reconnects_total{reason="server_goaway"}` (existing label since Task 3, no schema change needed for this branch).
+- `ServerUpdate` → No producer today AND no schema label today (`server_update_unsupported` does not yet exist in `wtpReconnectReasonsValid`). After this task's Steps 1–3 land, the label exists at zero; then Tasks 18/19 wire `IncReconnects(WTPReconnectReasonServerUpdateUnsupported)` directly against the dedicated label.
+- Unknown frame → No producer today AND no schema label today (`recv_unknown_frame` does not yet exist in `wtpReconnectReasonsValid`). After Steps 1–3, same trajectory as `ServerUpdate`.
 
-The structured-log `reason` field on each WARN entry stays the same across this transition (`goaway_received`, `server_update_unsupported_in_phase_4`, `recv_unknown_frame_type`); only the metric label set changes.
+The structured-log `reason` field on each WARN entry (Task 22d) is independent of the metric-label progression and does not change shape across this task — `goaway_received`, `server_update_unsupported_in_phase_4`, `recv_unknown_frame_type` are the WARN values from the moment Task 22d lands, regardless of whether this task's Steps 1–3 are already in.
 
 **Prerequisites:**
 - Task 3 — established the original seven-label `WTPReconnectReason` enum, the `wtpReconnectReasonsValid` validation table, the `wtpReconnectReasonsEmitOrder` always-emit slice, and the `TestWTPMetrics_ReconnectsAlwaysEmittedAllReasons` regression test. This task extends all four touch points symmetrically.
 - Task 18 / Task 19 — wire `IncReconnects(reason)` from the actual reconnect path; this task is independent of THAT wiring **for Steps 1–3 and 5–8** (always-emit semantics ensure the new series are visible at zero on registration even if the recv path never fires). **Step 4 is GATED on Tasks 18 and 19 having landed the `IncReconnects(WTPReconnectReasonServerUpdateUnsupported)` and `IncReconnects(WTPReconnectReasonRecvUnknownFrame)` call sites in transport AND on Task 22d having landed the structured WARN logging in the recv-multiplexer branches** — see Step 4's gating note. Steps 1–3 and 5–8 may run before any of those tasks; Step 4 MUST NOT.
 - Task 22d — owns the structured WARN logging for the same three fail-closed recv branches. Step 4's spec rewrite assumes both the dedicated metric labels (this task's Steps 1–3) AND the structured WARN logging (Task 22d) are live, so Step 4 is gated on Task 22d as well.
 
-**Scope split (Steps 1–3 / 5–8 vs Step 4).** Steps 1–3 and 5–8 land the **schema-only** delta — the new const values, the validation-map entries, the always-emit-order entries, the always-emit zero-value tests, the cross-compile check, the commit, and the roborev. After these steps land, the new metric labels appear at zero on `/metrics` but no code path increments them yet AND the spec wording in §"Operator observability for fail-closed recv branches" stays in its INTERIM state (the three branches collapse onto `server_goaway` / `unknown`, with `errCh`-substring guidance flagged as transitional). This is the lifecycle state the spec calls "Schema landed, emitter not wired" (see spec §"Lifecycle states for reconnect-reason observability"). Step 4 is the **end-state spec promotion** that flips that wording — it MUST be deferred until the emitter call sites and WARN logging actually exist; otherwise the spec lies about what operators can see.
+**Scope split (Steps 1–3 / 5–8 vs Step 4).** Steps 1–3 and 5–8 land the **schema-only** delta — the new const values, the validation-map entries, the always-emit-order entries, the always-emit zero-value tests, the cross-compile check, the commit, and the roborev. After these steps land, the new metric labels appear at zero on `/metrics` but no code path increments them yet AND the spec wording in §"Operator observability for fail-closed recv branches" stays in its INTERIM state (the three branches still have no producer in non-test code, with `errCh`-substring guidance flagged as transitional debugging only — not the canonical operator surface). This is the lifecycle state the spec calls "Schema landed, emitter not wired" (see spec §"Lifecycle states for reconnect-reason observability"). Step 4 is the **end-state spec promotion** that flips that wording — it MUST be deferred until the emitter call sites and WARN logging actually exist; otherwise the spec lies about what operators can see.
 
 **Files:**
 - Modify: `internal/metrics/wtp.go` (extend the const block, validation map, and emit-order slice)
@@ -14711,7 +14715,7 @@ Expected: PASS.
 | Branch | Required call site | Where (target task) |
 |--------|--------------------|---------------------|
 | Goaway | `metrics.IncReconnects(metrics.WTPReconnectReasonServerGoaway)` in non-test code under `internal/store/watchtower/transport/` | Task 18 or 19 (whichever owns the Goaway-driven reconnect path) |
-| ServerUpdate | `metrics.IncReconnects(metrics.WTPReconnectReasonServerUpdate)` in non-test code under `internal/store/watchtower/transport/` (label name post-Task 22c is `server_update_unsupported`; verify by const name `WTPReconnectReasonServerUpdate`) | Task 19 |
+| ServerUpdate | `metrics.IncReconnects(metrics.WTPReconnectReasonServerUpdateUnsupported)` in non-test code under `internal/store/watchtower/transport/` (label name post-Task 22c is `server_update_unsupported`; verify by const name `WTPReconnectReasonServerUpdateUnsupported`) | Task 19 |
 | Unknown frame | `metrics.IncReconnects(metrics.WTPReconnectReasonRecvUnknownFrame)` in non-test code under `internal/store/watchtower/transport/` | Task 19 |
 
 All three rows must be green before this step's spec rewrite can land. The Goaway row is mandatory because the promoted end-state spec text claims the `Goaway` branch is "live" — without an `IncReconnects(...)` call site for it in non-test code, the spec would describe a zero-valued series with no producer.
@@ -14728,7 +14732,7 @@ Tests are the authoritative gate; greps are illustrative only. Run BOTH test com
    - Each branch's reconnect path must have a passing test that asserts `wtp_reconnects_total{reason=<...>}` incremented from 0 to 1 (one assertion per branch: `server_goaway`, `server_update_unsupported`, `recv_unknown_frame`).
 
 3. Optional supplementary check (quick eyeball; the mechanical greps below are sanity-only because `LogAttrs(...)` calls in this codebase span multiple lines — see `recv_multiplexer.go:298–312` for the multi-line WARN style — and a single-line grep CANNOT reliably match them):
-   - `rg -U 'IncReconnects\(.*WTPReconnectReason(ServerGoaway|ServerUpdate|RecvUnknownFrame)' internal/store/watchtower/transport/` should show three matches.
+   - `rg -U 'IncReconnects\(.*WTPReconnectReason(ServerGoaway|ServerUpdateUnsupported|RecvUnknownFrame)' internal/store/watchtower/transport/` should show three matches.
    - `rg -U 'reason.*"(goaway_received|server_update_unsupported_in_phase_4|recv_unknown_frame_type)"' internal/store/watchtower/transport/` should show three matches.
    - These greps are sanity checks, not the gate — the tests above are authoritative. A correctly-formatted multi-line `LogAttrs(...)` may or may not match a line-oriented grep depending on how the formatter laid the attributes out; do not block the spec promotion on a grep miss when the tests pass.
 
@@ -14747,10 +14751,10 @@ Also update §"Metrics" (the `wtp_reconnects_total` enumeration) to add `server_
 
 Adding labels to `wtp_reconnects_total{reason}` is **backwards-compatible at the wire level**: new time series appear at zero on registration via the always-emit contract (Step 2 above), so existing dashboards and alerts that aggregate across all reasons (`sum(wtp_reconnects_total)`) continue to behave identically. The compatibility break is at the **monitoring-config level**:
 
-- Dashboards that filter by an explicit reason set (`wtp_reconnects_total{reason=~"server_goaway|unknown"}`) MUST be updated to include the new labels, otherwise reconnects driven by `ServerUpdate` / unknown frames will silently disappear from the panel after Step 2 lands.
-- Alerts keyed on the `unknown` reason — e.g., `rate(wtp_reconnects_total{reason="unknown"}[5m]) > X` as a "we don't know what's reconnecting us, investigate" trip — will see a one-time DROP in the `unknown` series the moment Step 2 lands (the ServerUpdate / unknown-frame traffic that previously fed `unknown` now feeds the dedicated labels). Operators should EITHER widen the alert to `reason=~"unknown|server_update_unsupported|recv_unknown_frame"` ahead of the schema change, OR add separate alerts on the new labels in the same release.
+- Dashboards that filter by an explicit reason set (`wtp_reconnects_total{reason=~"server_goaway|unknown"}`) MUST be updated to include the new labels, otherwise reconnects driven by `ServerUpdate` / unknown frames will silently disappear from the panel after Tasks 18/19 wire the emitters (the schema change in this task is a precondition for that emitter wiring; see Task 18 / Task 19 §"Prerequisite (rollout-order gate)").
+- Alerts keyed on the `unknown` reason — e.g., `rate(wtp_reconnects_total{reason="unknown"}[5m]) > X` as a "we don't know what's reconnecting us, investigate" trip — will NOT see a step-change in the `unknown` series the moment Step 2 lands (no producer ever fed `unknown` from the fail-closed branches under the Round-27 schema-first rollout order). The alert tuning question is purely forward-looking: once Tasks 18/19 wire the dedicated-label emitters, `ServerUpdate` and unknown-frame reconnects show up on `server_update_unsupported` / `recv_unknown_frame` from day one (NOT on `unknown`). Operators should EITHER widen the alert to `reason=~"unknown|server_update_unsupported|recv_unknown_frame"` ahead of the Tasks 18/19 ship, OR add separate alerts on the new labels in the same release as Tasks 18/19.
 
-**Migration cadence:** dashboards bumped one release ahead of the schema change (so a new label appearing at zero is already visible in the panel before any reconnect of that type can fire); alerts updated in the same release as Step 2; changelog / release notes call out the new labels and link to this task. The always-emit contract (Step 2) ensures the dashboard preflight can verify the new series are present at zero before the schema change ships.
+**Migration cadence:** dashboards bumped one release ahead of the schema change (so a new label appearing at zero is already visible in the panel before any reconnect of that type can fire); alerts updated AT OR BEFORE the Tasks 18/19 release (which is when emitters first fire — this task's Steps 1–3 only register the schema, never increment); changelog / release notes call out the new labels and link to this task. The always-emit contract (Step 2) ensures the dashboard preflight can verify the new series are present at zero before any emitter ships.
 
 **External monitoring acceptance criteria (gated on landing of Step 4 — the end-state spec promotion).** Step 4 MUST NOT be marked done until every checkbox below has concrete artifact evidence linked from this plan section or from `docs/superpowers/operator/wtp-monitoring-migration.md` (the Task 27a tracking artifact). **Note:** as of commit `7daa69eb` this file does NOT yet exist — Task 27a creates it (see Task 27a §"Files" / `docs/superpowers/operator/wtp-monitoring-migration.md  # NEW (Task 27a)`). Operators executing the checklist below MUST `create-or-update` this file: if it does not yet exist, create it per Task 27a's procedure (jump to §"Task 27a: Operator monitoring migration (coordination task)") then add a "Task 22c reconnect-reason expansion" subsection; if it already exists, extend that file with the subsection rather than creating a parallel artifact.
 
@@ -14796,7 +14800,9 @@ All three branches share the standard fields `frame="recv_control"`, `reason=<br
 
 - **`Goaway` WARN includes additional stable fields:**
   - `goaway_code` — string mirror of the proto enum value name (`GoawayCode.String()`), e.g. `"GOAWAY_CODE_UNSPECIFIED"`, `"GOAWAY_CODE_DRAINING"`, `"GOAWAY_CODE_OVERLOAD"`, `"GOAWAY_CODE_UPGRADE"`, `"GOAWAY_CODE_AUTH"`. Names mirror the proto enum literally so operators see the same identifier used in the .proto file and runbooks.
-  - `goaway_message` — string, the server's human-readable message (`Goaway.GetMessage()`). Truncate to max 512 chars to bound log volume; UTF-8 only — strip non-printable bytes (use the existing log-sanitization helper if one exists in this codebase; otherwise inline a small ASCII-and-printable-Unicode filter at the call site and document a future consolidation in a follow-up).
+  - `goaway_message` — string, the server's human-readable message (`Goaway.GetMessage()`), passed through `sanitizeForLog` (see Step 2 impl pattern below). Sanitization enforces three guarantees: (1) invalid UTF-8 sequences are replaced with U+FFFD via `strings.ToValidUTF8`; (2) control / non-printable runes are replaced with U+FFFD (passes through `' '`, `'\t'`, `'\n'` unchanged); (3) the result is truncated to AT MOST 512 bytes WITH the literal marker `...[truncated]` appended INSIDE the 512-byte budget, on a UTF-8 rune boundary. Empty input passes through unchanged.
+
+    **`goaway_message` redaction policy.** Server-supplied messages are logged after sanitization (truncated to 512 bytes; non-printable / invalid-UTF-8 sequences replaced with U+FFFD) but otherwise verbatim. The Watchtower server contract (server-side spec — link to be added when the server protocol doc lands; tracked as future docs) requires server operators NOT to include credentials, secrets, or PII in `Goaway.message`; client-side redaction beyond sanitization is out of scope. If a Watchtower server is found violating this contract in production, the agent's logging filter (this Step 2's `sanitizeForLog` call) is the safety net for transport-layer log poisoning (oversized payloads, control bytes, mojibake) but NOT for credential redaction — the contract owner for "no secrets in `Goaway.message`" is the server, not the client. AGENTS.md / repo-wide privacy policy should be consulted before broadening this stance; the current project has no stricter cross-cutting redaction policy that would require additional client-side filtering here.
   - `goaway_retry_immediately` — bool (`Goaway.GetRetryImmediately()`).
 - **`ServerUpdate` WARN emits only the standard `frame`/`reason`/`session_id` fields.** ServerUpdate-specific payload is intentionally omitted in Phase 4 because the phase does NOT process the SessionUpdate frame (the recv branch is fail-closed precisely because Phase 4 has no handler for key/generation rotation). Revisit when Phase 5+ adds support — at that point the WARN site goes away anyway, so dragging fields in here would be churn.
 - **Unknown frame WARN emits the standard fields plus `frame_type=fmt.Sprintf("%T", m)`** so operators can identify the proto type the local switch did not recognise.
@@ -14809,9 +14815,21 @@ All three branches share the standard fields `frame="recv_control"`, `reason=<br
 
 Add to `internal/store/watchtower/transport/recv_multiplexer_test.go` a test (one per branch, table-driven if convenient) that:
 1. Constructs a `Transport` with a recording logger (capture all `slog.Record`s emitted).
-2. Drives a single inbound `*wtpv1.ServerMessage_Goaway` (or `_ServerUpdate`, or an unknown variant) through the recv goroutine via the existing seams. For the `Goaway` case, populate `Goaway.Code = wtpv1.GoawayCode_GOAWAY_CODE_DRAINING`, `Goaway.Message = "graceful shutdown"`, and `Goaway.RetryImmediately = false` so the test exercises non-default values for all three stable payload fields.
-3. Asserts EXACTLY ONE WARN-level record was emitted with attributes `reason="goaway_received"` (resp. `"server_update_unsupported_in_phase_4"`, `"recv_unknown_frame_type"`), `frame="recv_control"`, AND `session_id` set to the transport's `opts.SessionID`. For the `Goaway` case, ALSO assert `goaway_code="GOAWAY_CODE_DRAINING"`, `goaway_message="graceful shutdown"`, `goaway_retry_immediately=false`.
+2. Drives a single inbound `*wtpv1.ServerMessage_Goaway` (or `_ServerUpdate`, or an unknown variant) through the recv goroutine via the existing seams. For the `Goaway` case, the **positive-path test** populates `Goaway.Code = wtpv1.GoawayCode_GOAWAY_CODE_DRAINING`, `Goaway.Message = "graceful shutdown"`, and **`Goaway.RetryImmediately = true`** so the test exercises NON-DEFAULT values for ALL three stable payload fields. Setting `RetryImmediately=true` is mandatory for the positive-path because `false` is the proto3 zero — a hardcoded `false` in the implementation would still pass a `RetryImmediately=false` test, hiding a wiring bug. Setting `Code = GOAWAY_CODE_DRAINING` (not `_UNSPECIFIED`) is mandatory for the same reason — `_UNSPECIFIED` is the proto3 zero for the enum. Setting `Message = "graceful shutdown"` (non-empty) is mandatory because empty-string is the proto3 zero for `string`.
+3. Asserts EXACTLY ONE WARN-level record was emitted with attributes `reason="goaway_received"` (resp. `"server_update_unsupported_in_phase_4"`, `"recv_unknown_frame_type"`), `frame="recv_control"`, AND `session_id` set to the transport's `opts.SessionID`. For the `Goaway` positive-path case, ALSO assert `goaway_code="GOAWAY_CODE_DRAINING"`, `goaway_message="graceful shutdown"`, `goaway_retry_immediately=true`.
 4. Asserts the `errCh` still receives the existing recv-error envelope (the WARN log is additive — the state-machine signal is unchanged).
+
+**Additional zero-value-emission sub-tests for the `Goaway` branch** (each verifies the field is emitted at its zero value rather than omitted from the log entry — proto3 zero values are not transmitted on the wire but the LOG SCHEMA contract requires the field to appear regardless of value):
+
+a. **Sub-test `RetryImmediately=false`** — assert the log entry CONTAINS the `goaway_retry_immediately` key with value `false` (not absent). Comment in the test: "true case proves the field is plumbed at all; false case proves it's emitted at zero (not omitted from the log entry by an `if g.GetRetryImmediately()` guard)."
+b. **Sub-test `Code = GOAWAY_CODE_UNSPECIFIED`** — assert the log entry CONTAINS the `goaway_code` key with value `"GOAWAY_CODE_UNSPECIFIED"` (the enum's String() form for the zero value, NOT absent and NOT empty-string). Same rationale as (a): proves the field is emitted regardless of whether the server sent the proto3 default.
+c. **Sub-test `Message = ""`** — assert the log entry CONTAINS the `goaway_message` key with value `""` (empty-string explicitly, NOT absent). Same rationale as (a). The sanitizer (see log-safety sub-tests below) MUST pass empty-string through unchanged.
+
+**Log-safety sub-tests for `goaway_message`** (the server-supplied message is potentially adversarial — it MUST be sanitized before logging so an operator's log pipeline isn't poisoned by control bytes, oversized payloads, or invalid UTF-8 sequences):
+
+d. **Sub-test overlength** — set `Goaway.Message` to a string longer than 512 bytes (e.g., `strings.Repeat("a", 1024)`). Assert the logged `goaway_message` field is truncated to AT MOST 512 bytes AND ends with the literal truncation marker `...[truncated]` so operators see the message was clipped (not silently chopped). The truncation marker is part of the 512-byte budget — the implementation truncates the raw input to `512 - len("...[truncated]")` bytes then appends the marker.
+e. **Sub-test non-printable bytes** — set `Goaway.Message` to a string containing control bytes such as `"hello\x00\x01world\x7f"` (NUL, SOH, DEL). Assert the logged `goaway_message` field has each control byte replaced by the Unicode replacement character (U+FFFD). The replacement-character strategy (NOT hex-escaping, NOT stripping) is enforced by the test so the implementation is constrained to one canonical sanitization output. Spaces, tabs, and newlines inside the printable range are preserved as-is — the sanitizer ONLY touches bytes outside the printable Unicode range.
+f. **Sub-test invalid UTF-8** — set `Goaway.Message` to a string containing invalid UTF-8 sequences such as `"prefix\xff\xfe\xfdsuffix"` (lone continuation bytes, invalid lead bytes). Assert the logged `goaway_message` field has each invalid byte sequence replaced by U+FFFD. The test MUST exercise a multi-byte invalid sequence (e.g. `"\xed\xa0\x80"` — a UTF-16 surrogate half encoded as 3-byte UTF-8) to lock in that the sanitizer uses `strings.ToValidUTF8(s, "\ufffd")` semantics rather than per-byte ASCII filtering (which would leave the surrogate's three bytes individually classified as "not control" and pass them through corrupted).
 
 If the recording-logger seam does not yet exist in the test file, add it as a small helper that wraps `slog.New(slog.NewJSONHandler(&buf, ...))` and a helper to parse the JSON lines back into attribute maps for assertion.
 
@@ -14825,14 +14843,24 @@ In `internal/store/watchtower/transport/recv_multiplexer.go`, in each of the thr
 ```go
 case *wtpv1.ServerMessage_Goaway:
     g := m.Goaway
-    msg := g.GetMessage()
-    if len(msg) > 512 {
-        msg = msg[:512]
-    }
-    // Strip non-printable bytes; use the existing log-sanitization
-    // helper if one exists in this package, otherwise inline an
-    // ASCII-and-printable-Unicode filter and document follow-up.
-    msg = sanitizeForLog(msg)
+    // sanitizeForLog enforces three guarantees, in order:
+    //   1. Replace any invalid UTF-8 sequence with U+FFFD (use
+    //      strings.ToValidUTF8(s, "\ufffd") — handles multi-byte invalid
+    //      sequences correctly, where per-byte ASCII filtering would
+    //      pass corrupted multi-byte runs through).
+    //   2. Replace any control / non-printable rune with U+FFFD (iterate
+    //      runes after step 1 and replace anything where !unicode.IsPrint
+    //      AND not in the explicit pass-through set {' ', '\t', '\n'}).
+    //   3. Truncate to AT MOST 512 bytes WITH the literal marker
+    //      "...[truncated]" appended INSIDE the 512-byte budget — i.e.
+    //      truncate the raw input to (512 - len("...[truncated]"))
+    //      bytes then append the marker; do NOT chop mid-rune (use
+    //      utf8.RuneStart-aware truncation).
+    // The test sub-cases d/e/f in Step 1 enforce these three guarantees
+    // exactly; the implementation MUST match them. If a future
+    // log-sanitization helper lands in a shared package, replace the
+    // local function with a call to it WITHOUT changing the contract.
+    msg := sanitizeForLog(g.GetMessage())
     t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
         "wtp: recv fail-closed control frame",
         slog.String("frame", "recv_control"),
@@ -14846,6 +14874,51 @@ case *wtpv1.ServerMessage_Goaway:
     default:
     }
     return
+```
+
+The `sanitizeForLog` helper lives alongside the recv multiplexer (no shared log-sanitization package exists in this codebase today — verified by `rg -l 'sanitize|Sanitize' internal/store/watchtower/transport/` returning empty). Inline implementation in `recv_multiplexer.go` (keep it private to the package; lift to `internal/log/sanitize.go` in a follow-up if a second caller emerges):
+
+```go
+const (
+    goawayMessageMaxBytes  = 512
+    goawayTruncationMarker = "...[truncated]"
+)
+
+// sanitizeForLog returns s after (1) UTF-8 validation (invalid bytes
+// replaced with U+FFFD), (2) control/non-printable rune replacement
+// (replaced with U+FFFD; passes through ' ', '\t', '\n'), and (3)
+// truncation to goawayMessageMaxBytes with goawayTruncationMarker
+// appended inside the budget. Empty input returns empty output.
+func sanitizeForLog(s string) string {
+    if s == "" {
+        return ""
+    }
+    valid := strings.ToValidUTF8(s, "\ufffd")
+    var b strings.Builder
+    b.Grow(len(valid))
+    for _, r := range valid {
+        switch r {
+        case ' ', '\t', '\n':
+            b.WriteRune(r)
+        default:
+            if unicode.IsPrint(r) {
+                b.WriteRune(r)
+            } else {
+                b.WriteRune('\ufffd')
+            }
+        }
+    }
+    out := b.String()
+    if len(out) <= goawayMessageMaxBytes {
+        return out
+    }
+    budget := goawayMessageMaxBytes - len(goawayTruncationMarker)
+    // Walk back to a rune boundary so we never chop mid-rune.
+    for budget > 0 && !utf8.RuneStart(out[budget]) {
+        budget--
+    }
+    return out[:budget] + goawayTruncationMarker
+}
 ```
 
 Mirror the pattern for `ServerUpdate` (`reason="server_update_unsupported_in_phase_4"`; standard fields only — see the WARN field schema above for the rationale on omitting ServerUpdate-specific payload in Phase 4) and the `default` branch (`reason="recv_unknown_frame_type"`; ALSO carry `slog.String("frame_type", fmt.Sprintf("%T", m))` for diagnostic context — the unknown-frame branch is the only one where the proto type is not statically known).
