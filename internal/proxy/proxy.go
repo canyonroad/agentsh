@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -57,9 +56,9 @@ type Proxy struct {
 	logger          *slog.Logger
 	isCustomOpenAI  bool
 	chatGPTUpstream *url.URL
-	registry         *mcpregistry.Registry
+	registry        *mcpregistry.Registry
 	// policy is immutable after construction — set once in New(), never changed.
-	policy           *mcpinspect.PolicyEvaluator
+	policy *mcpinspect.PolicyEvaluator
 	// onInterceptEvent is called for each MCP tool call intercept event.
 	// Set via SetEventCallback; the API layer uses it to persist events.
 	onInterceptEvent func(mcpinspect.MCPToolCallInterceptedEvent)
@@ -105,17 +104,16 @@ func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 		logger = slog.Default()
 	}
 
-	// Run retention cleanup asynchronously if configured
-	// storagePath is like ~/.agentsh/sessions/<session-id>/llm-logs
-	// sessionsDir is ~/.agentsh/sessions
+	// Run retention cleanup asynchronously if configured.
+	// storagePath is the base sessions directory used by NewStorage, for example
+	// ~/.agentsh/sessions.
 	if storagePath != "" && (cfg.Storage.Retention.MaxAgeDays > 0 || cfg.Storage.Retention.MaxSizeMB > 0) {
-		sessionsDir := filepath.Dir(filepath.Dir(storagePath))
 		retentionCfg := RetentionConfig{
 			MaxAgeDays: cfg.Storage.Retention.MaxAgeDays,
 			MaxSizeMB:  cfg.Storage.Retention.MaxSizeMB,
 			Eviction:   cfg.Storage.Retention.Eviction,
 		}
-		go RunRetention(sessionsDir, retentionCfg, cfg.SessionID, logger)
+		go RunRetention(storagePath, retentionCfg, cfg.SessionID, logger)
 	}
 
 	// Build dialect configs with any overrides from ProxyConfig.Providers
