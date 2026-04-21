@@ -16,10 +16,8 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
-	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
-	"github.com/agentsh/agentsh/internal/landlock"
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
@@ -44,35 +42,6 @@ func traceparentFromContext(ctx context.Context) string {
 		return v
 	}
 	return ""
-}
-
-// seccompWrapperConfig is passed to the agentsh-unixwrap wrapper via
-// AGENTSH_SECCOMP_CONFIG environment variable to configure seccomp-bpf filtering.
-type seccompWrapperConfig struct {
-	UnixSocketEnabled   bool     `json:"unix_socket_enabled"`
-	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
-	ExecveEnabled       bool     `json:"execve_enabled"`
-	FileMonitorEnabled  bool     `json:"file_monitor_enabled"`
-	BlockedSyscalls     []string `json:"blocked_syscalls"`
-	OnBlock             string   `json:"on_block,omitempty"`
-
-	// File monitor sub-options
-	InterceptMetadata bool `json:"intercept_metadata,omitempty"`
-	BlockIOUring      bool `json:"block_io_uring,omitempty"`
-
-	// Landlock filesystem restrictions
-	LandlockEnabled bool     `json:"landlock_enabled,omitempty"`
-	LandlockABI     int      `json:"landlock_abi,omitempty"`
-	Workspace       string   `json:"workspace,omitempty"`
-	AllowExecute    []string `json:"allow_execute,omitempty"`
-	AllowRead       []string `json:"allow_read,omitempty"`
-	AllowWrite      []string `json:"allow_write,omitempty"`
-	DenyPaths       []string `json:"deny_paths,omitempty"`
-	AllowNetwork    bool     `json:"allow_network,omitempty"`
-	AllowBind       bool     `json:"allow_bind,omitempty"`
-
-	// Server PID for PR_SET_PTRACER (Yama ptrace_scope=1 workaround)
-	ServerPID int `json:"server_pid,omitempty"`
 }
 
 // macSandboxWrapperConfig is passed to agentsh-macwrap via
@@ -201,66 +170,11 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	}
 
 	// Pass seccomp configuration to the wrapper
-	seccompCfg := seccompWrapperConfig{
+	seccompCfg := a.buildSeccompWrapperConfig(s, seccompWrapperParams{
 		UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
-		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
-		OnBlock:             a.cfg.Sandbox.Seccomp.Syscalls.OnBlock,
-		SignalFilterEnabled: signalFilterActive, // Only true if signal socket succeeded
+		SignalFilterEnabled: signalFilterActive,
 		ExecveEnabled:       execveEnabled,
-		FileMonitorEnabled:  config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.Enabled, false),
-		ServerPID:           os.Getpid(),
-	}
-
-	// Bridge file monitor sub-options using EnforceWithoutFUSE as the default
-	fmDefault := config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE, false)
-	seccompCfg.InterceptMetadata = config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata, fmDefault)
-	seccompCfg.BlockIOUring = config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.BlockIOUring, fmDefault)
-
-	// Add Landlock config if enabled
-	if a.cfg.Landlock.Enabled {
-		llResult := capabilities.DetectLandlock()
-		if llResult.Available {
-			workspace := s.WorkspaceMountPath()
-			seccompCfg.LandlockEnabled = true
-			seccompCfg.LandlockABI = llResult.ABI
-			seccompCfg.Workspace = workspace
-
-			// Derive paths from policy
-			if sessionPolicy != nil {
-				pol := sessionPolicy.Policy()
-				seccompCfg.AllowExecute = landlock.DeriveExecutePathsFromPolicy(pol)
-				seccompCfg.AllowExecute = append(seccompCfg.AllowExecute, landlock.DeriveExecutePathsFromFileRules(pol)...)
-				seccompCfg.AllowRead = landlock.DeriveReadPathsFromPolicy(pol)
-				seccompCfg.AllowWrite = landlock.DeriveWritePathsFromPolicy(pol)
-			}
-
-			// Add explicit config paths
-			seccompCfg.AllowExecute = append(seccompCfg.AllowExecute, a.cfg.Landlock.AllowExecute...)
-			seccompCfg.AllowRead = append(seccompCfg.AllowRead, a.cfg.Landlock.AllowRead...)
-			seccompCfg.AllowWrite = append(seccompCfg.AllowWrite, a.cfg.Landlock.AllowWrite...)
-			seccompCfg.DenyPaths = append(seccompCfg.DenyPaths, a.cfg.Landlock.DenyPaths...)
-
-			// Honor landlock.network.* config. validateConfig already rejects
-			// allow_connect_tcp=false while sandbox.network.enabled=true, so reaching
-			// this point with AllowConnectTCP=false implies the operator opted out
-			// of proxy TCP. Defaults (connect=true, bind=false) come from applyDefaults.
-			if a.cfg.Landlock.Network.AllowConnectTCP != nil {
-				seccompCfg.AllowNetwork = *a.cfg.Landlock.Network.AllowConnectTCP
-			}
-			if a.cfg.Landlock.Network.AllowBindTCP != nil {
-				seccompCfg.AllowBind = *a.cfg.Landlock.Network.AllowBindTCP
-			}
-
-			slog.Info("landlock config prepared for wrapper",
-				"abi", llResult.ABI,
-				"workspace", workspace,
-				"session_id", sessionID)
-		} else {
-			slog.Warn("landlock enabled but not available",
-				"error", llResult.Error,
-				"session_id", sessionID)
-		}
-	}
+	})
 	if cfgJSON, err := json.Marshal(seccompCfg); err == nil {
 		wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"] = string(cfgJSON)
 	}

@@ -22,6 +22,88 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+func TestCreateSessionWithRetry_RetriesTransientTransportErrors(t *testing.T) {
+	t.Parallel()
+
+	want := types.Session{ID: "session-retried"}
+	attempts := 0
+	cli := &fakeSessionClient{
+		createWithID: func(context.Context, string, string, string) (types.Session, error) {
+			attempts++
+			if attempts == 1 {
+				return types.Session{}, errors.New(`Post "http://localhost:1234/api/v1/sessions": read tcp [::1]:123->[::1]:456: read: bad file descriptor`)
+			}
+			return want, nil
+		},
+	}
+
+	got, err := createSessionWithRetry(context.Background(), cli, "/workspace", "default")
+	if err != nil {
+		t.Fatalf("createSessionWithRetry: %v", err)
+	}
+	if got.ID != want.ID {
+		t.Fatalf("session ID = %q, want %q", got.ID, want.ID)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestCreateSessionWithRetry_DoesNotRetryPermanentErrors(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	cli := &fakeSessionClient{
+		createWithID: func(context.Context, string, string, string) (types.Session, error) {
+			attempts++
+			return types.Session{}, errors.New("policy not found")
+		},
+	}
+
+	_, err := createSessionWithRetry(context.Background(), cli, "/workspace", "default")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestCreateSessionWithRetry_UsesExistingSessionAfterConflict(t *testing.T) {
+	t.Parallel()
+
+	want := types.Session{ID: "session-existing"}
+	createAttempts := 0
+	getAttempts := 0
+	cli := &fakeSessionClient{
+		createWithID: func(context.Context, string, string, string) (types.Session, error) {
+			createAttempts++
+			if createAttempts == 1 {
+				return types.Session{}, errors.New(`Post "http://localhost:1234/api/v1/sessions": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`)
+			}
+			return types.Session{}, &client.HTTPError{Method: http.MethodPost, Path: "/api/v1/sessions", Status: "409 Conflict", StatusCode: http.StatusConflict}
+		},
+		getSession: func(context.Context, string) (types.Session, error) {
+			getAttempts++
+			return want, nil
+		},
+	}
+
+	got, err := createSessionWithRetry(context.Background(), cli, "/workspace", "default")
+	if err != nil {
+		t.Fatalf("createSessionWithRetry: %v", err)
+	}
+	if got.ID != want.ID {
+		t.Fatalf("session ID = %q, want %q", got.ID, want.ID)
+	}
+	if createAttempts != 2 {
+		t.Fatalf("create attempts = %d, want 2", createAttempts)
+	}
+	if getAttempts != 1 {
+		t.Fatalf("get attempts = %d, want 1", getAttempts)
+	}
+}
+
 // TestSeccompWrapperEnabled verifies that when unix_sockets.enabled=true,
 // the server starts successfully, can create sessions, and exec commands work.
 // The wrapper may fail to set up seccomp in the container environment (due to
@@ -55,7 +137,7 @@ func TestSeccompWrapperEnabled(t *testing.T) {
 	cli := client.New(endpoint, "test-key")
 
 	// Verify session creation works with wrapper config enabled
-	sess, err := cli.CreateSession(ctx, "/workspace", "default")
+	sess, err := createSessionWithRetry(ctx, cli, "/workspace", "default")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -120,7 +202,7 @@ func TestSeccompWrapperDisabled(t *testing.T) {
 	cli := client.New(endpoint, "test-key")
 
 	// Verify session creation works with wrapper disabled
-	sess, err := cli.CreateSession(ctx, "/workspace", "default")
+	sess, err := createSessionWithRetry(ctx, cli, "/workspace", "default")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -249,6 +331,7 @@ func startSeccompServerContainer(t *testing.T, ctx context.Context, agentshBin, 
 //   - wait.ForHTTP startup timeouts where the container starts but the
 //     mapped port briefly isn't reachable in time; the next attempt on the
 //     same image typically succeeds in a few seconds.
+//
 // Any non-nil container returned alongside an error is terminated (after a
 // best-effort log capture) before we return or retry, so privileged
 // containers never leak across attempts or out to the caller (which
@@ -293,6 +376,58 @@ func startContainerWithRetry(t *testing.T, ctx context.Context, req testcontaine
 		time.Sleep(2 * time.Second)
 	}
 	return nil, err
+}
+
+type sessionCreator interface {
+	CreateSessionWithID(ctx context.Context, id, workspace, policy string) (types.Session, error)
+	GetSession(ctx context.Context, id string) (types.Session, error)
+}
+
+type fakeSessionClient struct {
+	createWithID func(ctx context.Context, id, workspace, policy string) (types.Session, error)
+	getSession   func(ctx context.Context, id string) (types.Session, error)
+}
+
+func (f *fakeSessionClient) CreateSessionWithID(ctx context.Context, id, workspace, policy string) (types.Session, error) {
+	return f.createWithID(ctx, id, workspace, policy)
+}
+
+func (f *fakeSessionClient) GetSession(ctx context.Context, id string) (types.Session, error) {
+	return f.getSession(ctx, id)
+}
+
+func createSessionWithRetry(ctx context.Context, cli sessionCreator, workspace, policy string) (types.Session, error) {
+	sessionID := fmt.Sprintf("session-%d", time.Now().UnixNano())
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		var sess types.Session
+		sess, err = cli.CreateSessionWithID(ctx, sessionID, workspace, policy)
+		if err == nil {
+			return sess, nil
+		}
+		var httpErr *client.HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusConflict {
+			return cli.GetSession(ctx, sessionID)
+		}
+		if !isTransientCreateSessionError(err) || attempt == 3 || ctx.Err() != nil {
+			return types.Session{}, err
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return types.Session{}, err
+}
+
+func isTransientCreateSessionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(msg, "Client.Timeout exceeded while awaiting headers") ||
+		strings.Contains(msg, "bad file descriptor") ||
+		strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "EOF")
 }
 
 const seccompTestPolicyYAML = `
@@ -389,7 +524,7 @@ func TestExecveInterception_DepthEnforcement(t *testing.T) {
 
 	cli := client.New(endpoint, "test-key")
 
-	sess, err := cli.CreateSession(ctx, "/workspace", "depth-test")
+	sess, err := createSessionWithRetry(ctx, cli, "/workspace", "depth-test")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}

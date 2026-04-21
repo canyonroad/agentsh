@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/landlock"
 	"github.com/agentsh/agentsh/internal/session"
@@ -230,49 +229,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	stubBin := "agentsh-stub"
 	stubPath, _ := exec.LookPath(stubBin)
 
-	// Build seccomp config
 	execveEnabled := a.cfg.Sandbox.Seccomp.Execve.Enabled
-	seccompCfg := seccompWrapperConfig{
-		UnixSocketEnabled: a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
-		BlockedSyscalls:   a.cfg.Sandbox.Seccomp.Syscalls.Block,
-		OnBlock:           a.cfg.Sandbox.Seccomp.Syscalls.OnBlock,
-		ExecveEnabled:     execveEnabled,
-		ServerPID:         os.Getpid(),
-	}
-
-	// Add Landlock config if enabled
-	if a.cfg.Landlock.Enabled {
-		llResult := capabilities.DetectLandlock()
-		if llResult.Available {
-			workspace := s.WorkspaceMountPath()
-			seccompCfg.LandlockEnabled = true
-			seccompCfg.LandlockABI = llResult.ABI
-			seccompCfg.Workspace = workspace
-
-			seccompCfg.AllowExecute, seccompCfg.AllowRead, seccompCfg.AllowWrite = a.deriveLandlockAllowPaths(s)
-
-			seccompCfg.AllowExecute = append(seccompCfg.AllowExecute, a.cfg.Landlock.AllowExecute...)
-			seccompCfg.AllowRead = append(seccompCfg.AllowRead, a.cfg.Landlock.AllowRead...)
-			seccompCfg.AllowWrite = append(seccompCfg.AllowWrite, a.cfg.Landlock.AllowWrite...)
-			seccompCfg.DenyPaths = append(seccompCfg.DenyPaths, a.cfg.Landlock.DenyPaths...)
-
-			// Honor landlock.network.* config. Defaults (connect=true, bind=false)
-			// come from applyDefaults; validateConfig already rejects the
-			// allow_connect_tcp=false + sandbox.network.enabled=true combination.
-			if a.cfg.Landlock.Network.AllowConnectTCP != nil {
-				seccompCfg.AllowNetwork = *a.cfg.Landlock.Network.AllowConnectTCP
-			}
-			if a.cfg.Landlock.Network.AllowBindTCP != nil {
-				seccompCfg.AllowBind = *a.cfg.Landlock.Network.AllowBindTCP
-			}
-		}
-	}
-
-	// Check if unix socket monitoring is enabled at all
-	unixEnabled := a.cfg.Sandbox.UnixSockets.Enabled != nil && *a.cfg.Sandbox.UnixSockets.Enabled
-	if unixEnabled {
-		seccompCfg.UnixSocketEnabled = true
-	}
 
 	// Create a private temp directory for the notify socket to prevent
 	// other local users from connecting first (security: socket path injection).
@@ -367,7 +324,17 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID, s, req.CallerUID)
 		}
 	}
-	seccompCfg.SignalFilterEnabled = signalFilterEnabled
+
+	unixSocketEnabled := a.cfg.Sandbox.Seccomp.UnixSocket.Enabled
+	if a.cfg.Sandbox.UnixSockets.Enabled != nil && *a.cfg.Sandbox.UnixSockets.Enabled {
+		unixSocketEnabled = true
+	}
+
+	seccompCfg := a.buildSeccompWrapperConfig(s, seccompWrapperParams{
+		UnixSocketEnabled:   unixSocketEnabled,
+		SignalFilterEnabled: signalFilterEnabled,
+		ExecveEnabled:       execveEnabled,
+	})
 
 	cfgJSON, err := json.Marshal(seccompCfg)
 	if err != nil {

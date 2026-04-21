@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"runtime"
 	"testing"
 
@@ -227,5 +228,60 @@ func TestSetupSeccompWrapper_PreservesEnv(t *testing.T) {
 				f.Close()
 			}
 		}
+	}
+}
+
+func TestSetupSeccompWrapper_FileMonitorDefaults(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("seccomp wrapper only available on Linux")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &enabled
+	cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE = &enabled
+
+	app := newTestAppForSeccomp(t, cfg)
+
+	req := types.ExecRequest{
+		Command: "/bin/echo",
+		Args:    []string{"hello"},
+	}
+
+	result := app.setupSeccompWrapper(req, "test-session", nil)
+	if result == nil || result.extraCfg == nil {
+		t.Fatal("expected non-nil wrapper setup result with extraCfg")
+	}
+	defer func() {
+		if result.extraCfg.notifyParentSock != nil {
+			result.extraCfg.notifyParentSock.Close()
+		}
+		for _, f := range result.extraCfg.extraFiles {
+			if f != nil {
+				f.Close()
+			}
+		}
+	}()
+
+	seccompJSON, ok := result.wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"]
+	if !ok {
+		t.Fatal("AGENTSH_SECCOMP_CONFIG env var not set")
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(seccompJSON), &parsed); err != nil {
+		t.Fatalf("unmarshal seccomp config: %v\n%s", err, seccompJSON)
+	}
+
+	if got, _ := parsed["file_monitor_enabled"].(bool); !got {
+		t.Fatalf("file_monitor_enabled = %v, want true (JSON: %s)", got, seccompJSON)
+	}
+	if got, _ := parsed["intercept_metadata"].(bool); !got {
+		t.Fatalf("intercept_metadata = %v, want true (JSON: %s)", got, seccompJSON)
+	}
+	if got, _ := parsed["block_io_uring"].(bool); !got {
+		t.Fatalf("block_io_uring = %v, want true (JSON: %s)", got, seccompJSON)
 	}
 }
