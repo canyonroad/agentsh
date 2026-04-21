@@ -182,9 +182,13 @@ func (h *RecvSessionHandle) Done() <-chan struct{} { return h.done }
 // recv goroutine has exited) to prove that a stale write to an orphaned
 // eventCh cannot bleed into a freshly-allocated successor session's
 // eventCh. Returns true if the send succeeded (channel had buffer
-// capacity), false otherwise. Production code MUST NOT use this — the
-// recv goroutine is the only legitimate writer to eventCh during the
-// session's lifetime.
+// capacity), false if the channel was full and the event was dropped.
+// Round-24 Finding 3: callers MUST inspect the return value — a false
+// means the probe never landed and any downstream "no bleed observed"
+// assertion would pass vacuously. Callers are expected to drain the
+// channel before invoking this so the non-blocking send is guaranteed
+// capacity. Production code MUST NOT use this — the recv goroutine is
+// the only legitimate writer to eventCh during the session's lifetime.
 func (h *RecvSessionHandle) TrySendStaleEventForTest(ev recvAckEvent) bool {
 	select {
 	case h.eventCh <- ev:

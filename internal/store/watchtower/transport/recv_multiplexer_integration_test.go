@@ -290,13 +290,43 @@ func TestRecvMultiplexer_ReconnectDoesNotLeakStateAcrossSessions(t *testing.T) {
 	// session's eventCh AFTER teardown. The goroutine is gone so
 	// nothing reads from it; the channel still exists in memory (the
 	// handle holds a reference) so the send can succeed into the
-	// channel buffer (which had spare capacity after we drained the
-	// (1, 100) event). This send is a stand-in for "what would happen
+	// channel buffer. This send is a stand-in for "what would happen
 	// if some other code path retained a reference to the old channel
 	// and tried to push into it" — the assertion that follows proves
 	// no such push can be observed via the NEW session's eventCh.
+	//
+	// Round-24 Finding 3: deterministically drain any residual events
+	// from the OLD eventCh before the probe so the non-blocking send
+	// is guaranteed spare capacity. Without the drain, a slow recv
+	// goroutine that pushed an extra event between the (1, 100) drain
+	// above and the fc1.Close() / TeardownRecv() pair could leave the
+	// buffer full, making TrySendStaleEventForTest a no-op and
+	// silently passing the bleed-isolation assertion below regardless
+	// of whether channel-identity isolation actually holds. The
+	// non-blocking drain loop here is a no-op in the steady-state
+	// case (the goroutine has exited so nothing else can push, and
+	// the (1, 100) event was already drained) but defends the test
+	// determinism against any future change to the recv-loop ordering.
+	for drained := false; !drained; {
+		select {
+		case <-h1Old.EventCh():
+			// Discard residual event — the test does not depend on
+			// what was queued, only that capacity is freed before the
+			// probe send.
+		default:
+			drained = true
+		}
+	}
+
 	staleEvt := recvBatchAck(99, 9999)
-	_ = h1Old.TrySendStaleEventForTest(transport.MakeBatchAckEventForTest(staleEvt))
+	// Round-24 Finding 3: capture and assert the non-blocking-send
+	// return value. A false here means the channel is full and the
+	// stale event was NOT injected — the bleed-isolation assertion
+	// below would then pass vacuously, hiding any future regression
+	// in the per-connection eventCh allocation contract.
+	if !h1Old.TrySendStaleEventForTest(transport.MakeBatchAckEventForTest(staleEvt)) {
+		t.Fatal("stale event injection did not succeed; eventCh was full or recv goroutine still draining — test cannot prove isolation")
+	}
 
 	// Sanity check: session 2 demuxes its own frames cleanly AND the
 	// stale send into the OLD eventCh did NOT bleed into the NEW one.

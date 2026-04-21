@@ -14610,6 +14610,131 @@ Run `/roborev-design-review` and address findings.
 
 ---
 
+### Task 22c: WTP reconnect-reason schema expansion for fail-closed control frames
+
+This task owns the dedicated-label expansion of the `wtp_reconnects_total{reason}` family for the fail-closed recv branches documented in spec §"Operator observability for fail-closed recv branches". The Round-23 spec text introduced two new structured-log `reason` strings — `server_update_unsupported_in_phase_4` and `recv_unknown_frame_type` — that today MUST collapse onto the existing `server_goaway` / `unknown` metric labels because the labels for those branches do not yet exist. This task adds the dedicated labels (`server_update_unsupported`, `recv_unknown_frame`), wires the always-emit contract, and ships the operator-facing migration runbook.
+
+**Why a dedicated task.** Adding a metric label is a contract change for every dashboard, alert, and saved query that filters by `wtp_reconnects_total{reason=~...}`. Folding the change into Task 18 / Task 19 (where the reconnect plumbing lands) would have buried the migration story under unrelated state-machine work. This task makes the schema delta the unit of work, with its own roborev cycle and its own monitoring preflight.
+
+**Interim state (this is what the spec describes today, before this task lands).** Per spec §"Operator observability for fail-closed recv branches" walked-back wording (Round-24 Finding 1):
+- `Goaway` → drives `wtp_reconnects_total{reason="server_goaway"}` (existing label, no change after this task either).
+- `ServerUpdate` → drives `wtp_reconnects_total{reason="unknown"}` under the seven-label schema (interim); this task moves it to `wtp_reconnects_total{reason="server_update_unsupported"}`.
+- Unknown frame → drives `wtp_reconnects_total{reason="unknown"}` under the seven-label schema (interim); this task moves it to `wtp_reconnects_total{reason="recv_unknown_frame"}`.
+
+The structured-log `reason` field on each WARN entry stays the same across this transition (`goaway_received`, `server_update_unsupported_in_phase_4`, `recv_unknown_frame_type`); only the metric label set changes.
+
+**Prerequisites:**
+- Task 3 — established the original seven-label `WTPReconnectReason` enum, the `wtpReconnectReasonsValid` validation table, the `wtpReconnectReasonsEmitOrder` always-emit slice, and the `TestWTPMetrics_ReconnectsAlwaysEmittedAllReasons` regression test. This task extends all four touch points symmetrically.
+- Task 18 / Task 19 — wire `IncReconnects(reason)` from the actual reconnect path; this task is independent of THAT wiring and ships the labels at the metrics layer regardless of whether the call sites have landed (always-emit semantics ensure the new series are visible at zero on registration even if the recv path never fires).
+
+**Files:**
+- Modify: `internal/metrics/wtp.go` (extend the const block, validation map, and emit-order slice)
+- Modify: `internal/metrics/wtp_test.go` (extend the always-emit regression test)
+- Modify: `docs/superpowers/specs/2026-04-18-wtp-client-design.md` (rewrite §"Operator observability for fail-closed recv branches" to describe the END STATE under the expanded schema; update the §"Metrics" reason enumeration to add the two new labels)
+
+- [ ] **Step 1: Write the failing test**
+
+Append the following to `internal/metrics/wtp_test.go` (mirror the existing `TestWTPMetrics_ReconnectsAlwaysEmittedAllReasons` shape):
+
+```go
+func TestWTPMetrics_ReconnectsAlwaysEmittedIncludesFailClosedControlFrameLabels(t *testing.T) {
+	c := New()
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	for _, reason := range []string{"server_update_unsupported", "recv_unknown_frame"} {
+		want := fmt.Sprintf(`wtp_reconnects_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("missing zero-valued reconnect series %q (Task 22c always-emit)\nbody:\n%s", want, body)
+		}
+	}
+
+	c.WTP().IncReconnects(WTPReconnectReasonServerUpdateUnsupported)
+	c.WTP().IncReconnects(WTPReconnectReasonRecvUnknownFrame)
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	for _, want := range []string{
+		`wtp_reconnects_total{reason="server_update_unsupported"} 1`,
+		`wtp_reconnects_total{reason="recv_unknown_frame"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q after IncReconnects\nbody:\n%s", want, body)
+		}
+	}
+}
+```
+
+Also extend the existing `TestWTPMetrics_ReconnectsAlwaysEmittedAllReasons` `expectedReasons` slice to include `"recv_unknown_frame"` and `"server_update_unsupported"` so the original regression test catches a future deletion of either label.
+
+Run: `go test ./internal/metrics/ -run TestWTPMetrics_ReconnectsAlwaysEmitted -count=1`
+Expected: FAIL with "missing zero-valued reconnect series" because the constants and emit-order entries don't exist yet.
+
+- [ ] **Step 2: Extend the const block, validation map, and emit-order slice**
+
+In `internal/metrics/wtp.go`:
+
+```go
+const (
+	WTPReconnectReasonDialFailed              WTPReconnectReason = "dial_failed"
+	WTPReconnectReasonStreamRecvError         WTPReconnectReason = "stream_recv_error"
+	WTPReconnectReasonSendError               WTPReconnectReason = "send_error"
+	WTPReconnectReasonAckTimeout              WTPReconnectReason = "ack_timeout"
+	WTPReconnectReasonHeartbeatTimeout        WTPReconnectReason = "heartbeat_timeout"
+	WTPReconnectReasonServerGoaway            WTPReconnectReason = "server_goaway"
+	WTPReconnectReasonServerUpdateUnsupported WTPReconnectReason = "server_update_unsupported" // Task 22c
+	WTPReconnectReasonRecvUnknownFrame        WTPReconnectReason = "recv_unknown_frame"        // Task 22c
+	WTPReconnectReasonUnknown                 WTPReconnectReason = "unknown"
+)
+```
+
+Add both to `wtpReconnectReasonsValid`. Insert into `wtpReconnectReasonsEmitOrder` in sorted-by-string order (so `recv_unknown_frame` lands between `heartbeat_timeout` and `send_error`, and `server_update_unsupported` lands between `stream_recv_error` and `unknown`).
+
+- [ ] **Step 3: Run the test to prove it passes**
+
+Run: `go test ./internal/metrics/ -run TestWTPMetrics_ReconnectsAlwaysEmitted -count=1`
+Expected: PASS.
+
+- [ ] **Step 4: Rewrite spec §"Operator observability for fail-closed recv branches" to the END STATE**
+
+In `docs/superpowers/specs/2026-04-18-wtp-client-design.md`, the subsection currently reflects the INTERIM state (Round-24 Finding 1 walk-back: ServerUpdate / unknown frame collapse to `unknown`). After Step 2 lands, rewrite the bullet list so it reads:
+- `Goaway` → `wtp_reconnects_total{reason="server_goaway"}` (unchanged).
+- `ServerUpdate` → `wtp_reconnects_total{reason="server_update_unsupported"}`.
+- Unknown frame → `wtp_reconnects_total{reason="recv_unknown_frame"}`.
+
+Drop the "**temporary debugging guidance only** — replaced by the dedicated labels when Task 22c lands" wrapper around the `errCh` substring guidance because the dedicated labels now exist; keep the `errCh`-substring text as a one-line implementer hint at the recv-error correlation site, but mark the labels as the canonical operator surface.
+
+Also update §"Metrics" (the `wtp_reconnects_total` enumeration) to add `server_update_unsupported` and `recv_unknown_frame` between `server_goaway` and `unknown` with the same per-reason one-line description style as the existing labels.
+
+- [ ] **Step 5: Backwards Compatibility**
+
+Adding labels to `wtp_reconnects_total{reason}` is **backwards-compatible at the wire level**: new time series appear at zero on registration via the always-emit contract (Step 2 above), so existing dashboards and alerts that aggregate across all reasons (`sum(wtp_reconnects_total)`) continue to behave identically. The compatibility break is at the **monitoring-config level**:
+
+- Dashboards that filter by an explicit reason set (`wtp_reconnects_total{reason=~"server_goaway|unknown"}`) MUST be updated to include the new labels, otherwise reconnects driven by `ServerUpdate` / unknown frames will silently disappear from the panel after Step 2 lands.
+- Alerts keyed on the `unknown` reason — e.g., `rate(wtp_reconnects_total{reason="unknown"}[5m]) > X` as a "we don't know what's reconnecting us, investigate" trip — will see a one-time DROP in the `unknown` series the moment Step 2 lands (the ServerUpdate / unknown-frame traffic that previously fed `unknown` now feeds the dedicated labels). Operators should EITHER widen the alert to `reason=~"unknown|server_update_unsupported|recv_unknown_frame"` ahead of the schema change, OR add separate alerts on the new labels in the same release.
+
+**Migration cadence:** dashboards bumped one release ahead of the schema change (so a new label appearing at zero is already visible in the panel before any reconnect of that type can fire); alerts updated in the same release as Step 2; changelog / release notes call out the new labels and link to this task. The always-emit contract (Step 2) ensures the dashboard preflight can verify the new series are present at zero before the schema change ships.
+
+- [ ] **Step 6: Cross-compile check**
+
+Run: `go build ./...`
+Run: `GOOS=windows go build ./...`
+Expected: no errors.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add internal/metrics/wtp.go internal/metrics/wtp_test.go docs/superpowers/specs/2026-04-18-wtp-client-design.md
+git commit -m "feat(metrics): add wtp_reconnects_total labels for fail-closed control frames"
+```
+
+- [ ] **Step 8: Roborev**
+
+Run `/roborev-design-review` and address findings.
+
+---
+
 ### Task 22b: Cross-task parity integration
 
 This task is a coordination point that spans the proto package (Task 17 Step 4) and the metrics package (Task 22a Step 4). Its purpose is to host the four-invariant parity test that asserts byte-equality between `wtpv1.AllValidationReasons()` (proto-side) and `metrics.ValidationReasons()` (metrics-side) PLUS the disjointness/coverage contract for `metrics.MetricsOnlyReasons()`. It also hosts the cross-package `TestClassifierBypassWARN_RateLimited` test that exercises the shared rate-limiter wired between Task 17 Step 4a's receiver-side WARN path and Task 22a's metrics-side WARN path.
