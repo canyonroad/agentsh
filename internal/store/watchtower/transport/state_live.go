@@ -72,6 +72,42 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			_ = t.conn.Close()
 			t.conn = nil
 			return StateShutdown, ctx.Err()
+		case ack := <-t.recvBatchAckCh:
+			// Recv-multiplexer arm per sub-step 17.X (plan
+			// §"Two-cursor ack clamp in BatchAck/ServerHeartbeat
+			// handlers"). The recv goroutine pushes typed events
+			// onto the channel; the apply happens here on the
+			// main state-machine goroutine to preserve the
+			// single-owner invariant for the cursor fields. Nil
+			// channel until initRecvChannels has run — Go's nil-
+			// channel semantics make this select arm dormant in
+			// that case (blocks forever, never selected), which
+			// is the desired behavior when no recv goroutine is
+			// running.
+			t.applyAckFromRecv("batch_ack", ack.gen, ack.seq)
+		case <-t.heartbeatSignalCh:
+			// Coalesced heartbeat signal: load the latest snapshot
+			// from the atomic pointer (the recv goroutine
+			// overwrites the pointer on every heartbeat, so older
+			// pending events may have been silently dropped per
+			// the round-6 typed-event backpressure policy table).
+			// The recv goroutine emits gen=0 because
+			// wtpv1.ServerHeartbeat carries no generation field on
+			// the wire; substitute t.persistedAck.Generation here
+			// so applyAckFromRecv classifies within the active
+			// generation per spec §"Effective-ack tuple and clamp"
+			// (heartbeat is treated as a watermark snapshot within
+			// the active generation).
+			if hb := t.latestHeartbeat.Load(); hb != nil {
+				t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, hb.seq)
+			}
+		case err := <-t.recvErrCh:
+			// Recv goroutine surfaced a fatal stream error; tear
+			// down the conn and regress to Connecting so the run
+			// loop dials a fresh stream on the next iteration.
+			_ = t.conn.Close()
+			t.conn = nil
+			return StateConnecting, fmt.Errorf("recv: %w", err)
 		case <-rdr.Notify():
 			// Pull as many records as the window and batcher allow.
 			for inflight < opts.MaxInflight {

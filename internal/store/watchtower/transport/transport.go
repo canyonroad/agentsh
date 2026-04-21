@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
@@ -221,6 +222,28 @@ type Transport struct {
 	// rejectReason is populated when the server rejects the session
 	// (SessionAck.accepted=false). Surfaced via RejectReason().
 	rejectReason string
+
+	// Recv-multiplexer typed-event channels per the round-6 typed-event
+	// backpressure policy table (plan §"Typed-event backpressure policy
+	// table"). The recv goroutine (runRecv in recv_multiplexer.go) is the
+	// SOLE writer; the main state-machine goroutine (runReplaying / runLive)
+	// is the SOLE reader. The channels and coalescing pointer are
+	// initialised lazily by initRecvChannels() on the first successful dial.
+	//
+	//   - recvBatchAckCh: depth 1, blocking send. BatchAck carries
+	//     durability-advancing data; dropping silently regresses the local
+	//     ack watermark.
+	//   - heartbeatSignalCh + latestHeartbeat: depth 1 signal channel +
+	//     atomic pointer for coalescing. Heartbeats are idempotent over
+	//     the watermark snapshot — older pending heartbeats may be silently
+	//     overwritten by newer ones.
+	//   - recvErrCh: depth 1, non-blocking trySend. Surfaces the first
+	//     recv error so the main goroutine can transition to Connecting;
+	//     subsequent errors during the wind-down are redundant.
+	recvBatchAckCh    chan recvBatchAck
+	heartbeatSignalCh chan struct{}
+	latestHeartbeat   *atomic.Pointer[recvServerHeartbeat]
+	recvErrCh         chan error
 }
 
 // New constructs a Transport. It does not dial; call Run to start.
