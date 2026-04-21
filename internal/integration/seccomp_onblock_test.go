@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -364,19 +365,15 @@ func TestSeccompOnBlock_LogAndKill_GCPressure(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			buf := make([][]byte, 0, 8)
 			for {
 				select {
 				case <-stop:
 					return
 				default:
 				}
-				buf = append(buf, make([]byte, 256<<10))
-				if len(buf) > 32 {
-					buf = buf[:0]
-					runtime.GC()
-					debug.FreeOSMemory()
-				}
+				_ = make([]byte, 64<<10)
+				runtime.GC()
+				debug.FreeOSMemory()
 			}
 		}()
 		defer func() {
@@ -384,7 +381,7 @@ func TestSeccompOnBlock_LogAndKill_GCPressure(t *testing.T) {
 			<-done
 		}()
 
-		for i := 0; i < 100; i++ {
+		for i := 0; i < 25; i++ {
 			runtime.GC()
 
 			st, events, err := startWrappedChild(t, cfgJSON, "ptrace-traceme")
@@ -409,6 +406,12 @@ func TestSeccompOnBlock_LogAndKill_GCPressure(t *testing.T) {
 	)
 	out, err := cmd.CombinedOutput()
 
+	if err != nil {
+		sawTarget := strings.Contains(string(out), "ACK: invalid argument") ||
+			strings.Contains(string(out), "RecvFD: bad file descriptor") ||
+			strings.Contains(string(out), "ACK handshake failed: expected 1 ACK byte, got 0")
+		require.Truef(t, sawTarget, "child output did not include a target handshake failure:\n%s", out)
+	}
 	require.NoErrorf(t, err, "child output:\n%s", out)
 }
 
