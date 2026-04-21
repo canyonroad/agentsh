@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -237,12 +239,9 @@ func startWrappedChild(t *testing.T, cfgJSON string, cmdArg string) (syscall.Wai
 	if err != nil {
 		return 0, nil, fmt.Errorf("socketpair: %w", err)
 	}
-	parentFD := sp[0]
-	childFD := sp[1]
-	// childEnd will be dup'd into the wrapper via ExtraFiles (fd 3); we close
-	// our copy immediately after start. parentEnd stays open for the duration.
-	defer unix.Close(parentFD)
-	childEnd := os.NewFile(uintptr(childFD), "child-end")
+	parentEnd := os.NewFile(uintptr(sp[0]), "parent-end")
+	childEnd := os.NewFile(uintptr(sp[1]), "child-end")
+	defer parentEnd.Close()
 	// Note: passing via ExtraFiles causes Go to dup-and-clexec. We keep
 	// childEnd alive until after cmd.Start so the fd survives the fork.
 	defer childEnd.Close()
@@ -282,8 +281,6 @@ func startWrappedChild(t *testing.T, cfgJSON string, cmdArg string) (syscall.Wai
 	var notifyFile *os.File
 	if hasNotify {
 		// Receive the notify fd from the wrapper.
-		parentEnd := os.NewFile(uintptr(parentFD), "parent-end")
-		// parentEnd shares the fd with parentFD; do NOT double-close.
 		recvd, rerr := unixmon.RecvFD(parentEnd)
 		if rerr != nil {
 			_ = cmd.Process.Kill()
@@ -293,7 +290,7 @@ func startWrappedChild(t *testing.T, cfgJSON string, cmdArg string) (syscall.Wai
 		notifyFile = recvd
 
 		// ACK so the wrapper proceeds to exec.
-		if _, werr := unix.Write(parentFD, []byte{1}); werr != nil {
+		if _, werr := parentEnd.Write([]byte{1}); werr != nil {
 			_ = notifyFile.Close()
 			_ = cmd.Process.Kill()
 			_, _ = cmd.Process.Wait()
@@ -343,6 +340,75 @@ func startWrappedChild(t *testing.T, cfgJSON string, cmdArg string) (syscall.Wai
 }
 
 // ---------- Tests ----------
+
+const seccompOnBlockGCPressureEnv = "AGENTSH_TEST_SECCOMP_ONBLOCK_GC_PRESSURE"
+
+func TestSeccompOnBlock_LogAndKill_GCPressure(t *testing.T) {
+	if os.Getenv(seccompOnBlockGCPressureEnv) == "1" {
+		oldGCPercent := debug.SetGCPercent(1)
+		oldMemLimit := debug.SetMemoryLimit(64 << 20)
+		defer debug.SetGCPercent(oldGCPercent)
+		defer debug.SetMemoryLimit(oldMemLimit)
+
+		cfgJSON := `{
+			"unix_socket_enabled": false,
+			"blocked_syscalls": ["ptrace"],
+			"on_block": "log_and_kill"
+		}`
+
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = make([]byte, 64<<10)
+				runtime.GC()
+				debug.FreeOSMemory()
+			}
+		}()
+		defer func() {
+			close(stop)
+			<-done
+		}()
+
+		for i := 0; i < 25; i++ {
+			runtime.GC()
+
+			st, events, err := startWrappedChild(t, cfgJSON, "ptrace-traceme")
+			require.NoErrorf(t, err, "iteration %d", i)
+			require.Truef(t, st.Signaled(), "iteration %d", i)
+			require.Equalf(t, syscall.SIGKILL, st.Signal(), "iteration %d", i)
+			require.Lenf(t, events, 1, "iteration %d", i)
+
+			runtime.GC()
+		}
+		return
+	}
+
+	cmd := exec.Command(
+		os.Args[0],
+		"-test.run=^TestSeccompOnBlock_LogAndKill_GCPressure$",
+	)
+	cmd.Env = append(os.Environ(),
+		seccompOnBlockGCPressureEnv+"=1",
+		"GOGC=1",
+		"GOMEMLIMIT=64MiB",
+	)
+	out, err := cmd.CombinedOutput()
+
+	if err != nil {
+		sawTarget := strings.Contains(string(out), "ACK: invalid argument") ||
+			strings.Contains(string(out), "RecvFD: bad file descriptor") ||
+			strings.Contains(string(out), "ACK handshake failed: expected 1 ACK byte, got 0")
+		require.Truef(t, sawTarget, "child output did not include a target handshake failure:\n%s", out)
+	}
+	require.NoErrorf(t, err, "child output:\n%s", out)
+}
 
 func TestSeccompOnBlock_Errno(t *testing.T) {
 	cfgJSON := `{
