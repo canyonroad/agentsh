@@ -345,20 +345,65 @@ func startWrappedChild(t *testing.T, cfgJSON string, cmdArg string) (syscall.Wai
 
 // ---------- Tests ----------
 
-func TestSeccompOnBlock_LogAndKill_GCPressure(t *testing.T) {
-	oldGCPercent := debug.SetGCPercent(1)
-	oldMemLimit := debug.SetMemoryLimit(64 << 20)
-	defer debug.SetGCPercent(oldGCPercent)
-	defer debug.SetMemoryLimit(oldMemLimit)
+const seccompOnBlockGCPressureEnv = "AGENTSH_TEST_SECCOMP_ONBLOCK_GC_PRESSURE"
 
-	runtime.GC()
+func TestSeccompOnBlock_LogAndKill_GCPressure(t *testing.T) {
+	if os.Getenv(seccompOnBlockGCPressureEnv) == "1" {
+		oldGCPercent := debug.SetGCPercent(1)
+		oldMemLimit := debug.SetMemoryLimit(64 << 20)
+		defer debug.SetGCPercent(oldGCPercent)
+		defer debug.SetMemoryLimit(oldMemLimit)
+
+		cfgJSON := `{
+			"unix_socket_enabled": false,
+			"blocked_syscalls": ["ptrace"],
+			"on_block": "log_and_kill"
+		}`
+
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			buf := make([][]byte, 0, 8)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				buf = append(buf, make([]byte, 256<<10))
+				if len(buf) > 32 {
+					buf = buf[:0]
+					runtime.GC()
+					debug.FreeOSMemory()
+				}
+			}
+		}()
+		defer func() {
+			close(stop)
+			<-done
+		}()
+
+		for i := 0; i < 100; i++ {
+			runtime.GC()
+
+			st, events, err := startWrappedChild(t, cfgJSON, "ptrace-traceme")
+			require.NoErrorf(t, err, "iteration %d", i)
+			require.Truef(t, st.Signaled(), "iteration %d", i)
+			require.Equalf(t, syscall.SIGKILL, st.Signal(), "iteration %d", i)
+			require.Lenf(t, events, 1, "iteration %d", i)
+
+			runtime.GC()
+		}
+		return
+	}
 
 	cmd := exec.Command(
 		os.Args[0],
-		"-test.run=^TestSeccompOnBlock_LogAndKill$",
-		"-test.count=20",
+		"-test.run=^TestSeccompOnBlock_LogAndKill_GCPressure$",
 	)
 	cmd.Env = append(os.Environ(),
+		seccompOnBlockGCPressureEnv+"=1",
 		"GOGC=1",
 		"GOMEMLIMIT=64MiB",
 	)
