@@ -9670,6 +9670,16 @@ Unit tests (mirror Task 15.1's two-cursor test suite, this time exercising the r
 
 - `TestRecvMultiplexer_BatchAckAdoptedDoesNotAdvanceOnMarkAckedFailure`: snapshot-and-rollback path mirrored from Task 15.1's `TestApplyServerAckTuple_AdoptedDoesNotAdvanceOnMarkAckedFailure`. Setup: `Options.WAL` is a fake whose `MarkAcked` returns a non-nil error on the next call (use the same `walMarkAckedFn` indirection seam Task 15.1 introduces); `InitialAckTuple = &AckTuple{Sequence: 50, Generation: 7, Present: true}`. Inject BatchAck `(serverGen=7, serverSeq=100)` (lex-higher → helper returns `Adopted`, mutates BOTH cursors to `(100, 7)` in-line). Assert: `MarkAcked(7, 100)` was called exactly once and returned the injected error; BOTH cursors rolled back to the pre-helper snapshot — `t.persistedAck == AckCursor{50, 7}`, `t.remoteReplayCursor == AckCursor{50, 7}`, `t.persistedAckPresent == true`; the metrics fake recorded ZERO calls to `SetAckHighWatermark` (failure path does not emit); the WARN buffer contains exactly one entry naming the failure with `frame="batch_ack", attempted_seq=100, attempted_gen=7`, the `err` field, and the action ("rolled back"); the rate-limited ack-anomaly WARN buffer is empty (failure is not an anomaly).
 
+Round-22 integration tests (drive the recv goroutine via a fake Conn, not just the helper). The previous unit tests above exercise `applyAckFromRecv` directly and do not start the recv goroutine; the round-22 set asserts the channel/lifecycle properties end-to-end.
+
+- `TestRecvMultiplexer_PreservesWireOrderingAcrossBatchAckAndHeartbeat`: drive a fake `Conn` whose `Recv()` emits a deterministic sequence of mixed `*wtpv1.ServerMessage_BatchAck` and `*wtpv1.ServerMessage_ServerHeartbeat` frames (e.g. BatchAck(1, 100), Heartbeat(99), BatchAck(1, 200), Heartbeat(150)). Start the recv goroutine via the test seam, drain the events on the main goroutine, and assert the resulting `applyAckFromRecv` calls happen in strict wire order — no heartbeat crosses a later BatchAck. Use a pre-allocated `Recorder` that captures `(frame, gen, seq)` in invocation order; the assertion is the recorded slice equals the wire order.
+
+- `TestRecvMultiplexer_ReconnectDoesNotLeakStateAcrossSessions`: dial → drive a few events through the recv goroutine → tear down the recvSession via the test seam → re-dial (new recvSession). Push a stale event onto the OLD session's eventCh AFTER teardown (the channel still exists in the closure but the Transport no longer points at it); assert that the new recvSession's eventCh is empty, that the new session's ctx is alive, and that the old session's ctx is cancelled. This locks in round-22 Finding 2: no event from the prior connection is observable through the new recvSession.
+
+- `TestRecvMultiplexer_PerConnectionCancelUnblocksBlockedRecv`: fill `recvSession.eventCh` to capacity by draining nothing on the main goroutine, then have the fake conn deliver one more BatchAck — the recv goroutine blocks on the eventCh send. Trigger per-connection cancellation by calling `t.recv.cancelFn()`. Assert the recv goroutine exits within a short timeout (e.g. 100ms). This locks in round-22 Finding 2's per-connection-ctx behaviour: the recv goroutine MUST respond to the connection-scoped cancel even when the transport-wide ctx is still alive.
+
+- `TestRecvMultiplexer_GoawaySurfacesFailClosedError`: drive a fake Conn that emits a `*wtpv1.ServerMessage_Goaway` frame. Start the recv goroutine; assert that it pushes a non-nil error onto `recvSession.errCh` carrying a "control frame goaway not yet handled" substring (or equivalent), and that the recv goroutine exits. Sibling test `TestRecvMultiplexer_SessionUpdateSurfacesFailClosedError` does the same for `*wtpv1.ServerMessage_ServerUpdate`. This locks in round-22 Finding 4: the recv goroutine MUST NOT silently drop control frames the client cannot yet handle. Tasks 18/19/20 will replace these branches with real handlers.
+
 Step ordering for sub-step 17.X (mirrors the Task 15.1 step shape — round-8 rewrite):
 
 - [ ] **Sub-step 17.X.1:** Write the failing tests above (originally eight; round-9 expanded to ten by adding cross-gen Anomaly tests for `LowerGenIsAnomaly` and `HigherGenIsAnomaly` per Finding 1) against the recv-channel injection seam (constructing `Options.WAL` via the real `wal.Open` with the Task 14a identity options so the `wal.MarkAcked` / `wal.HighWaterSequence` calls operate on a real disk-backed WAL).
@@ -9696,42 +9706,115 @@ Step ordering for sub-step 17.X (mirrors the Task 15.1 step shape — round-8 re
 - The recv goroutine becomes a thin demuxer: typed-decode the inbound `*wtpv1.ServerMessage`, push a typed event onto the channel, return to recv. No business logic on the recv goroutine.
 - The clamp / WARN-rate-limit / metric-update logic lives on the main goroutine alongside the rest of the state-machine code, making it trivial to unit-test by injecting events directly onto the channel (no need for a recv-goroutine fixture).
 
-**Typed-event backpressure policy table (round-6 fix).** The full-channel behavior differs by event type — round-5 left this underspecified; round-6 reviewer flagged the inconsistency. Different event types want different policies because losing a `BatchAck` silently regresses the local ack watermark (the WAL GC then re-protects already-acked segments, which is wrong but recoverable), while losing a `ServerHeartbeat` only delays the liveness signal by one heartbeat interval (the next heartbeat carries the same data — heartbeats are by spec idempotent over the watermark snapshot). Policies:
+**Single FIFO ack-event channel (round-22 rewrite — supersedes the round-6 two-channel design).** Round-22 reviewer flagged that splitting BatchAck and ServerHeartbeat across separate channels (with the heartbeat path coalescing through `atomic.Pointer[recvServerHeartbeat]`) silently loses the wire ordering between the two frame types. Concretely: the server emits BatchAck(gen=8, seq=100) followed by ServerHeartbeat(seq=99); under the round-6 design the heartbeat could be processed AFTER the BatchAck and would be substituted with `t.persistedAck.Generation == 8` at apply-time, which then reinterprets the older heartbeat as belonging to gen=8 and incorrectly drives `applyAckFromRecv` against an inflated tuple. The round-22 fix collapses both event types onto a SINGLE bounded FIFO channel that preserves wire order, with the heartbeat-deadline timer (Task 18) as the sole defender against main-goroutine wedging. Coalescing was the round-6 mitigation for channel saturation under a wedged consumer; with a deadline timer driving a forced reconnect on wedge, coalescing is no longer worth the ordering cost.
 
-| Event type | Channel depth | Send policy | Drop semantics | Rationale |
-|---|---|---|---|---|
-| `recvBatchAck` | 1-deep | **Blocking send** | Recv goroutine BLOCKS if main is wedged | A `BatchAck` carries durability-advancing data. Dropping one would silently regress the local ack watermark. If the main goroutine is wedged for longer than the heartbeat-deadline window the protocol is already broken (the deadline timer will fire and force a reconnect); the recv goroutine blocking is the correct signal. |
-| `recvServerHeartbeat` | 1-deep signal channel + `latestHeartbeat atomic.Pointer[heartbeatEvent]` | **Non-blocking trySend with coalescing** | Recv overwrites `latestHeartbeat`; the signal channel is drained by main on its next iteration, which then snapshots the pointer | Heartbeats carry liveness data + an ack-watermark snapshot that BatchAck already covers. Multiple pending heartbeats can collapse into the latest — older heartbeats overwrite, never queue. Recv goroutine never blocks on heartbeats. |
-
-Implementation sketch (recv goroutine side):
+The single channel carries a tagged-union event:
 
 ```go
-// recvBatchAck path — blocking send. If main is wedged, recv blocks
-// here; the heartbeat-deadline timer will catch the stall and force
-// a reconnect via runConnecting.
-recvBatchAckCh <- recvBatchAck{gen: a.GetGeneration(), seq: a.GetAckHighWatermarkSeq()}
+// recvAckEventKind discriminates between the two ack-bearing wire frames
+// the recv goroutine demuxes onto recvSession.eventCh.
+type recvAckEventKind int
 
-// recvServerHeartbeat path — coalescing. Overwrite the atomic
-// pointer with the latest, then non-blocking signal main.
-latestHeartbeat.Store(&recvServerHeartbeat{gen: h.GetGeneration(), seq: h.GetAckHighWatermarkSeq(), at: time.Now()})
-select {
-case heartbeatSignalCh <- struct{}{}:
-default:
-    // Main hasn't drained the previous signal yet; the latest pointer
-    // already reflects the new heartbeat. No-op.
+const (
+    recvAckEventBatchAck recvAckEventKind = iota + 1
+    recvAckEventHeartbeat
+)
+
+// recvAckEvent is the single event type the recv goroutine pushes onto
+// recvSession.eventCh. The kind discriminator selects the wire-frame
+// dispatch on the main goroutine; the gen/seq carry the ack tuple.
+//
+// Wire-ordering invariant (round-22 Finding 1): events on this channel
+// are processed in strict FIFO order on the main goroutine. The recv
+// goroutine pushes them in receive order; the main goroutine selects
+// one at a time and runs applyAckFromRecv to completion before pulling
+// the next. This is the load-bearing invariant for the heartbeat
+// generation substitution rule (see ServerHeartbeat dispatch below).
+type recvAckEvent struct {
+    kind recvAckEventKind
+    gen  uint32 // populated for BatchAck; ignored for Heartbeat (substituted at apply-time)
+    seq  uint64
 }
 ```
 
-Main goroutine side:
+| Event type | Channel | Send policy | Drop semantics | Rationale |
+|---|---|---|---|---|
+| `recvAckEventBatchAck` AND `recvAckEventHeartbeat` | Shared `recvSession.eventCh chan recvAckEvent` (depth 4) | **Blocking send** with per-connection ctx cancellation | Recv goroutine BLOCKS if main is wedged; cancelling the per-connection ctx unblocks the send | A wedged main goroutine is a protocol-broken state — the heartbeat-deadline timer (Task 18) will fire on the per-connection ctx and force a reconnect via `runConnecting`. Until that fires, the recv goroutine blocks on send to preserve wire ordering. The depth of 4 absorbs steady-state burstiness without backpressuring the wire path; depth 1 would force the recv goroutine to block on every event. |
+
+ServerHeartbeat generation handling (round-22 Finding 1, non-obvious invariant). The proto frame `wtpv1.ServerHeartbeat` carries ONLY `ack_high_watermark_seq` — no generation field on the wire. The recv goroutine therefore CANNOT populate `recvAckEvent.gen` for heartbeats from the wire alone. The previous round-6 trick of "substitute `t.persistedAck.Generation` at apply time" caused Finding 1 because earlier heartbeats could be reordered past later BatchAcks. The round-22 fix:
+
+1. The recv goroutine pushes the heartbeat event onto `eventCh` with `gen` left as zero (it has no value to put there); the kind discriminator marks it as a heartbeat.
+2. The main goroutine's dispatch site for `recvAckEventHeartbeat` substitutes `t.persistedAck.Generation` AT APPLY TIME, exactly as before.
+3. **The substitution is now safe** because strict FIFO order on `eventCh` guarantees that any earlier `recvAckEventBatchAck` with a different gen has ALREADY been processed (and therefore has ALREADY advanced `t.persistedAck.Generation` if it was an Adopted outcome) before the heartbeat reaches the dispatch site.
+
+This invariant depends entirely on strict FIFO order — if the channel were ever drained out of order (or coalesced with newer events) the substitution rule would break. Document this carefully wherever it matters; reviewers should treat any change to the recv-event ordering as load-bearing.
+
+Implementation sketch (recv goroutine side, single FIFO):
 
 ```go
-case ack := <-recvBatchAckCh:
-    t.applyAckFromRecv("batch_ack", ack.gen, ack.seq)
-case <-heartbeatSignalCh:
-    if hb := latestHeartbeat.Load(); hb != nil {
-        t.applyAckFromRecv("server_heartbeat", hb.gen, hb.seq)
+// Both branches push onto the SAME channel. Heartbeat carries no gen
+// from the wire; the field stays zero and is substituted at apply time.
+case *wtpv1.ServerMessage_BatchAck:
+    a := m.BatchAck
+    select {
+    case rs.eventCh <- recvAckEvent{kind: recvAckEventBatchAck, gen: a.GetGeneration(), seq: a.GetAckHighWatermarkSeq()}:
+    case <-rs.ctx.Done():
+        return
+    }
+case *wtpv1.ServerMessage_ServerHeartbeat:
+    h := m.ServerHeartbeat
+    select {
+    case rs.eventCh <- recvAckEvent{kind: recvAckEventHeartbeat, seq: h.GetAckHighWatermarkSeq()}:
+    case <-rs.ctx.Done():
+        return
     }
 ```
+
+Main goroutine side (single select arm — both kinds funnel through one branch):
+
+```go
+case ev := <-t.recv.eventCh:
+    switch ev.kind {
+    case recvAckEventBatchAck:
+        t.applyAckFromRecv("batch_ack", ev.gen, ev.seq)
+    case recvAckEventHeartbeat:
+        // Heartbeat carries no gen on the wire; FIFO order on eventCh
+        // guarantees any earlier BatchAck has already advanced
+        // t.persistedAck.Generation, so the substitution here is safe.
+        t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, ev.seq)
+    }
+```
+
+**Per-connection recv state (round-22 rewrite — Finding 2).** Earlier rounds held the recv-multiplexer channels and the `latestHeartbeat` pointer as fields directly on `Transport`. Round-22 reviewer flagged that this lets stale state from an old stream bleed into the next stream after reconnect: a pending recv-error value, a queued heartbeat signal, or the `latestHeartbeat` pointer all survive a `t.conn.Close()` + redial cycle. Worse, a recv goroutine blocked on `recvBatchAckCh` was only listening to the transport-wide `ctx.Done()` — so cancelling a connection mid-state-transition (StateLive → StateConnecting on stream error) could not unblock the recv goroutine until the entire transport shut down.
+
+The round-22 fix: hold all recv-multiplexer state in a single per-connection `recvSession` struct. The struct is created fresh on each successful dial and discarded on every tear-down. State cannot survive across reconnect because the field that holds it is a fresh allocation on each Connecting-success path.
+
+```go
+// recvSession bundles all per-connection recv-multiplexer state. A new
+// instance is created on each successful dial (in runConnecting after
+// SessionAck) and discarded when the conn tears down. The fields are
+// non-nil for the lifetime of the connection; the Transport.recv field
+// points at the live session OR is nil (when no recv goroutine is
+// running, e.g. between connections or in tests that do not dial).
+//
+// Per-connection ctx + cancelFn is the load-bearing piece for round-22
+// Finding 2: cancelling the per-connection ctx unblocks the recv
+// goroutine's blocking send on eventCh, even when the transport-wide
+// ctx is still alive (e.g. StateLive→StateConnecting transition after
+// a stream error — only this connection is dead, not the transport).
+type recvSession struct {
+    ctx      context.Context
+    cancelFn context.CancelFunc
+    eventCh  chan recvAckEvent
+    errCh    chan error
+}
+```
+
+`Transport.recv *recvSession` replaces the four round-6 fields (`recvBatchAckCh`, `heartbeatSignalCh`, `latestHeartbeat`, `recvErrCh`). Every state exit path that tears down the conn (StateLive → StateConnecting on stream error, StateLive → StateShutdown on ctx cancel, StateReplaying → StateConnecting on err, StateReplaying → StateShutdown on ctx cancel) MUST call `t.recv.cancelFn()` BEFORE `t.conn.Close()` so the recv goroutine wakes up; AFTER the cancel and close it MUST nil out `t.recv` so subsequent state-handler reads see no stale references.
+
+The select arms in state_live.go / state_replaying.go read recv-channel state via `t.recv.eventCh` and `t.recv.errCh`, gated on `t.recv != nil` (Go's nil-channel semantics make those select arms dormant when the field is nil — preserves the current "recv goroutine not started yet" behaviour for tests that drive applyAckFromRecv directly without a dial).
+
+**Fail-closed for unhandled control frames (round-22 Finding 4).** The round-6 design silently dropped `Goaway` and `SessionUpdate` frames in the recv-goroutine's default switch arm. Round-22 reviewer flagged that as unsafe staging once the recv goroutine becomes the sole production recv path — a Goaway is the server's reconnect signal and silently dropping it would wedge the session forever; a SessionUpdate is a key-rotation control frame and dropping it desynchronises the chain. The round-22 fix: when the recv goroutine sees a `*wtpv1.ServerMessage_Goaway` or `*wtpv1.ServerMessage_ServerUpdate`, it pushes a fatal error onto `recvSession.errCh` ("control frame X not yet handled") and returns. The main goroutine's `recvErrCh` arm sees the error and returns to `StateConnecting` — same path as a real stream error. A separate fall-through arm catches any future unknown frame type with a similar fatal error ("unknown control frame, returning to Connecting"), which is the proto-evolution defence (server may add new frame types the client predates). Tasks 18/19/20 will replace the Goaway and SessionUpdate paths with real handlers; the fail-closed staging keeps production from ever silently swallowing them.
 
 Deterministic test seam for the policy (round-7 fix). Earlier rounds described the acceptance tests as "stall the main goroutine, then probe the recv goroutine via `runtime.Stack` or a wallclock timeout." Both probes are non-deterministic — `runtime.Stack` parsing races with the scheduler, and a timeout-based assertion either flakes (deadline too short) or wastes wallclock budget (deadline too long) and never proves the send actually blocked vs. simply not having reached the channel yet. Round-7 replaces this with a SYNCHRONOUS test-only hook on `Transport`, exported from a `*_test.go` file using the same pattern as the existing `RunReplayingForTest` / `SetConnForTest` / `SetBuildEventBatchFnForTest` seams (`internal/store/watchtower/transport/state_replaying_internal_test.go`). The hook fires inside the recv goroutine at deterministic phase boundaries, so tests observe ordering without timing.
 

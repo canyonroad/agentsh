@@ -58,32 +58,46 @@ import (
 // binary) so external transport_test callers can still drive the
 // per-state handler in isolation.
 func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error) {
+	// Per-connection recv channel handles, captured once per loop entry.
+	// Nil-channel semantics make the drain arms dormant when t.recv is
+	// not set (tests that exercise runReplaying without a dial).
+	var (
+		recvEventCh <-chan recvAckEvent
+		recvErrCh   <-chan error
+	)
+	if t.recv != nil {
+		recvEventCh = t.recv.eventCh
+		recvErrCh = t.recv.errCh
+	}
 	for {
 		// Drain any pending recv-multiplexer events before issuing the
-		// next NextBatch. Per sub-step 17.X (plan §"Two-cursor ack
-		// clamp in BatchAck/ServerHeartbeat handlers") the recv
-		// goroutine pushes typed events onto t.recvBatchAckCh /
-		// t.heartbeatSignalCh; the apply happens on the main state-
-		// machine goroutine to preserve the single-owner invariant for
-		// the cursor fields. Non-blocking drain so the replay loop
-		// never stalls waiting on the recv side; the channels are nil
-		// until initRecvChannels has run, in which case Go's nil-
-		// channel semantics make every recv arm block forever and the
-		// default arm fires immediately. Recv-error handling: if the
-		// recv goroutine surfaced a fatal stream error, tear down the
-		// conn and regress to Connecting on the same iteration.
+		// next NextBatch. Per sub-step 17.X (plan §"Single FIFO ack-
+		// event channel"; round-22 Finding 1) the recv goroutine
+		// pushes typed events onto recv.eventCh in strict wire order;
+		// the apply happens on the main state-machine goroutine to
+		// preserve the single-owner invariant for the cursor fields.
+		// Non-blocking drain so the replay loop never stalls waiting
+		// on the recv side; recvEventCh is nil when t.recv is unset,
+		// in which case Go's nil-channel semantics keep the drain
+		// arms inert and the default arm fires immediately. Recv-
+		// error handling: if the recv goroutine surfaced a fatal
+		// stream error OR a fail-closed unhandled control frame
+		// (round-22 Finding 4), tear down the recvSession + conn and
+		// regress to Connecting on the same iteration.
 		select {
-		case ack := <-t.recvBatchAckCh:
-			t.applyAckFromRecv("batch_ack", ack.gen, ack.seq)
-		case <-t.heartbeatSignalCh:
-			if hb := t.latestHeartbeat.Load(); hb != nil {
-				// gen=0 on the wire (ServerHeartbeat carries no
-				// generation field); substitute the active gen
-				// per spec §"Effective-ack tuple and clamp".
-				t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, hb.seq)
+		case ev := <-recvEventCh:
+			switch ev.kind {
+			case recvAckEventBatchAck:
+				t.applyAckFromRecv("batch_ack", ev.gen, ev.seq)
+			case recvAckEventHeartbeat:
+				// Heartbeat carries no gen on the wire; FIFO order
+				// guarantees any earlier BatchAck has already
+				// advanced t.persistedAck.Generation.
+				t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, ev.seq)
 			}
-		case err := <-t.recvErrCh:
+		case err := <-recvErrCh:
 			_ = t.conn.Close()
+			t.teardownRecv()
 			t.conn = nil
 			return StateConnecting, fmt.Errorf("recv: %w", err)
 		default:
@@ -93,6 +107,7 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 		batch, done, err := r.NextBatch(ctx)
 		if err != nil {
 			_ = t.conn.Close()
+			t.teardownRecv()
 			t.conn = nil
 			return StateConnecting, fmt.Errorf("replay batch: %w", err)
 		}
@@ -100,11 +115,13 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 			msg, err := buildEventBatchFn(batch.Records)
 			if err != nil {
 				_ = t.conn.Close()
+				t.teardownRecv()
 				t.conn = nil
 				return StateConnecting, fmt.Errorf("build EventBatch: %w", err)
 			}
 			if err := t.conn.Send(msg); err != nil {
 				_ = t.conn.Close()
+				t.teardownRecv()
 				t.conn = nil
 				return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
 			}

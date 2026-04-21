@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
@@ -106,3 +107,103 @@ func ComputeReplayPlanForTest(t *Transport, replay AckCursor, persisted AckCurso
 func LoggerForTest(t *Transport) *slog.Logger {
 	return t.opts.Logger
 }
+
+// RecvSessionForTest is the round-22 integration-test seam that returns
+// the live per-connection recvSession so external tests can assert
+// lifecycle properties (eventCh capacity, errCh contents, ctx state).
+// Returns nil when no recv goroutine is running. NEVER call from
+// production code — the recvSession is not part of the public surface.
+func RecvSessionForTest(t *Transport) *RecvSessionHandle {
+	if t.recv == nil {
+		return nil
+	}
+	return &RecvSessionHandle{
+		ctx:      t.recv.ctx,
+		cancelFn: t.recv.cancelFn,
+		eventCh:  t.recv.eventCh,
+		errCh:    t.recv.errCh,
+	}
+}
+
+// RecvSessionHandle is the test-only view onto a recvSession. The fields
+// expose just enough to drive integration tests without leaking the
+// internal recvAckEvent type to package-external test code (the helper
+// methods below let tests assert on event metadata instead).
+type RecvSessionHandle struct {
+	ctx      context.Context
+	cancelFn context.CancelFunc
+	eventCh  chan recvAckEvent
+	errCh    chan error
+}
+
+// Ctx returns the per-connection context — tests assert it is alive
+// (or cancelled) via ctx.Err().
+func (h *RecvSessionHandle) Ctx() context.Context { return h.ctx }
+
+// Cancel triggers per-connection cancellation. Mirrors the production
+// teardown path (round-22 Finding 2) so tests can assert the recv
+// goroutine wakes up and exits without going through state-machine
+// transitions.
+func (h *RecvSessionHandle) Cancel() { h.cancelFn() }
+
+// EventCh returns the event channel so tests can drain events directly
+// (mirrors what the main goroutine does in the state-handler select
+// arms). Returns a generic interface{} channel facade so the recvAckEvent
+// type can stay package-internal; assertions go through the helper
+// methods on EventForTest.
+func (h *RecvSessionHandle) EventCh() <-chan recvAckEvent { return h.eventCh }
+
+// ErrCh returns the recv-error channel so tests can observe stream
+// errors and fail-closed control-frame signals.
+func (h *RecvSessionHandle) ErrCh() <-chan error { return h.errCh }
+
+// EventLen returns the current event channel queue depth — used by
+// integration tests to fill the channel and assert back-pressure.
+func (h *RecvSessionHandle) EventLen() int { return len(h.eventCh) }
+
+// EventCap returns the event channel capacity (rounds-22 design fixes
+// this at 4 — see recv_multiplexer.go::newRecvSession).
+func (h *RecvSessionHandle) EventCap() int { return cap(h.eventCh) }
+
+// FrameForTest returns a stable string label for the event kind so
+// external tests can assert order without referencing the internal
+// recvAckEventKind enum values.
+func FrameForTest(ev recvAckEvent) string {
+	switch ev.kind {
+	case recvAckEventBatchAck:
+		return "batch_ack"
+	case recvAckEventHeartbeat:
+		return "server_heartbeat"
+	default:
+		return "unknown"
+	}
+}
+
+// GenForTest returns the event generation. For heartbeats this is zero
+// on the wire — production substitutes t.persistedAck.Generation at
+// apply time.
+func GenForTest(ev recvAckEvent) uint32 { return ev.gen }
+
+// SeqForTest returns the event sequence — populated for both kinds.
+func SeqForTest(ev recvAckEvent) uint64 { return ev.seq }
+
+// StartRecvForTest starts the recv goroutine bound to the given parent
+// ctx, attaches a fresh recvSession to t.recv, and returns the handle.
+// External integration tests use this to drive the recv-goroutine path
+// against a fake Conn without going through runConnecting.
+func StartRecvForTest(t *Transport, parent context.Context) *RecvSessionHandle {
+	rs := newRecvSession(parent)
+	t.recv = rs
+	go t.runRecv(rs)
+	return &RecvSessionHandle{
+		ctx:      rs.ctx,
+		cancelFn: rs.cancelFn,
+		eventCh:  rs.eventCh,
+		errCh:    rs.errCh,
+	}
+}
+
+// TeardownRecvForTest invokes the production teardownRecv helper so
+// integration tests can assert the round-22 lifecycle (cancel + nil
+// out the field) without touching unexported state.
+func TeardownRecvForTest(t *Transport) { t.teardownRecv() }

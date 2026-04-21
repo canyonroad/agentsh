@@ -63,49 +63,58 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 		return nil
 	}
 
+	// Per-connection recv channel handles. Captured into locals once at
+	// the top of the loop so the select arms are dormant when the
+	// recvSession has not been initialised (e.g. tests that drive
+	// runLive with no dial). Go's nil-channel semantics make the
+	// select arms block forever on a nil channel — exactly what we
+	// want when no recv goroutine is running.
+	var (
+		recvEventCh <-chan recvAckEvent
+		recvErrCh   <-chan error
+	)
+	if t.recv != nil {
+		recvEventCh = t.recv.eventCh
+		recvErrCh = t.recv.errCh
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			// ctx cancellation: caller (Run loop) decides whether to
-			// shut down or reconnect. Close the conn so the next
-			// StateConnecting iteration starts clean.
+			// shut down or reconnect. Tear down the recvSession (round-22
+			// Finding 2) and the conn so the next StateConnecting
+			// iteration starts clean.
 			_ = t.conn.Close()
+			t.teardownRecv()
 			t.conn = nil
 			return StateShutdown, ctx.Err()
-		case ack := <-t.recvBatchAckCh:
-			// Recv-multiplexer arm per sub-step 17.X (plan
-			// §"Two-cursor ack clamp in BatchAck/ServerHeartbeat
-			// handlers"). The recv goroutine pushes typed events
-			// onto the channel; the apply happens here on the
-			// main state-machine goroutine to preserve the
-			// single-owner invariant for the cursor fields. Nil
-			// channel until initRecvChannels has run — Go's nil-
-			// channel semantics make this select arm dormant in
-			// that case (blocks forever, never selected), which
-			// is the desired behavior when no recv goroutine is
-			// running.
-			t.applyAckFromRecv("batch_ack", ack.gen, ack.seq)
-		case <-t.heartbeatSignalCh:
-			// Coalesced heartbeat signal: load the latest snapshot
-			// from the atomic pointer (the recv goroutine
-			// overwrites the pointer on every heartbeat, so older
-			// pending events may have been silently dropped per
-			// the round-6 typed-event backpressure policy table).
-			// The recv goroutine emits gen=0 because
-			// wtpv1.ServerHeartbeat carries no generation field on
-			// the wire; substitute t.persistedAck.Generation here
-			// so applyAckFromRecv classifies within the active
-			// generation per spec §"Effective-ack tuple and clamp"
-			// (heartbeat is treated as a watermark snapshot within
-			// the active generation).
-			if hb := t.latestHeartbeat.Load(); hb != nil {
-				t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, hb.seq)
+		case ev := <-recvEventCh:
+			// Recv-multiplexer arm per sub-step 17.X (plan §"Single
+			// FIFO ack-event channel"; round-22 Finding 1). The recv
+			// goroutine pushes typed events onto recv.eventCh in
+			// strict wire order; the apply happens here on the main
+			// state-machine goroutine to preserve the single-owner
+			// invariant for the cursor fields. recvEventCh is nil
+			// until t.recv is set — Go's nil-channel semantics make
+			// this select arm dormant in that case.
+			switch ev.kind {
+			case recvAckEventBatchAck:
+				t.applyAckFromRecv("batch_ack", ev.gen, ev.seq)
+			case recvAckEventHeartbeat:
+				// Heartbeat carries no gen on the wire; FIFO order on
+				// eventCh guarantees any earlier BatchAck has already
+				// advanced t.persistedAck.Generation, so substituting
+				// here is safe (round-22 Finding 1 invariant).
+				t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, ev.seq)
 			}
-		case err := <-t.recvErrCh:
-			// Recv goroutine surfaced a fatal stream error; tear
-			// down the conn and regress to Connecting so the run
-			// loop dials a fresh stream on the next iteration.
+		case err := <-recvErrCh:
+			// Recv goroutine surfaced a fatal stream error OR a fail-
+			// closed unhandled control frame (round-22 Finding 4); tear
+			// down the recvSession + conn and regress to Connecting so
+			// the run loop dials a fresh stream on the next iteration.
 			_ = t.conn.Close()
+			t.teardownRecv()
 			t.conn = nil
 			return StateConnecting, fmt.Errorf("recv: %w", err)
 		case <-rdr.Notify():
@@ -114,6 +123,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 				rec, ok, err := rdr.TryNext()
 				if err != nil {
 					_ = t.conn.Close()
+					t.teardownRecv()
 					t.conn = nil
 					return StateConnecting, fmt.Errorf("reader: %w", err)
 				}
@@ -124,11 +134,13 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 					msg, err := encodeBatchMessage(outBatch.Records)
 					if err != nil {
 						_ = t.conn.Close()
+						t.teardownRecv()
 						t.conn = nil
 						return StateConnecting, err
 					}
 					if err := t.conn.Send(msg); err != nil {
 						_ = t.conn.Close()
+						t.teardownRecv()
 						t.conn = nil
 						return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
 					}
@@ -140,11 +152,13 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 				msg, err := encodeBatchMessage(outBatch.Records)
 				if err != nil {
 					_ = t.conn.Close()
+					t.teardownRecv()
 					t.conn = nil
 					return StateConnecting, err
 				}
 				if err := t.conn.Send(msg); err != nil {
 					_ = t.conn.Close()
+					t.teardownRecv()
 					t.conn = nil
 					return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
 				}

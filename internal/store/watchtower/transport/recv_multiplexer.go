@@ -2,81 +2,189 @@ package transport
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
-	"sync/atomic"
-	"time"
 
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
-// recvBatchAck is the typed event the recv goroutine emits onto
-// t.recvBatchAckCh when it demuxes a *wtpv1.ServerMessage_BatchAck frame.
-// Carries the (gen, seq) tuple the main state-machine goroutine feeds into
-// applyAckFromRecv.
-type recvBatchAck struct {
-	gen uint32
-	seq uint64
+// recvAckEventKind discriminates between the two ack-bearing wire frames
+// the recv goroutine demuxes onto recvSession.eventCh per the round-22
+// single-FIFO design (plan §"Single FIFO ack-event channel").
+type recvAckEventKind int
+
+const (
+	// recvAckEventBatchAck wraps a *wtpv1.ServerMessage_BatchAck demux.
+	// gen + seq are populated from the wire frame.
+	recvAckEventBatchAck recvAckEventKind = iota + 1
+	// recvAckEventHeartbeat wraps a *wtpv1.ServerMessage_ServerHeartbeat
+	// demux. Only seq is populated from the wire frame; gen is zero
+	// because the proto carries no generation field. The main goroutine
+	// substitutes t.persistedAck.Generation at apply time — safe ONLY
+	// because strict FIFO order on eventCh guarantees any earlier
+	// BatchAck has already been processed (and may have advanced
+	// t.persistedAck.Generation) before this heartbeat reaches the
+	// dispatch site. See round-22 Finding 1.
+	recvAckEventHeartbeat
+)
+
+// recvAckEvent is the single tagged-union event type the recv goroutine
+// pushes onto recvSession.eventCh. The kind discriminator selects the
+// dispatch on the main goroutine; gen/seq carry the ack tuple.
+//
+// Wire-ordering invariant (round-22 Finding 1, load-bearing): events on
+// eventCh are processed in strict FIFO order on the main goroutine. The
+// recv goroutine pushes them in receive order; the main goroutine
+// selects one at a time and runs applyAckFromRecv to completion before
+// pulling the next. The heartbeat-generation substitution rule (see
+// recvAckEventHeartbeat) depends on this invariant — any change to the
+// recv-event ordering MUST be reviewed against the substitution rule.
+type recvAckEvent struct {
+	kind recvAckEventKind
+	gen  uint32
+	seq  uint64
 }
 
-// recvServerHeartbeat is the typed event the recv goroutine emits via the
-// coalescing latestHeartbeat atomic.Pointer. The wire-format
-// *wtpv1.ServerHeartbeat carries only ack_high_watermark_seq, so the
-// goroutine emits gen=0 here; the main goroutine substitutes
-// t.persistedAck.Generation at apply-time per the spec §"Effective-ack
-// tuple and clamp" (heartbeat is treated as a watermark snapshot within
-// the active generation).
-type recvServerHeartbeat struct {
-	gen uint32
-	seq uint64
-	at  time.Time
+// recvSession bundles all per-connection recv-multiplexer state per
+// the round-22 plan §"Per-connection recv state". A new instance is
+// created on each successful dial and discarded when the conn tears
+// down. The fields are non-nil for the lifetime of the connection;
+// Transport.recv points at the live session OR is nil (when no recv
+// goroutine is running, e.g. between connections or in tests that
+// drive applyAckFromRecv directly without a dial).
+//
+// Per-connection ctx + cancelFn is the load-bearing piece for round-22
+// Finding 2: cancelling this ctx unblocks the recv goroutine's
+// blocking send on eventCh even when the transport-wide ctx is still
+// alive (e.g. StateLive→StateConnecting transition after a stream
+// error — only this connection is dead, not the transport).
+type recvSession struct {
+	ctx      context.Context
+	cancelFn context.CancelFunc
+	// eventCh carries demuxed BatchAck and ServerHeartbeat events in
+	// strict wire order. Depth 4 absorbs steady-state burstiness; the
+	// recv goroutine blocks on send when the channel is full and
+	// unblocks via ctx cancellation. Single-channel-FIFO design per
+	// round-22 Finding 1.
+	eventCh chan recvAckEvent
+	// errCh surfaces fatal recv errors (stream closed by peer, OR
+	// fail-closed for unhandled control frames per round-22 Finding 4).
+	// Depth 1 with non-blocking trySend because only the FIRST recv
+	// error matters for the state-machine transition; subsequent
+	// errors during the wind-down are redundant.
+	errCh chan error
+	// done is closed by runRecv right before it returns. teardownRecv
+	// waits on it so callers can rely on the recv goroutine being fully
+	// stopped (and no longer reading t.conn) once teardownRecv returns.
+	// This is the synchronisation primitive that prevents data races on
+	// t.conn between the recv goroutine and the main state-machine
+	// goroutine when it dials a fresh conn after teardown (round-22
+	// Finding 2 — the per-connection ctx cancel + done close together
+	// give a fully synchronous teardown).
+	done chan struct{}
+}
+
+// newRecvSession constructs a recvSession bound to the given parent ctx.
+// The session's ctx is a child of parent — cancelling either cancels
+// both, so a transport-wide shutdown propagates AND a per-connection
+// teardown can unblock the recv goroutine without touching the parent.
+func newRecvSession(parent context.Context) *recvSession {
+	ctx, cancelFn := context.WithCancel(parent)
+	return &recvSession{
+		ctx:      ctx,
+		cancelFn: cancelFn,
+		eventCh:  make(chan recvAckEvent, 4),
+		errCh:    make(chan error, 1),
+		done:     make(chan struct{}),
+	}
+}
+
+// teardownRecv cancels the per-connection recv ctx, waits for the recv
+// goroutine to fully exit (closing rs.done), and clears the live session
+// reference. Idempotent — safe to call from every state-exit path; a
+// nil t.recv is a no-op so the helper can run even when no recv
+// goroutine is active.
+//
+// The wait on rs.done is load-bearing for round-22 Finding 2: callers
+// (state_live, state_replaying, integration tests) reassign t.conn
+// after teardown returns, and the recv goroutine reads t.conn via
+// t.conn.Recv(). Without the wait, the goroutine could still be in
+// flight inside Recv() when the next dial overwrites t.conn — a data
+// race the race detector catches.
+//
+// Caller-ordering contract (load-bearing): ctx cancellation alone does
+// NOT unblock t.conn.Recv() — the conn's underlying transport (gRPC
+// stream, fake test conn, etc.) only returns from Recv when (a) a frame
+// arrives, (b) Recv hits a stream error, or (c) the conn is Closed.
+// Therefore callers MUST close t.conn BEFORE calling teardownRecv (so
+// the in-flight Recv unblocks and the goroutine signals done). Closing
+// the conn AFTER teardownRecv would deadlock — the wait would never
+// return because Recv stays blocked. State-handler exit paths follow
+// this order: t.conn.Close() first, then teardownRecv(), then
+// t.conn = nil.
+func (t *Transport) teardownRecv() {
+	if t.recv == nil {
+		return
+	}
+	rs := t.recv
+	t.recv = nil
+	rs.cancelFn()
+	<-rs.done
 }
 
 // runRecv is the recv-goroutine loop. It calls t.conn.Recv() repeatedly,
-// demuxes the inbound *wtpv1.ServerMessage frame into typed events, and
-// pushes each event onto the appropriate channel per the round-6 typed-event
-// backpressure policy table:
-//
-//   - recvBatchAck → blocking send on t.recvBatchAckCh (depth 1). A BatchAck
-//     carries durability-advancing data; dropping one would silently regress
-//     the local ack watermark. If the main goroutine is wedged longer than
-//     the heartbeat-deadline window the protocol is already broken, and the
-//     blocking send is the correct backpressure signal.
-//   - recvServerHeartbeat → coalescing via t.latestHeartbeat (atomic
-//     pointer overwrite) plus a non-blocking trySend on t.heartbeatSignalCh
-//     (depth 1). Heartbeats are idempotent over the watermark snapshot, so
-//     older pending heartbeats may be silently overwritten by newer ones.
+// demuxes the inbound *wtpv1.ServerMessage frame into a tagged-union
+// recvAckEvent, and pushes the event onto rs.eventCh in strict wire
+// order. Heartbeats are NOT coalesced — they share the channel with
+// BatchAck events to preserve the ordering invariant (plan §"Single
+// FIFO ack-event channel"; round-22 Finding 1).
 //
 // The recv goroutine MUST NOT touch t.persistedAck / t.remoteReplayCursor
-// / t.persistedAckPresent directly (single-owner invariant per
-// transport.go:76-77 and plan §"Concurrency boundary for ack-cursor
-// updates"). All cursor mutations happen on the main goroutine via
-// applyAckFromRecv.
+// / t.persistedAckPresent directly (single-owner invariant per plan
+// §"Concurrency boundary for ack-cursor updates"). All cursor mutations
+// happen on the main goroutine via applyAckFromRecv.
+//
+// Fail-closed for unhandled control frames (round-22 Finding 4): a
+// *wtpv1.ServerMessage_Goaway or *wtpv1.ServerMessage_ServerUpdate
+// pushes a fatal error onto rs.errCh and returns. Tasks 18/19/20 will
+// replace these with real handlers; until then the staging path
+// surfaces them so the main goroutine drops back to Connecting
+// instead of silently dropping a session-critical control frame.
+//
+// Unknown frame types (anything not in the switch) take a separate
+// fail-closed branch — the proto-evolution defence: a future server
+// may add control frames the client predates, and silently dropping
+// them risks correctness.
 //
 // runRecv exits on:
-//   - ctx cancellation (via the inner Recv blocking on the conn's stream
-//     ctx, which is cancelled by Run when transitioning out of Live)
-//   - any non-nil error from t.conn.Recv() (stream closed by the peer or
-//     by Close); the main goroutine notices via the recvErrCh signal
-func (t *Transport) runRecv(ctx context.Context) {
+//   - rs.ctx cancellation (per-connection cancel; round-22 Finding 2)
+//   - any non-nil error from t.conn.Recv() (stream closed by peer)
+//   - any unhandled control frame or unknown frame type (fail-closed)
+func (t *Transport) runRecv(rs *recvSession) {
+	// Closing rs.done is what unblocks teardownRecv's wait. defer at the
+	// top guarantees every exit path (ctx cancel, Recv error, fail-closed
+	// control frame, unknown frame) signals exit — round-22 Finding 2's
+	// load-bearing synchronisation primitive.
+	defer close(rs.done)
 	for {
-		// Bail if the parent context has been cancelled. The conn.Recv()
-		// call below will also unblock once Close() is called on the conn,
-		// but checking ctx first avoids one extra Recv attempt on shutdown.
+		// Bail if the per-connection ctx has been cancelled. The
+		// conn.Recv() call below will also unblock once Close() is
+		// called on the conn, but checking ctx first avoids one extra
+		// Recv attempt on shutdown.
 		select {
-		case <-ctx.Done():
+		case <-rs.ctx.Done():
 			return
 		default:
 		}
 		msg, err := t.conn.Recv()
 		if err != nil {
-			// Surface the error through the dedicated channel so the main
-			// goroutine can transition to Connecting on the next select
-			// iteration. The channel has depth 1 + non-blocking trySend
-			// because only the FIRST recv error matters for transition
-			// purposes — subsequent errors during the wind-down are
-			// redundant.
+			// Surface the error through rs.errCh so the main goroutine
+			// can transition to Connecting on the next select iteration.
+			// Non-blocking send because only the FIRST recv error
+			// matters; subsequent errors during wind-down are redundant.
 			select {
-			case t.recvErrCh <- err:
+			case rs.errCh <- err:
 			default:
 			}
 			return
@@ -84,51 +192,76 @@ func (t *Transport) runRecv(ctx context.Context) {
 		switch m := msg.GetMsg().(type) {
 		case *wtpv1.ServerMessage_BatchAck:
 			a := m.BatchAck
-			ev := recvBatchAck{gen: a.GetGeneration(), seq: a.GetAckHighWatermarkSeq()}
-			// Blocking send per the round-6 typed-event backpressure table.
+			ev := recvAckEvent{
+				kind: recvAckEventBatchAck,
+				gen:  a.GetGeneration(),
+				seq:  a.GetAckHighWatermarkSeq(),
+			}
+			// Blocking send; per-connection ctx unblocks if main is
+			// wedged (round-22 Finding 2). The heartbeat-deadline
+			// timer (Task 18) is the wedge-defence at the protocol
+			// layer.
 			select {
-			case t.recvBatchAckCh <- ev:
-			case <-ctx.Done():
+			case rs.eventCh <- ev:
+			case <-rs.ctx.Done():
 				return
 			}
 		case *wtpv1.ServerMessage_ServerHeartbeat:
 			h := m.ServerHeartbeat
-			// ServerHeartbeat carries no generation field on the wire;
-			// the main goroutine substitutes t.persistedAck.Generation at
-			// apply-time. We still pass the seq through this typed event
-			// so the coalescing semantics stay consistent.
-			t.latestHeartbeat.Store(&recvServerHeartbeat{
-				gen: 0,
+			ev := recvAckEvent{
+				kind: recvAckEventHeartbeat,
+				// gen left zero; main substitutes t.persistedAck.Generation
+				// at apply time per the FIFO-order invariant.
 				seq: h.GetAckHighWatermarkSeq(),
-				at:  time.Now(),
-			})
-			select {
-			case t.heartbeatSignalCh <- struct{}{}:
-			default:
-				// Main goroutine has not drained the previous signal yet;
-				// the latestHeartbeat pointer already reflects the new
-				// snapshot. No-op per the coalescing policy.
 			}
+			select {
+			case rs.eventCh <- ev:
+			case <-rs.ctx.Done():
+				return
+			}
+		case *wtpv1.ServerMessage_Goaway:
+			// Tasks 18/19/20 will replace these with real handlers.
+			// Fail closed so the main goroutine drops to Connecting
+			// instead of silently dropping a session-critical frame
+			// (round-22 Finding 4).
+			select {
+			case rs.errCh <- errors.New("recv: control frame goaway not yet handled"):
+			default:
+			}
+			return
+		case *wtpv1.ServerMessage_ServerUpdate:
+			// Tasks 18/19/20 will replace these with real handlers.
+			// Fail closed; see Goaway branch above.
+			select {
+			case rs.errCh <- errors.New("recv: control frame session_update not yet handled"):
+			default:
+			}
+			return
 		default:
-			// Frame types other than BatchAck/ServerHeartbeat are not
-			// handled by this multiplexer (Goaway/SessionUpdate land in
-			// later tasks). Drop them silently for now — they are not
-			// ack-bearing and do not regress any cursor.
+			// Unknown frame type — proto-evolution defence: the
+			// server may add new control frames the client predates.
+			// Surface as a recv error so the main goroutine drops to
+			// Connecting rather than silently dropping the frame.
+			select {
+			case rs.errCh <- fmt.Errorf("recv: unknown control frame %T, returning to Connecting", m):
+			default:
+			}
+			return
 		}
 	}
 }
 
 // applyAckFromRecv is the recv-side wrapper around applyServerAckTuple.
-// It is invoked from the main state-machine goroutine when a typed
-// recvBatchAck or recvServerHeartbeat event surfaces on the recv channel;
-// the recv goroutine NEVER touches t.persistedAck / t.remoteReplayCursor
-// / t.persistedAckPresent directly (single-owner invariant per plan §
-// "Concurrency boundary for ack-cursor updates").
+// It is invoked from the main state-machine goroutine when a
+// recvAckEvent surfaces on rs.eventCh; the recv goroutine NEVER
+// touches t.persistedAck / t.remoteReplayCursor / t.persistedAckPresent
+// directly (single-owner invariant per plan §"Concurrency boundary
+// for ack-cursor updates").
 //
-// `frame` is the proto frame name ("batch_ack" / "server_heartbeat") used
-// in the anomaly WARN's structured log so operators can tell which frame
-// type drove the anomaly. SessionAck logs through the ackSessionAck site
-// directly (with frame="session_ack") — same side-effect contract,
+// `frame` is the proto frame name ("batch_ack" / "server_heartbeat")
+// used in the anomaly WARN's structured log so operators can tell which
+// frame type drove the anomaly. SessionAck logs through the ackSessionAck
+// site directly (with frame="session_ack") — same side-effect contract,
 // inlined there for the anomaly-WARN/rejectReason interleave.
 //
 // Round-8 — the four-branch dispatch matches Task 15.1 Step 1b. The
@@ -223,31 +356,5 @@ func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq u
 			slog.String("session_id", t.opts.SessionID))
 	case AckOutcomeNoOp:
 		// No cursor moved; nothing to do.
-	}
-}
-
-// initRecvChannels lazily allocates the recv-multiplexer channels and the
-// coalescing latestHeartbeat pointer. Called by runConnecting on the first
-// successful dial so the channels are ready before runReplaying / runLive
-// start their main-goroutine selects.
-//
-// The channels are owned by the main goroutine; the recv goroutine only
-// sends. Channel depths are per the round-6 typed-event backpressure table:
-// recvBatchAckCh is depth 1 with blocking send (BatchAck carries durability
-// data); heartbeatSignalCh is depth 1 with non-blocking trySend (heartbeats
-// are idempotent and coalesced via the atomic pointer); recvErrCh is depth
-// 1 with non-blocking trySend (only the first recv error matters).
-func (t *Transport) initRecvChannels() {
-	if t.recvBatchAckCh == nil {
-		t.recvBatchAckCh = make(chan recvBatchAck, 1)
-	}
-	if t.heartbeatSignalCh == nil {
-		t.heartbeatSignalCh = make(chan struct{}, 1)
-	}
-	if t.recvErrCh == nil {
-		t.recvErrCh = make(chan error, 1)
-	}
-	if t.latestHeartbeat == nil {
-		t.latestHeartbeat = &atomic.Pointer[recvServerHeartbeat]{}
 	}
 }
