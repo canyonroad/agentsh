@@ -823,15 +823,44 @@ func TestFlushLoop_PeriodicSync(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	time.Sleep(250 * time.Millisecond)
+	chainState := chain.State()
 
-	sidecar, err := audit.ReadSidecar(audit.SidecarPath(logPath))
+	sidecar, err := waitForSidecarSequence(audit.SidecarPath(logPath), chainState.Sequence, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	chainState := chain.State()
 	if sidecar.Sequence != chainState.Sequence {
 		t.Fatalf("sidecar.Sequence = %d, want %d (timer should have flushed)", sidecar.Sequence, chainState.Sequence)
+	}
+}
+
+func TestWaitForSidecarSequence_Timeout(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	writeSidecarForState(t, logPath, audit.ChainState{
+		Sequence: 0,
+		PrevHash: "prev-hash",
+	})
+
+	if _, err := waitForSidecarSequence(audit.SidecarPath(logPath), 1, 50*time.Millisecond); err == nil {
+		t.Fatal("waitForSidecarSequence() error = nil, want timeout")
+	}
+}
+
+func waitForSidecarSequence(sidecarPath string, want int64, timeout time.Duration) (audit.SidecarState, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		sidecar, err := audit.ReadSidecar(sidecarPath)
+		if err != nil {
+			return audit.SidecarState{}, err
+		}
+		if sidecar.Sequence == want {
+			return sidecar, nil
+		}
+		if time.Now().After(deadline) {
+			return sidecar, fmt.Errorf("timed out waiting for sidecar sequence %d; got %d", want, sidecar.Sequence)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

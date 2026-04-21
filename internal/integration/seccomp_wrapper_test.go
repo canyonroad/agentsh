@@ -18,6 +18,7 @@ import (
 	"github.com/agentsh/agentsh/internal/client"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/go-connections/nat"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -101,6 +102,84 @@ func TestCreateSessionWithRetry_UsesExistingSessionAfterConflict(t *testing.T) {
 	}
 	if getAttempts != 1 {
 		t.Fatalf("get attempts = %d, want 1", getAttempts)
+	}
+}
+
+type fakeEndpointContainer struct {
+	hostCalls int
+	portCalls int
+
+	hostFunc func(context.Context) (string, error)
+	portFunc func(context.Context, nat.Port) (nat.Port, error)
+}
+
+func (f *fakeEndpointContainer) Host(ctx context.Context) (string, error) {
+	f.hostCalls++
+	return f.hostFunc(ctx)
+}
+
+func (f *fakeEndpointContainer) MappedPort(ctx context.Context, port nat.Port) (nat.Port, error) {
+	f.portCalls++
+	return f.portFunc(ctx, port)
+}
+
+func TestContainerHTTPEndpointWithRetry_RetriesTransientMappedPortErrors(t *testing.T) {
+	t.Parallel()
+
+	wantPort, err := nat.NewPort("tcp", "49152")
+	if err != nil {
+		t.Fatalf("nat.NewPort: %v", err)
+	}
+
+	attempts := 0
+	ctr := &fakeEndpointContainer{
+		hostFunc: func(context.Context) (string, error) {
+			return "127.0.0.1", nil
+		},
+		portFunc: func(context.Context, nat.Port) (nat.Port, error) {
+			attempts++
+			if attempts == 1 {
+				return "", errors.New(`inspect: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.48/containers/abc/json": context deadline exceeded`)
+			}
+			return wantPort, nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	endpoint, err := containerHTTPEndpointWithRetry(ctx, ctr, "18080/tcp")
+	if err != nil {
+		t.Fatalf("containerHTTPEndpointWithRetry: %v", err)
+	}
+	if endpoint != "http://127.0.0.1:49152" {
+		t.Fatalf("endpoint = %q, want %q", endpoint, "http://127.0.0.1:49152")
+	}
+	if ctr.portCalls != 2 {
+		t.Fatalf("MappedPort calls = %d, want 2", ctr.portCalls)
+	}
+}
+
+func TestContainerHTTPEndpointWithRetry_DoesNotRetryPermanentErrors(t *testing.T) {
+	t.Parallel()
+
+	ctr := &fakeEndpointContainer{
+		hostFunc: func(context.Context) (string, error) {
+			return "127.0.0.1", nil
+		},
+		portFunc: func(context.Context, nat.Port) (nat.Port, error) {
+			return "", errors.New("port not exposed")
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if _, err := containerHTTPEndpointWithRetry(ctx, ctr, "18080/tcp"); err == nil {
+		t.Fatal("containerHTTPEndpointWithRetry() error = nil, want permanent failure")
+	}
+	if ctr.portCalls != 1 {
+		t.Fatalf("MappedPort calls = %d, want 1", ctr.portCalls)
 	}
 }
 
@@ -297,15 +376,10 @@ func startSeccompServerContainer(t *testing.T, ctx context.Context, agentshBin, 
 		t.Fatalf("start container: %v", err)
 	}
 
-	host, err := ctr.Host(ctx)
+	endpoint, err := containerHTTPEndpointWithRetry(ctx, ctr, "18080/tcp")
 	if err != nil {
-		t.Fatalf("container host: %v", err)
+		t.Fatalf("resolve endpoint: %v", err)
 	}
-	mappedPort, err := ctr.MappedPort(ctx, "18080/tcp")
-	if err != nil {
-		t.Fatalf("map port: %v", err)
-	}
-	endpoint := fmt.Sprintf("http://%s:%s", host, mappedPort.Port())
 
 	cleanup := func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 60*time.Second)
