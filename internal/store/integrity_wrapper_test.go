@@ -847,21 +847,90 @@ func TestWaitForSidecarSequence_Timeout(t *testing.T) {
 	}
 }
 
-func waitForSidecarSequence(sidecarPath string, want int64, timeout time.Duration) (audit.SidecarState, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		sidecar, err := audit.ReadSidecar(sidecarPath)
-		if err != nil {
-			return audit.SidecarState{}, err
+func TestWaitForSidecarSequence_RetriesTransientReadErrors(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	got, err := waitForSidecarSequenceWithReader("audit.jsonl.chain", 3, 100*time.Millisecond, func(string) (audit.SidecarState, error) {
+		calls++
+		if calls == 1 {
+			return audit.SidecarState{}, &os.PathError{
+				Op:   "open",
+				Path: "audit.jsonl.chain",
+				Err:  errors.New("The process cannot access the file because it is being used by another process."),
+			}
 		}
-		if sidecar.Sequence == want {
-			return sidecar, nil
+		return audit.SidecarState{Sequence: 3}, nil
+	})
+	if err != nil {
+		t.Fatalf("waitForSidecarSequenceWithReader() error = %v", err)
+	}
+	if got.Sequence != 3 {
+		t.Fatalf("Sequence = %d, want 3", got.Sequence)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
+func TestWaitForSidecarSequence_FailsFastOnNonRetryableReadError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("boom")
+	_, err := waitForSidecarSequenceWithReader("audit.jsonl.chain", 1, 100*time.Millisecond, func(string) (audit.SidecarState, error) {
+		return audit.SidecarState{}, wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("waitForSidecarSequenceWithReader() error = %v, want %v", err, wantErr)
+	}
+}
+
+func waitForSidecarSequence(sidecarPath string, want int64, timeout time.Duration) (audit.SidecarState, error) {
+	return waitForSidecarSequenceWithReader(sidecarPath, want, timeout, audit.ReadSidecar)
+}
+
+func waitForSidecarSequenceWithReader(sidecarPath string, want int64, timeout time.Duration, readSidecar func(string) (audit.SidecarState, error)) (audit.SidecarState, error) {
+	deadline := time.Now().Add(timeout)
+	var lastSidecar audit.SidecarState
+	var lastErr error
+	for {
+		sidecar, err := readSidecar(sidecarPath)
+		if err != nil {
+			if !shouldRetrySidecarRead(err) {
+				return audit.SidecarState{}, err
+			}
+			lastErr = err
+		} else {
+			lastSidecar = sidecar
+			lastErr = nil
+			if sidecar.Sequence == want {
+				return sidecar, nil
+			}
 		}
 		if time.Now().After(deadline) {
-			return sidecar, fmt.Errorf("timed out waiting for sidecar sequence %d; got %d", want, sidecar.Sequence)
+			if lastErr != nil {
+				return audit.SidecarState{}, fmt.Errorf("timed out waiting for sidecar sequence %d after read error: %w", want, lastErr)
+			}
+			return lastSidecar, fmt.Errorf("timed out waiting for sidecar sequence %d; got %d", want, lastSidecar.Sequence)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func shouldRetrySidecarRead(err error) bool {
+	if errors.Is(err, audit.ErrSidecarNotFound) || errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) {
+		return false
+	}
+
+	msg := strings.ToLower(pathErr.Err.Error())
+	return strings.Contains(msg, "sharing violation") ||
+		strings.Contains(msg, "used by another process") ||
+		strings.Contains(msg, "cannot access the file")
 }
 
 func TestClose_FinalFlush(t *testing.T) {

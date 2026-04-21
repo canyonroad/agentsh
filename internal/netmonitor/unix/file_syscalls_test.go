@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"unsafe"
 
@@ -330,43 +329,51 @@ func TestFileSyscallName(t *testing.T) {
 	}
 }
 
-// pathToPtr creates a null-terminated byte buffer and returns its address as uint64.
-// Callers must keep the returned byte slice alive with runtime.KeepAlive after
-// the raw-memory read that consumes the pointer.
-func pathToPtr(s string) (uint64, []byte) {
-	buf := append([]byte(s), 0)
-	return uint64(uintptr(unsafe.Pointer(&buf[0]))), buf
+// pathToPtr creates a NUL-terminated path buffer in mapped memory so its raw
+// address stays valid while the test asks ProcessVMReadv to read this process.
+func pathToPtr(t *testing.T, s string) uint64 {
+	t.Helper()
+
+	buf, err := unix.Mmap(-1, 0, len(s)+1, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_ANON|unix.MAP_PRIVATE)
+	if err != nil {
+		t.Fatalf("unix.Mmap() error = %v", err)
+	}
+	copy(buf, s)
+	buf[len(s)] = 0
+	t.Cleanup(func() {
+		if err := unix.Munmap(buf); err != nil {
+			t.Fatalf("unix.Munmap() error = %v", err)
+		}
+	})
+	return uint64(uintptr(unsafe.Pointer(&buf[0])))
 }
 
 func TestResolvePathAt_Absolute(t *testing.T) {
 	pid := os.Getpid()
-	ptr, buf := pathToPtr("/usr/bin/ls")
+	ptr := pathToPtr(t, "/usr/bin/ls")
 
 	result, err := resolvePathAt(pid, -100, ptr)
-	runtime.KeepAlive(buf)
 	assert.NoError(t, err)
 	assert.Equal(t, "/usr/bin/ls", result)
 }
 
 func TestResolvePathAt_AbsoluteClean(t *testing.T) {
 	pid := os.Getpid()
-	ptr, buf := pathToPtr("/usr/bin/../lib/test")
+	ptr := pathToPtr(t, "/usr/bin/../lib/test")
 
 	result, err := resolvePathAt(pid, -100, ptr)
-	runtime.KeepAlive(buf)
 	assert.NoError(t, err)
 	assert.Equal(t, "/usr/lib/test", result)
 }
 
 func TestResolvePathAt_RelativeATFDCWD(t *testing.T) {
 	pid := os.Getpid()
-	ptr, buf := pathToPtr("somefile.txt")
+	ptr := pathToPtr(t, "somefile.txt")
 
 	cwd, err := os.Getwd()
 	assert.NoError(t, err)
 
 	result, err := resolvePathAt(pid, -100, ptr) // AT_FDCWD = -100
-	runtime.KeepAlive(buf)
 	assert.NoError(t, err)
 	assert.Equal(t, filepath.Join(cwd, "somefile.txt"), result)
 }
@@ -379,20 +386,18 @@ func TestResolvePathAt_RelativeToDirfd(t *testing.T) {
 	assert.NoError(t, err)
 	defer dir.Close()
 
-	ptr, buf := pathToPtr("testfile.txt")
+	ptr := pathToPtr(t, "testfile.txt")
 
 	result, err := resolvePathAt(pid, int32(dir.Fd()), ptr)
-	runtime.KeepAlive(buf)
 	assert.NoError(t, err)
 	assert.Equal(t, "/tmp/testfile.txt", result)
 }
 
 func TestResolvePathAt_InvalidPid(t *testing.T) {
-	ptr, buf := pathToPtr("/some/path")
+	ptr := pathToPtr(t, "/some/path")
 
 	// Use a PID that certainly doesn't exist
 	_, err := resolvePathAt(999999999, -100, ptr)
-	runtime.KeepAlive(buf)
 	assert.Error(t, err)
 }
 
