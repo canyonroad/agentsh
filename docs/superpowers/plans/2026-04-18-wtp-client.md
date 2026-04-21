@@ -14625,7 +14625,10 @@ The structured-log `reason` field on each WARN entry stays the same across this 
 
 **Prerequisites:**
 - Task 3 — established the original seven-label `WTPReconnectReason` enum, the `wtpReconnectReasonsValid` validation table, the `wtpReconnectReasonsEmitOrder` always-emit slice, and the `TestWTPMetrics_ReconnectsAlwaysEmittedAllReasons` regression test. This task extends all four touch points symmetrically.
-- Task 18 / Task 19 — wire `IncReconnects(reason)` from the actual reconnect path; this task is independent of THAT wiring and ships the labels at the metrics layer regardless of whether the call sites have landed (always-emit semantics ensure the new series are visible at zero on registration even if the recv path never fires).
+- Task 18 / Task 19 — wire `IncReconnects(reason)` from the actual reconnect path; this task is independent of THAT wiring **for Steps 1–3 and 5–8** (always-emit semantics ensure the new series are visible at zero on registration even if the recv path never fires). **Step 4 is GATED on Tasks 18 and 19 having landed the `IncReconnects(WTPReconnectReasonServerUpdateUnsupported)` and `IncReconnects(WTPReconnectReasonRecvUnknownFrame)` call sites in transport AND on Task 22d having landed the structured WARN logging in the recv-multiplexer branches** — see Step 4's gating note. Steps 1–3 and 5–8 may run before any of those tasks; Step 4 MUST NOT.
+- Task 22d — owns the structured WARN logging for the same three fail-closed recv branches. Step 4's spec rewrite assumes both the dedicated metric labels (this task's Steps 1–3) AND the structured WARN logging (Task 22d) are live, so Step 4 is gated on Task 22d as well.
+
+**Scope split (Steps 1–3 / 5–8 vs Step 4).** Steps 1–3 and 5–8 land the **schema-only** delta — the new const values, the validation-map entries, the always-emit-order entries, the always-emit zero-value tests, the cross-compile check, the commit, and the roborev. After these steps land, the new metric labels appear at zero on `/metrics` but no code path increments them yet AND the spec wording in §"Operator observability for fail-closed recv branches" stays in its INTERIM state (the three branches collapse onto `server_goaway` / `unknown`, with `errCh`-substring guidance flagged as transitional). This is the lifecycle state the spec calls "Schema landed, emitter not wired" (see spec §"Lifecycle states for reconnect-reason observability"). Step 4 is the **end-state spec promotion** that flips that wording — it MUST be deferred until the emitter call sites and WARN logging actually exist; otherwise the spec lies about what operators can see.
 
 **Files:**
 - Modify: `internal/metrics/wtp.go` (extend the const block, validation map, and emit-order slice)
@@ -14696,14 +14699,23 @@ Add both to `wtpReconnectReasonsValid`. Insert into `wtpReconnectReasonsEmitOrde
 Run: `go test ./internal/metrics/ -run TestWTPMetrics_ReconnectsAlwaysEmitted -count=1`
 Expected: PASS.
 
-- [ ] **Step 4: Rewrite spec §"Operator observability for fail-closed recv branches" to the END STATE**
+- [ ] **Step 4: Rewrite spec §"Operator observability for fail-closed recv branches" to the END STATE — GATED on Tasks 18 + 19 + 22d**
 
-In `docs/superpowers/specs/2026-04-18-wtp-client-design.md`, the subsection currently reflects the INTERIM state (Round-24 Finding 1 walk-back: ServerUpdate / unknown frame collapse to `unknown`). After Step 2 lands, rewrite the bullet list so it reads:
-- `Goaway` → `wtp_reconnects_total{reason="server_goaway"}` (unchanged).
-- `ServerUpdate` → `wtp_reconnects_total{reason="server_update_unsupported"}`.
-- Unknown frame → `wtp_reconnects_total{reason="recv_unknown_frame"}`.
+**This step is GATED. Do NOT run it until ALL THREE prerequisite tasks have landed:**
+1. **Task 18** — emitter call sites for `IncReconnects(WTPReconnectReasonHeartbeatTimeout)` AND any other reconnect plumbing it owns (heartbeat-deadline-driven reconnect).
+2. **Task 19** — emitter call sites for the shutdown/drain reconnect paths AND the `IncReconnects(WTPReconnectReasonServerUpdateUnsupported)` / `IncReconnects(WTPReconnectReasonRecvUnknownFrame)` call sites at the recv-multiplexer fail-closed branches (or whichever predecessor task wires those — verify by grepping for `IncReconnects(WTPReconnectReasonServerUpdateUnsupported)` and `IncReconnects(WTPReconnectReasonRecvUnknownFrame)` and confirming both have non-test producers in `internal/store/watchtower/transport/`).
+3. **Task 22d** — structured WARN logging in the three recv-multiplexer fail-closed branches (`Goaway`, `ServerUpdate`, unknown frame), each with its `reason=<...>` field per the spec.
 
-Drop the "**temporary debugging guidance only** — replaced by the dedicated labels when Task 22c lands" wrapper around the `errCh` substring guidance because the dedicated labels now exist; keep the `errCh`-substring text as a one-line implementer hint at the recv-error correlation site, but mark the labels as the canonical operator surface.
+**Verification before running this step:** grep for `IncReconnects(WTPReconnectReasonServerUpdateUnsupported)` and `IncReconnects(WTPReconnectReasonRecvUnknownFrame)` across `internal/store/watchtower/transport/` and confirm BOTH have at least one non-test caller. ALSO grep for `slog.LevelWarn.*reason.*goaway_received`, `slog.LevelWarn.*reason.*server_update_unsupported_in_phase_4`, and `slog.LevelWarn.*reason.*recv_unknown_frame_type` in `recv_multiplexer.go` and confirm all three are present. If any is missing, this step is NOT ready — block on the missing predecessor.
+
+**Why the gate.** If Step 4 lands before the predecessor wirings, the spec would describe the new metric labels as a "live operator surface" when they are actually zero-valued series with no producer (operators reading the new labels on `/metrics` would see flatlines and have no way to distinguish "branch never fired" from "wiring missing"). It would similarly describe the WARN log's `reason` field as queryable when no log line carries it. The interim spec wording (which describes the branches under the collapsed `server_goaway` / `unknown` labels and flags `errCh`-substring guidance as transitional) is correct and operationally useful throughout the "Schema landed, emitter not wired" lifecycle state — keep it in place until predecessors land.
+
+**The end-state rewrite.** Once all three predecessors are confirmed landed, in `docs/superpowers/specs/2026-04-18-wtp-client-design.md`, replace the §"Operator observability for fail-closed recv branches" subsection wording. The three-branch bullet list flips to:
+- `Goaway` → `wtp_reconnects_total{reason="server_goaway"}` (unchanged) AND structured WARN log with `reason="goaway_received"`.
+- `ServerUpdate` → `wtp_reconnects_total{reason="server_update_unsupported"}` AND structured WARN log with `reason="server_update_unsupported_in_phase_4"`.
+- Unknown frame → `wtp_reconnects_total{reason="recv_unknown_frame"}` AND structured WARN log with `reason="recv_unknown_frame_type"`.
+
+Drop the "Current state (commit `0b28f74e`)" / "Future contract (owned by Tasks 22c + 22d)" / "Lifecycle states" framing wholesale — at this point the lifecycle has reached state 3 ("End-state spec wording active") and the historical framing is no longer needed. Drop the "**transitional debugging only**" wrapper around the `errCh` substring guidance because the dedicated labels AND the structured WARN log now exist; keep the `errCh`-substring text as a one-line implementer hint at the recv-error correlation site, but mark the labels + WARN reason field as the canonical operator surface.
 
 Also update §"Metrics" (the `wtp_reconnects_total` enumeration) to add `server_update_unsupported` and `recv_unknown_frame` between `server_goaway` and `unknown` with the same per-reason one-line description style as the existing labels.
 
@@ -14715,6 +14727,13 @@ Adding labels to `wtp_reconnects_total{reason}` is **backwards-compatible at the
 - Alerts keyed on the `unknown` reason — e.g., `rate(wtp_reconnects_total{reason="unknown"}[5m]) > X` as a "we don't know what's reconnecting us, investigate" trip — will see a one-time DROP in the `unknown` series the moment Step 2 lands (the ServerUpdate / unknown-frame traffic that previously fed `unknown` now feeds the dedicated labels). Operators should EITHER widen the alert to `reason=~"unknown|server_update_unsupported|recv_unknown_frame"` ahead of the schema change, OR add separate alerts on the new labels in the same release.
 
 **Migration cadence:** dashboards bumped one release ahead of the schema change (so a new label appearing at zero is already visible in the panel before any reconnect of that type can fire); alerts updated in the same release as Step 2; changelog / release notes call out the new labels and link to this task. The always-emit contract (Step 2) ensures the dashboard preflight can verify the new series are present at zero before the schema change ships.
+
+**External monitoring acceptance criteria (gated on landing of Step 4 — the end-state spec promotion).** Step 4 MUST NOT be marked done until every checkbox below has concrete artifact evidence linked from this plan section or from `docs/superpowers/operator/wtp-monitoring-migration.md` (the existing Task 27a tracking artifact — extend that file with a "Task 22c reconnect-reason expansion" subsection rather than creating a parallel artifact).
+
+- [ ] Grafana dashboard panel for the WTP reconnect-by-reason view (the dashboard owned by the operator team — see Task 27a Step 1a's authoritative inventory declaration for the exact dashboard name) updated to include the two new reason series. **Evidence required:** dashboard JSON diff committed to the monitoring repo (link the commit), OR a screenshot showing all 9 series rendering at zero on a clean session attached to `docs/superpowers/operator/wtp-monitoring-migration.md`.
+- [ ] Prometheus alert rule keyed on `wtp_reconnects_total{reason="unknown"}` (or the equivalent reconnect-storm rule named in the operator team's authoritative inventory per Task 27a Step 1a) updated to either explicitly INCLUDE the two new reasons (`reason=~"unknown|server_update_unsupported|recv_unknown_frame"`) or explicitly EXCLUDE them (with a separate dedicated alert covering the new labels). **Evidence required:** alert rule diff in the monitoring repo (link the commit) AND a one-line note in `docs/superpowers/operator/wtp-monitoring-migration.md` recording the chosen include-vs-exclude policy.
+- [ ] CHANGELOG.md (or the equivalent agent release notes file the project ships) entry under the next release documenting the two new labels with operator action required (dashboards + alerts updated per the two checkboxes above). **Evidence required:** CHANGELOG diff link.
+- [ ] **Owner sign-off.** No OWNERS / CODEOWNERS file exists in this repository today (verified at commit `0b28f74e`); the implementation team OWNS the metric-schema delta (Steps 1–3) but does NOT own the external monitoring artifact updates. Per Task 27a Step 1a, the SRE/ops team declares the authoritative monitoring inventory in `docs/superpowers/operator/wtp-monitoring-migration.md`. **TBD: identify the specific monitoring-config owner (a named person, role, or team) for the three artifacts above and record them in `docs/superpowers/operator/wtp-monitoring-migration.md` BEFORE marking this checklist complete.** Until an owner is named and signs off on the three artifacts, Step 4's gate is NOT satisfied — even if the predecessor code tasks (18, 19, 22d) have all landed. This prevents declaring the migration "done" without evidence the consumers were actually updated.
 
 - [ ] **Step 6: Cross-compile check**
 
@@ -14732,6 +14751,87 @@ git commit -m "feat(metrics): add wtp_reconnects_total labels for fail-closed co
 - [ ] **Step 8: Roborev**
 
 Run `/roborev-design-review` and address findings.
+
+---
+
+### Task 22d: Structured WARN logging for fail-closed recv branches
+
+This task owns the structured WARN log emission at the three fail-closed recv-multiplexer branches (`Goaway`, `ServerUpdate`, unknown frame types). Per spec §"Operator observability for fail-closed recv branches", each branch carries a stable `reason=<string>` field in the WARN log so operators can distinguish the branch BEFORE the connection tears down (and without grepping the bare `errCh` substring, which is the transitional debugging guidance the spec calls out as not-canonical).
+
+**Why a dedicated task.** The current recv multiplexer (`internal/store/watchtower/transport/recv_multiplexer.go` lines 222–250) pushes plain Go errors onto `rs.errCh` and emits NO structured log. Adding `slog.Warn(...)` calls is small but it MUST land paired with unit tests proving each branch emits its WARN with the expected `reason` field — otherwise the spec contract is unverified. Folding this into Task 22c (metric-label expansion) would conflate the metric-schema change with the log-format change; folding it into Task 18 / Task 19 (heartbeat + drain) would bury the contract under unrelated state-machine work. This task makes the WARN-log contract the unit of work, with its own test surface and its own roborev cycle.
+
+**Sibling-task split (Task 22c vs Task 22d):** Task 22c owns the **metric labels** (`server_update_unsupported`, `recv_unknown_frame`); Task 22d owns the **structured WARN log fields** (`reason="goaway_received"`, `reason="server_update_unsupported_in_phase_4"`, `reason="recv_unknown_frame_type"`). The two MAY land in either order — they are independent at the implementation layer (no source-file collision; metrics are in `internal/metrics/wtp.go`, WARN logs are in `internal/store/watchtower/transport/recv_multiplexer.go`). Both MUST land before Task 22c's Step 4 (the spec end-state promotion) runs.
+
+**Prerequisites:**
+- Task 22 (or whichever task wired the recv multiplexer into production) — the production recv-multiplexer plumbing must exist for the WARN logs to fire on real traffic. The WARN code itself can land before that plumbing (the recv-multiplexer file already exists and is exercised by tests via the `StartRecvForTest`/`TeardownRecvForTest` seams), but operator-visible emission only happens once the production wiring lands.
+- The transport's existing logger pattern: `t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn, msg, attrs...)` — see `recv_multiplexer.go:298–312` and `state_connecting.go:93–106` for prior art. The new WARN calls MUST use the same pattern (resolved logger, `LogAttrs` for low-allocation structured fields, attribute order: `frame`, `reason`, then any branch-specific context, ending with `session_id`).
+
+**Files:**
+- Modify: `internal/store/watchtower/transport/recv_multiplexer.go` — add `slog.LevelWarn` `LogAttrs` calls in the three fail-closed branches, BEFORE the existing `errCh` non-blocking send. Keep the `errCh` send unchanged (it remains the state-machine signal; the WARN log is added as a sibling diagnostic).
+- Modify: `internal/store/watchtower/transport/recv_multiplexer_test.go` — add table-driven tests asserting each branch emits exactly one WARN entry with the expected `reason` field. Use a recording `slog.Handler` bound to `t.opts.Logger` for assertions (the existing test infrastructure already provides this via the seams; verify before introducing a new seam).
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `internal/store/watchtower/transport/recv_multiplexer_test.go` a test (one per branch, table-driven if convenient) that:
+1. Constructs a `Transport` with a recording logger (capture all `slog.Record`s emitted).
+2. Drives a single inbound `*wtpv1.ServerMessage_Goaway` (or `_ServerUpdate`, or an unknown variant) through the recv goroutine via the existing seams.
+3. Asserts EXACTLY ONE WARN-level record was emitted with attributes `reason="goaway_received"` (resp. `"server_update_unsupported_in_phase_4"`, `"recv_unknown_frame_type"`), `frame="recv_control"`, AND `session_id` set to the transport's `opts.SessionID`.
+4. Asserts the `errCh` still receives the existing recv-error envelope (the WARN log is additive — the state-machine signal is unchanged).
+
+If the recording-logger seam does not yet exist in the test file, add it as a small helper that wraps `slog.New(slog.NewJSONHandler(&buf, ...))` and a helper to parse the JSON lines back into attribute maps for assertion.
+
+Run: `go test ./internal/store/watchtower/transport/ -run TestRecvMultiplexer_FailClosed.*WarnLog -count=1 -race`
+Expected: FAIL — the WARN calls don't exist yet.
+
+- [ ] **Step 2: Add the WARN calls**
+
+In `internal/store/watchtower/transport/recv_multiplexer.go`, in each of the three fail-closed branches (currently around lines 222, 232, 240), add a `t.opts.Logger.LogAttrs(...)` call BEFORE the existing `errCh` non-blocking send. Pattern (mirroring the existing anomaly-WARN pattern at lines 298–312):
+
+```go
+case *wtpv1.ServerMessage_Goaway:
+    t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+        "wtp: recv fail-closed control frame",
+        slog.String("frame", "recv_control"),
+        slog.String("reason", "goaway_received"),
+        slog.String("session_id", t.opts.SessionID))
+    select {
+    case rs.errCh <- errors.New("recv: control frame goaway not yet handled"):
+    default:
+    }
+    return
+```
+
+Mirror the pattern for `ServerUpdate` (`reason="server_update_unsupported_in_phase_4"`) and the `default` branch (`reason="recv_unknown_frame_type"`; ALSO carry `slog.String("frame_type", fmt.Sprintf("%T", m))` for diagnostic context — the unknown-frame branch is the only one where the proto type is not statically known).
+
+The `frame="recv_control"` field is a NEW value distinct from the existing `frame="batch_ack"` / `frame="server_heartbeat"` / `frame="session_ack"` set used by the anomaly-WARN site — it discriminates "fail-closed control frame" from "ack-bearing frame anomaly" so an operator filtering by `frame=recv_control` sees only the three fail-closed branches.
+
+- [ ] **Step 3: Run the tests to prove they pass**
+
+Run: `go test ./internal/store/watchtower/transport/ -run TestRecvMultiplexer_FailClosed.*WarnLog -count=1 -race`
+Expected: PASS.
+
+- [ ] **Step 4: Cross-compile check**
+
+Run: `go build ./...`
+Run: `GOOS=windows go build ./...`
+Expected: no errors.
+
+- [ ] **Step 5: Cross-link to spec**
+
+Verify spec §"Operator observability for fail-closed recv branches" references Task 22d as the owner of the WARN-logging contract (it does as of Round-25). No spec edit needed UNLESS the spec wording has drifted; if it has, update the cross-reference but do NOT promote to end-state wording (that promotion is Task 22c Step 4's job).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add internal/store/watchtower/transport/recv_multiplexer.go internal/store/watchtower/transport/recv_multiplexer_test.go
+git commit -m "feat(wtp/transport): structured WARN logs for fail-closed recv branches"
+```
+
+- [ ] **Step 7: Roborev**
+
+Run `/roborev-design-review` and address findings.
+
+**Out of scope:** any metric-schema changes — those belong to Task 22c. This task is logs-only.
 
 ---
 
