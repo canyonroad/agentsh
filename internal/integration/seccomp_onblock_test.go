@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"syscall"
 	"testing"
@@ -345,31 +346,25 @@ func startWrappedChild(t *testing.T, cfgJSON string, cmdArg string) (syscall.Wai
 // ---------- Tests ----------
 
 func TestSeccompOnBlock_LogAndKill_GCPressure(t *testing.T) {
-	repoRoot := "."
-	if wd, err := os.Getwd(); err == nil {
-		for {
-			if _, statErr := os.Stat(filepath.Join(wd, "go.mod")); statErr == nil {
-				repoRoot = wd
-				break
-			}
-			parent := filepath.Dir(wd)
-			if parent == wd {
-				break
-			}
-			wd = parent
-		}
-	}
+	oldGCPercent := debug.SetGCPercent(1)
+	oldMemLimit := debug.SetMemoryLimit(64 << 20)
+	defer debug.SetGCPercent(oldGCPercent)
+	defer debug.SetMemoryLimit(oldMemLimit)
 
-	cmd := exec.Command("go", "test", "-tags=integration", "./internal/integration", "-run", "^TestSeccompOnBlock_LogAndKill$", "-count=20")
-	cmd.Dir = repoRoot
+	runtime.GC()
+
+	cmd := exec.Command(
+		os.Args[0],
+		"-test.run=^TestSeccompOnBlock_LogAndKill$",
+		"-test.count=20",
+	)
 	cmd.Env = append(os.Environ(),
 		"GOGC=1",
 		"GOMEMLIMIT=64MiB",
 	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	out, err := cmd.CombinedOutput()
 
-	require.NoError(t, cmd.Run())
+	require.NoErrorf(t, err, "child output:\n%s", out)
 }
 
 func TestSeccompOnBlock_Errno(t *testing.T) {
