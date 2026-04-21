@@ -183,6 +183,64 @@ func TestContainerHTTPEndpointWithRetry_DoesNotRetryPermanentErrors(t *testing.T
 	}
 }
 
+func TestStartContainerWithRetry_RetriesTransientNetworkSetupTimeout(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	attempts := 0
+	_, err := startContainerWithRetryFunc(
+		t,
+		ctx,
+		3,
+		25*time.Millisecond,
+		time.Millisecond,
+		func(context.Context) (testcontainers.Container, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, errors.New(`create container: ensure default network: network list: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.51/networks": context deadline exceeded`)
+			}
+			return nil, nil
+		},
+		func(testcontainers.Container, string) {},
+	)
+	if err != nil {
+		t.Fatalf("startContainerWithRetryFunc: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestStartContainerWithRetry_DoesNotRetryPermanentCreateErrors(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	attempts := 0
+	wantErr := errors.New("pull access denied")
+	_, err := startContainerWithRetryFunc(
+		t,
+		ctx,
+		3,
+		25*time.Millisecond,
+		time.Millisecond,
+		func(context.Context) (testcontainers.Container, error) {
+			attempts++
+			return nil, wantErr
+		},
+		func(testcontainers.Container, string) {},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("startContainerWithRetryFunc() error = %v, want %v", err, wantErr)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
 // TestSeccompWrapperEnabled verifies that when unix_sockets.enabled=true,
 // the server starts successfully, can create sessions, and exec commands work.
 // The wrapper may fail to set up seccomp in the container environment (due to
@@ -429,27 +487,68 @@ func startContainerWithRetry(t *testing.T, ctx context.Context, req testcontaine
 		_ = c.Terminate(termCtx)
 		cancelTerm()
 	}
+	const (
+		maxAttempts    = 3
+		attemptTimeout = 90 * time.Second
+		retryBackoff   = 2 * time.Second
+	)
+	return startContainerWithRetryFunc(
+		t,
+		ctx,
+		maxAttempts,
+		attemptTimeout,
+		retryBackoff,
+		func(attemptCtx context.Context) (testcontainers.Container, error) {
+			return testcontainers.GenericContainer(attemptCtx, req)
+		},
+		cleanup,
+	)
+}
+
+func startContainerWithRetryFunc(
+	t *testing.T,
+	ctx context.Context,
+	maxAttempts int,
+	attemptTimeout time.Duration,
+	retryBackoff time.Duration,
+	start func(context.Context) (testcontainers.Container, error),
+	cleanup func(testcontainers.Container, string),
+) (testcontainers.Container, error) {
+	t.Helper()
+
 	var err error
-	for attempt := 1; attempt <= 3; attempt++ {
-		var ctr testcontainers.Container
-		ctr, err = testcontainers.GenericContainer(ctx, req)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		ctr, startErr := start(attemptCtx)
+		cancel()
+		err = startErr
 		if err == nil {
 			return ctr, nil
 		}
-		msg := err.Error()
-		transient := strings.Contains(msg, "use of closed network connection") ||
-			strings.Contains(msg, "EOF") ||
-			strings.Contains(msg, "connection reset") ||
-			strings.Contains(msg, "wait until ready")
-		if !transient || attempt == 3 {
+		if !isTransientContainerStartError(err) || attempt == maxAttempts || ctx.Err() != nil {
 			cleanup(ctr, "failed-start")
 			return nil, err
 		}
 		cleanup(ctr, "retrying")
-		t.Logf("transient docker error on attempt %d/3, retrying: %v", attempt, err)
-		time.Sleep(2 * time.Second)
+		t.Logf("transient docker error on attempt %d/%d, retrying: %v", attempt, maxAttempts, err)
+		time.Sleep(retryBackoff)
 	}
 	return nil, err
+}
+
+func isTransientContainerStartError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "wait until ready") ||
+		strings.Contains(msg, "ensure default network") ||
+		strings.Contains(msg, "network list")
 }
 
 type sessionCreator interface {
