@@ -239,12 +239,9 @@ func startWrappedChild(t *testing.T, cfgJSON string, cmdArg string) (syscall.Wai
 	if err != nil {
 		return 0, nil, fmt.Errorf("socketpair: %w", err)
 	}
-	parentFD := sp[0]
-	childFD := sp[1]
-	// childEnd will be dup'd into the wrapper via ExtraFiles (fd 3); we close
-	// our copy immediately after start. parentEnd stays open for the duration.
-	defer unix.Close(parentFD)
-	childEnd := os.NewFile(uintptr(childFD), "child-end")
+	parentEnd := os.NewFile(uintptr(sp[0]), "parent-end")
+	childEnd := os.NewFile(uintptr(sp[1]), "child-end")
+	defer parentEnd.Close()
 	// Note: passing via ExtraFiles causes Go to dup-and-clexec. We keep
 	// childEnd alive until after cmd.Start so the fd survives the fork.
 	defer childEnd.Close()
@@ -284,8 +281,6 @@ func startWrappedChild(t *testing.T, cfgJSON string, cmdArg string) (syscall.Wai
 	var notifyFile *os.File
 	if hasNotify {
 		// Receive the notify fd from the wrapper.
-		parentEnd := os.NewFile(uintptr(parentFD), "parent-end")
-		// parentEnd shares the fd with parentFD; do NOT double-close.
 		recvd, rerr := unixmon.RecvFD(parentEnd)
 		if rerr != nil {
 			_ = cmd.Process.Kill()
@@ -295,7 +290,7 @@ func startWrappedChild(t *testing.T, cfgJSON string, cmdArg string) (syscall.Wai
 		notifyFile = recvd
 
 		// ACK so the wrapper proceeds to exec.
-		if _, werr := unix.Write(parentFD, []byte{1}); werr != nil {
+		if _, werr := parentEnd.Write([]byte{1}); werr != nil {
 			_ = notifyFile.Close()
 			_ = cmd.Process.Kill()
 			_, _ = cmd.Process.Wait()
