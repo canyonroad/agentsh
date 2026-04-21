@@ -14629,7 +14629,7 @@ The structured-log `reason` field on each WARN entry (Task 22d) is independent o
 
 **Prerequisites:**
 - Task 3 — established the original seven-label `WTPReconnectReason` enum, the `wtpReconnectReasonsValid` validation table, the `wtpReconnectReasonsEmitOrder` always-emit slice, and the `TestWTPMetrics_ReconnectsAlwaysEmittedAllReasons` regression test. This task extends all four touch points symmetrically.
-- Task 18 / Task 19 — wire `IncReconnects(reason)` from the actual reconnect path; this task is independent of THAT wiring **for Steps 1–3 and 5–8** (always-emit semantics ensure the new series are visible at zero on registration even if the recv path never fires). **Step 4 is GATED on Tasks 18 and 19 having landed the `IncReconnects(WTPReconnectReasonServerUpdateUnsupported)` and `IncReconnects(WTPReconnectReasonRecvUnknownFrame)` call sites in transport AND on Task 22d having landed the structured WARN logging in the recv-multiplexer branches** — see Step 4's gating note. Steps 1–3 and 5–8 may run before any of those tasks; Step 4 MUST NOT.
+- Task 18 / Task 19 — wire `IncReconnects(reason)` from the actual reconnect path; this task is independent of THAT wiring **for Steps 1–3 and 5–8** (always-emit semantics ensure the new series are visible at zero on registration even if the recv path never fires). **Step 4 is GATED on non-test `IncReconnects(...)` call sites for ALL THREE fail-closed branches — `WTPReconnectReasonServerGoaway`, `WTPReconnectReasonServerUpdateUnsupported`, AND `WTPReconnectReasonRecvUnknownFrame` — landing in transport, AND on Task 22d having landed the structured WARN logging in the recv-multiplexer branches.** See Step 4's full emitter matrix below for the exact rule (the matrix is the authoritative gate; this bullet is the at-a-glance summary). Steps 1–3 and 5–8 may run before any of those tasks; Step 4 MUST NOT.
 - Task 22d — owns the structured WARN logging for the same three fail-closed recv branches. Step 4's spec rewrite assumes both the dedicated metric labels (this task's Steps 1–3) AND the structured WARN logging (Task 22d) are live, so Step 4 is gated on Task 22d as well.
 
 **Scope split (Steps 1–3 / 5–8 vs Step 4).** Steps 1–3 and 5–8 land the **schema-only** delta — the new const values, the validation-map entries, the always-emit-order entries, the always-emit zero-value tests, the cross-compile check, the commit, and the roborev. After these steps land, the new metric labels appear at zero on `/metrics` but no code path increments them yet AND the spec wording in §"Operator observability for fail-closed recv branches" stays in its INTERIM state (the three branches still have no producer in non-test code, with `errCh`-substring guidance flagged as transitional debugging only — not the canonical operator surface). This is the lifecycle state the spec calls "Schema landed, emitter not wired" (see spec §"Lifecycle states for reconnect-reason observability"). Step 4 is the **end-state spec promotion** that flips that wording — it MUST be deferred until the emitter call sites and WARN logging actually exist; otherwise the spec lies about what operators can see.
@@ -14796,85 +14796,154 @@ This task owns the structured WARN log emission at the three fail-closed recv-mu
 
 **WARN field schema:**
 
-All three branches share the standard fields `frame="recv_control"`, `reason=<branch-specific>`, and `session_id=<transport opts.SessionID>`. The `Goaway` branch additionally carries the proto's stable payload subset so operators see the server's reason without needing to correlate logs across services. Verified against `proto/canyonroad/wtp/v1/wtp.proto` `message Goaway { GoawayCode code = 1; string message = 2; bool retry_immediately = 3; }`:
+All three branches share the standard fields `frame="recv_control"`, `reason=<branch-specific>`, and `session_id=<transport opts.SessionID>`. The `Goaway` branch additionally carries the proto's stable payload subset so operators see the server's reason without needing to correlate logs across services. Verified against `proto/canyonroad/wtp/v1/wtp.proto` `message Goaway { GoawayCode code = 1; string message = 2; bool retry_immediately = 3; }`.
 
-- **`Goaway` WARN includes additional stable fields:**
-  - `goaway_code` — string mirror of the proto enum value name (`GoawayCode.String()`), e.g. `"GOAWAY_CODE_UNSPECIFIED"`, `"GOAWAY_CODE_DRAINING"`, `"GOAWAY_CODE_OVERLOAD"`, `"GOAWAY_CODE_UPGRADE"`, `"GOAWAY_CODE_AUTH"`. Names mirror the proto enum literally so operators see the same identifier used in the .proto file and runbooks.
-  - `goaway_message` — string, the server's human-readable message (`Goaway.GetMessage()`), passed through `sanitizeForLog` (see Step 2 impl pattern below). Sanitization enforces three guarantees: (1) invalid UTF-8 sequences are replaced with U+FFFD via `strings.ToValidUTF8`; (2) control / non-printable runes are replaced with U+FFFD (passes through `' '`, `'\t'`, `'\n'` unchanged); (3) the result is truncated to AT MOST 512 bytes WITH the literal marker `...[truncated]` appended INSIDE the 512-byte budget, on a UTF-8 rune boundary. Empty input passes through unchanged.
+**Conservative default (until server contract published) — `LogGoawayMessage = false` (default):**
 
-    **`goaway_message` redaction policy.** Server-supplied messages are logged after sanitization (truncated to 512 bytes; non-printable / invalid-UTF-8 sequences replaced with U+FFFD) but otherwise verbatim. The Watchtower server contract (server-side spec — link to be added when the server protocol doc lands; tracked as future docs) requires server operators NOT to include credentials, secrets, or PII in `Goaway.message`; client-side redaction beyond sanitization is out of scope. If a Watchtower server is found violating this contract in production, the agent's logging filter (this Step 2's `sanitizeForLog` call) is the safety net for transport-layer log poisoning (oversized payloads, control bytes, mojibake) but NOT for credential redaction — the contract owner for "no secrets in `Goaway.message`" is the server, not the client. AGENTS.md / repo-wide privacy policy should be consulted before broadening this stance; the current project has no stricter cross-cutting redaction policy that would require additional client-side filtering here.
-  - `goaway_retry_immediately` — bool (`Goaway.GetRetryImmediately()`).
+The `Goaway` WARN omits the message text entirely and emits only:
+- `goaway_code` — string mirror of the proto enum value name (`GoawayCode.String()`), e.g. `"GOAWAY_CODE_UNSPECIFIED"`, `"GOAWAY_CODE_DRAINING"`, `"GOAWAY_CODE_OVERLOAD"`, `"GOAWAY_CODE_UPGRADE"`, `"GOAWAY_CODE_AUTH"`. Names mirror the proto enum literally so operators see the same identifier used in the .proto file and runbooks.
+- `goaway_message_present` — bool, `true` if `Goaway.GetMessage() != ""`, otherwise `false`. This is a triage marker: it tells operators whether the server sent any explanatory text without exposing the text itself. The `goaway_message` key is OMITTED from the log entry entirely under this default.
+- `goaway_retry_immediately` — bool (`Goaway.GetRetryImmediately()`).
+
+**Opt-in verbatim (after server contract published, OR for trusted deployments) — `LogGoawayMessage = true`:**
+
+When the transport's config has `LogGoawayMessage = true`, the `Goaway` WARN additionally includes:
+- `goaway_message` — string, the server's human-readable message (`Goaway.GetMessage()`), passed through `sanitizeForLog` (see Step 2 impl pattern below). Sanitization enforces three guarantees, IN THIS ORDER: (1) invalid UTF-8 sequences are replaced with U+FFFD via `strings.ToValidUTF8`; (2) control / non-printable runes are replaced with U+FFFD (passes through `' '`, `'\t'`, `'\n'` unchanged — see "Whitespace preservation policy" below); (3) the SANITIZED OUTPUT is truncated to AT MOST 512 bytes with the literal marker `...[truncated]` appended INSIDE the 512-byte budget, at a UTF-8 rune boundary. Empty input passes through unchanged.
+
+  Note: truncation order matters — sanitize first, then truncate. Sanitization can grow the string (a single invalid byte expands to a 3-byte U+FFFD), and truncating raw input could split a valid multi-byte sequence at a non-rune boundary. Sanitizing first guarantees the input to truncation is valid UTF-8 with no control bytes, and truncating second accounts for any growth from sanitization.
+
+  The `goaway_message_present` marker is STILL emitted under the opt-in mode (so operators querying `goaway_message_present=true` get the same hit-set regardless of which mode the agent runs in).
+
+**Whitespace preservation policy (`\n` and `\t`).** The sanitizer PRESERVES the two whitespace characters `\n` (LF, U+000A) and `\t` (HT, U+0009) even though they are technically in the C0 control range. Rationale: most logging conventions preserve newlines and tabs and let the underlying handler escape them (`slog.JSONHandler` escapes both as `\n`/`\t` in JSON strings; `slog.TextHandler` quotes the value when it contains either character). Stripping or replacing them would lose layout information operators rely on for multi-line server messages. The sanitizer DOES replace all OTHER C0 controls (U+0000..U+0008, U+000B..U+001F) and DEL (U+007F) with U+FFFD per the (2) guarantee above.
+
+**`goaway_message` redaction policy (matches spec).** Server-supplied messages, when logged under the opt-in mode, are logged after sanitization but otherwise verbatim. The Watchtower server contract (server-side spec — link to be added when the server protocol doc lands; tracked separately in the canyonroad repo — see spec §"`goaway_message` redaction policy") requires server operators NOT to include credentials, secrets, or PII in `Goaway.message`; client-side redaction beyond sanitization is out of scope. The conservative default (this Step 2's `LogGoawayMessage = false` posture) is the immediate mitigation for the period before the server contract is published. If a Watchtower server is found violating the no-secrets contract in production, the agent's logging filter (this Step 2's `sanitizeForLog` call) is the safety net for transport-layer log poisoning (oversized payloads, control bytes, mojibake) but NOT for credential redaction — the contract owner for "no secrets in `Goaway.message`" is the server, not the client. AGENTS.md / repo-wide privacy policy should be consulted before broadening this stance; the current project has no stricter cross-cutting redaction policy that would require additional client-side filtering here.
+
 - **`ServerUpdate` WARN emits only the standard `frame`/`reason`/`session_id` fields.** ServerUpdate-specific payload is intentionally omitted in Phase 4 because the phase does NOT process the SessionUpdate frame (the recv branch is fail-closed precisely because Phase 4 has no handler for key/generation rotation). Revisit when Phase 5+ adds support — at that point the WARN site goes away anyway, so dragging fields in here would be churn.
 - **Unknown frame WARN emits the standard fields plus `frame_type=fmt.Sprintf("%T", m)`** so operators can identify the proto type the local switch did not recognise.
 
 **Files:**
 - Modify: `internal/store/watchtower/transport/recv_multiplexer.go` — add `slog.LevelWarn` `LogAttrs` calls in the three fail-closed branches, BEFORE the existing `errCh` non-blocking send. Keep the `errCh` send unchanged (it remains the state-machine signal; the WARN log is added as a sibling diagnostic).
-- Modify: `internal/store/watchtower/transport/recv_multiplexer_test.go` — add table-driven tests asserting each branch emits exactly one WARN entry with the expected `reason` field AND, for the `Goaway` branch, the three stable Goaway-specific fields (`goaway_code`, `goaway_message`, `goaway_retry_immediately`). Use a recording `slog.Handler` bound to `t.opts.Logger` for assertions (the existing test infrastructure already provides this via the seams; verify before introducing a new seam).
+- Modify: `internal/store/watchtower/transport/transport.go` (or wherever the transport `Options` struct lives) — add the `LogGoawayMessage bool` field with the doc comment that references the server-contract dependency (see Step 2 below for the exact doc text).
+- Modify: `internal/store/watchtower/transport/recv_multiplexer_test.go` — add table-driven tests asserting each branch emits exactly one WARN entry with the expected `reason` field. For the `Goaway` branch, assert the conservative-default fields (`goaway_code`, `goaway_message_present`, `goaway_retry_immediately` — `goaway_message` ABSENT) AND the opt-in fields (the same three plus `goaway_message` after sanitization). Use a recording `slog.Handler` bound to `t.opts.Logger` for assertions, parameterized over BOTH `slog.NewJSONHandler` AND `slog.NewTextHandler` (the existing test infrastructure may already provide a JSON capture seam via the existing `slog` plumbing; verify before introducing a new seam, and EXTEND it for the Text handler if the JSON-only seam is the only one present).
 
 - [ ] **Step 1: Write the failing tests**
 
 Add to `internal/store/watchtower/transport/recv_multiplexer_test.go` a test (one per branch, table-driven if convenient) that:
-1. Constructs a `Transport` with a recording logger (capture all `slog.Record`s emitted).
+1. Constructs a `Transport` with a recording logger (capture all `slog.Record`s emitted). The recording logger MUST be parameterized to run under BOTH `slog.NewJSONHandler` AND `slog.NewTextHandler` — wrap the test body in a `t.Run("JSON", ...)` / `t.Run("Text", ...)` pair and instantiate the handler accordingly. The repo uses `TextHandler` in production code (e.g. `internal/threatfeed/syncer.go:40-42`), so the `goaway_message` opt-in path MUST behave correctly under both handlers (the sanitizer guarantees the field value is valid UTF-8 with no C0 controls EXCEPT `\n` and `\t`, which both handlers escape correctly). All schema and value assertions below MUST pass under both handlers; fork only the parsing helper (JSON: `json.Unmarshal` per line; Text: parse `key=value` pairs respecting `slog.TextHandler`'s quoting rules for values containing whitespace, `=`, or `"`).
 2. Drives a single inbound `*wtpv1.ServerMessage_Goaway` (or `_ServerUpdate`, or an unknown variant) through the recv goroutine via the existing seams. For the `Goaway` case, the **positive-path test** populates `Goaway.Code = wtpv1.GoawayCode_GOAWAY_CODE_DRAINING`, `Goaway.Message = "graceful shutdown"`, and **`Goaway.RetryImmediately = true`** so the test exercises NON-DEFAULT values for ALL three stable payload fields. Setting `RetryImmediately=true` is mandatory for the positive-path because `false` is the proto3 zero — a hardcoded `false` in the implementation would still pass a `RetryImmediately=false` test, hiding a wiring bug. Setting `Code = GOAWAY_CODE_DRAINING` (not `_UNSPECIFIED`) is mandatory for the same reason — `_UNSPECIFIED` is the proto3 zero for the enum. Setting `Message = "graceful shutdown"` (non-empty) is mandatory because empty-string is the proto3 zero for `string`.
-3. Asserts EXACTLY ONE WARN-level record was emitted with attributes `reason="goaway_received"` (resp. `"server_update_unsupported_in_phase_4"`, `"recv_unknown_frame_type"`), `frame="recv_control"`, AND `session_id` set to the transport's `opts.SessionID`. For the `Goaway` positive-path case, ALSO assert `goaway_code="GOAWAY_CODE_DRAINING"`, `goaway_message="graceful shutdown"`, `goaway_retry_immediately=true`.
+3. Asserts EXACTLY ONE WARN-level record was emitted with attributes `reason="goaway_received"` (resp. `"server_update_unsupported_in_phase_4"`, `"recv_unknown_frame_type"`), `frame="recv_control"`, AND `session_id` set to the transport's `opts.SessionID`. For the `Goaway` positive-path case under the **conservative default** (`LogGoawayMessage = false`), assert `goaway_code="GOAWAY_CODE_DRAINING"`, `goaway_retry_immediately=true`, `goaway_message_present=true`, and assert the `goaway_message` key is ABSENT from the log entry. For the **opt-in** sub-case (`LogGoawayMessage = true`), additionally assert `goaway_message="graceful shutdown"` AND `goaway_message_present=true`.
 4. Asserts the `errCh` still receives the existing recv-error envelope (the WARN log is additive — the state-machine signal is unchanged).
 
 **Additional zero-value-emission sub-tests for the `Goaway` branch** (each verifies the field is emitted at its zero value rather than omitted from the log entry — proto3 zero values are not transmitted on the wire but the LOG SCHEMA contract requires the field to appear regardless of value):
 
 a. **Sub-test `RetryImmediately=false`** — assert the log entry CONTAINS the `goaway_retry_immediately` key with value `false` (not absent). Comment in the test: "true case proves the field is plumbed at all; false case proves it's emitted at zero (not omitted from the log entry by an `if g.GetRetryImmediately()` guard)."
 b. **Sub-test `Code = GOAWAY_CODE_UNSPECIFIED`** — assert the log entry CONTAINS the `goaway_code` key with value `"GOAWAY_CODE_UNSPECIFIED"` (the enum's String() form for the zero value, NOT absent and NOT empty-string). Same rationale as (a): proves the field is emitted regardless of whether the server sent the proto3 default.
-c. **Sub-test `Message = ""`** — assert the log entry CONTAINS the `goaway_message` key with value `""` (empty-string explicitly, NOT absent). Same rationale as (a). The sanitizer (see log-safety sub-tests below) MUST pass empty-string through unchanged.
+c. **Sub-test `Message = ""`** — assert that under the conservative default the `goaway_message_present` key is present with value `false` (and `goaway_message` is absent). Under the opt-in (`LogGoawayMessage = true`), assert that `goaway_message` is present with value `""` (empty-string explicitly, NOT absent) AND `goaway_message_present=false`. Same rationale as (a). The sanitizer (see log-safety sub-tests below) MUST pass empty-string through unchanged.
 
-**Log-safety sub-tests for `goaway_message`** (the server-supplied message is potentially adversarial — it MUST be sanitized before logging so an operator's log pipeline isn't poisoned by control bytes, oversized payloads, or invalid UTF-8 sequences):
+**Log-safety sub-tests for `goaway_message`** (the server-supplied message is potentially adversarial — it MUST be sanitized before logging so an operator's log pipeline isn't poisoned by control bytes, oversized payloads, or invalid UTF-8 sequences). These sub-tests run under the **opt-in mode** (`LogGoawayMessage = true`) because that is the only mode where the message text is logged. The sanitizer itself is implemented and tested unconditionally, so these tests lock in the sanitizer contract regardless of the production default.
 
-d. **Sub-test overlength** — set `Goaway.Message` to a string longer than 512 bytes (e.g., `strings.Repeat("a", 1024)`). Assert the logged `goaway_message` field is truncated to AT MOST 512 bytes AND ends with the literal truncation marker `...[truncated]` so operators see the message was clipped (not silently chopped). The truncation marker is part of the 512-byte budget — the implementation truncates the raw input to `512 - len("...[truncated]")` bytes then appends the marker.
-e. **Sub-test non-printable bytes** — set `Goaway.Message` to a string containing control bytes such as `"hello\x00\x01world\x7f"` (NUL, SOH, DEL). Assert the logged `goaway_message` field has each control byte replaced by the Unicode replacement character (U+FFFD). The replacement-character strategy (NOT hex-escaping, NOT stripping) is enforced by the test so the implementation is constrained to one canonical sanitization output. Spaces, tabs, and newlines inside the printable range are preserved as-is — the sanitizer ONLY touches bytes outside the printable Unicode range.
+d. **Sub-test overlength** — set `Goaway.Message` to a string longer than 512 bytes (e.g., `strings.Repeat("a", 1024)`). Assert the logged `goaway_message` field is at most 512 bytes AND ends with the literal truncation marker `...[truncated]` so operators see the message was clipped (not silently chopped). The truncation marker is part of the 512-byte budget — the contract is "sanitize THEN truncate the SANITIZED OUTPUT to `512 - len("...[truncated]")` bytes at a rune boundary, then append the marker". Total output length is at most 512 bytes including the marker.
+e. **Sub-test non-printable bytes** — set `Goaway.Message` to a string containing control bytes such as `"hello\x00\x01world\x7f"` (NUL, SOH, DEL). Assert the logged `goaway_message` field has each control byte replaced by the Unicode replacement character (U+FFFD). The replacement-character strategy (NOT hex-escaping, NOT stripping) is enforced by the test so the implementation is constrained to one canonical sanitization output. Spaces, tabs, and newlines inside the printable range are PRESERVED as-is — the sanitizer ONLY touches bytes outside the printable Unicode range, with `' '`, `'\t'`, and `'\n'` in the explicit pass-through set per the "Whitespace preservation policy" callout in the WARN field schema above.
 f. **Sub-test invalid UTF-8** — set `Goaway.Message` to a string containing invalid UTF-8 sequences such as `"prefix\xff\xfe\xfdsuffix"` (lone continuation bytes, invalid lead bytes). Assert the logged `goaway_message` field has each invalid byte sequence replaced by U+FFFD. The test MUST exercise a multi-byte invalid sequence (e.g. `"\xed\xa0\x80"` — a UTF-16 surrogate half encoded as 3-byte UTF-8) to lock in that the sanitizer uses `strings.ToValidUTF8(s, "\ufffd")` semantics rather than per-byte ASCII filtering (which would leave the surrogate's three bytes individually classified as "not control" and pass them through corrupted).
+g. **Sub-test combined overlength + invalid + control + multi-byte boundary** — the canonical "all-at-once" regression for the sanitize-THEN-truncate ordering contract. Construct a 600-byte input that mixes:
+  - >100 bytes of plain ASCII at the start (to verify pass-through of the non-pathological prefix);
+  - several invalid UTF-8 sequences sprinkled mid-input (e.g. `"\xff\xfe"`, `"\xc3\x28"` — invalid 2-byte sequence);
+  - several control bytes (`"\x00"`, `"\x01"`, `"\x7f"`);
+  - a multi-byte UTF-8 character (e.g. `"é"` = `"\xc3\xa9"` or `"中"` = `"\xe4\xb8\xad"`) deliberately positioned NEAR the truncation boundary (around byte 500-510 of the sanitized output) to verify the truncation walks back to a rune boundary instead of splitting the multi-byte character mid-codepoint.
 
-If the recording-logger seam does not yet exist in the test file, add it as a small helper that wraps `slog.New(slog.NewJSONHandler(&buf, ...))` and a helper to parse the JSON lines back into attribute maps for assertion.
+  Assertions:
+  - The output is sanitized first: every invalid UTF-8 sequence and every control byte (excluding the `' '`/`'\t'`/`'\n'` pass-through set) is replaced with U+FFFD.
+  - The output is then truncated to AT MOST 512 bytes ending at a rune boundary (NOT mid-codepoint), with the `...[truncated]` marker appended within the 512-byte budget.
+  - `utf8.ValidString(out) == true` — the entire output is valid UTF-8 (sanitization replaced everything invalid; truncation never split a multi-byte sequence).
+  - The plain-ASCII prefix at the start of the input is preserved verbatim in the output's prefix region.
+
+  This sub-test is the load-bearing regression for the sanitize-THEN-truncate ordering: an implementation that truncates raw input first would fail at least one of the boundary assertions (sanitization growth would push the output over 512 bytes, OR raw truncation would split the multi-byte character mid-codepoint and `utf8.ValidString` would fail).
+
+If the recording-logger seam does not yet exist in the test file, add it as a small helper that wraps `slog.New(slog.NewJSONHandler(&buf, ...))` AND `slog.New(slog.NewTextHandler(&buf, ...))`, plus parsing helpers for both formats. Drive the per-handler subtest fork from a single test body so the assertions stay DRY.
 
 Run: `go test ./internal/store/watchtower/transport/ -run TestRecvMultiplexer_FailClosed.*WarnLog -count=1 -race`
 Expected: FAIL — the WARN calls don't exist yet.
 
 - [ ] **Step 2: Add the WARN calls**
 
-In `internal/store/watchtower/transport/recv_multiplexer.go`, in each of the three fail-closed branches (currently around lines 222, 232, 240), add a `t.opts.Logger.LogAttrs(...)` call BEFORE the existing `errCh` non-blocking send. Pattern (mirroring the existing anomaly-WARN pattern at lines 298–312):
+In `internal/store/watchtower/transport/recv_multiplexer.go`, in each of the three fail-closed branches (currently around lines 222, 232, 240), add a `t.opts.Logger.LogAttrs(...)` call BEFORE the existing `errCh` non-blocking send. The `Goaway` branch's WARN payload depends on the transport's `LogGoawayMessage` config flag (default `false` — see WARN field schema above). Pattern (mirroring the existing anomaly-WARN pattern at lines 298–312):
 
 ```go
 case *wtpv1.ServerMessage_Goaway:
     g := m.Goaway
-    // sanitizeForLog enforces three guarantees, in order:
-    //   1. Replace any invalid UTF-8 sequence with U+FFFD (use
-    //      strings.ToValidUTF8(s, "\ufffd") — handles multi-byte invalid
-    //      sequences correctly, where per-byte ASCII filtering would
-    //      pass corrupted multi-byte runs through).
-    //   2. Replace any control / non-printable rune with U+FFFD (iterate
-    //      runes after step 1 and replace anything where !unicode.IsPrint
-    //      AND not in the explicit pass-through set {' ', '\t', '\n'}).
-    //   3. Truncate to AT MOST 512 bytes WITH the literal marker
-    //      "...[truncated]" appended INSIDE the 512-byte budget — i.e.
-    //      truncate the raw input to (512 - len("...[truncated]"))
-    //      bytes then append the marker; do NOT chop mid-rune (use
-    //      utf8.RuneStart-aware truncation).
-    // The test sub-cases d/e/f in Step 1 enforce these three guarantees
-    // exactly; the implementation MUST match them. If a future
-    // log-sanitization helper lands in a shared package, replace the
-    // local function with a call to it WITHOUT changing the contract.
-    msg := sanitizeForLog(g.GetMessage())
-    t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
-        "wtp: recv fail-closed control frame",
+    msgPresent := g.GetMessage() != ""
+    attrs := []slog.Attr{
         slog.String("frame", "recv_control"),
         slog.String("reason", "goaway_received"),
         slog.String("goaway_code", g.GetCode().String()),
-        slog.String("goaway_message", msg),
         slog.Bool("goaway_retry_immediately", g.GetRetryImmediately()),
-        slog.String("session_id", t.opts.SessionID))
+        slog.Bool("goaway_message_present", msgPresent),
+    }
+    if t.opts.LogGoawayMessage {
+        // Opt-in verbatim mode (gated on the Watchtower-server-side
+        // contract that forbids secrets in Goaway.message — see spec
+        // §"`goaway_message` redaction policy"). sanitizeForLog
+        // enforces three guarantees, IN THIS ORDER:
+        //   1. Replace any invalid UTF-8 sequence with U+FFFD (use
+        //      strings.ToValidUTF8(s, "\ufffd") — handles multi-byte
+        //      invalid sequences correctly, where per-byte ASCII
+        //      filtering would pass corrupted multi-byte runs through).
+        //   2. Replace any control / non-printable rune with U+FFFD
+        //      (iterate runes after step 1 and replace anything where
+        //      !unicode.IsPrint AND not in the explicit pass-through
+        //      set {' ', '\t', '\n'} — the two whitespace controls are
+        //      preserved per the schema's "Whitespace preservation
+        //      policy"; both JSONHandler and TextHandler escape them
+        //      correctly).
+        //   3. Truncate the SANITIZED OUTPUT (NOT the raw input) to
+        //      AT MOST 512 bytes WITH the literal marker
+        //      "...[truncated]" appended INSIDE the 512-byte budget —
+        //      i.e. truncate the sanitized string to (512 -
+        //      len("...[truncated]")) bytes at a UTF-8 rune boundary
+        //      (use utf8.RuneStart-aware backtracking) then append
+        //      the marker. The sanitize-THEN-truncate ordering is
+        //      load-bearing: sanitization can grow the string (a
+        //      single invalid byte expands to a 3-byte U+FFFD), and
+        //      truncating raw input could split a valid multi-byte
+        //      sequence at a non-rune boundary.
+        // Step 1 sub-cases d/e/f/g enforce these guarantees exactly;
+        // the implementation MUST match them. If a future log-
+        // sanitization helper lands in a shared package, replace the
+        // local function with a call to it WITHOUT changing the
+        // contract.
+        msg := sanitizeForLog(g.GetMessage())
+        attrs = append(attrs, slog.String("goaway_message", msg))
+    }
+    t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+        "wtp: recv fail-closed control frame",
+        append(attrs, slog.String("session_id", t.opts.SessionID))...)
     select {
     case rs.errCh <- errors.New("recv: control frame goaway not yet handled"):
     default:
     }
     return
 ```
+
+The transport's `Options` struct gains a new field `LogGoawayMessage bool` (default `false`). The doc comment MUST reference the spec dependency:
+
+```go
+// LogGoawayMessage controls whether the Goaway WARN log includes the
+// server-supplied message text verbatim (after sanitization). Defaults
+// to false (conservative posture) — the message is OMITTED from the
+// log payload and only a goaway_message_present marker is emitted.
+//
+// Setting this to true is OPT-IN and is gated on the Watchtower-server-
+// side contract that forbids secrets, credentials, or PII in
+// Goaway.message. That contract lives in the canyonroad repo (Watchtower
+// server team — see spec §"`goaway_message` redaction policy" for the
+// follow-up tracker). Operators who set this to true while the contract
+// is pending take responsibility for their own server-side redaction
+// posture (e.g. by trusting only their own internal Watchtower
+// deployments).
+LogGoawayMessage bool
+```
+
+The handler-agnostic test parameterization (Step 1 fork over `JSONHandler` and `TextHandler`) MUST pass under both handlers when `LogGoawayMessage = true`. The sanitizer's invariant — output is valid UTF-8 with no C0 controls except `\n` and `\t` — guarantees both handlers escape the field value correctly: `slog.JSONHandler` JSON-escapes `\n` and `\t` as `\n`/`\t` in the JSON string; `slog.TextHandler` quotes the value when it contains either character. There is no canonical handler choice for production; both are supported.
 
 The `sanitizeForLog` helper lives alongside the recv multiplexer (no shared log-sanitization package exists in this codebase today — verified by `rg -l 'sanitize|Sanitize' internal/store/watchtower/transport/` returning empty). Inline implementation in `recv_multiplexer.go` (keep it private to the package; lift to `internal/log/sanitize.go` in a follow-up if a second caller emerges):
 
@@ -14886,9 +14955,17 @@ const (
 
 // sanitizeForLog returns s after (1) UTF-8 validation (invalid bytes
 // replaced with U+FFFD), (2) control/non-printable rune replacement
-// (replaced with U+FFFD; passes through ' ', '\t', '\n'), and (3)
-// truncation to goawayMessageMaxBytes with goawayTruncationMarker
-// appended inside the budget. Empty input returns empty output.
+// (replaced with U+FFFD; passes through ' ', '\t', '\n' per the
+// "Whitespace preservation policy" in the WARN field schema), and (3)
+// truncation of the SANITIZED output to goawayMessageMaxBytes with
+// goawayTruncationMarker appended inside the budget at a UTF-8 rune
+// boundary. Empty input returns empty output.
+//
+// Order matters: sanitize THEN truncate. Sanitization can grow the
+// string (a single invalid byte expands to a 3-byte U+FFFD), and
+// truncating raw input could split a valid multi-byte sequence at a
+// non-rune boundary. Step 1's combined sub-test (g) is the regression
+// for this ordering.
 func sanitizeForLog(s string) string {
     if s == "" {
         return ""
@@ -14943,7 +15020,7 @@ Verify spec §"Operator observability for fail-closed recv branches" references 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add internal/store/watchtower/transport/recv_multiplexer.go internal/store/watchtower/transport/recv_multiplexer_test.go
+git add internal/store/watchtower/transport/recv_multiplexer.go internal/store/watchtower/transport/transport.go internal/store/watchtower/transport/recv_multiplexer_test.go
 git commit -m "feat(wtp/transport): structured WARN logs for fail-closed recv branches"
 ```
 
