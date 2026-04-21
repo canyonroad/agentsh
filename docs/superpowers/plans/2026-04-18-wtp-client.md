@@ -10751,14 +10751,22 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 			// O(span) where span = wal.HighGeneration() -
 			// persistedAck.Generation — the iteration count is the
 			// RANGE of generation numbers, NOT the surviving on-disk
-			// count and NOT the post-filter stage count. In healthy
-			// operation span ≈ surviving-count ≈ 1-3; they diverge
-			// only when GC has pruned middle generations (e.g., span=10
-			// with surviving-count=3 if generations 11-13 were fully
-			// GC'd between persistedAck.Generation=10 and
-			// HighGeneration=20). The per-gen call is an in-memory map
-			// lookup with no disk I/O. See spec §"Cost bound for
-			// reconnect-time replay scan".
+			// count and NOT the post-filter stage count. Round-17
+			// Finding 2: in healthy operation, span on reconnect is
+			// typically 0-1 (the writer has not advanced more than once
+			// since the last persisted ack); surviving-count is
+			// typically 1-3 independent of span (the active generation
+			// plus 0-2 GC-eligible neighbours pending pruning). Span
+			// and surviving-count diverge whenever GC has pruned middle
+			// generations (e.g., span=10 with surviving-count=3 if
+			// generations 11-13 were fully GC'd between
+			// persistedAck.Generation=10 and HighGeneration=20). The
+			// production loop carries an explicit wraparound guard
+			// (`gen > persistedAck.Generation`) so that a hypothetical
+			// persistedAck.Generation == math.MaxUint32 short-circuits
+			// instead of looping back through gen=0. The per-gen call
+			// is an in-memory map lookup with no disk I/O. See spec
+			// §"Cost bound for reconnect-time replay scan".
 			stages, lerr := t.computeReplayPlan(t.remoteReplayCursor, t.persistedAck)
 			if lerr != nil {
 				rep = nil
@@ -13089,8 +13097,8 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	}
 
 	go func() {
-		_ = tr.Run(ctx, func(start uint64) (*wal.Reader, error) {
-			return w.NewReader(start), nil
+		_ = tr.Run(ctx, func(gen uint32, start uint64) (*wal.Reader, error) {
+			return w.NewReader(wal.ReaderOptions{Generation: gen, Start: start})
 		}, transport.LiveOptions{
 			Batcher: transport.BatcherOptions{
 				MaxRecords: opts.BatchMaxRecords,
