@@ -204,11 +204,24 @@ func TestRecvMultiplexer_PreservesWireOrderingAcrossBatchAckAndHeartbeat(t *test
 
 // ===== Round-22 Test 2 =====
 // TestRecvMultiplexer_ReconnectDoesNotLeakStateAcrossSessions —
-// round-22 Finding 2. Start one recvSession, drain it, tear it down,
-// start a fresh recvSession. Assert: (a) the new session's eventCh
-// is empty (no stale event from the first session bleeds through),
-// (b) the new session's ctx is alive, (c) the OLD session's ctx is
-// cancelled.
+// round-22 Finding 2 (strengthened by round-23 Finding 3). Start one
+// recvSession, drain it, tear it down, start a fresh recvSession.
+// Asserts:
+//   (a) the OLD session's ctx is cancelled and its goroutine has fully
+//       exited (the done channel is closed, proving the goroutine
+//       returned from runRecv);
+//   (b) the new session's ctx is alive AND its eventCh is empty;
+//   (c) channel identity is isolated — the new session's eventCh is a
+//       distinct allocation from the old session's eventCh;
+//   (d) a stale send attempted on the OLD session's eventCh after
+//       teardown does NOT bleed into the NEW session's eventCh.
+//
+// Round-23 Finding 3: the old session's `eventCh` is captured via the
+// RecvSessionHandle BEFORE teardown so the test can attempt a
+// non-blocking send into it after the goroutine exits — this proves
+// the bleed-isolation guarantee end-to-end (channel identity AND no
+// observable cross-channel propagation), not just the empty-buffer
+// post-condition.
 func TestRecvMultiplexer_ReconnectDoesNotLeakStateAcrossSessions(t *testing.T) {
 	t.Parallel()
 
@@ -224,6 +237,11 @@ func TestRecvMultiplexer_ReconnectDoesNotLeakStateAcrossSessions(t *testing.T) {
 		t.Fatalf("session 1 first event: got (%q, %d), want (batch_ack, 100)", frame, seq)
 	}
 
+	// Capture the old session handle BEFORE teardown so we can attempt
+	// the stale-send-after-teardown probe below. RecvSessionHandle
+	// retains the channel even after Transport.recv is niled out.
+	h1Old := h1
+
 	// Tear down the first session — close the fake conn first so the
 	// recv goroutine returns from its blocking Recv() (cond-wait does
 	// not unblock on ctx-cancel alone). teardownRecv waits for the
@@ -233,6 +251,13 @@ func TestRecvMultiplexer_ReconnectDoesNotLeakStateAcrossSessions(t *testing.T) {
 	transport.TeardownRecvForTest(tr)
 	if err := h1.Ctx().Err(); err == nil {
 		t.Fatal("session 1 ctx still alive after teardown")
+	}
+	// Round-23 Finding 4 strengthening: prove the goroutine has fully
+	// exited (ctx cancellation alone does not prove return-from-runRecv).
+	select {
+	case <-h1.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("session 1 recv goroutine did not exit after teardown")
 	}
 
 	// Re-attach a fresh fake conn (mirrors what runConnecting would do
@@ -252,10 +277,43 @@ func TestRecvMultiplexer_ReconnectDoesNotLeakStateAcrossSessions(t *testing.T) {
 		t.Fatalf("session 2 ctx: got %v, want alive", err)
 	}
 
-	// Sanity check: session 2 demuxes its own frames cleanly.
+	// Round-23 Finding 3: prove channel identity isolation. The new
+	// session's eventCh MUST be a distinct allocation from the old
+	// session's eventCh — same address would mean the recvSession
+	// constructor reused the channel and a stale send on the old
+	// reference could leak forward.
+	if h1Old.EventCh() == h2.EventCh() {
+		t.Fatal("session 2 eventCh: shares identity with session 1 eventCh (stale-leak risk)")
+	}
+
+	// Round-23 Finding 3: attempt a non-blocking send onto the OLD
+	// session's eventCh AFTER teardown. The goroutine is gone so
+	// nothing reads from it; the channel still exists in memory (the
+	// handle holds a reference) so the send can succeed into the
+	// channel buffer (which had spare capacity after we drained the
+	// (1, 100) event). This send is a stand-in for "what would happen
+	// if some other code path retained a reference to the old channel
+	// and tried to push into it" — the assertion that follows proves
+	// no such push can be observed via the NEW session's eventCh.
+	staleEvt := recvBatchAck(99, 9999)
+	_ = h1Old.TrySendStaleEventForTest(transport.MakeBatchAckEventForTest(staleEvt))
+
+	// Sanity check: session 2 demuxes its own frames cleanly AND the
+	// stale send into the OLD eventCh did NOT bleed into the NEW one.
 	fc2.Push(recvBatchAck(2, 50))
 	if frame, gen, seq := drainEvent(t, h2, time.Second); frame != "batch_ack" || gen != 2 || seq != 50 {
-		t.Fatalf("session 2 first event: got (%q, %d, %d), want (batch_ack, 2, 50)", frame, gen, seq)
+		t.Fatalf("session 2 first event: got (%q, %d, %d), want (batch_ack, 2, 50) — stale (99, 9999) bleed?", frame, gen, seq)
+	}
+
+	// Final assertion: drain one more time with a very short timeout
+	// to confirm nothing else (i.e., no stale event) sits on the new
+	// channel after the legitimate one.
+	select {
+	case ev := <-h2.EventCh():
+		t.Fatalf("session 2 eventCh saw unexpected event after legitimate one: frame=%q gen=%d seq=%d (stale leak)",
+			transport.FrameForTest(ev), transport.GenForTest(ev), transport.SeqForTest(ev))
+	case <-time.After(50 * time.Millisecond):
+		// Expected: no further events.
 	}
 }
 
@@ -347,6 +405,17 @@ func TestRecvMultiplexer_PerConnectionCancelUnblocksBlockedRecv(t *testing.T) {
 		t.Fatalf("recv ctx still alive %s after cancel", time.Since(cancelStart))
 	}
 
+	// Round-23 Finding 4: ctx cancellation alone does NOT prove the
+	// recv goroutine has returned from runRecv — it only proves the
+	// per-connection ctx flipped. Wait on the done channel (closed by
+	// runRecv's `defer close(rs.done)` immediately before return) to
+	// confirm the goroutine has fully exited.
+	select {
+	case <-h.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("recv goroutine did not exit (Done channel still open) after per-connection cancel")
+	}
+
 	// The transport-wide parent ctx must still be alive — the
 	// per-connection cancel must NOT propagate up.
 	if parent.Err() != nil {
@@ -389,6 +458,17 @@ func TestRecvMultiplexer_GoawaySurfacesFailClosedError(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("recv did not surface Goaway as fail-closed error")
 	}
+
+	// Round-23 Finding 4: errCh delivery proves the fail-closed branch
+	// emitted, but does NOT prove the recv goroutine actually returned
+	// from runRecv. Wait on the done channel (closed by runRecv's
+	// `defer close(rs.done)` immediately before return) to confirm the
+	// fail-closed Goaway branch terminated the goroutine as documented.
+	select {
+	case <-h.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("recv goroutine did not exit (Done channel still open) after Goaway fail-closed")
+	}
 }
 
 // ===== Round-22 Test 4b =====
@@ -424,5 +504,14 @@ func TestRecvMultiplexer_SessionUpdateSurfacesFailClosedError(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("recv did not surface ServerUpdate as fail-closed error")
+	}
+
+	// Round-23 Finding 4: see Goaway test — wait on Done() to prove the
+	// recv goroutine actually returned from runRecv after pushing the
+	// fail-closed error onto errCh.
+	select {
+	case <-h.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("recv goroutine did not exit (Done channel still open) after ServerUpdate fail-closed")
 	}
 }

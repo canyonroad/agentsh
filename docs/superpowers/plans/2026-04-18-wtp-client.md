@@ -9443,6 +9443,8 @@ func encodeBatchMessage(_ []wal.Record) (*wtpv1.ClientMessage, error) {
 
 **Sub-step 17.X: Two-cursor ack clamp in BatchAck/ServerHeartbeat handlers (round-8 rewrite — depends on Task 15.1)**
 
+**Status (round-23): test-only until Task 22 wires it into runConnecting.** The recv multiplexer (`runRecv`, `newRecvSession`, `teardownRecv`, `applyAckFromRecv`) and the `Transport.recv *recvSession` field have all landed in production code, but `runConnecting` does NOT yet start the recv goroutine after accepting `SessionAck` — `state_connecting.go::runConnecting` returns straight to `StateReplaying` without touching `t.recv`. The recv path is exercised exclusively via the `StartRecvForTest` / `TeardownRecvForTest` test seams (see `seams_export_test.go`); production callers see `t.recv == nil` so the `state_live.go` and `state_replaying.go` recv-channel select arms are dormant by Go's nil-channel semantics. **Task 22 (Store integration / runConnecting wiring) will start a fresh `recvSession` on each successful dial after `SessionAck` is accepted** by adding `t.recv = newRecvSession(ctx); go t.runRecv(t.recv)` to `runConnecting` immediately before the `StateReplaying` return. Until that wiring lands, all "fresh recvSession created on each successful dial" / "started on each redial" / "production lifecycle" language in this section describes the END STATE that Task 22 finishes — not what production runConnecting does today. Cross-reference: see Task 22 Run-loop / Store integration sub-section for the runConnecting wiring.
+
 **Scope: same-generation only.** Round-9 narrowing — mirrors Task 15.1. The BatchAck and ServerHeartbeat handlers reuse the same `applyServerAckTuple` helper and inherit the same scope: legitimate `ResendNeeded` outcomes are restricted to **same-generation** server tuples. Cross-generation server tuples (`server.gen != local.persistedAck.gen`, in either direction) take the `Anomaly` path or the cross-gen `Adopted` path per the unified classification table.
 
 **Round-12 SCOPE NOTE (Finding 5 — supersedes round-11; mirrors Task 15.1 EXACTLY).** The recv-side wrapper dispatches on the SAME unified anomaly classification predicates Task 15.1's helper uses, in this order. Both call sites MUST stay in lock-step with this table — the helper is the single source of truth, and the wrapper is allowed only to add the `frame=...` label to the WARN.
@@ -9674,11 +9676,11 @@ Round-22 integration tests (drive the recv goroutine via a fake Conn, not just t
 
 - `TestRecvMultiplexer_PreservesWireOrderingAcrossBatchAckAndHeartbeat`: drive a fake `Conn` whose `Recv()` emits a deterministic sequence of mixed `*wtpv1.ServerMessage_BatchAck` and `*wtpv1.ServerMessage_ServerHeartbeat` frames (e.g. BatchAck(1, 100), Heartbeat(99), BatchAck(1, 200), Heartbeat(150)). Start the recv goroutine via the test seam, drain the events on the main goroutine, and assert the resulting `applyAckFromRecv` calls happen in strict wire order — no heartbeat crosses a later BatchAck. Use a pre-allocated `Recorder` that captures `(frame, gen, seq)` in invocation order; the assertion is the recorded slice equals the wire order.
 
-- `TestRecvMultiplexer_ReconnectDoesNotLeakStateAcrossSessions`: dial → drive a few events through the recv goroutine → tear down the recvSession via the test seam → re-dial (new recvSession). Push a stale event onto the OLD session's eventCh AFTER teardown (the channel still exists in the closure but the Transport no longer points at it); assert that the new recvSession's eventCh is empty, that the new session's ctx is alive, and that the old session's ctx is cancelled. This locks in round-22 Finding 2: no event from the prior connection is observable through the new recvSession.
+- `TestRecvMultiplexer_ReconnectDoesNotLeakStateAcrossSessions`: dial → drive a few events through the recv goroutine → tear down the recvSession via the test seam → re-dial (new recvSession). Push a stale event onto the OLD session's eventCh AFTER teardown (the channel still exists in the closure but the Transport no longer points at it); assert that the new recvSession's eventCh is empty, that the new session's ctx is alive, and that the old session's ctx is cancelled. This locks in round-22 Finding 2: no event from the prior connection is observable through the new recvSession. **Round-23 Finding 3 strengthening:** the test additionally (a) waits on the OLD session's `Done()` channel after teardown to prove the goroutine has fully returned from `runRecv` (not just that the ctx flipped), (b) compares old-vs-new `eventCh` channel identity to prove the constructor allocated a fresh channel for the new session, (c) attempts a non-blocking send onto the OLD session's eventCh after teardown via `RecvSessionHandle.TrySendStaleEventForTest`, and (d) drains the NEW session's eventCh and asserts the stale event is NOT observed (even after the legitimate event arrives) — proving channel-identity isolation AND no observable cross-channel propagation.
 
-- `TestRecvMultiplexer_PerConnectionCancelUnblocksBlockedRecv`: fill `recvSession.eventCh` to capacity by draining nothing on the main goroutine, then have the fake conn deliver one more BatchAck — the recv goroutine blocks on the eventCh send. Trigger per-connection cancellation by calling `t.recv.cancelFn()`. Assert the recv goroutine exits within a short timeout (e.g. 100ms). This locks in round-22 Finding 2's per-connection-ctx behaviour: the recv goroutine MUST respond to the connection-scoped cancel even when the transport-wide ctx is still alive.
+- `TestRecvMultiplexer_PerConnectionCancelUnblocksBlockedRecv`: fill `recvSession.eventCh` to capacity by draining nothing on the main goroutine, then have the fake conn deliver one more BatchAck — the recv goroutine blocks on the eventCh send. Trigger per-connection cancellation by calling `t.recv.cancelFn()`. Assert the recv goroutine exits within a short timeout (e.g. 100ms). This locks in round-22 Finding 2's per-connection-ctx behaviour: the recv goroutine MUST respond to the connection-scoped cancel even when the transport-wide ctx is still alive. **Round-23 Finding 4 strengthening:** after asserting `Ctx().Err() != nil`, the test ALSO waits on `RecvSessionHandle.Done()` (closed by `runRecv`'s `defer close(rs.done)` immediately before return) to prove the goroutine has actually returned — `ctx.Err()` only proves the per-connection ctx flipped, not that the goroutine exited.
 
-- `TestRecvMultiplexer_GoawaySurfacesFailClosedError`: drive a fake Conn that emits a `*wtpv1.ServerMessage_Goaway` frame. Start the recv goroutine; assert that it pushes a non-nil error onto `recvSession.errCh` carrying a "control frame goaway not yet handled" substring (or equivalent), and that the recv goroutine exits. Sibling test `TestRecvMultiplexer_SessionUpdateSurfacesFailClosedError` does the same for `*wtpv1.ServerMessage_ServerUpdate`. This locks in round-22 Finding 4: the recv goroutine MUST NOT silently drop control frames the client cannot yet handle. Tasks 18/19/20 will replace these branches with real handlers.
+- `TestRecvMultiplexer_GoawaySurfacesFailClosedError`: drive a fake Conn that emits a `*wtpv1.ServerMessage_Goaway` frame. Start the recv goroutine; assert that it pushes a non-nil error onto `recvSession.errCh` carrying a "control frame goaway not yet handled" substring (or equivalent), and that the recv goroutine exits. Sibling test `TestRecvMultiplexer_SessionUpdateSurfacesFailClosedError` does the same for `*wtpv1.ServerMessage_ServerUpdate`. This locks in round-22 Finding 4: the recv goroutine MUST NOT silently drop control frames the client cannot yet handle. Tasks 18/19/20 will replace these branches with real handlers. **Round-23 Finding 4 strengthening:** both tests additionally wait on `RecvSessionHandle.Done()` after the errCh delivery to prove the fail-closed branch actually returned from `runRecv` (errCh delivery alone proves only that the branch emitted; a missing `return` would still pass the errCh check but fail Done()).
 
 Step ordering for sub-step 17.X (mirrors the Task 15.1 step shape — round-8 rewrite):
 
@@ -9787,32 +9789,57 @@ case ev := <-t.recv.eventCh:
 
 **Per-connection recv state (round-22 rewrite — Finding 2).** Earlier rounds held the recv-multiplexer channels and the `latestHeartbeat` pointer as fields directly on `Transport`. Round-22 reviewer flagged that this lets stale state from an old stream bleed into the next stream after reconnect: a pending recv-error value, a queued heartbeat signal, or the `latestHeartbeat` pointer all survive a `t.conn.Close()` + redial cycle. Worse, a recv goroutine blocked on `recvBatchAckCh` was only listening to the transport-wide `ctx.Done()` — so cancelling a connection mid-state-transition (StateLive → StateConnecting on stream error) could not unblock the recv goroutine until the entire transport shut down.
 
-The round-22 fix: hold all recv-multiplexer state in a single per-connection `recvSession` struct. The struct is created fresh on each successful dial and discarded on every tear-down. State cannot survive across reconnect because the field that holds it is a fresh allocation on each Connecting-success path.
+The round-22 fix: hold all recv-multiplexer state in a single per-connection `recvSession` struct. Once Task 22 wires the recv lifecycle into `runConnecting`, the struct will be created fresh on each successful dial after SessionAck and discarded on every tear-down. State cannot survive across reconnect because the field that holds it is a fresh allocation on each Connecting-success path. Until Task 22 lands the wiring, the only callers that allocate a `recvSession` are the `StartRecvForTest` / `TeardownRecvForTest` test seams (see Status callout above and `seams_export_test.go`).
 
 ```go
-// recvSession bundles all per-connection recv-multiplexer state. A new
-// instance is created on each successful dial (in runConnecting after
-// SessionAck) and discarded when the conn tears down. The fields are
-// non-nil for the lifetime of the connection; the Transport.recv field
-// points at the live session OR is nil (when no recv goroutine is
-// running, e.g. between connections or in tests that do not dial).
+// recvSession bundles all per-connection recv-multiplexer state. Task 22
+// will create a new instance on each successful dial (in runConnecting,
+// immediately after SessionAck is accepted, by calling
+// t.recv = newRecvSession(ctx) followed by go t.runRecv(t.recv)) and
+// discard it when the conn tears down. Until Task 22 lands, only the
+// test seams allocate a recvSession; production runConnecting does NOT
+// touch t.recv. The fields are non-nil for the lifetime of the
+// connection; the Transport.recv field points at the live session OR is
+// nil (when no recv goroutine is running, e.g. between connections or
+// in tests that do not dial).
 //
 // Per-connection ctx + cancelFn is the load-bearing piece for round-22
 // Finding 2: cancelling the per-connection ctx unblocks the recv
 // goroutine's blocking send on eventCh, even when the transport-wide
 // ctx is still alive (e.g. StateLive→StateConnecting transition after
 // a stream error — only this connection is dead, not the transport).
+//
+// done is closed by runRecv right before it returns. teardownRecv waits
+// on it so callers can rely on the recv goroutine being fully stopped
+// (and no longer reading t.conn) once teardownRecv returns. This is the
+// synchronisation primitive that prevents data races on t.conn between
+// the recv goroutine and the main state-machine goroutine when the next
+// dial overwrites t.conn after teardown.
 type recvSession struct {
     ctx      context.Context
     cancelFn context.CancelFunc
     eventCh  chan recvAckEvent
     errCh    chan error
+    done     chan struct{}
 }
 ```
 
-`Transport.recv *recvSession` replaces the four round-6 fields (`recvBatchAckCh`, `heartbeatSignalCh`, `latestHeartbeat`, `recvErrCh`). Every state exit path that tears down the conn (StateLive → StateConnecting on stream error, StateLive → StateShutdown on ctx cancel, StateReplaying → StateConnecting on err, StateReplaying → StateShutdown on ctx cancel) MUST call `t.recv.cancelFn()` BEFORE `t.conn.Close()` so the recv goroutine wakes up; AFTER the cancel and close it MUST nil out `t.recv` so subsequent state-handler reads see no stale references.
+`Transport.recv *recvSession` replaces the four round-6 fields (`recvBatchAckCh`, `heartbeatSignalCh`, `latestHeartbeat`, `recvErrCh`). Every state-exit path that tears down the conn (StateLive → StateConnecting on stream error, StateLive → StateShutdown on ctx cancel, StateReplaying → StateConnecting on err, StateReplaying → StateShutdown on ctx cancel) MUST follow this **exact ordering** to avoid a deadlock in `teardownRecv`'s wait on `rs.done`:
 
-The select arms in state_live.go / state_replaying.go read recv-channel state via `t.recv.eventCh` and `t.recv.errCh`, gated on `t.recv != nil` (Go's nil-channel semantics make those select arms dormant when the field is nil — preserves the current "recv goroutine not started yet" behaviour for tests that drive applyAckFromRecv directly without a dial).
+1. **`t.conn.Close()`** — unblocks any in-flight `t.conn.Recv()` call inside the recv goroutine. `rs.ctx` cancellation alone does NOT unblock `Recv()`: the gRPC stream / fake test conn / etc. only returns from `Recv` when (a) a frame arrives, (b) `Recv` hits a stream error, or (c) the conn is `Close()`d. Skipping this step would deadlock the next step because `runRecv` cannot reach its `defer close(rs.done)` until `Recv` returns.
+2. **`t.teardownRecv()`** — calls `rs.cancelFn()` (which prevents new blocking sends on `eventCh`) AND waits on `rs.done` (which is closed by `runRecv`'s top-of-function `defer close(rs.done)` immediately before return). After this returns, the recv goroutine has fully exited and no longer holds a reference to `t.conn`.
+3. **`t.conn = nil`** — clears the field so the next state-handler iteration sees no stale reference and the next `runConnecting` call can dial fresh.
+
+This is the order the production code in `state_live.go::runLive` and `state_replaying.go::runReplaying` follows on every exit path; the canonical snippet is:
+
+```go
+_ = t.conn.Close()
+t.teardownRecv()
+t.conn = nil
+return StateConnecting, fmt.Errorf("recv: %w", err) // or StateShutdown for ctx-cancel
+```
+
+The select arms in `state_live.go` / `state_replaying.go` read recv-channel state via `t.recv.eventCh` and `t.recv.errCh`, gated on `t.recv != nil` (Go's nil-channel semantics make those select arms dormant when the field is nil — preserves the current "recv goroutine not started yet" behaviour for tests that drive `applyAckFromRecv` directly without a dial AND for the pre-Task-22 production reality where `runConnecting` doesn't start the goroutine).
 
 **Fail-closed for unhandled control frames (round-22 Finding 4).** The round-6 design silently dropped `Goaway` and `SessionUpdate` frames in the recv-goroutine's default switch arm. Round-22 reviewer flagged that as unsafe staging once the recv goroutine becomes the sole production recv path — a Goaway is the server's reconnect signal and silently dropping it would wedge the session forever; a SessionUpdate is a key-rotation control frame and dropping it desynchronises the chain. The round-22 fix: when the recv goroutine sees a `*wtpv1.ServerMessage_Goaway` or `*wtpv1.ServerMessage_ServerUpdate`, it pushes a fatal error onto `recvSession.errCh` ("control frame X not yet handled") and returns. The main goroutine's `recvErrCh` arm sees the error and returns to `StateConnecting` — same path as a real stream error. A separate fall-through arm catches any future unknown frame type with a similar fatal error ("unknown control frame, returning to Connecting"), which is the proto-evolution defence (server may add new frame types the client predates). Tasks 18/19/20 will replace the Goaway and SessionUpdate paths with real handlers; the fail-closed staging keeps production from ever silently swallowing them.
 

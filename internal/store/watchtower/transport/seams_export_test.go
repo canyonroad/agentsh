@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
+	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"golang.org/x/time/rate"
 )
 
@@ -122,6 +123,7 @@ func RecvSessionForTest(t *Transport) *RecvSessionHandle {
 		cancelFn: t.recv.cancelFn,
 		eventCh:  t.recv.eventCh,
 		errCh:    t.recv.errCh,
+		done:     t.recv.done,
 	}
 }
 
@@ -134,6 +136,7 @@ type RecvSessionHandle struct {
 	cancelFn context.CancelFunc
 	eventCh  chan recvAckEvent
 	errCh    chan error
+	done     chan struct{}
 }
 
 // Ctx returns the per-connection context — tests assert it is alive
@@ -165,6 +168,32 @@ func (h *RecvSessionHandle) EventLen() int { return len(h.eventCh) }
 // this at 4 — see recv_multiplexer.go::newRecvSession).
 func (h *RecvSessionHandle) EventCap() int { return cap(h.eventCh) }
 
+// Done returns the recv goroutine's done channel, closed by runRecv
+// immediately before it returns. Round-23 Finding 4 test seam: external
+// integration tests use this to assert the recv goroutine has fully
+// exited after triggering cancel / control-frame / recv-error paths,
+// rather than relying on ctx.Err() or errCh delivery (neither of which
+// proves the goroutine has actually returned from runRecv).
+func (h *RecvSessionHandle) Done() <-chan struct{} { return h.done }
+
+// TrySendStaleEventForTest attempts a non-blocking send of the given
+// event into the underlying eventCh. Round-23 Finding 3 test seam:
+// external integration tests use this on a TORN-DOWN handle (where the
+// recv goroutine has exited) to prove that a stale write to an orphaned
+// eventCh cannot bleed into a freshly-allocated successor session's
+// eventCh. Returns true if the send succeeded (channel had buffer
+// capacity), false otherwise. Production code MUST NOT use this — the
+// recv goroutine is the only legitimate writer to eventCh during the
+// session's lifetime.
+func (h *RecvSessionHandle) TrySendStaleEventForTest(ev recvAckEvent) bool {
+	select {
+	case h.eventCh <- ev:
+		return true
+	default:
+		return false
+	}
+}
+
 // FrameForTest returns a stable string label for the event kind so
 // external tests can assert order without referencing the internal
 // recvAckEventKind enum values.
@@ -187,6 +216,22 @@ func GenForTest(ev recvAckEvent) uint32 { return ev.gen }
 // SeqForTest returns the event sequence — populated for both kinds.
 func SeqForTest(ev recvAckEvent) uint64 { return ev.seq }
 
+// MakeBatchAckEventForTest constructs a recvAckEvent of kind BatchAck
+// from a wire frame. Round-23 Finding 3 test seam: external integration
+// tests use this to fabricate a stale event for the
+// "send-onto-old-eventCh-after-teardown-and-prove-no-bleed" probe in
+// TestRecvMultiplexer_ReconnectDoesNotLeakStateAcrossSessions. Production
+// code MUST NOT use this — events are produced exclusively by the recv
+// goroutine in runRecv.
+func MakeBatchAckEventForTest(frame *wtpv1.ServerMessage) recvAckEvent {
+	a := frame.GetBatchAck()
+	return recvAckEvent{
+		kind: recvAckEventBatchAck,
+		gen:  a.GetGeneration(),
+		seq:  a.GetAckHighWatermarkSeq(),
+	}
+}
+
 // StartRecvForTest starts the recv goroutine bound to the given parent
 // ctx, attaches a fresh recvSession to t.recv, and returns the handle.
 // External integration tests use this to drive the recv-goroutine path
@@ -200,6 +245,7 @@ func StartRecvForTest(t *Transport, parent context.Context) *RecvSessionHandle {
 		cancelFn: rs.cancelFn,
 		eventCh:  rs.eventCh,
 		errCh:    rs.errCh,
+		done:     rs.done,
 	}
 }
 
