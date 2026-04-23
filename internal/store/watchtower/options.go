@@ -16,6 +16,25 @@ import (
 )
 
 // Options configures a watchtower Store.
+//
+// Zero-value contract for numeric / duration fields: ZERO means
+// "use the spec default" (applyDefaults fills it in BEFORE validate
+// runs). Negative values are INVALID and rejected by validate. Tests
+// that want to assert "the validate gate fires for invalid values"
+// pass a NEGATIVE — passing zero exercises the default-application
+// path instead.
+//
+// Affected fields:
+//
+//   - WALSegmentSize     (default 256 KiB)
+//   - WALMaxTotalSize    (default 16 MiB)
+//   - BatchMaxRecords    (default 256)
+//   - BatchMaxBytes      (default 256 KiB)
+//   - BatchMaxAge        (default 100 ms)
+//   - DrainDeadline      (default 2 s)
+//
+// All other fields are required (or explicitly optional with their
+// own zero-as-permissive semantics — Filter, Endpoint, TLS*, etc.).
 type Options struct {
 	// WAL configuration.
 	WALDir          string

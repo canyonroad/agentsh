@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower"
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
+	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
 // TestNew_QuarantinesOnSessionIDMismatch covers the WAL identity-
@@ -146,24 +148,125 @@ func TestStore_CloseReturnsAfterRunLoopExits(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
 	start := time.Now()
-	closeErr := s.Close(ctx)
+	closeErr := s.Close()
 	elapsed := time.Since(start)
-	// Close should return promptly (cancel + wait for runDone).
-	// The nopDialer keeps Run in dial-fail backoff; tr.Stop +
-	// runCancel should unblock it within a few backoff intervals.
+	// Close should return promptly.
 	if elapsed > 1500*time.Millisecond {
 		t.Fatalf("Close took %v; expected < 1.5s", elapsed)
 	}
-	// The returned error is either nil (Run exited cleanly via ctx)
-	// or a context.Canceled wrap. Either is acceptable — we are
-	// asserting the lifecycle returns, not a specific error shape.
+	// nopDialer keeps Run in dial-fail backoff; Stop + runCancel
+	// unblock it. Either nil or context.Canceled is acceptable
+	// shape — we are asserting the lifecycle returns, not a
+	// specific error.
 	if closeErr != nil &&
 		!errors.Is(closeErr, context.Canceled) &&
 		!errors.Is(closeErr, context.DeadlineExceeded) {
 		t.Fatalf("Close returned unexpected error shape: %v", closeErr)
 	}
+}
+
+// TestStore_CloseAfterTerminalRunExit covers the High-finding path
+// from roborev #5763: when Run has ALREADY exited (e.g. terminal
+// SessionAck rejection at startup), Close MUST NOT call tr.Stop
+// because Stop's `<-r.done` would block forever (no consumer left).
+//
+// Setup: build a Store with a dialer + fakeConn that responds to
+// SessionInit with a rejected SessionAck — runConnecting returns
+// (StateShutdown, err), the Run loop exits with the terminal error,
+// runDone is populated. Then call Close and assert it returns
+// promptly (well below the DrainDeadline).
+func TestStore_CloseAfterTerminalRunExit(t *testing.T) {
+	// Use a sync gate so the Store doesn't see "no Dial" and we can
+	// drive the rejection deterministically.
+	dialReady := make(chan struct{}, 1)
+	dialReady <- struct{}{} // first dial allowed
+	conn := newRejectingFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		select {
+		case <-dialReady:
+			return conn, nil
+		default:
+			return nil, errors.New("no more dials")
+		}
+	})
+
+	opts := validOpts(t.TempDir())
+	opts.DrainDeadline = 10 * time.Second // Long, so a Stop deadlock would be obvious
+	opts.Dialer = dialer
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Wait for Err() to surface the terminal error (i.e. Run exited).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if errVal := s.Err(); errVal != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Run did not exit within 2s; Err()=%v", s.Err())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Run has exited; Close MUST be bounded — if it called the
+	// would-deadlock Stop on the dead run loop, this would hang
+	// for opts.DrainDeadline=10s.
+	start := time.Now()
+	closeErr := s.Close()
+	elapsed := time.Since(start)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Close after terminal Run exit took %v; expected < 500ms (would indicate Stop-on-dead-loop deadlock)", elapsed)
+	}
+	if closeErr == nil {
+		t.Fatal("Close after terminal Run exit returned nil; want the captured terminal error")
+	}
+	// Err() after Close should return the same captured value.
+	if got := s.Err(); got != closeErr {
+		t.Fatalf("Err() after Close = %v, want %v (same captured value)", got, closeErr)
+	}
+}
+
+// rejectingFakeConn implements transport.Conn — Recv returns a
+// rejected SessionAck (Accepted=false) so runConnecting surfaces
+// (StateShutdown, err). Send accepts SessionInit; subsequent calls
+// error.
+type rejectingFakeConn struct {
+	sendCount int
+	closed    chan struct{}
+}
+
+func newRejectingFakeConn() *rejectingFakeConn {
+	return &rejectingFakeConn{closed: make(chan struct{})}
+}
+
+func (c *rejectingFakeConn) Send(*wtpv1.ClientMessage) error {
+	c.sendCount++
+	if c.sendCount > 1 {
+		return errors.New("only one Send allowed")
+	}
+	return nil
+}
+
+func (c *rejectingFakeConn) Recv() (*wtpv1.ServerMessage, error) {
+	return &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{
+				Accepted:     false,
+				RejectReason: "test rejection",
+			},
+		},
+	}, nil
+}
+
+func (c *rejectingFakeConn) CloseSend() error { return nil }
+func (c *rejectingFakeConn) Close() error {
+	select {
+	case <-c.closed:
+	default:
+		close(c.closed)
+	}
+	return nil
 }

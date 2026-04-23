@@ -207,3 +207,55 @@ func TestWTPMetrics_ReconnectsAlwaysEmittedAllReasons(t *testing.T) {
 		t.Errorf("expected other reasons to remain 0 after one increment\nbody:\n%s", body)
 	}
 }
+
+// TestWTPMetrics_AnomalousAckAlwaysEmittedAllReasons mirrors the
+// reconnects-always-emitted contract for the Task 22 anomaly counter:
+// every canonical AckOutcomeAnomaly reason MUST appear in the
+// Prometheus exposition with a zero value before any IncAnomalousAck
+// call. After one increment the targeted label flips to 1; others
+// stay 0. Out-of-band reasons (a future IncAnomalousAck call with a
+// reason NOT in the canonical list) MUST also surface so an unknown
+// sub-case is observable rather than silently dropped.
+func TestWTPMetrics_AnomalousAckAlwaysEmittedAllReasons(t *testing.T) {
+	c := New()
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	expectedReasons := []string{
+		"stale_generation",
+		"unwritten_generation",
+		"server_ack_exceeds_local_seq",
+		"server_ack_exceeds_local_data",
+		"wal_read_failure",
+	}
+	for _, reason := range expectedReasons {
+		want := fmt.Sprintf(`wtp_anomalous_ack_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("missing zero-valued anomalous_ack series %q\nbody:\n%s", want, body)
+		}
+	}
+
+	// After one increment, only that reason flips to 1.
+	c.WTP().IncAnomalousAck("stale_generation")
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_anomalous_ack_total{reason="stale_generation"} 1`) {
+		t.Errorf("expected stale_generation=1 after one IncAnomalousAck\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_anomalous_ack_total{reason="unwritten_generation"} 0`) {
+		t.Errorf("expected other reasons to remain 0\nbody:\n%s", body)
+	}
+
+	// Out-of-band reason: an IncAnomalousAck with a reason NOT in
+	// the canonical list must still surface in the exposition so the
+	// new sub-case is observable.
+	c.WTP().IncAnomalousAck("future_unknown_reason")
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_anomalous_ack_total{reason="future_unknown_reason"} 1`) {
+		t.Errorf("expected out-of-band reason to surface\nbody:\n%s", body)
+	}
+}

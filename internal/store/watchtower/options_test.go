@@ -52,18 +52,18 @@ func validOpts(dir string) watchtower.Options {
 	}
 }
 
-// closeStore is a defer-friendly Close helper that bounds the wait so
-// a stuck run loop does not block test cleanup.
+// closeStore is a defer-friendly Close helper. Callers don't need a
+// ctx because Store.Close uses opts.DrainDeadline internally per the
+// EventStore interface.
 func closeStore(t *testing.T, s *watchtower.Store) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := s.Close(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		// Close's bounded-wait surfaces context.Canceled when the bg
-		// loop exits via ctx — that's the normal shutdown path with
-		// the nopDialer, where ctx.Cancel races with Stop's drain.
-		// Tests that wire a real dialer should expect a clean nil
-		// here; tests using nopDialer accept either.
+	if err := s.Close(); err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded) {
+		// Close's internal bounded wait surfaces context.Canceled
+		// when the bg loop exits via runCancel — that's the normal
+		// shutdown path with the nopDialer. Tests with a real
+		// dialer should see a clean nil here.
 		_ = err
 	}
 }
@@ -228,20 +228,17 @@ func TestNew_RejectsCancelledSetupCtx(t *testing.T) {
 }
 
 // TestNew_RejectsNonPositiveBatchMaxAge verifies validate rejects a
-// zero or negative BatchMaxAge before the bg goroutine reaches
-// time.NewTicker (which panics on non-positive durations).
+// negative BatchMaxAge before the bg goroutine reaches time.NewTicker
+// (which panics on non-positive durations).
+//
+// Zero is NOT tested here because Options' documented zero-value
+// contract is "use the default" — applyDefaults rewrites zero to
+// 100ms before validate runs. TestNew_ZeroBatchMaxAgeAppliesDefault
+// covers the zero-as-default path.
 func TestNew_RejectsNonPositiveBatchMaxAge(t *testing.T) {
-	for _, d := range []time.Duration{-time.Second, 0, -1} {
+	for _, d := range []time.Duration{-time.Second, -1} {
 		t.Run(d.String(), func(t *testing.T) {
 			opts := validOpts(t.TempDir())
-			// applyDefaults overrides 0 — directly bypass by setting a
-			// non-zero negative.
-			if d == 0 {
-				// validate runs after applyDefaults, so a literal 0
-				// becomes 100ms. This sub-case is covered by the
-				// negative durations.
-				t.Skip("0 is normalized by applyDefaults; covered by negative cases")
-			}
 			opts.BatchMaxAge = d
 			_, err := watchtower.New(context.Background(), opts)
 			if err == nil {
@@ -252,6 +249,21 @@ func TestNew_RejectsNonPositiveBatchMaxAge(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNew_ZeroBatchMaxAgeAppliesDefault verifies the documented
+// zero-value contract on Options: a literal zero is rewritten by
+// applyDefaults BEFORE validate runs, so New succeeds. Locks in the
+// "zero = use default, negative = invalid" contract documented on
+// the Options docstring.
+func TestNew_ZeroBatchMaxAgeAppliesDefault(t *testing.T) {
+	opts := validOpts(t.TempDir())
+	opts.BatchMaxAge = 0 // explicit zero — should default to 100ms
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("expected New to accept BatchMaxAge=0 (defaults to 100ms), got %v", err)
+	}
+	defer closeStore(t, s)
 }
 
 // TestNew_RejectsIncoherentTLS verifies cert-without-key (and
@@ -290,18 +302,13 @@ func TestStore_CloseIsIdempotent(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	err1 := s.Close(ctx)
-	err2 := s.Close(ctx)
+	err1 := s.Close()
+	err2 := s.Close()
 	if err1 == nil && err2 != nil {
 		t.Fatalf("Close idempotency broken: first=%v, second=%v", err1, err2)
 	}
 	if err1 != nil && err2 != err1 {
-		// Both should be the same captured error. Allow small
-		// formatting diffs but they should contain the same root
-		// cause.
+		// Both should be the same captured error.
 		t.Fatalf("Close returned different errors on idempotent calls: first=%v, second=%v", err1, err2)
 	}
 }

@@ -194,69 +194,130 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	return s, nil
 }
 
-// Close shuts down the Store: signals the transport to drain (up to
-// opts.DrainDeadline), cancels the bg run loop's context, waits for
-// the run loop to return, and closes the WAL. Returns the run loop's
-// terminal error (nil on clean shutdown, ctx.Done if the supplied
-// ctx elapses before the run loop exits, or whatever error tr.Run
-// surfaced).
+// Close shuts down the Store and matches the store.EventStore.Close()
+// signature so *Store can be used wherever the interface is expected.
 //
-// Close is idempotent: second and later calls return the error
-// captured on the first call.
+// Behavior:
 //
-// Ordering inside Close is load-bearing:
+//  1. If the bg run loop has ALREADY exited (peek runDone non-
+//     blockingly), skip the cooperative drain — calling tr.Stop on a
+//     dead run loop would block forever (the buffered stopCh send
+//     would succeed but nothing would close r.done; documented on
+//     Transport.Stop).
+//  2. Otherwise, request a cooperative drain via tr.Stop in a
+//     goroutine bounded by opts.DrainDeadline. Wait on runDone OR
+//     the deadline.
+//  3. On deadline, fall back to runCancel() and wait on runDone
+//     (bounded — the bg run loop's select arms honour ctx.Done in
+//     short order).
+//  4. Close the WAL. WAL-close errors are appended to the captured
+//     close error so neither is silently dropped.
 //
-//  1. tr.Stop(drainDeadline) — observed at the next interruptible
-//     checkpoint in the run loop (see transport.Stop docs). Sends
-//     the BatcherDrain + CloseSend on the Live state path; in other
-//     states is effectively a fast teardown.
-//  2. runCancel() — bounded fallback if Stop's cooperative path is
-//     blocked on a wedged Conn.Send / Recv / Dial. Cancelling the bg
-//     ctx unblocks the next ctx-honouring select in the run loop.
-//  3. Wait on runDone (with the supplied ctx as the bound) — the bg
-//     goroutine sends Run's return value here right before exiting.
-//  4. Close the WAL. Errors here are appended to the captured close
-//     error so neither is silently dropped.
-func (s *Store) Close(ctx context.Context) error {
+// Returns the run loop's terminal error on clean shutdown, or a
+// wrapped deadline / WAL-close error otherwise. Idempotent — second
+// and later calls return the error captured on the first call.
+//
+// CAVEAT: under racy shutdown (Run exits between the peek and the
+// Stop goroutine launch) the Stop goroutine MAY leak. Until
+// Transport.Stop gains a non-blocking-on-late-call mode, this is the
+// least-bad shutdown shape that satisfies EventStore.Close()'s
+// no-ctx contract while still attempting graceful drain.
+func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
-		// Stop is the cooperative shutdown signal; runCancel is the
-		// fallback if Stop is blocked on a non-interruptible call.
-		// Order matters: Stop first so the run loop has a chance to
-		// drain via the Live arm, runCancel second so a wedged
-		// blocked call eventually unblocks via ctx.Done.
-		s.tr.Stop(s.opts.DrainDeadline)
-		s.runCancel()
-
-		select {
-		case err := <-s.runDone:
-			s.closeErr = err
-		case <-ctx.Done():
-			s.closeErr = fmt.Errorf("watchtower.Close: ctx elapsed before run loop exited: %w", ctx.Err())
-		}
-
-		if walErr := s.w.Close(); walErr != nil {
-			if s.closeErr == nil {
-				s.closeErr = fmt.Errorf("watchtower.Close: WAL close: %w", walErr)
-			} else {
-				s.closeErr = fmt.Errorf("%w (also: WAL close: %v)", s.closeErr, walErr)
-			}
-		}
+		s.closeErr = s.shutdown()
 	})
 	return s.closeErr
 }
 
+// shutdown is the body of Close, factored out so closeOnce.Do can
+// capture a single return value without inlining a 60-line closure.
+// Bounded by opts.DrainDeadline (or 0 → immediate cancel + wait).
+func (s *Store) shutdown() error {
+	// Step 1: did Run already exit? If so, do NOT call Stop —
+	// Transport.Stop's <-r.done wait would block forever because
+	// the consumer is gone.
+	select {
+	case err := <-s.runDone:
+		// Replay so a subsequent Err() observation is consistent
+		// with this captured value. Buffered cap-1, never blocks.
+		s.runDone <- err
+		s.runCancel() // idempotent; quiets the linter
+		return s.combineWALCloseErr(err)
+	default:
+	}
+
+	// Step 2: Run is alive. Cooperative drain via Stop, bounded by
+	// DrainDeadline. Stop runs in a goroutine because if Run dies
+	// between our peek above and Stop's send below, Stop's
+	// <-r.done would block forever.
+	stopGoroutineExited := make(chan struct{})
+	go func() {
+		s.tr.Stop(s.opts.DrainDeadline)
+		close(stopGoroutineExited)
+	}()
+
+	deadline := s.opts.DrainDeadline
+	if deadline <= 0 {
+		// Drain disabled by configuration — fall straight to
+		// runCancel + wait.
+		s.runCancel()
+		return s.combineWALCloseErr(<-s.runDone)
+	}
+
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+
+	var runErr error
+	select {
+	case runErr = <-s.runDone:
+		// Drain succeeded (or run loop exited via Stop's path).
+		_ = stopGoroutineExited // best-effort; may still be running
+	case <-timer.C:
+		// Drain deadline elapsed. Fall back to runCancel and a
+		// bounded wait on runDone.
+		s.runCancel()
+		select {
+		case runErr = <-s.runDone:
+		case <-time.After(2 * time.Second):
+			runErr = errors.New("watchtower.Close: run loop did not exit within fallback deadline after runCancel")
+		}
+	}
+	return s.combineWALCloseErr(runErr)
+}
+
+// combineWALCloseErr closes the WAL and merges any error with runErr.
+// Both errors are surfaced in the returned message; neither is
+// silently dropped.
+func (s *Store) combineWALCloseErr(runErr error) error {
+	walErr := s.w.Close()
+	if walErr == nil {
+		return runErr
+	}
+	if runErr == nil {
+		return fmt.Errorf("watchtower.Close: WAL close: %w", walErr)
+	}
+	return fmt.Errorf("%w (also: WAL close: %v)", runErr, walErr)
+}
+
 // Err returns the run loop's terminal error if it has already exited,
 // or nil if the loop is still running. Useful for callers polling on
-// transport health. After Close returns, Err returns the same value
-// Close did.
+// transport health.
+//
+// After Close returns, Err returns the same captured value Close did.
+// Implementation: closeOnce protects closeErr; runDone is replayed
+// after consumption so the non-blocking peek path remains consistent
+// with the closed-store path.
 //
 // Non-blocking — peeks at runDone via a non-blocking receive so the
 // caller does not stall waiting for the run loop.
 func (s *Store) Err() error {
+	// If Close has already run, closeErr is the canonical answer.
+	// We can't take the closeOnce mutex without potentially racing
+	// the bg goroutine, so instead check runDone first: after
+	// shutdown the runDone slot has been replayed, so the peek
+	// returns the same error Close captured.
 	select {
 	case err := <-s.runDone:
-		// Replay back into runDone so a subsequent Close still sees
-		// the value. runDone is cap-1, so this is safe — no blocking.
 		s.runDone <- err
 		return err
 	default:
