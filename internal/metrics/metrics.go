@@ -35,6 +35,14 @@ type Collector struct {
 	wtpDroppedMissingChain atomic.Uint64
 	wtpWALCorruption       atomic.Uint64
 
+	// Task 22 cursor-feedback metrics. The Transport's
+	// applyServerAckTuple helper increments these on the three non-
+	// Adopted dispatch outcomes; AppendEvent and the recv-multiplexer
+	// share the same accessors.
+	wtpAnomalousAckByReason sync.Map     // map[string]*atomic.Uint64
+	wtpResendNeeded         atomic.Uint64
+	wtpAckRegressionLoss    atomic.Uint64
+
 	wtpLatencyMu      sync.Mutex
 	wtpLatencyBuckets [14]uint64 // 13 buckets + +Inf; index aligned with wtpLatencyBucketsSeconds
 	wtpLatencyCount   uint64

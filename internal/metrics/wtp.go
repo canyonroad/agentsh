@@ -155,6 +155,39 @@ func (w *WTPMetrics) IncWALCorruption(n uint64) {
 	w.c.wtpWALCorruption.Add(n)
 }
 
+// IncAnomalousAck increments the per-reason counter for a server ack
+// tuple that landed in one of the five disjoint anomaly sub-cases per
+// transport.AckOutcomeAnomaly. Reasons are short snake_case strings
+// (e.g. "stale_generation", "unwritten_generation",
+// "server_ack_exceeds_local_seq"). Nil-safe.
+func (w *WTPMetrics) IncAnomalousAck(reason string) {
+	if w == nil || w.c == nil {
+		return
+	}
+	ptr, _ := w.c.wtpAnomalousAckByReason.LoadOrStore(reason, &atomic.Uint64{})
+	ptr.(*atomic.Uint64).Add(1)
+}
+
+// IncResendNeeded increments the counter for legitimate stale-server
+// recovery: server's ack tuple lex-precedes persistedAck, only
+// remoteReplayCursor regressed (no MarkAcked call). Nil-safe.
+func (w *WTPMetrics) IncResendNeeded() {
+	if w == nil || w.c == nil {
+		return
+	}
+	w.c.wtpResendNeeded.Add(1)
+}
+
+// IncAckRegressionLoss increments the counter for synthesized in-
+// memory loss markers produced when computeReplayStart's case A or C
+// observed an ack_regression_after_gc gap. Nil-safe.
+func (w *WTPMetrics) IncAckRegressionLoss() {
+	if w == nil || w.c == nil {
+		return
+	}
+	w.c.wtpAckRegressionLoss.Add(1)
+}
+
 // Latency histogram buckets, in seconds. Chosen to cover sub-millisecond
 // localhost (testserver) through pathological 30s reconnect-edge sends.
 var wtpLatencyBucketsSeconds = []float64{
@@ -238,6 +271,24 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 	fmt.Fprint(w, "# HELP wtp_wal_corruption_total CRC corruption events encountered during WAL replay.\n")
 	fmt.Fprint(w, "# TYPE wtp_wal_corruption_total counter\n")
 	fmt.Fprintf(w, "wtp_wal_corruption_total %d\n", c.wtpWALCorruption.Load())
+
+	// Cursor-feedback counters introduced with the Store integration
+	// (Task 22). Anomalous-ack is per-reason; resend-needed and
+	// ack-regression-loss are scalar.
+	fmt.Fprint(w, "# HELP wtp_anomalous_ack_total Server ack tuples that fell into one of the AckOutcomeAnomaly sub-cases, by reason.\n")
+	fmt.Fprint(w, "# TYPE wtp_anomalous_ack_total counter\n")
+	c.wtpAnomalousAckByReason.Range(func(k, v any) bool {
+		fmt.Fprintf(w, "wtp_anomalous_ack_total{reason=%q} %d\n", k.(string), v.(*atomic.Uint64).Load())
+		return true
+	})
+
+	fmt.Fprint(w, "# HELP wtp_resend_needed_total Server ack tuples that landed in the ResendNeeded branch (legitimate stale-server recovery).\n")
+	fmt.Fprint(w, "# TYPE wtp_resend_needed_total counter\n")
+	fmt.Fprintf(w, "wtp_resend_needed_total %d\n", c.wtpResendNeeded.Load())
+
+	fmt.Fprint(w, "# HELP wtp_ack_regression_loss_total Synthesized in-memory loss markers from computeReplayStart Case A or C.\n")
+	fmt.Fprint(w, "# TYPE wtp_ack_regression_loss_total counter\n")
+	fmt.Fprintf(w, "wtp_ack_regression_loss_total %d\n", c.wtpAckRegressionLoss.Load())
 
 	// Snapshot under lock to avoid blocking ObserveSendLatency callers
 	// during a slow scrape.
