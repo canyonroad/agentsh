@@ -215,10 +215,14 @@ func TestServer_SessionAckZeroIsLiteralNotMirror(t *testing.T) {
 }
 
 // TestServer_AckDelayDelaysSessionAck verifies AckDelay is honoured
-// on the SessionAck path (which is also exercised on the BatchAck
-// path by the same handler block). The test asserts only a lower
-// bound on the elapsed time — upper bounds are scheduler-dependent
-// and not part of the contract.
+// on the SessionAck path. The timer starts BEFORE Send so the
+// measured elapsed time bounds the entire client.Send → server
+// receive → server delay → server.Send → client.Recv cycle. Under
+// bufconn the non-delay components are sub-millisecond, so the
+// elapsed time cleanly strictly exceeds the configured delay.
+// Starting the timer after Send (a prior version of this test)
+// would have been flaky: the server can start its delay countdown
+// before the test goroutine resumes to capture the start.
 func TestServer_AckDelayDelaysSessionAck(t *testing.T) {
 	const delay = 80 * time.Millisecond
 	srv := testserver.New(testserver.Options{AckDelay: delay})
@@ -227,8 +231,8 @@ func TestServer_AckDelayDelaysSessionAck(t *testing.T) {
 	conn := dialOrFatal(t, srv)
 	defer conn.Close()
 
-	sendSessionInit(t, conn)
 	start := time.Now()
+	sendSessionInit(t, conn)
 	got, err := recvWithDeadline(t, conn, 2*time.Second)
 	elapsed := time.Since(start)
 	if err != nil {
@@ -239,6 +243,44 @@ func TestServer_AckDelayDelaysSessionAck(t *testing.T) {
 	}
 	if elapsed < delay {
 		t.Fatalf("SessionAck arrived after %v, want >= %v", elapsed, delay)
+	}
+}
+
+// TestServer_AckDelayDelaysBatchAck verifies AckDelay also applies
+// on the BatchAck path (the server's Stream handler has a separate
+// delay block for the EventBatch branch). Without a dedicated test,
+// a future refactor that drops the BatchAck delay site while
+// leaving the SessionAck site intact would pass the suite but
+// silently regress the documented contract.
+func TestServer_AckDelayDelaysBatchAck(t *testing.T) {
+	const delay = 80 * time.Millisecond
+	srv := testserver.New(testserver.Options{AckDelay: delay})
+	defer srv.Close()
+
+	conn := dialOrFatal(t, srv)
+	defer conn.Close()
+
+	// Establish the session first. SessionAck is also delayed, but
+	// we only care about measuring the BatchAck delay separately.
+	sendSessionInit(t, conn)
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv SessionAck: %v", err)
+	}
+
+	// Now time the EventBatch → BatchAck cycle. Start BEFORE Send
+	// for the same reason documented on the SessionAck test.
+	start := time.Now()
+	sendEmptyBatch(t, conn)
+	got, err := recvWithDeadline(t, conn, 2*time.Second)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("recv BatchAck: %v", err)
+	}
+	if got.GetBatchAck() == nil {
+		t.Fatalf("got %T, want BatchAck", got.Msg)
+	}
+	if elapsed < delay {
+		t.Fatalf("BatchAck arrived after %v, want >= %v", elapsed, delay)
 	}
 }
 
