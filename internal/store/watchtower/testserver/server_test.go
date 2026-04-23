@@ -167,6 +167,81 @@ func TestServer_SessionAckSeqAndGenerationLiteral(t *testing.T) {
 	}
 }
 
+// TestServer_SessionAckZeroIsLiteralNotMirror verifies the renamed
+// contract: when SessionAckSeq / SessionAckGeneration are unset
+// (zero), the server replies with literal (0, 0) regardless of what
+// the client advertised in SessionInit. Regression guard against a
+// future "mirror the client's watermark on zero" reinterpretation
+// of the option semantics — the prior naming (StaleWatermark) hinted
+// at that, and the rename's contract is only enforceable if a test
+// proves zero stays zero under a non-zero client watermark.
+func TestServer_SessionAckZeroIsLiteralNotMirror(t *testing.T) {
+	srv := testserver.New(testserver.Options{}) // both ack fields zero
+	defer srv.Close()
+
+	conn := dialOrFatal(t, srv)
+	defer conn.Close()
+
+	// Send a SessionInit with NON-ZERO wal_high_watermark_seq +
+	// generation. If the server "mirrors the client", the SessionAck
+	// would echo (12345, 9). With literal-zero semantics, the
+	// SessionAck must be (0, 0).
+	if err := conn.Send(&wtpv1.ClientMessage{
+		Msg: &wtpv1.ClientMessage_SessionInit{
+			SessionInit: &wtpv1.SessionInit{
+				AgentId:             "test",
+				SessionId:           "s1",
+				Algorithm:           wtpv1.HashAlgorithm_HASH_ALGORITHM_HMAC_SHA256,
+				WalHighWatermarkSeq: 12345,
+				Generation:          9,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	got, err := recvWithDeadline(t, conn, 2*time.Second)
+	if err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+	ack := got.GetSessionAck()
+	if ack == nil {
+		t.Fatalf("got %T, want SessionAck", got.Msg)
+	}
+	if ack.GetAckHighWatermarkSeq() != 0 || ack.GetGeneration() != 0 {
+		t.Fatalf("SessionAck tuple=(%d, %d) — server appears to be mirroring the client's SessionInit watermark; want literal (0, 0) per Options doc",
+			ack.GetAckHighWatermarkSeq(), ack.GetGeneration())
+	}
+}
+
+// TestServer_AckDelayDelaysSessionAck verifies AckDelay is honoured
+// on the SessionAck path (which is also exercised on the BatchAck
+// path by the same handler block). The test asserts only a lower
+// bound on the elapsed time — upper bounds are scheduler-dependent
+// and not part of the contract.
+func TestServer_AckDelayDelaysSessionAck(t *testing.T) {
+	const delay = 80 * time.Millisecond
+	srv := testserver.New(testserver.Options{AckDelay: delay})
+	defer srv.Close()
+
+	conn := dialOrFatal(t, srv)
+	defer conn.Close()
+
+	sendSessionInit(t, conn)
+	start := time.Now()
+	got, err := recvWithDeadline(t, conn, 2*time.Second)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+	if got.GetSessionAck() == nil {
+		t.Fatalf("got %T, want SessionAck", got.Msg)
+	}
+	if elapsed < delay {
+		t.Fatalf("SessionAck arrived after %v, want >= %v", elapsed, delay)
+	}
+}
+
 // TestServer_DropAfterBatchN verifies the server returns an error from
 // the Stream handler after observing the configured number of
 // EventBatch messages on the CURRENT stream. The client observes the
