@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
@@ -257,3 +258,34 @@ func StartRecvForTest(t *Transport, parent context.Context) *RecvSessionHandle {
 // integration tests can assert the round-22 lifecycle (cancel + nil
 // out the field) without touching unexported state.
 func TeardownRecvForTest(t *Transport) { t.teardownRecv() }
+
+// EnqueueStopAndWaitForTest is the deterministic-timing test seam for
+// Task 19's Stop-between-replay-batches test. It:
+//
+//  1. Runs `preEnqueue` synchronously so the test can sample counters
+//     / cursors etc. IMMEDIATELY before the stop request is enqueued.
+//  2. Writes the stopReq to t.stopCh — this is the exact moment
+//     "Stop is enqueued" (buffered cap-1 send returns immediately).
+//  3. Runs `postEnqueue` synchronously so the test can arm latches /
+//     install side-effect signals AFTER the enqueue is visible in
+//     t.stopCh. The latch window now measures "sends between the
+//     enqueue and the next top-of-loop observation" rather than the
+//     scheduler-dependent "sample → goroutine-launch → enqueue →
+//     observation" window.
+//  4. Blocks until whichever state-handler arm services the stopReq
+//     closes r.done.
+//
+// Production code MUST NOT call this — Stop (transport.go) is the
+// supported API. The seam exists ONLY so the replay-stop test can
+// synchronize the latch arming with the stopCh-enqueue moment.
+func EnqueueStopAndWaitForTest(t *Transport, drainDeadline time.Duration, preEnqueue, postEnqueue func()) {
+	if preEnqueue != nil {
+		preEnqueue()
+	}
+	r := stopReq{drainDeadline: drainDeadline, done: make(chan struct{})}
+	t.stopCh <- r
+	if postEnqueue != nil {
+		postEnqueue()
+	}
+	<-r.done
+}

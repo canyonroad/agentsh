@@ -159,23 +159,32 @@ func TestShutdown_StopDrainsThenCloseSends(t *testing.T) {
 // are synchronous calls with no ctx hook); the stopCh arm only runs
 // once the current Send/NextBatch has returned.
 //
-// Test shape: seed the WAL with many records and use a small batch
-// cap so replay issues many Send calls. Drain a few Replaying
-// EventBatches off sendCh (proving the loop is actively iterating),
-// then call Stop. A deterministic upper bound on "extra sends after
-// Stop" is enforced by instrumenting sendFn: after Stop is called,
-// the (N+1)th additional Send call blocks on conn.closed. If
-// runReplaying's top-of-loop stopCh arm is serviced within N more
-// sends, everything proceeds cleanly (the stopCh arm closes the
-// conn, unblocking any pending Send). If runReplaying ignores
-// stopCh until replay completes, the (N+1)th Send blocks and
-// Stop's `<-r.done` wait never fires — the test deadlocks and
-// times out with a concrete violation message.
+// Determinism: the test uses the EnqueueStopAndWaitForTest seam
+// (seams_export_test.go) to anchor the sample + arm to the exact
+// moment the stopReq lands in t.stopCh. Ordering inside the seam:
 //
-// The 2s timeout + deterministic bound N=5 catches regressions
-// where Stop is serviced near replay completion (delta ~= 200
-// sends, far exceeding N=5). Without the stopCh arm, this test
-// deadlocks.
+//  1. stopReq is written to t.stopCh (the enqueue moment).
+//  2. postEnqueue fires synchronously, sampling sendCalls and
+//     arming the blockAfter latch to sample + maxSendsAfterStop.
+//  3. The seam blocks on r.done.
+//
+// The latch therefore measures ONLY "sends between stopCh-enqueue
+// and runReplaying's top-of-loop observation" — the property the
+// stopCh arm actually controls. Scheduler delay BEFORE step 1 does
+// not consume any latch budget.
+//
+// If runReplaying's top-of-loop stopCh arm is serviced within the
+// budget, the conn.Close from the arm unblocks any pending Send
+// and the seam returns cleanly. If stopCh is ignored, the
+// (maxSendsAfterStop+1)th Send blocks on conn.closed, the seam's
+// `<-r.done` wait never fires, and the 2s timeout fails the test
+// with an explicit diagnostic. maxSendsAfterStop = 50 comfortably
+// covers the 1–2 sends that may fire between the enqueue and the
+// next top-of-loop select while remaining trivially smaller than
+// the ~200-send regression signal.
+//
+// Validated by temporarily removing runReplaying's stopCh arm — the
+// test fails deterministically with delta ~= totalRecords.
 func TestShutdown_StopBetweenReplayBatches(t *testing.T) {
 	dir := t.TempDir()
 	w, err := wal.Open(wal.Options{Dir: dir, SegmentSize: 64 * 1024})
@@ -195,12 +204,15 @@ func TestShutdown_StopBetweenReplayBatches(t *testing.T) {
 	}
 
 	// Instrumented send with a "block after N more sends" latch.
-	// `blockAfter` is zero initially (no blocking). The test arms
-	// it AFTER calling Stop, to blockAfter = sendsAtStopCall + 5.
-	// Any Send past that count blocks on conn.closed until the
-	// runReplaying stopCh arm tears the conn down. If the stopCh
-	// arm is never serviced, Send stays blocked and the test's
-	// stopReturned wait hits the 2s timeout — a deterministic fail.
+	// `blockAfter` starts at zero (no blocking). The test arms it
+	// inside postEnqueue (AFTER the stopReq has been written to
+	// t.stopCh) to sendCalls.Load() + maxSendsAfterStop. Any Send
+	// past that count blocks on conn.closed until runReplaying's
+	// stopCh arm tears the conn down; if the arm is never serviced
+	// Send stays blocked and EnqueueStopAndWaitForTest's `<-r.done`
+	// wait hits the 2s test timeout — a deterministic fail
+	// anchored to the enqueue moment.
+	const maxSendsAfterStop = 50
 	var (
 		sendCalls   atomic.Int32
 		blockAfter  atomic.Int32 // 0 = no blocking
@@ -296,31 +308,33 @@ func TestShutdown_StopBetweenReplayBatches(t *testing.T) {
 		}
 	}()
 
-	// Arm the post-Stop block latch: allow up to `maxSendsAfterStop`
-	// more sends past the sampled baseline, then any further Send
-	// blocks on conn.closed. The budget covers (1) in-flight sends
-	// completing between the sample and the actual Stop delivery,
-	// (2) Go scheduler latency on the goroutine launch below, and
-	// (3) the single NextBatch/Send that may still be mid-flight
-	// when the Stop request reaches the buffered channel. All
-	// combined comfortably fit under maxSendsAfterStop=50, which is
-	// trivially smaller than the ~200-send regression signal that
-	// an ignored stopCh would produce.
-	const maxSendsAfterStop = 50
-	sendsAtStopCall := sendCalls.Load()
-	blockAfter.Store(sendsAtStopCall + maxSendsAfterStop)
-
+	// Use EnqueueStopAndWaitForTest to atomically enqueue the
+	// stopReq and then arm the latch in postEnqueue — so the latch
+	// budget measures only the enqueue→observation window.
+	var sendsAtEnqueue int32
 	stopReturned := make(chan struct{})
 	go func() {
-		tr.Stop(200 * time.Millisecond)
+		transport.EnqueueStopAndWaitForTest(
+			tr,
+			200*time.Millisecond,
+			nil, // preEnqueue
+			func() {
+				// postEnqueue: stopReq is now in t.stopCh.
+				// Sample + arm the latch. All further Sends are
+				// counted toward the maxSendsAfterStop budget
+				// relative to THIS moment.
+				sendsAtEnqueue = sendCalls.Load()
+				blockAfter.Store(sendsAtEnqueue + maxSendsAfterStop)
+			},
+		)
 		close(stopReturned)
 	}()
 
 	select {
 	case <-stopReturned:
 	case <-time.After(2 * time.Second):
-		t.Fatalf("Stop did not return within 2s; sends=%d, sendsAtStopCall=%d, limit=%d, blocked=%v — regression: runReplaying did not observe stopCh promptly",
-			sendCalls.Load(), sendsAtStopCall, sendsAtStopCall+maxSendsAfterStop, blockedOnce.Load())
+		t.Fatalf("Stop did not return within 2s; sends=%d, sendsAtEnqueue=%d, limit=%d, blocked=%v — regression: runReplaying did not observe stopCh promptly",
+			sendCalls.Load(), sendsAtEnqueue, sendsAtEnqueue+maxSendsAfterStop, blockedOnce.Load())
 	}
 	<-drainDone
 
@@ -333,17 +347,15 @@ func TestShutdown_StopBetweenReplayBatches(t *testing.T) {
 		t.Fatal("Run did not return within 2s of Stop")
 	}
 
-	// Upper bound: runReplaying observed stopCh within maxSendsAfterStop
-	// additional sends past the sampled baseline. Any regression that
-	// services Stop only near replay completion would drive sendCalls
-	// to ~totalRecords + 1 and trip this assertion before the timeout
-	// — as well as causing the blockAfter latch to trigger. The
-	// budget accommodates scheduler noise; it remains trivially
-	// smaller than the ~200-send regression signal.
+	// Upper bound anchored at the enqueue moment: runReplaying
+	// observed stopCh within maxSendsAfterStop sends past the
+	// enqueue. Any regression that services Stop only near replay
+	// completion drives delta to ~totalRecords, far exceeding
+	// maxSendsAfterStop.
 	totalSends := sendCalls.Load()
-	if delta := totalSends - sendsAtStopCall; delta > maxSendsAfterStop {
-		t.Fatalf("Stop not observed promptly between replay batches: totalSends=%d, sendsAtStopCall=%d, delta=%d, limit=%d",
-			totalSends, sendsAtStopCall, delta, maxSendsAfterStop)
+	if delta := totalSends - sendsAtEnqueue; delta > maxSendsAfterStop {
+		t.Fatalf("Stop not observed promptly between replay batches: totalSends=%d, sendsAtEnqueue=%d, delta=%d, limit=%d",
+			totalSends, sendsAtEnqueue, delta, maxSendsAfterStop)
 	}
 }
 
