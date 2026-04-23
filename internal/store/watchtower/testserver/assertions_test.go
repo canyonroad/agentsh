@@ -2,6 +2,8 @@ package testserver_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,11 +33,31 @@ func sendUncompressedBatch(t *testing.T, conn testserver.Conn, events ...*wtpv1.
 	}
 }
 
-// TestWaitForBatch_ReturnsBatchOrTimesOut verifies that WaitForBatch
-// blocks until at least one EventBatch has been received, and returns
-// the first batch. Exercises AssertSequenceRange alongside the happy
-// path to lock in the [first, last] no-gaps-no-duplicates contract.
-func TestWaitForBatch_ReturnsBatchOrTimesOut(t *testing.T) {
+// sendCompressedBatchMarker is a test helper that sends an EventBatch
+// whose Body is NOT UncompressedEvents — the server records it so the
+// assertion helpers can exercise their fail-fast compression branch.
+// We set Compression to ZSTD but leave Body nil; the testserver does
+// not decode the body so this is sufficient to produce "not
+// UncompressedEvents" on the recorded batch.
+func sendCompressedBatchMarker(t *testing.T, conn testserver.Conn) {
+	t.Helper()
+	if err := conn.Send(&wtpv1.ClientMessage{
+		Msg: &wtpv1.ClientMessage_EventBatch{
+			EventBatch: &wtpv1.EventBatch{
+				Compression: wtpv1.Compression_COMPRESSION_ZSTD,
+				// Body omitted — simulates a compressed wire payload
+				// that the testserver helpers cannot decode.
+			},
+		},
+	}); err != nil {
+		t.Fatalf("send compressed EventBatch: %v", err)
+	}
+}
+
+// TestWaitForFirstBatch_ReturnsFirstBatch verifies the happy path:
+// after one batch is recorded, WaitForFirstBatch returns a deep copy
+// of it and AssertSequenceRange accepts the contiguous window.
+func TestWaitForFirstBatch_ReturnsFirstBatch(t *testing.T) {
 	srv := testserver.New(testserver.Options{})
 	defer srv.Close()
 
@@ -45,22 +67,26 @@ func TestWaitForBatch_ReturnsBatchOrTimesOut(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Exchange SessionInit / SessionAck so the server is past the
-	// session-handshake arm of its Stream handler.
 	sendSessionInit(t, conn)
 	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
 		t.Fatalf("recv SessionAck: %v", err)
 	}
 
-	// Send one EventBatch with a single event at seq=1.
 	sendUncompressedBatch(t, conn, &wtpv1.CompactEvent{Sequence: 1, Generation: 1})
 
-	got, err := srv.WaitForBatch(2 * time.Second)
+	got, err := srv.WaitForFirstBatch(2 * time.Second)
 	if err != nil {
-		t.Fatalf("WaitForBatch: %v", err)
+		t.Fatalf("WaitForFirstBatch: %v", err)
 	}
 	if n := len(got.GetUncompressed().GetEvents()); n != 1 {
 		t.Fatalf("batch events: got %d, want 1", n)
+	}
+
+	// Mutating the returned batch MUST NOT affect the server's
+	// internal record (deep-copy contract).
+	got.GetUncompressed().Events = nil
+	if n := len(srv.Batches()[0].GetUncompressed().GetEvents()); n != 1 {
+		t.Fatalf("after caller mutation, server's batch has %d events; want 1 (deep-copy broken)", n)
 	}
 
 	if err := srv.AssertSequenceRange(1, 1); err != nil {
@@ -68,25 +94,63 @@ func TestWaitForBatch_ReturnsBatchOrTimesOut(t *testing.T) {
 	}
 }
 
-// TestWaitForBatch_TimesOutWhenNoBatch verifies WaitForBatch returns
-// a non-nil error when its deadline elapses without any batch being
-// received. Guards against a regression where the helper returns a
-// zero-value batch with a nil error.
-func TestWaitForBatch_TimesOutWhenNoBatch(t *testing.T) {
+// TestWaitForFirstBatch_TimesOutWhenNoBatch verifies that the helper
+// returns a non-nil error when the deadline elapses without any
+// batch being recorded.
+func TestWaitForFirstBatch_TimesOutWhenNoBatch(t *testing.T) {
 	srv := testserver.New(testserver.Options{})
 	defer srv.Close()
 
-	got, err := srv.WaitForBatch(100 * time.Millisecond)
+	got, err := srv.WaitForFirstBatch(100 * time.Millisecond)
 	if err == nil {
-		t.Fatalf("WaitForBatch returned nil err and batch=%v; want timeout error", got)
+		t.Fatalf("WaitForFirstBatch returned nil err and batch=%v; want timeout error", got)
+	}
+	if got != nil {
+		t.Fatalf("WaitForFirstBatch returned batch=%v; want nil on timeout", got)
+	}
+}
+
+// TestWaitForFirstBatch_ReturnsImmediatelyOnStaleBatch locks in the
+// documented semantics: WaitForFirstBatch returns the FIRST batch
+// ever recorded, not "the next batch after this call." A second
+// call after a batch is already in the server sees it immediately.
+// This is a subtle trap — scenario authors who need "wait for new
+// data" must snapshot len(Batches()) themselves.
+func TestWaitForFirstBatch_ReturnsImmediatelyOnStaleBatch(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	defer srv.Close()
+
+	conn, err := srv.Dial(context.Background())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	sendSessionInit(t, conn)
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv SessionAck: %v", err)
+	}
+	sendUncompressedBatch(t, conn, &wtpv1.CompactEvent{Sequence: 1})
+	if _, err := srv.WaitForFirstBatch(2 * time.Second); err != nil {
+		t.Fatalf("first WaitForFirstBatch: %v", err)
+	}
+
+	// Second call with a tiny deadline should STILL succeed because
+	// the first batch is already recorded.
+	start := time.Now()
+	if _, err := srv.WaitForFirstBatch(100 * time.Millisecond); err != nil {
+		t.Fatalf("second WaitForFirstBatch: %v", err)
+	}
+	if d := time.Since(start); d > 50*time.Millisecond {
+		t.Fatalf("second WaitForFirstBatch took %v; want ~instant (first-batch-ever semantics)", d)
 	}
 }
 
 // TestAssertSequenceRange_DetectsGapsAndDuplicates exercises the
-// failure branches of AssertSequenceRange: out-of-range seq,
-// duplicate seq, and missing seq. Each branch is tested by
-// constructing a sequence that trips it and asserting the helper
-// returns a non-nil error with an identifying substring.
+// failure branches of AssertSequenceRange: out-of-range, duplicate,
+// and missing seq. Each branch asserts BOTH non-nil error AND the
+// diagnostic substring so a future regression that swaps or
+// generalizes the error messages is caught.
 func TestAssertSequenceRange_DetectsGapsAndDuplicates(t *testing.T) {
 	t.Run("missing_seq", func(t *testing.T) {
 		srv := testserver.New(testserver.Options{})
@@ -103,18 +167,20 @@ func TestAssertSequenceRange_DetectsGapsAndDuplicates(t *testing.T) {
 			t.Fatalf("recv SessionAck: %v", err)
 		}
 
-		// Send seqs 1 and 3 — 2 is missing.
 		sendUncompressedBatch(t, conn,
-			&wtpv1.CompactEvent{Sequence: 1, Generation: 0},
-			&wtpv1.CompactEvent{Sequence: 3, Generation: 0},
+			&wtpv1.CompactEvent{Sequence: 1},
+			&wtpv1.CompactEvent{Sequence: 3},
 		)
-		if _, err := srv.WaitForBatch(2 * time.Second); err != nil {
-			t.Fatalf("WaitForBatch: %v", err)
+		if _, err := srv.WaitForFirstBatch(2 * time.Second); err != nil {
+			t.Fatalf("WaitForFirstBatch: %v", err)
 		}
 
 		err = srv.AssertSequenceRange(1, 3)
 		if err == nil {
 			t.Fatal("AssertSequenceRange: want missing-seq error, got nil")
+		}
+		if !strings.Contains(err.Error(), "missing seq 2") {
+			t.Fatalf("AssertSequenceRange err=%q, want substring %q", err.Error(), "missing seq 2")
 		}
 	})
 
@@ -133,12 +199,11 @@ func TestAssertSequenceRange_DetectsGapsAndDuplicates(t *testing.T) {
 			t.Fatalf("recv SessionAck: %v", err)
 		}
 
-		// Send seq=1 twice (two batches, same seq).
-		sendUncompressedBatch(t, conn, &wtpv1.CompactEvent{Sequence: 1, Generation: 0})
+		sendUncompressedBatch(t, conn, &wtpv1.CompactEvent{Sequence: 1})
 		if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
 			t.Fatalf("recv BatchAck 1: %v", err)
 		}
-		sendUncompressedBatch(t, conn, &wtpv1.CompactEvent{Sequence: 1, Generation: 0})
+		sendUncompressedBatch(t, conn, &wtpv1.CompactEvent{Sequence: 1})
 		if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
 			t.Fatalf("recv BatchAck 2: %v", err)
 		}
@@ -146,6 +211,9 @@ func TestAssertSequenceRange_DetectsGapsAndDuplicates(t *testing.T) {
 		err = srv.AssertSequenceRange(1, 1)
 		if err == nil {
 			t.Fatal("AssertSequenceRange: want duplicate-seq error, got nil")
+		}
+		if !strings.Contains(err.Error(), "duplicate seq 1") {
+			t.Fatalf("AssertSequenceRange err=%q, want substring %q", err.Error(), "duplicate seq 1")
 		}
 	})
 
@@ -164,24 +232,83 @@ func TestAssertSequenceRange_DetectsGapsAndDuplicates(t *testing.T) {
 			t.Fatalf("recv SessionAck: %v", err)
 		}
 
-		// Send seq=5, assert range [1, 3] — 5 is outside.
-		sendUncompressedBatch(t, conn, &wtpv1.CompactEvent{Sequence: 5, Generation: 0})
-		if _, err := srv.WaitForBatch(2 * time.Second); err != nil {
-			t.Fatalf("WaitForBatch: %v", err)
+		sendUncompressedBatch(t, conn, &wtpv1.CompactEvent{Sequence: 5})
+		if _, err := srv.WaitForFirstBatch(2 * time.Second); err != nil {
+			t.Fatalf("WaitForFirstBatch: %v", err)
 		}
 
 		err = srv.AssertSequenceRange(1, 3)
 		if err == nil {
 			t.Fatal("AssertSequenceRange: want out-of-range error, got nil")
 		}
+		if !strings.Contains(err.Error(), "outside expected range") || !strings.Contains(err.Error(), "seq 5") {
+			t.Fatalf("AssertSequenceRange err=%q, want out-of-range substring", err.Error())
+		}
 	})
+}
+
+// TestAssertRange_InvalidBoundsRejected verifies that first > last
+// is rejected with ErrInvalidRange BEFORE any batch iteration. A
+// swapped-argument test-setup bug would otherwise silently pass
+// when no batches are recorded (empty loop = nil return).
+func TestAssertRange_InvalidBoundsRejected(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	defer srv.Close()
+
+	if err := srv.AssertSequenceRange(10, 5); err == nil {
+		t.Fatal("AssertSequenceRange(10, 5): want ErrInvalidRange, got nil")
+	} else if !errors.Is(err, testserver.ErrInvalidRange) {
+		t.Fatalf("AssertSequenceRange(10, 5) err=%v, want errors.Is(..., ErrInvalidRange)", err)
+	}
+
+	if err := srv.AssertReplayObserved(10, 5); err == nil {
+		t.Fatal("AssertReplayObserved(10, 5): want ErrInvalidRange, got nil")
+	} else if !errors.Is(err, testserver.ErrInvalidRange) {
+		t.Fatalf("AssertReplayObserved(10, 5) err=%v, want errors.Is(..., ErrInvalidRange)", err)
+	}
+}
+
+// TestAssertRange_CompressedBatchFailsFast verifies that a recorded
+// batch whose Body is not UncompressedEvents causes the assertion
+// helpers to return ErrUnsupportedCompression rather than silently
+// skip. Without this, a misconfigured test that enabled compression
+// would see misleading "missing seq" failures.
+func TestAssertRange_CompressedBatchFailsFast(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	defer srv.Close()
+
+	conn, err := srv.Dial(context.Background())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	sendSessionInit(t, conn)
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv SessionAck: %v", err)
+	}
+
+	sendCompressedBatchMarker(t, conn)
+	if _, err := srv.WaitForFirstBatch(2 * time.Second); err != nil {
+		t.Fatalf("WaitForFirstBatch: %v", err)
+	}
+
+	if err := srv.AssertSequenceRange(0, 0); err == nil {
+		t.Fatal("AssertSequenceRange on compressed batch: want ErrUnsupportedCompression, got nil")
+	} else if !errors.Is(err, testserver.ErrUnsupportedCompression) {
+		t.Fatalf("AssertSequenceRange err=%v, want errors.Is(..., ErrUnsupportedCompression)", err)
+	}
+
+	if err := srv.AssertReplayObserved(0, 0); err == nil {
+		t.Fatal("AssertReplayObserved on compressed batch: want ErrUnsupportedCompression, got nil")
+	} else if !errors.Is(err, testserver.ErrUnsupportedCompression) {
+		t.Fatalf("AssertReplayObserved err=%v, want errors.Is(..., ErrUnsupportedCompression)", err)
+	}
 }
 
 // TestAssertReplayObserved_DetectsReplayBoundary verifies that
 // AssertReplayObserved passes when every seq in [first, last] was
-// observed in some batch, and does not care about additional later
-// sequences. Tolerant of extra Live-era traffic appended after the
-// replay window.
+// observed in some batch, tolerating extra seqs past `last`.
 func TestAssertReplayObserved_DetectsReplayBoundary(t *testing.T) {
 	srv := testserver.New(testserver.Options{})
 	defer srv.Close()
@@ -197,7 +324,6 @@ func TestAssertReplayObserved_DetectsReplayBoundary(t *testing.T) {
 		t.Fatalf("recv SessionAck: %v", err)
 	}
 
-	// Replay batch: seqs 11..12.
 	sendUncompressedBatch(t, conn,
 		&wtpv1.CompactEvent{Sequence: 11, Generation: 1},
 		&wtpv1.CompactEvent{Sequence: 12, Generation: 1},
@@ -206,7 +332,6 @@ func TestAssertReplayObserved_DetectsReplayBoundary(t *testing.T) {
 		t.Fatalf("recv BatchAck replay: %v", err)
 	}
 
-	// Live batch: seq 13 (extra, should be tolerated).
 	sendUncompressedBatch(t, conn, &wtpv1.CompactEvent{Sequence: 13, Generation: 1})
 	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
 		t.Fatalf("recv BatchAck live: %v", err)
@@ -216,8 +341,12 @@ func TestAssertReplayObserved_DetectsReplayBoundary(t *testing.T) {
 		t.Fatalf("AssertReplayObserved [11,12]: %v", err)
 	}
 
-	// Missing-seq branch: range [10, 12] — 10 was never sent.
-	if err := srv.AssertReplayObserved(10, 12); err == nil {
+	// Missing-seq: 10 was never sent.
+	err = srv.AssertReplayObserved(10, 12)
+	if err == nil {
 		t.Fatal("AssertReplayObserved [10,12]: want missing-seq error, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing seq 10") {
+		t.Fatalf("AssertReplayObserved err=%q, want substring %q", err.Error(), "missing seq 10")
 	}
 }
