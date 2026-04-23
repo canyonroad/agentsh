@@ -416,11 +416,35 @@ type stopReq struct {
 // In all non-Live paths the drain is effectively no-op; drainDeadline
 // is consulted only by runShutdown.
 func (t *Transport) Stop(drainDeadline time.Duration) {
+	t.stopWithHooks(drainDeadline, nil, nil)
+}
+
+// stopWithHooks is the shared implementation behind Stop and the
+// test-only EnqueueStopAndWaitForTest seam. Splitting it here means
+// both the public Stop path and the instrumented test path go
+// through the same enqueue/wait code: a regression in either step
+// is observable through both entry points.
+//
+// preEnqueue / postEnqueue are called synchronously around the
+// `t.stopCh <- r` send. Production Stop passes nil for both (no-ops);
+// tests pass the hooks they need.
+//
+// A nil t.stopCh (New not yet called, or a direct zero-value
+// Transport) is treated as an instant no-op — this matches the
+// public Stop's previous behavior and avoids a panic on uninitialized
+// instances.
+func (t *Transport) stopWithHooks(drainDeadline time.Duration, preEnqueue, postEnqueue func()) {
 	if t.stopCh == nil {
 		return
 	}
+	if preEnqueue != nil {
+		preEnqueue()
+	}
 	r := stopReq{drainDeadline: drainDeadline, done: make(chan struct{})}
 	t.stopCh <- r
+	if postEnqueue != nil {
+		postEnqueue()
+	}
 	<-r.done
 }
 

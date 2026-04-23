@@ -259,33 +259,45 @@ func StartRecvForTest(t *Transport, parent context.Context) *RecvSessionHandle {
 // out the field) without touching unexported state.
 func TeardownRecvForTest(t *Transport) { t.teardownRecv() }
 
-// EnqueueStopAndWaitForTest is the deterministic-timing test seam for
-// Task 19's Stop-between-replay-batches test. It:
+// EnqueueStopAndWaitForTest is the timing-anchored test seam for
+// Task 19's Stop-between-replay-batches test. It calls the same
+// stopWithHooks helper that the public Transport.Stop uses, so the
+// enqueue/wait code path is exercised identically in both paths; a
+// regression to Stop itself is observable through this seam too.
 //
-//  1. Runs `preEnqueue` synchronously so the test can sample counters
-//     / cursors etc. IMMEDIATELY before the stop request is enqueued.
-//  2. Writes the stopReq to t.stopCh — this is the exact moment
-//     "Stop is enqueued" (buffered cap-1 send returns immediately).
-//  3. Runs `postEnqueue` synchronously so the test can arm latches /
-//     install side-effect signals AFTER the enqueue is visible in
-//     t.stopCh. The latch window now measures "sends between the
-//     enqueue and the next top-of-loop observation" rather than the
-//     scheduler-dependent "sample → goroutine-launch → enqueue →
-//     observation" window.
-//  4. Blocks until whichever state-handler arm services the stopReq
-//     closes r.done.
+// Ordering (per stopWithHooks):
+//
+//  1. preEnqueue runs synchronously on the caller goroutine.
+//  2. `t.stopCh <- r` completes — the request is in the channel.
+//  3. postEnqueue runs synchronously on the caller goroutine.
+//  4. Block on r.done until a state handler closes it.
+//
+// Ordering caveat: "request is in the channel" is what step 2
+// guarantees. It does NOT guarantee that no receiver has yet
+// observed it — Go's select semantics allow a parked receiver on
+// an otherwise-ready arm to be unblocked by the send. In practice,
+// runReplaying's top-of-loop select uses `default` as a fall-through
+// so it is rarely parked on stopCh, but callers should treat
+// postEnqueue as "after enqueue, possibly concurrent with
+// observation" rather than "strictly before observation." For the
+// replay-stop test this is still tight enough: the latch budget
+// only needs to cover sends issued between enqueue and the next
+// top-of-loop pass, which is at most one NextBatch + Send cycle
+// under normal scheduling.
+//
+// Preconditions (caller must ensure):
+//
+//   - Run is currently executing on a goroutine (otherwise r.done
+//     is never closed and the seam hangs forever).
+//   - t.stopCh has spare buffer capacity OR a handler is ready to
+//     receive (the default cap-1 buffer is empty on a fresh
+//     Transport; a prior Stop that has been serviced empties it).
+//   - No concurrent caller is invoking Stop, stopWithHooks, or this
+//     seam — Transport.stopReq is single-use per run-loop lifetime.
 //
 // Production code MUST NOT call this — Stop (transport.go) is the
 // supported API. The seam exists ONLY so the replay-stop test can
 // synchronize the latch arming with the stopCh-enqueue moment.
 func EnqueueStopAndWaitForTest(t *Transport, drainDeadline time.Duration, preEnqueue, postEnqueue func()) {
-	if preEnqueue != nil {
-		preEnqueue()
-	}
-	r := stopReq{drainDeadline: drainDeadline, done: make(chan struct{})}
-	t.stopCh <- r
-	if postEnqueue != nil {
-		postEnqueue()
-	}
-	<-r.done
+	t.stopWithHooks(drainDeadline, preEnqueue, postEnqueue)
 }

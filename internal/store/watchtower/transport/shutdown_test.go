@@ -159,32 +159,28 @@ func TestShutdown_StopDrainsThenCloseSends(t *testing.T) {
 // are synchronous calls with no ctx hook); the stopCh arm only runs
 // once the current Send/NextBatch has returned.
 //
-// Determinism: the test uses the EnqueueStopAndWaitForTest seam
-// (seams_export_test.go) to anchor the sample + arm to the exact
-// moment the stopReq lands in t.stopCh. Ordering inside the seam:
+// Timing anchor: the test uses the EnqueueStopAndWaitForTest seam
+// (seams_export_test.go), which is a thin wrapper around the same
+// stopWithHooks helper that the public Transport.Stop uses. This
+// keeps the public enqueue/wait path covered while letting the
+// test arm a send-count latch close to the enqueue moment.
 //
-//  1. stopReq is written to t.stopCh (the enqueue moment).
-//  2. postEnqueue fires synchronously, sampling sendCalls and
-//     arming the blockAfter latch to sample + maxSendsAfterStop.
-//  3. The seam blocks on r.done.
+// Ordering claim (narrow): after postEnqueue returns, the stopReq
+// is in t.stopCh. Go's select semantics do NOT strictly prevent a
+// receiver that was already ready-to-consume from observing the
+// request before postEnqueue; runReplaying's top-of-loop select
+// uses a `default` fall-through so that window is rarely active,
+// but the seam docstring spells out the caveat. For the budget
+// below the caveat is tolerable: the latch just needs to accept a
+// handful of sends that may fire between enqueue and the next
+// top-of-loop check under normal scheduling.
 //
-// The latch therefore measures ONLY "sends between stopCh-enqueue
-// and runReplaying's top-of-loop observation" — the property the
-// stopCh arm actually controls. Scheduler delay BEFORE step 1 does
-// not consume any latch budget.
-//
-// If runReplaying's top-of-loop stopCh arm is serviced within the
-// budget, the conn.Close from the arm unblocks any pending Send
-// and the seam returns cleanly. If stopCh is ignored, the
-// (maxSendsAfterStop+1)th Send blocks on conn.closed, the seam's
-// `<-r.done` wait never fires, and the 2s timeout fails the test
-// with an explicit diagnostic. maxSendsAfterStop = 50 comfortably
-// covers the 1–2 sends that may fire between the enqueue and the
-// next top-of-loop select while remaining trivially smaller than
-// the ~200-send regression signal.
-//
-// Validated by temporarily removing runReplaying's stopCh arm — the
-// test fails deterministically with delta ~= totalRecords.
+// Regression shape: if runReplaying never observes stopCh (the
+// arm is removed or broken), the (maxSendsAfterStop+1)th Send
+// blocks on conn.closed, the seam's `<-r.done` wait never fires,
+// and the 2s timeout fails the test with an explicit diagnostic.
+// Validated by temporarily removing runReplaying's stopCh arm —
+// the test fails deterministically with delta ~= totalRecords.
 func TestShutdown_StopBetweenReplayBatches(t *testing.T) {
 	dir := t.TempDir()
 	w, err := wal.Open(wal.Options{Dir: dir, SegmentSize: 64 * 1024})
