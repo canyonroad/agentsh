@@ -18,6 +18,26 @@ import (
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 )
 
+// closeRunCancelGrace bounds how long Close waits on the run loop
+// AFTER runCancel fires (i.e. AFTER the cooperative Stop drain has
+// either succeeded or timed out). The bg loop's per-iteration ctx
+// checks unblock within a single backoff sleep on dial-fail or a
+// single select hop on Live, so this grace is only relevant if the
+// Transport is wedged inside a non-interruptible Conn.Send / Recv /
+// Dial (Transport.Stop's documented limitation).
+//
+// Exposed as a constant rather than an Options field because (a) the
+// only relevant configuration knob is opts.DrainDeadline, which the
+// operator controls, and (b) the fallback is a safety net not a
+// tunable — making it configurable invites operators to set it to
+// values that mask real wedge bugs. If a future production scenario
+// requires a different value, promote this to Options at that point.
+//
+// Worst-case Close latency = DrainDeadline + closeRunCancelGrace +
+// wal.Close (typically sub-millisecond). Documented in the Store
+// docstring.
+const closeRunCancelGrace = 2 * time.Second
+
 // Store is the watchtower store.EventStore implementation.
 //
 // Lifecycle:
@@ -33,18 +53,31 @@ import (
 //     cancels right after New returns will NOT silently kill the
 //     background transport.
 //
-//   - Close(ctx) cancels the run loop, calls tr.Stop with the
-//     configured drain deadline, closes the WAL, and returns any
-//     error the run loop surfaced (or ctx.Err() if Close's own ctx
-//     elapses before the run loop exits). Idempotent — second call
-//     is a no-op that returns the same error captured on the first
-//     call.
+//   - Close() (matching the EventStore.Close() error signature)
+//     shuts the Store down. The shutdown latency budget is the SUM
+//     of three documented quantities:
 //
-//   - Err() returns the run loop's terminal error if it has already
-//     exited (e.g. terminal SessionAck rejection from the server),
-//     or nil if the loop is still running. Callers polling on
-//     transport health should use Err in conjunction with their own
-//     liveness check.
+//       1. opts.DrainDeadline — the cooperative tr.Stop drain
+//          window. tr.Stop runs in a goroutine bounded by this
+//          duration; if drain completes the run loop exits
+//          gracefully.
+//       2. closeRunCancelGrace — a constant fallback (see
+//          store.go) that bounds how long Close waits on the run
+//          loop AFTER runCancel fires. The bg loop's per-iteration
+//          ctx checks unblock within a single backoff sleep on
+//          dial-fail or a single select hop on Live, so this grace
+//          is only relevant if the Transport is wedged in a non-
+//          interruptible call (Stop's documented limitation).
+//       3. wal.Close — typically sub-millisecond.
+//
+//     Worst-case Close latency = DrainDeadline + closeRunCancelGrace +
+//     wal.Close. Idempotent — second and later calls return the same
+//     captured error.
+//
+//   - Err() returns the run loop's terminal error if Run has
+//     already exited (or the canonical Close-captured error after
+//     Close has run). Non-blocking; returns nil if Run is still
+//     alive and Close has not yet run.
 //
 // AppendEvent and the rest of the store.EventStore surface land in
 // Task 23.
@@ -285,12 +318,12 @@ func (s *Store) shutdown() error {
 		_ = stopGoroutineExited // best-effort; may still be running
 	case <-timer.C:
 		// Drain deadline elapsed. Fall back to runCancel and a
-		// bounded wait on runDone.
+		// bounded wait on runDone (closeRunCancelGrace).
 		s.runCancel()
 		select {
 		case runErr = <-s.runDone:
-		case <-time.After(2 * time.Second):
-			runErr = errors.New("watchtower.Close: run loop did not exit within fallback deadline after runCancel")
+		case <-time.After(closeRunCancelGrace):
+			runErr = fmt.Errorf("watchtower.Close: run loop did not exit within closeRunCancelGrace=%v after runCancel", closeRunCancelGrace)
 		}
 	}
 	return s.combineWALCloseErr(runErr)

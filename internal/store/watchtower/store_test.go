@@ -359,27 +359,64 @@ func TestStore_CloseOnActiveRunReturnsCleanly(t *testing.T) {
 // TestStore_CloseDeadlineFallback exercises the timer.C branch of
 // shutdown(): when the cooperative tr.Stop drain does not complete
 // within DrainDeadline, runCancel is the fallback that unblocks the
-// run loop. Validates the bounded-Close contract end-to-end.
+// run loop within closeRunCancelGrace. Validates the bounded-Close
+// contract end-to-end with concrete latency + error-shape assertions.
 //
-// nopDialer never produces a Conn so Run is in dial-fail backoff;
-// tr.Stop's per-state stopCh arms will pick it up at the backoff
-// sleep's stopCh case (transport.go's outer-iteration check OR
-// backoff sleep stopCh arm — see Stop's interruptible-windows doc).
-// In either case Run exits via runCancel within the fallback grace.
+// Setup: 1ns DrainDeadline forces the deadline branch to fire on the
+// first scheduler hop. nopDialer keeps Run in dial-fail backoff;
+// runCancel is what eventually unblocks the bg loop.
+//
+// Bounded-Close contract: Close MUST return within
+// (DrainDeadline + closeRunCancelGrace + small jitter). With
+// DrainDeadline = 1ns and closeRunCancelGrace = 2s, the upper bound
+// is ~2.5s. A regression that misses the timer.C branch (e.g.
+// blocking on tr.Stop indefinitely) would hang at the test timeout.
+//
+// Error shape: nil if runCancel-driven exit happened cleanly within
+// the grace, OR the synthetic "did not exit within
+// closeRunCancelGrace" error if even the grace elapsed. Either is
+// acceptable shape — the contract is "bounded latency, observable
+// outcome."
 func TestStore_CloseDeadlineFallback(t *testing.T) {
 	opts := validOpts(t.TempDir())
-	// 1ns DrainDeadline forces the deadline branch to fire instantly
-	// (Stop's drain has no time to complete; runCancel is the path).
 	opts.DrainDeadline = 1 * time.Nanosecond
 
 	s, err := watchtower.New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+
+	start := time.Now()
 	closeErr := s.Close()
-	// Either nil (clean exit via runCancel-driven ctx) or wrapped
-	// is acceptable — the contract is "bounded, no deadlock."
-	_ = closeErr
+	elapsed := time.Since(start)
+
+	// closeRunCancelGrace is 2s (private constant in store.go);
+	// upper bound = DrainDeadline + closeRunCancelGrace + jitter.
+	// 2.5s is a comfortable headroom that still catches a regression
+	// to "no fallback at all" (which would block until test timeout).
+	const closeUpperBound = 2500 * time.Millisecond
+	if elapsed > closeUpperBound {
+		t.Fatalf("Close took %v; expected < %v (DrainDeadline + closeRunCancelGrace + jitter). Possible regression: timer.C branch missed.",
+			elapsed, closeUpperBound)
+	}
+
+	// Error-shape: three acceptable outcomes per the documented
+	// contract:
+	//   1. nil — clean drain (Stop happened to win in the goroutine).
+	//   2. context.Canceled — the run loop returned ctx.Err() after
+	//      runCancel fired in the fallback branch.
+	//   3. wrapped "watchtower.Close: ..." — the synthetic
+	//      closeRunCancelGrace-elapsed error.
+	// Any other shape (a panic, a raw transport error) would be a
+	// regression in shutdown's error-categorization.
+	if closeErr != nil &&
+		!errors.Is(closeErr, context.Canceled) &&
+		!strings.Contains(closeErr.Error(), "watchtower.Close") {
+		t.Fatalf("unexpected Close error shape: %v", closeErr)
+	}
+
+	// Err() consistency: must equal Close's return regardless of
+	// which branch fired.
 	if got := s.Err(); got != closeErr {
 		t.Fatalf("Err() after Close = %v, want closeErr=%v", got, closeErr)
 	}
