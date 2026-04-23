@@ -18249,6 +18249,52 @@ and the restart-required reload model.
 
 ## Definition of Done (end-state target — not current status)
 
+### Task 27c: Transport-side non-blocking Stop / RunDone signal (eliminate Close safety-net leak)
+
+**Owner:** WTP transport team.
+
+**Why:** Task 22's `watchtower.Store.Close()` returns
+`watchtower.ErrCloseSafetyNet` (a typed sentinel) when the bg run
+loop fails to exit within `closeRunCancelGrace` after `runCancel`.
+This happens when `Transport.Stop` is queued against a Run loop
+wedged inside a non-interruptible `Conn.Send` / `Recv` / `Dial` call
+that does not honour ctx — `Stop` then blocks on its `<-r.done` wait
+that nothing will close. The safety-net path leaks the bg goroutine,
+the in-flight `Stop` goroutine, and the WAL handle; same-process
+reopen is documented as a CONTRACT VIOLATION.
+
+This task eliminates the leak by making `Transport.Stop` non-
+blocking when no Run-loop consumer is alive (or by adding a
+RunDone signal Stop can observe so it returns instead of waiting on
+a never-closed `r.done`).
+
+**Acceptance criteria:**
+
+- `Transport.Stop` returns within a bounded time when called against
+  a Run loop that has already exited OR is wedged in a non-
+  interruptible call. No goroutine leak.
+- `watchtower.Store.Close()` no longer needs to skip `wal.Close` on
+  any path; the conditional WAL-close in `store.go` becomes
+  unconditional.
+- `watchtower.ErrCloseSafetyNet` is removed (or downgraded to a
+  reserved-for-degenerate-cases sentinel that no realistic
+  production scenario triggers).
+- The `Store` lifecycle docstring's "IMPORTANT incomplete-cleanup
+  case" block is removed.
+- Same-process reopen on the same WAL Dir after `Close()` returns
+  becomes SUPPORTED (contract change documented in the plan +
+  spec).
+- Acceptance test: a fault-injecting dialer that wedges `Dial`
+  AND ignores ctx — `Close()` MUST still return without leaking
+  the bg goroutine.
+
+**Coordination:** Task 22's `ErrCloseSafetyNet` test
+(`TestStore_CloseSafetyNetReturnsSentinel`) becomes the regression
+guard for the leak fix: after this task lands, that test should be
+updated or removed (the path it exercises no longer exists).
+
+---
+
 This section describes the target end-state when ALL 27 implementation
 tasks plus Task 27a and Task 27b have landed. It is NOT a current-status
 claim — at the time of writing, the plan is mid-execution (Task 17.X

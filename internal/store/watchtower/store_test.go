@@ -409,14 +409,21 @@ func TestStore_CloseSafetyNetReturnsSentinel(t *testing.T) {
 	closeErr := s.Close()
 	elapsed := time.Since(start)
 
-	// Lower bound: synthetic-timeout MUST wait at least
-	// closeRunCancelGrace (2s) before returning. Without the wedge,
-	// runCancel would propagate quickly and Close would return well
-	// under 2s. A regression that returns the sentinel without
-	// actually waiting would fail this lower-bound assertion.
-	if elapsed < 1500*time.Millisecond {
-		t.Fatalf("Close took %v; expected >= 1.5s (closeRunCancelGrace bound). Possible regression: synthetic-timeout returned too early.",
-			elapsed)
+	// Lower bound: synthetic-timeout MUST wait approximately the
+	// full closeRunCancelGrace (2s) before returning. Allow a 50ms
+	// jitter budget for scheduler noise / select dispatch — but
+	// no more, so a regression that returns the sentinel
+	// noticeably early (e.g. at 1s instead of 2s) fails this
+	// assertion. The lower bound used to be 1.5s which was too
+	// loose per roborev #5785.
+	const (
+		closeRunCancelGraceTest = 2 * time.Second
+		jitterBudget            = 50 * time.Millisecond
+		closeLowerBound         = closeRunCancelGraceTest - jitterBudget // 1.95s
+	)
+	if elapsed < closeLowerBound {
+		t.Fatalf("Close took %v; expected >= %v (closeRunCancelGrace=%v - jitter=%v). Possible regression: synthetic-timeout returned too early.",
+			elapsed, closeLowerBound, closeRunCancelGraceTest, jitterBudget)
 	}
 	// Upper bound: per the documented latency contract.
 	if elapsed > 2500*time.Millisecond {

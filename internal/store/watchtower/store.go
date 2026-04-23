@@ -114,6 +114,15 @@ var ErrCloseSafetyNet = errors.New("watchtower.Close: shutdown safety net hit; b
 //     from Close on the leak path. This avoids string-matching the
 //     wrapped error message for the same-process-reopen guard.
 //
+//     The transport-side fix that eliminates this entire path is
+//     tracked as **Task 27c** in the plan
+//     (docs/superpowers/plans/2026-04-18-wtp-client.md): make
+//     Transport.Stop non-blocking when no Run-loop consumer is
+//     alive (or add a RunDone signal Stop can observe). When that
+//     lands, ErrCloseSafetyNet becomes reserved-for-degenerate-
+//     cases and the conditional wal.Close in shutdown() becomes
+//     unconditional.
+//
 //     The transport-side non-blocking-stop signal that would
 //     eliminate the leak case is a future-task concern (the Stop
 //     docstring tracks it inline; no plan task owns it yet).
