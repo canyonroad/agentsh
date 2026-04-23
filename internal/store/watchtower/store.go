@@ -33,10 +33,26 @@ import (
 // values that mask real wedge bugs. If a future production scenario
 // requires a different value, promote this to Options at that point.
 //
-// Worst-case Close latency = DrainDeadline + closeRunCancelGrace +
-// wal.Close (typically sub-millisecond). Documented in the Store
-// docstring.
+// Latency contract per shutdown branch (canonical reference is the
+// Store docstring's "Close()" block; this comment exists to keep
+// the constant's local context honest):
+//
+//   Happy path  : DrainDeadline + closeRunCancelGrace + wal.Close
+//   Safety net  : DrainDeadline + closeRunCancelGrace
+//                 (wal.Close is INTENTIONALLY skipped — see
+//                  the IMPORTANT incomplete-cleanup case on the
+//                  Store docstring for why)
 const closeRunCancelGrace = 2 * time.Second
+
+// ErrCloseSafetyNet is the sentinel error returned by Close when the
+// synthetic-timeout safety net fires (closeRunCancelGrace elapsed
+// after runCancel without the bg run loop exiting). Higher layers
+// can errors.Is(err, ErrCloseSafetyNet) to reliably detect the
+// "WAL handle leaked, restart required, same-process reopen
+// unsupported" case WITHOUT string-matching the returned error
+// message. The wrapped error message also names the elapsed grace
+// duration for operator triage.
+var ErrCloseSafetyNet = errors.New("watchtower.Close: shutdown safety net hit; bg goroutine and WAL handle leaked, process restart required")
 
 // Store is the watchtower store.EventStore implementation.
 //
@@ -92,6 +108,11 @@ const closeRunCancelGrace = 2 * time.Second
 //     and a fresh process can open the Dir cleanly. Constructing a
 //     replacement watchtower.Store in the same process after a
 //     synthetic Close error is a CONTRACT VIOLATION.
+//
+//     Higher layers detect the safety-net path via
+//     errors.Is(err, ErrCloseSafetyNet) — a typed sentinel returned
+//     from Close on the leak path. This avoids string-matching the
+//     wrapped error message for the same-process-reopen guard.
 //
 //     The transport-side non-blocking-stop signal that would
 //     eliminate the leak case is a future-task concern (the Stop
@@ -378,10 +399,11 @@ func (s *Store) shutdown() error {
 				"action", "returning synthetic timeout error; bg goroutine + WAL handle leaked, restart required for clean state")
 			// IMPORTANT: do NOT call s.combineWALCloseErr — that
 			// would invoke wal.Close while a Reader inside the bg
-			// loop may still be active. Return the synthetic error
-			// directly; the leaked WAL handle is part of the
-			// safety-net contract.
-			return fmt.Errorf("watchtower.Close: run loop did not exit within closeRunCancelGrace=%v after runCancel (bg goroutine + WAL handle leaked; restart required)", closeRunCancelGrace)
+			// loop may still be active. Return the sentinel
+			// (wrapped with the elapsed grace) directly; the leaked
+			// WAL handle is part of the safety-net contract.
+			// Higher layers detect via errors.Is(err, ErrCloseSafetyNet).
+			return fmt.Errorf("%w (closeRunCancelGrace=%v elapsed)", ErrCloseSafetyNet, closeRunCancelGrace)
 		}
 	}
 	return s.combineWALCloseErr(runErr)

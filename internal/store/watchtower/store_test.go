@@ -356,7 +356,83 @@ func TestStore_CloseOnActiveRunReturnsCleanly(t *testing.T) {
 	}
 }
 
-// TestStore_CloseDeadlineFallback exercises the timer.C branch of
+// TestStore_CloseSafetyNetReturnsSentinel exercises the synthetic-
+// timeout branch of shutdown(): both DrainDeadline and
+// closeRunCancelGrace fully elapse without the bg loop exiting.
+// Asserts that the returned error is errors.Is(err, ErrCloseSafetyNet)
+// so higher layers can detect the WAL-leaked / no-reopen contract
+// without string-matching.
+//
+// To force the synthetic-timeout, the dialer's ctx hook is REMOVED:
+// Dial blocks on a chan that the test never closes AND ignores ctx
+// cancellation. runCancel cannot propagate through this dialer; the
+// run loop stays wedged inside Dial; closeRunCancelGrace fully
+// elapses; the synthetic error path fires.
+//
+// The bg goroutine is intentionally leaked at test end (no clean
+// runDone). t.Cleanup releases the wedge so the goroutine can exit
+// once the test moves on.
+func TestStore_CloseSafetyNetReturnsSentinel(t *testing.T) {
+	wedgeRelease := make(chan struct{})
+	enteredDial := make(chan struct{})
+	dialOnce := false
+	wedgingDialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		if !dialOnce {
+			dialOnce = true
+			close(enteredDial)
+		}
+		// Block on wedgeRelease ONLY — ctx is deliberately ignored
+		// so runCancel cannot unblock this Dial. Mirrors the
+		// "non-interruptible Conn.Dial" wedge case the safety net
+		// is designed to bound.
+		<-wedgeRelease
+		return nil, errors.New("released")
+	})
+	t.Cleanup(func() { close(wedgeRelease) })
+
+	opts := validOpts(t.TempDir())
+	opts.Dialer = wedgingDialer
+	opts.DrainDeadline = 1 * time.Nanosecond
+
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	select {
+	case <-enteredDial:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bg run loop did not reach Dial within 2s")
+	}
+
+	start := time.Now()
+	closeErr := s.Close()
+	elapsed := time.Since(start)
+
+	// Lower bound: synthetic-timeout MUST wait at least
+	// closeRunCancelGrace (2s) before returning. Without the wedge,
+	// runCancel would propagate quickly and Close would return well
+	// under 2s. A regression that returns the sentinel without
+	// actually waiting would fail this lower-bound assertion.
+	if elapsed < 1500*time.Millisecond {
+		t.Fatalf("Close took %v; expected >= 1.5s (closeRunCancelGrace bound). Possible regression: synthetic-timeout returned too early.",
+			elapsed)
+	}
+	// Upper bound: per the documented latency contract.
+	if elapsed > 2500*time.Millisecond {
+		t.Fatalf("Close took %v; expected < 2.5s", elapsed)
+	}
+
+	// The sentinel — the whole point of this test.
+	if !errors.Is(closeErr, watchtower.ErrCloseSafetyNet) {
+		t.Fatalf("Close error %v is not errors.Is(ErrCloseSafetyNet); higher layers cannot detect the leak/no-reopen path", closeErr)
+	}
+
+	// Err() consistency.
+	if got := s.Err(); got != closeErr {
+		t.Fatalf("Err() after Close = %v, want closeErr=%v", got, closeErr)
+	}
+}
 // shutdown(): when the cooperative tr.Stop drain does not complete
 // within DrainDeadline, runCancel is the fallback that unblocks the
 // run loop within closeRunCancelGrace.
