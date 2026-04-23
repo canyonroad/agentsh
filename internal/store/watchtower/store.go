@@ -74,15 +74,19 @@ const closeRunCancelGrace = 2 * time.Second
 //     does not honour ctx — see Transport.Stop's documented
 //     limitations), runCancel does NOT unblock it. After
 //     closeRunCancelGrace elapses, Close returns a synthetic
-//     "watchtower.Close: run loop did not exit within
-//     closeRunCancelGrace" error AND ALSO emits a WARN log. The bg
-//     goroutine and the in-flight Stop goroutine MAY still be alive
-//     at that point — Close has done everything it can without
-//     unsafe force. Operators should treat the synthetic error as a
-//     "shutdown raised the safety net" signal and investigate
-//     transport health. The transport-side non-blocking-stop signal
-//     that would eliminate this case is a future-task concern (the
-//     Stop docstring tracks it inline; no plan task owns it yet).
+//     "watchtower.Close: ... bg goroutine + WAL handle leaked"
+//     error AND emits a WARN log carrying the stable instance
+//     identifiers (session_id, agent_id, wal_dir) so multi-instance
+//     failures are triageable. In that path Close DELIBERATELY does
+//     NOT close the WAL — calling wal.Close while a wal.Reader is
+//     mid-read inside the bg loop would race (potential panic or
+//     corrupted state). The bg goroutine, the in-flight Stop
+//     goroutine, AND the WAL handle are all leaked; the operator's
+//     intended remedy is process restart, at which point the OS
+//     reclaims everything. The transport-side non-blocking-stop
+//     signal that would eliminate this case is a future-task
+//     concern (the Stop docstring tracks it inline; no plan task
+//     owns it yet).
 //
 //     Idempotent — second and later calls return the same captured
 //     error.
@@ -336,18 +340,30 @@ func (s *Store) shutdown() error {
 		select {
 		case runErr = <-s.runDone:
 		case <-time.After(closeRunCancelGrace):
-			// Synthetic-timeout case: runCancel did NOT unblock the
-			// run loop within closeRunCancelGrace. The bg goroutine
-			// AND the in-flight Stop goroutine MAY still be alive —
-			// see the "incomplete-cleanup case" note on the Store
-			// docstring. Surface BOTH a synthetic error AND a WARN
-			// log so operators can act on the safety-net hit; the
-			// returned error alone is easy to ignore at shutdown.
+			// Synthetic-timeout case — UNSAFE-CLEANUP path. The bg
+			// goroutine is still alive; calling wal.Close while a
+			// wal.Reader is mid-read inside the bg loop would race
+			// (potential panic or corrupted state). We DELIBERATELY
+			// leak the WAL handle, the bg goroutine, and the
+			// in-flight Stop goroutine — all three are tied to a
+			// process-level safety-net failure that the operator
+			// should resolve by restart, at which point the OS
+			// reclaims everything. The WARN log below carries the
+			// stable instance identifiers (session_id, agent_id,
+			// wal_dir) so multi-instance failures are triageable.
 			s.opts.Logger.Warn("watchtower.Close: shutdown safety net hit; transport likely wedged in non-interruptible Conn.Send/Recv/Dial",
 				"drain_deadline", s.opts.DrainDeadline,
 				"close_run_cancel_grace", closeRunCancelGrace,
-				"action", "returning synthetic timeout error; bg goroutine may still be alive")
-			runErr = fmt.Errorf("watchtower.Close: run loop did not exit within closeRunCancelGrace=%v after runCancel", closeRunCancelGrace)
+				"session_id", s.opts.SessionID,
+				"agent_id", s.opts.AgentID,
+				"wal_dir", s.opts.WALDir,
+				"action", "returning synthetic timeout error; bg goroutine + WAL handle leaked, restart required for clean state")
+			// IMPORTANT: do NOT call s.combineWALCloseErr — that
+			// would invoke wal.Close while a Reader inside the bg
+			// loop may still be active. Return the synthetic error
+			// directly; the leaked WAL handle is part of the
+			// safety-net contract.
+			return fmt.Errorf("watchtower.Close: run loop did not exit within closeRunCancelGrace=%v after runCancel (bg goroutine + WAL handle leaked; restart required)", closeRunCancelGrace)
 		}
 	}
 	return s.combineWALCloseErr(runErr)
