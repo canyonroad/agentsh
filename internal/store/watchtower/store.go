@@ -54,20 +54,21 @@ const closeRunCancelGrace = 2 * time.Second
 //     background transport.
 //
 //   - Close() (matching the EventStore.Close() error signature)
-//     shuts the Store down. The shutdown latency budget is the SUM
-//     of three documented quantities:
+//     shuts the Store down. The shutdown latency budget depends on
+//     which branch fires:
 //
-//       1. opts.DrainDeadline — the cooperative tr.Stop drain
-//          window. tr.Stop runs in a goroutine bounded by this
-//          duration; if drain completes the run loop exits
-//          gracefully.
-//       2. closeRunCancelGrace — a constant fallback (see
-//          store.go) that bounds how long Close waits on the run
-//          loop AFTER runCancel fires.
-//       3. wal.Close — typically sub-millisecond.
+//       Happy path (cooperative drain succeeds OR runCancel
+//       unblocks the bg loop within closeRunCancelGrace):
+//         DrainDeadline + closeRunCancelGrace + wal.Close
+//         (wal.Close is typically sub-millisecond)
 //
-//     Worst-case Close latency = DrainDeadline + closeRunCancelGrace +
-//     wal.Close.
+//       Safety-net path (synthetic timeout fires):
+//         DrainDeadline + closeRunCancelGrace
+//         wal.Close is NOT called on this path — see the
+//         IMPORTANT note below.
+//
+//     Idempotent — second and later calls return the same captured
+//     error.
 //
 //     IMPORTANT incomplete-cleanup case: if the Transport is wedged
 //     inside a non-interruptible call (Conn.Send / Recv / Dial that
@@ -81,15 +82,20 @@ const closeRunCancelGrace = 2 * time.Second
 //     NOT close the WAL — calling wal.Close while a wal.Reader is
 //     mid-read inside the bg loop would race (potential panic or
 //     corrupted state). The bg goroutine, the in-flight Stop
-//     goroutine, AND the WAL handle are all leaked; the operator's
-//     intended remedy is process restart, at which point the OS
-//     reclaims everything. The transport-side non-blocking-stop
-//     signal that would eliminate this case is a future-task
-//     concern (the Stop docstring tracks it inline; no plan task
-//     owns it yet).
+//     goroutine, AND the WAL handle are all leaked.
 //
-//     Idempotent — second and later calls return the same captured
-//     error.
+//     SAME-PROCESS REOPEN AFTER SAFETY-NET HIT IS UNSUPPORTED. The
+//     leaked bg goroutine still holds a wal.WAL reference; opening
+//     a fresh wal.WAL on the same Dir would race with the existing
+//     handle's writes. The operator's intended remedy is process
+//     restart, at which point the OS reclaims the leaked handle
+//     and a fresh process can open the Dir cleanly. Constructing a
+//     replacement watchtower.Store in the same process after a
+//     synthetic Close error is a CONTRACT VIOLATION.
+//
+//     The transport-side non-blocking-stop signal that would
+//     eliminate the leak case is a future-task concern (the Stop
+//     docstring tracks it inline; no plan task owns it yet).
 //
 //   - Err() returns the run loop's terminal error if Run has
 //     already exited (or the canonical Close-captured error after
@@ -260,19 +266,31 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 //     blockingly), skip the cooperative drain — calling tr.Stop on a
 //     dead run loop would block forever (the buffered stopCh send
 //     would succeed but nothing would close r.done; documented on
-//     Transport.Stop).
+//     Transport.Stop). Then close the WAL.
 //  2. Otherwise, request a cooperative drain via tr.Stop in a
 //     goroutine bounded by opts.DrainDeadline. Wait on runDone OR
 //     the deadline.
-//  3. On deadline, fall back to runCancel() and wait on runDone
-//     (bounded — the bg run loop's select arms honour ctx.Done in
-//     short order).
-//  4. Close the WAL. WAL-close errors are appended to the captured
-//     close error so neither is silently dropped.
+//  3. On deadline, fall back to runCancel() and wait on runDone,
+//     bounded by closeRunCancelGrace.
+//  4. CONDITIONAL WAL close:
+//       - If runDone fired in step 2 OR step 3 — close the WAL.
+//         WAL-close errors are merged into the captured close error.
+//       - If closeRunCancelGrace ALSO elapsed in step 3 (the
+//         synthetic-timeout safety-net path) — DO NOT close the
+//         WAL. The bg goroutine may still hold a wal.Reader; closing
+//         the WAL would race. Return the synthetic error directly
+//         and emit the operator WARN per the Store docstring.
 //
-// Returns the run loop's terminal error on clean shutdown, or a
-// wrapped deadline / WAL-close error otherwise. Idempotent — second
-// and later calls return the error captured on the first call.
+// Returns the run loop's terminal error on clean shutdown, a wrapped
+// WAL-close error if step 4 surfaced one, or the synthetic safety-
+// net error if step 3's grace elapsed. Idempotent — second and later
+// calls return the error captured on the first call.
+//
+// SAME-PROCESS REOPEN AFTER SAFETY-NET HIT IS UNSUPPORTED — see the
+// Store docstring's "incomplete-cleanup case" block. Operators must
+// restart the process to recover; constructing a replacement
+// watchtower.Store on the same WAL Dir in the same process is a
+// contract violation.
 //
 // CAVEAT: under racy shutdown (Run exits between the peek and the
 // Stop goroutine launch) the Stop goroutine MAY leak. Until
