@@ -155,11 +155,31 @@ func (w *WTPMetrics) IncWALCorruption(n uint64) {
 	w.c.wtpWALCorruption.Add(n)
 }
 
+// wtpAnomalousAckReasons is the canonical, ordered list of the five
+// disjoint AckOutcomeAnomaly reasons per the Transport's
+// applyServerAckTuple helper. Listed explicitly so the Prometheus
+// emit is stable (sorted by enum order, not map iteration order) AND
+// so every reason emits at zero on registration — operators can
+// distinguish "no anomalies yet" from "metric absent after restart".
+//
+// MUST stay in sync with the AnomalyReason constants surfaced by
+// applyServerAckTuple. Adding a sub-case there means appending the
+// label here.
+var wtpAnomalousAckReasons = []string{
+	"stale_generation",
+	"unwritten_generation",
+	"server_ack_exceeds_local_seq",
+	"server_ack_exceeds_local_data",
+	"wal_read_failure",
+}
+
 // IncAnomalousAck increments the per-reason counter for a server ack
-// tuple that landed in one of the five disjoint anomaly sub-cases per
-// transport.AckOutcomeAnomaly. Reasons are short snake_case strings
-// (e.g. "stale_generation", "unwritten_generation",
-// "server_ack_exceeds_local_seq"). Nil-safe.
+// tuple that landed in one of the five disjoint AckOutcomeAnomaly
+// sub-cases. Reasons are short snake_case strings — see
+// wtpAnomalousAckReasons for the canonical list. An unknown reason
+// is recorded under the literal label so observability does not
+// silently drop a new sub-case before the registry catches up.
+// Nil-safe.
 func (w *WTPMetrics) IncAnomalousAck(reason string) {
 	if w == nil || w.c == nil {
 		return
@@ -274,11 +294,30 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 
 	// Cursor-feedback counters introduced with the Store integration
 	// (Task 22). Anomalous-ack is per-reason; resend-needed and
-	// ack-regression-loss are scalar.
+	// ack-regression-loss are scalar. The anomalous-ack series is
+	// emitted in canonical-reason order with zeroes for never-fired
+	// reasons so "no anomalies yet" is distinguishable from "metric
+	// absent after restart" and so the exposition order is stable
+	// across scrapes.
 	fmt.Fprint(w, "# HELP wtp_anomalous_ack_total Server ack tuples that fell into one of the AckOutcomeAnomaly sub-cases, by reason.\n")
 	fmt.Fprint(w, "# TYPE wtp_anomalous_ack_total counter\n")
+	for _, reason := range wtpAnomalousAckReasons {
+		var n uint64
+		if v, ok := c.wtpAnomalousAckByReason.Load(reason); ok {
+			n = v.(*atomic.Uint64).Load()
+		}
+		fmt.Fprintf(w, "wtp_anomalous_ack_total{reason=%q} %d\n", reason, n)
+	}
+	// Surface any reasons NOT in the canonical list as well, so an
+	// out-of-band IncAnomalousAck("new_reason") is still observable.
 	c.wtpAnomalousAckByReason.Range(func(k, v any) bool {
-		fmt.Fprintf(w, "wtp_anomalous_ack_total{reason=%q} %d\n", k.(string), v.(*atomic.Uint64).Load())
+		reason := k.(string)
+		for _, known := range wtpAnomalousAckReasons {
+			if reason == known {
+				return true
+			}
+		}
+		fmt.Fprintf(w, "wtp_anomalous_ack_total{reason=%q} %d\n", reason, v.(*atomic.Uint64).Load())
 		return true
 	})
 

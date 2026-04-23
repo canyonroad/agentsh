@@ -194,11 +194,35 @@ func (o *Options) validate() error {
 	if o.BatchMaxBytes < 4096 {
 		return errors.New("watchtower: BatchMaxBytes must be >= 4 KiB")
 	}
+	if o.BatchMaxRecords <= 0 {
+		return errors.New("watchtower: BatchMaxRecords must be > 0")
+	}
+	if o.BatchMaxAge <= 0 {
+		// time.NewTicker panics on a zero or negative duration; reject
+		// here so the failure mode is a clear validate() error rather
+		// than a panic deep inside runLive.
+		return errors.New("watchtower: BatchMaxAge must be > 0")
+	}
+	if o.WALSegmentSize <= 0 {
+		return errors.New("watchtower: WALSegmentSize must be > 0")
+	}
+	if o.WALMaxTotalSize <= 0 {
+		return errors.New("watchtower: WALMaxTotalSize must be > 0")
+	}
 	if o.WALSegmentSize > o.WALMaxTotalSize/2 {
 		return errors.New("watchtower: WALSegmentSize must be <= WALMaxTotalSize/2")
 	}
+	if o.DrainDeadline < 0 {
+		return errors.New("watchtower: DrainDeadline must be >= 0")
+	}
 	if o.TLSCertFile != "" && o.AuthBearer != "" {
 		return errors.New("watchtower: TLS client cert and bearer auth are mutually exclusive")
+	}
+	// TLS coherence: cert and key are paired — one without the other
+	// is a configuration mistake. Surface here so the dialer (Task 27)
+	// can assume they always arrive together.
+	if (o.TLSCertFile == "") != (o.TLSKeyFile == "") {
+		return errors.New("watchtower: TLSCertFile and TLSKeyFile must be set together")
 	}
 	if o.SinkChainOverrideForTests != nil && !o.AllowSinkChainOverrideForTests {
 		return errors.New("watchtower: SinkChainOverrideForTests must be nil in production (set AllowSinkChainOverrideForTests in tests that need the seam)")

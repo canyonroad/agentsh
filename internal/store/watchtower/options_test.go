@@ -3,6 +3,7 @@ package watchtower_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/agentsh/agentsh/internal/store/watchtower"
 	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -18,6 +20,17 @@ import (
 // audit.NewSinkChain rejects keys shorter than audit.MinKeyLength (32),
 // so test fixtures must hit at least that length.
 func testHMACKey() []byte { return bytes.Repeat([]byte("a"), 32) }
+
+// nopDialer satisfies validate()'s Dialer-required check without
+// actually dialing — Dial returns an error so the bg run loop loops
+// in dial-fail backoff. Tests that need real bg progress should
+// substitute testserver.DialerFor (we keep that wiring out of this
+// package to avoid importing testserver into a unit-test surface).
+func nopDialer() transport.Dialer {
+	return transport.DialerFunc(func(ctx context.Context) (transport.Conn, error) {
+		return nil, errors.New("nopDialer: no conn")
+	})
+}
 
 // validOpts returns a watchtower.Options that satisfies validate() —
 // individual tests then mutate one field to exercise a specific
@@ -35,6 +48,23 @@ func validOpts(dir string) watchtower.Options {
 		BatchMaxBytes:   256 * 1024,
 		BatchMaxAge:     50 * time.Millisecond,
 		AllowStubMapper: true,
+		Dialer:          nopDialer(),
+	}
+}
+
+// closeStore is a defer-friendly Close helper that bounds the wait so
+// a stuck run loop does not block test cleanup.
+func closeStore(t *testing.T, s *watchtower.Store) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.Close(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		// Close's bounded-wait surfaces context.Canceled when the bg
+		// loop exits via ctx — that's the normal shutdown path with
+		// the nopDialer, where ctx.Cancel races with Stop's drain.
+		// Tests that wire a real dialer should expect a clean nil
+		// here; tests using nopDialer accept either.
+		_ = err
 	}
 }
 
@@ -147,7 +177,8 @@ func TestNew_RejectsSinkChainOverrideInProduction(t *testing.T) {
 }
 
 // TestNew_AcceptsSinkChainOverrideWhenAllowed verifies the gate's
-// permissive path.
+// permissive path. Cleans up the resulting Store via closeStore so
+// the bg run loop exits before the test goroutine returns.
 func TestNew_AcceptsSinkChainOverrideWhenAllowed(t *testing.T) {
 	innerChain, err := audit.NewSinkChain(testHMACKey(), "hmac-sha256")
 	if err != nil {
@@ -157,8 +188,142 @@ func TestNew_AcceptsSinkChainOverrideWhenAllowed(t *testing.T) {
 	opts := validOpts(t.TempDir())
 	opts.SinkChainOverrideForTests = override
 	opts.AllowSinkChainOverrideForTests = true
-	_, err = watchtower.New(context.Background(), opts)
+	s, err := watchtower.New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("expected New to accept SinkChainOverrideForTests when AllowSinkChainOverrideForTests is true, got %v", err)
+	}
+	closeStore(t, s)
+}
+
+// TestNew_RejectsMissingDialer verifies that omitting opts.Dialer is
+// a startup-time error rather than a silently-broken Store. Until
+// Task 27 wires the production gRPC dialer, callers must inject one.
+func TestNew_RejectsMissingDialer(t *testing.T) {
+	opts := validOpts(t.TempDir())
+	opts.Dialer = nil
+	_, err := watchtower.New(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected New to reject nil Dialer")
+	}
+	if !strings.Contains(err.Error(), "Dialer is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestNew_RejectsCancelledSetupCtx verifies the ctx-already-cancelled
+// guard. A caller passing an already-cancelled setup ctx has made a
+// configuration mistake; surface it instead of allocating a bg
+// goroutine that will exit immediately.
+func TestNew_RejectsCancelledSetupCtx(t *testing.T) {
+	opts := validOpts(t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := watchtower.New(ctx, opts)
+	if err == nil {
+		t.Fatal("expected New to reject already-cancelled setup ctx")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestNew_RejectsNonPositiveBatchMaxAge verifies validate rejects a
+// zero or negative BatchMaxAge before the bg goroutine reaches
+// time.NewTicker (which panics on non-positive durations).
+func TestNew_RejectsNonPositiveBatchMaxAge(t *testing.T) {
+	for _, d := range []time.Duration{-time.Second, 0, -1} {
+		t.Run(d.String(), func(t *testing.T) {
+			opts := validOpts(t.TempDir())
+			// applyDefaults overrides 0 — directly bypass by setting a
+			// non-zero negative.
+			if d == 0 {
+				// validate runs after applyDefaults, so a literal 0
+				// becomes 100ms. This sub-case is covered by the
+				// negative durations.
+				t.Skip("0 is normalized by applyDefaults; covered by negative cases")
+			}
+			opts.BatchMaxAge = d
+			_, err := watchtower.New(context.Background(), opts)
+			if err == nil {
+				t.Fatalf("expected validate to reject BatchMaxAge=%v", d)
+			}
+			if !strings.Contains(err.Error(), "BatchMaxAge") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestNew_RejectsIncoherentTLS verifies cert-without-key (and
+// vice-versa) is rejected at validate time.
+func TestNew_RejectsIncoherentTLS(t *testing.T) {
+	t.Run("cert_without_key", func(t *testing.T) {
+		opts := validOpts(t.TempDir())
+		opts.TLSCertFile = "/tmp/cert.pem"
+		_, err := watchtower.New(context.Background(), opts)
+		if err == nil {
+			t.Fatal("expected validate to reject cert without key")
+		}
+		if !strings.Contains(err.Error(), "TLSCertFile and TLSKeyFile must be set together") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	t.Run("key_without_cert", func(t *testing.T) {
+		opts := validOpts(t.TempDir())
+		opts.TLSKeyFile = "/tmp/key.pem"
+		_, err := watchtower.New(context.Background(), opts)
+		if err == nil {
+			t.Fatal("expected validate to reject key without cert")
+		}
+		if !strings.Contains(err.Error(), "TLSCertFile and TLSKeyFile must be set together") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
+// TestStore_CloseIsIdempotent verifies Close can be called multiple
+// times and returns the same error.
+func TestStore_CloseIsIdempotent(t *testing.T) {
+	opts := validOpts(t.TempDir())
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err1 := s.Close(ctx)
+	err2 := s.Close(ctx)
+	if err1 == nil && err2 != nil {
+		t.Fatalf("Close idempotency broken: first=%v, second=%v", err1, err2)
+	}
+	if err1 != nil && err2 != err1 {
+		// Both should be the same captured error. Allow small
+		// formatting diffs but they should contain the same root
+		// cause.
+		t.Fatalf("Close returned different errors on idempotent calls: first=%v, second=%v", err1, err2)
+	}
+}
+
+// TestStore_ErrIsNonBlocking verifies Err returns immediately and
+// does not stall waiting for the run loop.
+func TestStore_ErrIsNonBlocking(t *testing.T) {
+	opts := validOpts(t.TempDir())
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer closeStore(t, s)
+
+	done := make(chan struct{})
+	go func() {
+		_ = s.Err()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Err() did not return within 500ms; expected non-blocking peek")
 	}
 }

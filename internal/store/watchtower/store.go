@@ -17,8 +17,36 @@ import (
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 )
 
-// Store is the watchtower store.EventStore implementation. The struct
-// itself is intentionally small; AppendEvent and Close land in Task 23.
+// Store is the watchtower store.EventStore implementation.
+//
+// Lifecycle:
+//
+//   - New(ctx, opts) constructs the Store, runs validation, opens the
+//     WAL, and STARTS the transport's run loop in a background
+//     goroutine. The supplied ctx is SETUP-ONLY — it bounds the
+//     synchronous construction work (validate, wal.Open, transport
+//     New). The background goroutine uses an INTERNAL ctx the Store
+//     owns and cancels in Close. This matches the OTEL store's
+//     constructor convention (ctx for setup, lifetime owned by
+//     Close), and crucially means a setup-scoped ctx that the caller
+//     cancels right after New returns will NOT silently kill the
+//     background transport.
+//
+//   - Close(ctx) cancels the run loop, calls tr.Stop with the
+//     configured drain deadline, closes the WAL, and returns any
+//     error the run loop surfaced (or ctx.Err() if Close's own ctx
+//     elapses before the run loop exits). Idempotent — second call
+//     is a no-op that returns the same error captured on the first
+//     call.
+//
+//   - Err() returns the run loop's terminal error if it has already
+//     exited (e.g. terminal SessionAck rejection from the server),
+//     or nil if the loop is still running. Callers polling on
+//     transport health should use Err in conjunction with their own
+//     liveness check.
+//
+// AppendEvent and the rest of the store.EventStore surface land in
+// Task 23.
 type Store struct {
 	opts    Options
 	w       *wal.WAL
@@ -26,8 +54,18 @@ type Store struct {
 	sink    chain.SinkChainAPI
 	metrics *metrics.WTPMetrics
 
-	mu      sync.Mutex
-	fatalCh chan error
+	// runCancel cancels the internal context the bg run loop watches.
+	// Closed by Close. The internal context is independent of the
+	// constructor's ctx so the bg goroutine survives setup-ctx
+	// cancellation.
+	runCancel context.CancelFunc
+	// runDone receives Run's terminal return value (nil on clean
+	// shutdown, non-nil on terminal SessionAck rejection or other
+	// fatal). Buffer 1 so the bg goroutine never blocks on send.
+	runDone chan error
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // New constructs a Store, validates options, opens the WAL, wires the
@@ -46,7 +84,14 @@ type Store struct {
 //     the FIRST SessionInit after restart carries the durable
 //     watermark instead of (0, 0).
 //  5. Build the Transport with the dialer + WAL + metrics handle, and
-//     start its run loop in a background goroutine.
+//     start its run loop in a background goroutine bound to an
+//     INTERNAL context owned by the Store.
+//
+// The supplied ctx parameter is SETUP-ONLY. The bg run loop uses a
+// separate, Store-owned context that Close cancels. This matches the
+// OTEL store convention so callers can write
+// `s, err := watchtower.New(setupCtx, opts)` without worrying that a
+// short-lived setupCtx will silently kill the transport.
 //
 // TODO(Task 22a): the WAL identity-mismatch recovery path needs to
 // emit metrics.IncWALQuarantine(reason). The metric does not exist in
@@ -81,9 +126,25 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		return nil, err
 	}
 
+	// Production-dialer rejection: the placeholder dialer (Task 27
+	// will wire the real one) deliberately fails every Dial. Returning
+	// success from New with that dialer wired would give callers a
+	// half-built Store that infinite-loops in the bg dial-fail backoff
+	// — an opaque failure mode. Until Task 27 lands, production
+	// callers MUST inject a Dialer (testserver.DialerFor for tests,
+	// or a real grpc.Dial wrapper).
 	dialer := opts.Dialer
 	if dialer == nil {
-		dialer = newGRPCDialer(opts)
+		_ = w.Close()
+		return nil, errors.New("watchtower: Options.Dialer is required (production gRPC dialer wiring lands in Task 27; tests should use testserver.DialerFor)")
+	}
+
+	// Sanity-check setup ctx: callers passing an already-cancelled
+	// ctx have made a configuration mistake. Surface it before we
+	// allocate the bg goroutine.
+	if err := ctx.Err(); err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("watchtower.New: setup ctx already cancelled: %w", err)
 	}
 
 	mw := opts.Metrics.WTP()
@@ -101,17 +162,23 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("transport.New: %w", err)
 	}
 
+	// Internal context owned by the Store; cancelled by Close. The
+	// caller's ctx parameter is intentionally NOT threaded into the
+	// bg goroutine — see the lifecycle docstring above.
+	runCtx, runCancel := context.WithCancel(context.Background())
+
 	s := &Store{
-		opts:    opts,
-		w:       w,
-		tr:      tr,
-		sink:    sinkChain,
-		metrics: mw,
-		fatalCh: make(chan error, 1),
+		opts:      opts,
+		w:         w,
+		tr:        tr,
+		sink:      sinkChain,
+		metrics:   mw,
+		runCancel: runCancel,
+		runDone:   make(chan error, 1),
 	}
 
 	go func() {
-		_ = tr.Run(ctx, func(gen uint32, start uint64) (*wal.Reader, error) {
+		s.runDone <- tr.Run(runCtx, func(gen uint32, start uint64) (*wal.Reader, error) {
 			return w.NewReader(wal.ReaderOptions{Generation: gen, Start: start})
 		}, transport.LiveOptions{
 			Batcher: transport.BatcherOptions{
@@ -125,6 +192,76 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	}()
 
 	return s, nil
+}
+
+// Close shuts down the Store: signals the transport to drain (up to
+// opts.DrainDeadline), cancels the bg run loop's context, waits for
+// the run loop to return, and closes the WAL. Returns the run loop's
+// terminal error (nil on clean shutdown, ctx.Done if the supplied
+// ctx elapses before the run loop exits, or whatever error tr.Run
+// surfaced).
+//
+// Close is idempotent: second and later calls return the error
+// captured on the first call.
+//
+// Ordering inside Close is load-bearing:
+//
+//  1. tr.Stop(drainDeadline) — observed at the next interruptible
+//     checkpoint in the run loop (see transport.Stop docs). Sends
+//     the BatcherDrain + CloseSend on the Live state path; in other
+//     states is effectively a fast teardown.
+//  2. runCancel() — bounded fallback if Stop's cooperative path is
+//     blocked on a wedged Conn.Send / Recv / Dial. Cancelling the bg
+//     ctx unblocks the next ctx-honouring select in the run loop.
+//  3. Wait on runDone (with the supplied ctx as the bound) — the bg
+//     goroutine sends Run's return value here right before exiting.
+//  4. Close the WAL. Errors here are appended to the captured close
+//     error so neither is silently dropped.
+func (s *Store) Close(ctx context.Context) error {
+	s.closeOnce.Do(func() {
+		// Stop is the cooperative shutdown signal; runCancel is the
+		// fallback if Stop is blocked on a non-interruptible call.
+		// Order matters: Stop first so the run loop has a chance to
+		// drain via the Live arm, runCancel second so a wedged
+		// blocked call eventually unblocks via ctx.Done.
+		s.tr.Stop(s.opts.DrainDeadline)
+		s.runCancel()
+
+		select {
+		case err := <-s.runDone:
+			s.closeErr = err
+		case <-ctx.Done():
+			s.closeErr = fmt.Errorf("watchtower.Close: ctx elapsed before run loop exited: %w", ctx.Err())
+		}
+
+		if walErr := s.w.Close(); walErr != nil {
+			if s.closeErr == nil {
+				s.closeErr = fmt.Errorf("watchtower.Close: WAL close: %w", walErr)
+			} else {
+				s.closeErr = fmt.Errorf("%w (also: WAL close: %v)", s.closeErr, walErr)
+			}
+		}
+	})
+	return s.closeErr
+}
+
+// Err returns the run loop's terminal error if it has already exited,
+// or nil if the loop is still running. Useful for callers polling on
+// transport health. After Close returns, Err returns the same value
+// Close did.
+//
+// Non-blocking — peeks at runDone via a non-blocking receive so the
+// caller does not stall waiting for the run loop.
+func (s *Store) Err() error {
+	select {
+	case err := <-s.runDone:
+		// Replay back into runDone so a subsequent Close still sees
+		// the value. runDone is cap-1, so this is safe — no blocking.
+		s.runDone <- err
+		return err
+	default:
+		return nil
+	}
 }
 
 // openWALWithIdentityRecovery wraps wal.Open with the Task 14a
@@ -230,12 +367,14 @@ func readInitialAckTuple(opts Options, w *wal.WAL) (*transport.AckTuple, error) 
 	}
 }
 
-// newGRPCDialer is a placeholder dialer for production wiring. Real
-// TLS / auth construction lands in Task 27. Until then any production
-// caller (without Options.Dialer set) gets an explicit error from the
-// Run loop instead of a silent stall.
-func newGRPCDialer(opts Options) transport.Dialer {
-	_ = opts
+// newGRPCDialer is reserved for the production gRPC wiring landing
+// in Task 27. Until then New rejects an unset Options.Dialer rather
+// than wiring a placeholder that would silently infinite-loop in the
+// bg dial-fail backoff.
+//
+// Kept as a package-private symbol so Task 27 can drop in the real
+// implementation without restructuring New's call site.
+func newGRPCDialer(_ Options) transport.Dialer {
 	return transport.DialerFunc(func(ctx context.Context) (transport.Conn, error) {
 		return nil, fmt.Errorf("watchtower: production dialer not yet wired (Task 27)")
 	})
