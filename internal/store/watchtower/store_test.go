@@ -270,3 +270,117 @@ func (c *rejectingFakeConn) Close() error {
 	}
 	return nil
 }
+
+// TestStore_ErrAfterCloseReturnsCapturedValue is the regression guard
+// for the Close()/Err() consistency contract: after Close has run,
+// Err() MUST return the EXACT value Close captured (terminal err,
+// deadline-fallback wrap, OR WAL-close-merged err) — not a stale
+// peek of a now-empty runDone channel. The "closed" atomic flag set
+// inside closeOnce.Do AFTER closeErr is fully populated is the
+// discriminator.
+//
+// Setup uses the rejectingFakeConn so Run terminates with a non-nil
+// error; we then call Close, capture the returned err, call Err,
+// and assert exact equality.
+func TestStore_ErrAfterCloseReturnsCapturedValue(t *testing.T) {
+	conn := newRejectingFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return conn, nil
+	})
+	opts := validOpts(t.TempDir())
+	opts.Dialer = dialer
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Wait for Run to exit (Err surfaces the terminal err).
+	deadline := time.Now().Add(2 * time.Second)
+	for s.Err() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("Run did not exit within 2s")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	closeErr := s.Close()
+	if closeErr == nil {
+		t.Fatal("Close returned nil; want captured terminal err")
+	}
+	postClose := s.Err()
+	if postClose != closeErr {
+		t.Fatalf("Err() after Close = %v, want exactly %v (closeErr)", postClose, closeErr)
+	}
+
+	// Call Err multiple times — must always return the same value.
+	for i := 0; i < 3; i++ {
+		if got := s.Err(); got != closeErr {
+			t.Fatalf("Err() iteration %d = %v, want %v", i, got, closeErr)
+		}
+	}
+}
+
+// TestStore_CloseOnActiveRunReturnsCleanly covers the active-Close
+// path (Run is still alive when Close fires) — the second branch of
+// shutdown(). Uses the testserver-backed dialer would be ideal but
+// we keep the dependency narrow with a slow-dial dialer that holds
+// Run in its dial-fail backoff. Close should return promptly via
+// runCancel after the DrainDeadline.
+func TestStore_CloseOnActiveRunReturnsCleanly(t *testing.T) {
+	opts := validOpts(t.TempDir())
+	// nopDialer = perpetual dial-fail; Run is alive, looping in
+	// backoff. Close must return without waiting for the natural
+	// loop exit.
+	opts.DrainDeadline = 100 * time.Millisecond
+
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Verify Run is still alive (Err returns nil).
+	if got := s.Err(); got != nil {
+		t.Fatalf("pre-close Err() = %v, want nil (Run should still be alive)", got)
+	}
+
+	start := time.Now()
+	closeErr := s.Close()
+	elapsed := time.Since(start)
+	// Close should bound to DrainDeadline + small fallback margin.
+	if elapsed > 1*time.Second {
+		t.Fatalf("Close on active Run took %v; expected < 1s (DrainDeadline=%v + margin)", elapsed, opts.DrainDeadline)
+	}
+	// Err after Close MUST equal Close's return value.
+	if got := s.Err(); got != closeErr {
+		t.Fatalf("Err() after Close = %v, want exactly closeErr=%v", got, closeErr)
+	}
+}
+
+// TestStore_CloseDeadlineFallback exercises the timer.C branch of
+// shutdown(): when the cooperative tr.Stop drain does not complete
+// within DrainDeadline, runCancel is the fallback that unblocks the
+// run loop. Validates the bounded-Close contract end-to-end.
+//
+// nopDialer never produces a Conn so Run is in dial-fail backoff;
+// tr.Stop's per-state stopCh arms will pick it up at the backoff
+// sleep's stopCh case (transport.go's outer-iteration check OR
+// backoff sleep stopCh arm — see Stop's interruptible-windows doc).
+// In either case Run exits via runCancel within the fallback grace.
+func TestStore_CloseDeadlineFallback(t *testing.T) {
+	opts := validOpts(t.TempDir())
+	// 1ns DrainDeadline forces the deadline branch to fire instantly
+	// (Stop's drain has no time to complete; runCancel is the path).
+	opts.DrainDeadline = 1 * time.Nanosecond
+
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	closeErr := s.Close()
+	// Either nil (clean exit via runCancel-driven ctx) or wrapped
+	// is acceptable — the contract is "bounded, no deadlock."
+	_ = closeErr
+	if got := s.Err(); got != closeErr {
+		t.Fatalf("Err() after Close = %v, want closeErr=%v", got, closeErr)
+	}
+}

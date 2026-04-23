@@ -89,8 +89,14 @@ type Options struct {
 	// without it.
 	AllowStubMapper bool
 
-	// Dialer is an optional override; tests use this to inject
-	// testserver.DialerFor(). Nil = production gRPC dialer (Task 27).
+	// Dialer constructs the gRPC stream the Transport speaks WTP
+	// over. REQUIRED — until the production gRPC dialer wiring lands
+	// (Task 27), New rejects a nil Dialer rather than wiring a
+	// placeholder that would silently infinite-loop in dial-fail
+	// backoff. Tests pass testserver.DialerFor; integration code
+	// will pass a real gRPC dialer once Task 27 lands at which
+	// point this field will become OPTIONAL (nil = production
+	// dialer constructed from Endpoint + TLS* fields).
 	Dialer transport.Dialer
 
 	// Logger is the slog handle the Store and Transport use for

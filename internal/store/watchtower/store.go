@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
@@ -64,7 +65,13 @@ type Store struct {
 	// fatal). Buffer 1 so the bg goroutine never blocks on send.
 	runDone chan error
 
+	// closeOnce + closeErr track Close's single-execution result.
+	// closed is set to true atomically AFTER closeOnce.Do completes
+	// so Err() can distinguish the pre-close path (peek runDone) from
+	// the post-close path (return closeErr verbatim — the canonical
+	// post-close error source per the High finding in roborev #5767).
 	closeOnce sync.Once
+	closed    atomic.Bool
 	closeErr  error
 }
 
@@ -225,6 +232,10 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
 		s.closeErr = s.shutdown()
+		// Mark closed AFTER closeErr is fully populated so a
+		// concurrent Err() never sees the closed flag with a
+		// half-written closeErr.
+		s.closed.Store(true)
 	})
 	return s.closeErr
 }
@@ -303,19 +314,24 @@ func (s *Store) combineWALCloseErr(runErr error) error {
 // or nil if the loop is still running. Useful for callers polling on
 // transport health.
 //
-// After Close returns, Err returns the same captured value Close did.
-// Implementation: closeOnce protects closeErr; runDone is replayed
-// after consumption so the non-blocking peek path remains consistent
-// with the closed-store path.
+// Post-close behavior: after Close has run, Err returns the EXACT
+// value Close captured (terminal err, deadline-fallback wrap, OR
+// WAL-close-merged err). Pre-close behavior: peek runDone non-
+// blockingly; nil if Run is alive, the captured terminal err
+// otherwise. The closed flag (set inside closeOnce.Do AFTER closeErr
+// is fully populated) discriminates between the two paths.
 //
 // Non-blocking — peeks at runDone via a non-blocking receive so the
 // caller does not stall waiting for the run loop.
 func (s *Store) Err() error {
-	// If Close has already run, closeErr is the canonical answer.
-	// We can't take the closeOnce mutex without potentially racing
-	// the bg goroutine, so instead check runDone first: after
-	// shutdown the runDone slot has been replayed, so the peek
-	// returns the same error Close captured.
+	if s.closed.Load() {
+		// Canonical post-close source. Close has populated closeErr
+		// in full; the channel-state below has been consumed.
+		return s.closeErr
+	}
+	// Pre-close: peek runDone. If Run has terminated but Close has
+	// not yet run, replay so a subsequent peek (or Close's pre-Stop
+	// check) still sees the value.
 	select {
 	case err := <-s.runDone:
 		s.runDone <- err
