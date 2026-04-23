@@ -143,16 +143,29 @@ func (s *Server) handler() *srvHandler { return &srvHandler{s: s} }
 // Stream implements the WatchtowerServer bidi streaming RPC. Every
 // ClientMessage variant the Transport can emit is handled:
 //
-//   - SessionInit → SessionAck (honouring RejectSession + StaleWatermark).
+//   - SessionInit → SessionAck (honouring RejectSession +
+//     SessionAckSeq / SessionAckGeneration).
 //   - EventBatch → tally + BatchAck (honouring DropAfterBatchN +
-//     GoawayAfterBatchN).
-//   - Heartbeat → no-op (the Transport uses it as a liveness probe; the
-//     server's implicit "no error" response is the only signal needed).
+//     GoawayAfterBatchN). The drop/goaway counters are PER STREAM
+//     (per Dial), not global, so a Server reused across multiple
+//     Dial calls (reconnect-loop tests) sees each new stream start
+//     at 0 batches regardless of how many batches prior streams
+//     received.
+//   - Heartbeat → no-op (the Transport uses it as a liveness probe;
+//     the server's implicit "no error" response is the only signal
+//     needed).
 //
-// Unknown ClientMessage variants are ignored so a future proto addition
-// does not break existing tests silently. Add a scenario Option if a
-// specific negative test needs to observe unknown-frame handling.
+// Unknown ClientMessage variants are ignored so a future proto
+// addition does not break existing tests silently. Add a scenario
+// Option if a specific negative test needs to observe unknown-frame
+// handling.
 func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage, wtpv1.ServerMessage]) error {
+	// Per-stream batch counter. DropAfterBatchN and GoawayAfterBatchN
+	// reference this, NOT the Server's cumulative s.batches count —
+	// each Dial starts a fresh stream with its own counter so
+	// reconnect-loop tests can observe the configured threshold on
+	// each attempt.
+	var streamBatches int
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
@@ -185,30 +198,38 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 				Msg: &wtpv1.ServerMessage_SessionAck{
 					SessionAck: &wtpv1.SessionAck{
 						Accepted:            true,
-						AckHighWatermarkSeq: h.s.opts.StaleWatermark,
-						Generation:          0,
+						AckHighWatermarkSeq: h.s.opts.SessionAckSeq,
+						Generation:          h.s.opts.SessionAckGeneration,
 					},
 				},
 			}); err != nil {
 				return err
 			}
 		case *wtpv1.ClientMessage_EventBatch:
-			n := h.s.addBatch(x.EventBatch)
-			if h.s.opts.DropAfterBatchN > 0 && n >= h.s.opts.DropAfterBatchN {
+			_ = h.s.addBatch(x.EventBatch)
+			streamBatches++
+			if h.s.opts.DropAfterBatchN > 0 && streamBatches >= h.s.opts.DropAfterBatchN {
 				return errors.New("testserver: drop after batch")
 			}
-			if h.s.opts.GoawayAfterBatchN > 0 && n >= h.s.opts.GoawayAfterBatchN {
-				_ = stream.Send(&wtpv1.ServerMessage{
+			if h.s.opts.GoawayAfterBatchN > 0 && streamBatches >= h.s.opts.GoawayAfterBatchN {
+				// Best-effort goaway — propagate any Send error so
+				// tests that expect the server to observe the wire
+				// do not silently pass on a peer-already-closed
+				// stream.
+				if err := stream.Send(&wtpv1.ServerMessage{
 					Msg: &wtpv1.ServerMessage_Goaway{Goaway: &wtpv1.Goaway{}},
-				})
+				}); err != nil {
+					return err
+				}
 				return nil
 			}
-			// Normal case: one BatchAck per EventBatch, pointing at the
-			// last event's (generation, sequence). If the EventBatch is
-			// empty (e.g. a compressed batch we do not inspect, or a
-			// Heartbeat-style empty frame), the ack points at (0, 0)
-			// which the Transport's applyServerAckTuple helper treats
-			// as a no-op under the steady-state cursor.
+			// Normal case: one BatchAck per EventBatch, pointing at
+			// the last event's (generation, sequence). If the
+			// EventBatch is empty (e.g. a compressed batch we do not
+			// inspect, or a Heartbeat-style empty frame), the ack
+			// points at (0, 0) which the Transport's
+			// applyServerAckTuple helper treats as a no-op under the
+			// steady-state cursor.
 			var (
 				lastSeq uint64
 				lastGen uint32
