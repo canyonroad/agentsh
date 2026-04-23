@@ -149,15 +149,22 @@ func TestRun_ReturnsTerminalErrorOnSessionRejection(t *testing.T) {
 
 // TestRun_RetriesTransientDialFailureUntilSuccess verifies that
 // transient dial failures back off (do NOT terminate) and that a
-// subsequent successful dial advances the loop into Replaying. This
-// exercises the bo.Reset()/rep=nil branch and the StateConnecting →
-// next-state handoff that the cancellation test cannot.
+// subsequent successful dial advances the loop into Replaying. Then
+// it forces Replaying to fail (rdrFactory error) and asserts the loop
+// regresses to StateConnecting and re-dials — i.e. the full
+// dial-fail → dial-ok → replay-fail → re-dial cycle is exercised, not
+// just "any number of dials >= 2".
 //
-// The test stops short of actually running runReplaying — rdrFactory
-// returns an error to abort replay, which surfaces back through the
-// Run loop as a regress to StateConnecting. The dialer is then made
-// to return ctx.Err()-like errors so the loop exits via cancel within
-// the deadline.
+// Sequence:
+//   attempt 1: dial returns error    → backoff, retry
+//   attempt 2: dial returns conn,    → SessionInit + accepted SessionAck
+//                                       → StateReplaying
+//                                     → rdrFactory fails               → StateConnecting
+//   attempt 3: dial returns conn,    → SessionInit observed; cancel
+//
+// Without this end-to-end shape, a regression where Replaying-failure
+// fails to regress to Connecting (or fails to re-dial) would still
+// pass a "dials >= 2" assertion.
 func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
 	var attempts atomic.Int32
 	conn := newFakeConn()
@@ -166,9 +173,12 @@ func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
 		if n == 1 {
 			return nil, errors.New("transient dial fail")
 		}
-		// Reset conn state for the second attempt: tests reuse the same
-		// fakeConn, so we hand back the same conn (its closed channel
-		// is not yet shut on the first error path).
+		// Hand back the same fakeConn for attempts 2 and 3. The conn
+		// stays open across the replay-failure regress because runReplaying
+		// is not reached (rdrFactory errors before NewReplayer); the
+		// state regress goes through the Run loop's stage-error branch
+		// without runReplaying tearing the conn down. The next dial
+		// reuses this conn (it has not been Close'd).
 		return conn, nil
 	})
 
@@ -205,9 +215,7 @@ func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
 		})
 	}()
 
-	// Wait for the second (successful) attempt's SessionInit, then
-	// reply with an accepted SessionAck so runConnecting returns
-	// StateReplaying.
+	// === attempt 2: drain SessionInit, ack accepted, drive into Replaying.
 	select {
 	case <-conn.sendCh:
 	case <-time.After(2 * time.Second):
@@ -222,16 +230,29 @@ func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
 			},
 		},
 	}
-
-	// Replaying enters and calls rdrFactory; we error it. Confirm we
-	// reached Replaying, then cancel to exit cleanly.
 	select {
 	case <-rdrAttempts:
 	case <-time.After(2 * time.Second):
 		t.Fatal("rdrFactory was not invoked; Run did not reach Replaying")
 	}
-	cancel()
 
+	// === attempt 3: replay failure should regress to Connecting and
+	// re-dial. Observe a third SessionInit on the conn — proves the
+	// replay-failure → reconnect cycle, not just "loop ran twice."
+	select {
+	case <-conn.sendCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("no SessionInit on third attempt; replay-failure did not regress to Connecting (dial attempts=%d)", attempts.Load())
+	}
+	if got := attempts.Load(); got < 3 {
+		t.Fatalf("dial attempts: got %d, want >= 3 (transient + success + post-replay-failure re-dial)", got)
+	}
+
+	cancel()
+	// fakeConn.Recv does not honor ctx; close the conn so the third
+	// attempt's Recv unblocks and the Run loop sees ctx.Done() on the
+	// next iteration.
+	_ = conn.Close()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
@@ -239,9 +260,5 @@ func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not return within 3s of cancel")
-	}
-
-	if got := attempts.Load(); got < 2 {
-		t.Fatalf("dial attempts: got %d, want >= 2 (first transient, second success)", got)
 	}
 }
