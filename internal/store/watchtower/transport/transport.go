@@ -319,31 +319,48 @@ type stopReq struct {
 	done          chan struct{}
 }
 
-// Stop signals the transport to flush any pending records (up to
-// drainDeadline) and close the stream. It blocks until the run loop
-// has finished servicing the request.
+// Stop signals the transport to best-effort flush pending records (up
+// to drainDeadline in Live) and tear down the conn. It blocks until
+// the run loop has finished servicing the request.
 //
-// Stop is safe to call exactly once. A second call may block forever
-// because the run loop has already returned and nothing will close
-// done. Callers that need idempotency should guard with a sync.Once.
+// Stop is single-use. A second call may block forever because the run
+// loop has already returned and nothing will close done. The intended
+// pairing is:
 //
-// Behavior depends on the loop's current state:
+//	runDone := make(chan error, 1)
+//	go func() { runDone <- tr.Run(ctx, ...) }()
+//	...
+//	tr.Stop(drainDeadline) // blocks until Run services the request
+//	<-runDone              // Run returns nil after Stop
 //
-//   - In StateLive: runLive's select arm consumes the request, calls
-//     runShutdown to drain the live reader's pending records up to
-//     drainDeadline, flushes the batcher, CloseSend's the conn, and
-//     returns StateShutdown. The Run loop then exits with nil.
-//   - In any other state (Connecting back-off, Replaying, between
-//     states): the Run loop's per-iteration check observes the request,
-//     CloseSend's any held conn, and returns nil. There is no reader
-//     to drain in those states, so drainDeadline is effectively zero.
+// Stop-vs-Run-exit race: if Run has already returned (via ctx
+// cancellation, a terminal StateShutdown error, or some other exit),
+// the buffered send into stopCh succeeds but nothing closes done, so
+// Stop will hang. Callers that want Stop to be safe in either order
+// should check Run's return channel before calling Stop, or use a
+// sync.Once + non-blocking select wrapper at the call site. The
+// store-integration task (Task 22/27) that owns both Run's goroutine
+// and the Stop call site is the natural place to enforce this
+// ordering; Task 19 does not add a runtime guard because it would
+// require a second done-channel on Transport that the current plan
+// does not model.
 //
-// If the Run loop has already exited (Stop was preempted by ctx
-// cancellation or a terminal error), the buffered send fits into
-// stopCh and done is left open. The caller's <-done blocks; this is
-// the documented "call Stop only when Run is still running" contract.
-// Production callers should pair Stop with the goroutine running Run
-// and wait on Run's return BEFORE calling Stop on the next attempt.
+// Behavior by state:
+//
+//   - StateLive: runLive's select arm consumes the request, calls
+//     runShutdown for a best-effort drain, full-tears down the conn,
+//     and returns StateShutdown. The Run loop exits nil.
+//   - StateReplaying: runReplaying's select arm consumes the request,
+//     aborts in-flight replay (no drain — replay is send-after-build
+//     with no batcher to flush), full-tears down the conn, and
+//     returns StateShutdown. The Run loop exits nil.
+//   - Any other state (Connecting dial loop, backoff sleeps, between
+//     states): the Run loop's per-iteration stopCh check or one of
+//     the backoff-sleep stopCh arms observes the request, tears down
+//     any held conn (via handleOuterStop), and returns nil.
+//
+// In all non-Live paths the drain is effectively no-op; drainDeadline
+// is consulted only by runShutdown.
 func (t *Transport) Stop(drainDeadline time.Duration) {
 	if t.stopCh == nil {
 		return
@@ -743,6 +760,27 @@ func (t *Transport) computeReplayPlan(remoteReplayCursor AckCursor, persistedAck
 	return stages, nil
 }
 
+// handleOuterStop is the teardown path shared by every stopCh arm in
+// Run's outer loop (top-of-iteration check and the three backoff
+// sleeps). It tears down any held conn + recvSession and signals the
+// Stop caller by closing sr.done. Returns always; the caller must
+// `return nil` from Run immediately after.
+//
+// This path does NOT drain any reader — there is no batcher/reader
+// in scope outside of StateLive's runLive. The drain-then-CloseSend
+// contract is honoured only when Stop arrives during StateLive; in
+// any other state the documented contract collapses to "abort
+// cleanly, flush what runLive had buffered (if any)." See Stop.
+func (t *Transport) handleOuterStop(sr stopReq) {
+	if t.conn != nil {
+		_ = t.conn.CloseSend()
+		_ = t.conn.Close()
+		t.teardownRecv()
+		t.conn = nil
+	}
+	close(sr.done)
+}
+
 // Run loops the four-state state machine until ctx is cancelled, the
 // state machine reaches StateShutdown, or runConnecting returns a
 // terminal error (StateShutdown + non-nil error). It applies
@@ -814,16 +852,9 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 			return ctx.Err()
 		case sr := <-t.stopCh:
 			// Stop arrived between states (or during a Connecting
-			// back-off / Replaying iteration whose blocking calls are
-			// not stopCh-aware). There is no live reader to drain;
-			// CloseSend any held conn so the server sees the half-
-			// close and exit.
-			if t.conn != nil {
-				_ = t.conn.CloseSend()
-				_ = t.conn.Close()
-				t.conn = nil
-			}
-			close(sr.done)
+			// back-off whose sleep arm did not observe the request
+			// first). Tear down any held conn and signal done.
+			t.handleOuterStop(sr)
 			return nil
 		default:
 		}
@@ -847,7 +878,7 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 				case <-ctx.Done():
 					return ctx.Err()
 				case sr := <-t.stopCh:
-					close(sr.done)
+					t.handleOuterStop(sr)
 					return nil
 				case <-time.After(bo.Next()):
 				}
@@ -910,7 +941,7 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 				case <-ctx.Done():
 					return ctx.Err()
 				case sr := <-t.stopCh:
-					close(sr.done)
+					t.handleOuterStop(sr)
 					return nil
 				case <-time.After(bo.Next()):
 				}
@@ -943,7 +974,7 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 				case <-ctx.Done():
 					return ctx.Err()
 				case sr := <-t.stopCh:
-					close(sr.done)
+					t.handleOuterStop(sr)
 					return nil
 				case <-time.After(bo.Next()):
 				}

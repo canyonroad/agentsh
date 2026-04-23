@@ -100,6 +100,19 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 			t.teardownRecv()
 			t.conn = nil
 			return StateConnecting, fmt.Errorf("recv: %w", err)
+		case sr := <-t.stopCh:
+			// Task 19: Stop during replay aborts in-flight replay
+			// immediately (no drain — we have no batcher to flush).
+			// CloseSend signals the server; Close + teardown matches
+			// the recv-error path's full-teardown semantics so the
+			// run loop's StateShutdown case returns nil with no
+			// leaked conn/recv state.
+			_ = t.conn.CloseSend()
+			_ = t.conn.Close()
+			t.teardownRecv()
+			t.conn = nil
+			close(sr.done)
+			return StateShutdown, nil
 		default:
 			// No recv events pending; fall through to the next
 			// NextBatch iteration.

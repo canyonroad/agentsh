@@ -28,6 +28,10 @@ type fakeConn struct {
 	closeCalls      int
 	sendErr         error
 	recvErr         error
+	// sendFn, when non-nil, replaces the default Send path. Tests
+	// override this to pin Send calls (e.g. block until release) so
+	// shutdown/replay timing can be exercised deterministically.
+	sendFn func(msg *wtpv1.ClientMessage) error
 }
 
 func newFakeConn() *fakeConn {
@@ -40,6 +44,9 @@ func newFakeConn() *fakeConn {
 }
 
 func (f *fakeConn) Send(msg *wtpv1.ClientMessage) error {
+	if f.sendFn != nil {
+		return f.sendFn(msg)
+	}
 	if f.sendErr != nil {
 		return f.sendErr
 	}
