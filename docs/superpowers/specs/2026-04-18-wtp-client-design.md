@@ -1191,21 +1191,38 @@ if err := ts.AssertReplayObserved(1, 10); err != nil { t.Fatal(err) }
 The testserver also exposes a `Batches()` accessor returning deep-copied snapshots of all EventBatches it has received in order, so tests can assert against the full conversation, not just final state.
 
 **Non-goal: protocol validation of malformed CLIENT frames.** The
-testserver intentionally records and acks malformed batches (e.g.
-`ClientMessage_EventBatch{EventBatch: nil}`, EventBatch with unset
-Body oneof) — they are appended to `Batches()`, increment per-stream
-DropAfterBatchN/GoawayAfterBatchN counters, and receive a normal
-`BatchAck(0, 0)`. The proto contract (§7.3) says receivers MUST
-reject unset-body batches; this harness deliberately deviates so
-that the assertion helpers can surface the malformed shape as
+testserver intentionally records and processes malformed batches
+(e.g. `ClientMessage_EventBatch{EventBatch: nil}`, EventBatch with
+unset Body oneof) — they are appended to `Batches()` and increment
+per-stream `DropAfterBatchN`/`GoawayAfterBatchN` counters. A nil
+`*EventBatch` is normalized to a non-nil empty `EventBatch{}` before
+storage so accessor paths (`Batches()`, `WaitForFirstBatch()`) never
+return a literal nil entry. On the ack path:
+
+  - Default (no fault injection): the server sends `BatchAck(0, 0)`
+    after recording the batch.
+  - Fault injection: if recording the batch trips
+    `DropAfterBatchN`, the stream returns an error BEFORE any ack
+    is sent. If it trips `GoawayAfterBatchN`, the server sends a
+    `Goaway` frame instead of `BatchAck`. Tests blocking on a
+    BatchAck under those scenarios will time out — that is the
+    intended fault behavior, not a harness bug.
+
+The proto contract (§7.3) says receivers MUST reject unset-body
+batches; this harness deliberately deviates so that the assertion
+helpers can surface the malformed shape as
 `ErrUnsupportedCompression` (the more useful diagnostic for tests
 exercising client behavior). Spec-compliant CLIENT-side rejection
-belongs in transport / client-validation tests, NOT in scenario
-tests against this harness. Tests asserting end-to-end protocol
+belongs in transport / client-validation tests (the
+`internal/store/watchtower/transport/` package's own tests are the
+natural home — Task 22+ will add explicit malformed-frame coverage
+there as the production validators land), NOT in scenario tests
+against this harness. Tests asserting end-to-end protocol
 compliance should verify their Transport never emits a malformed
 EventBatch in the first place; tests should NOT rely on
 `BatchAck(0, 0)` for malformed input as a meaningful replay/recovery
-signal — it is a harness artifact.
+signal — it is a harness artifact subject to the fault-injection
+rules above.
 
 ### Golden vectors — published in two locations
 

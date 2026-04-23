@@ -490,14 +490,26 @@ func TestServer_NilEventBatchDoesNotPanic(t *testing.T) {
 	if got == nil {
 		t.Fatalf("WaitForFirstBatch returned nil; want non-nil empty *EventBatch")
 	}
+	// Empty-shape contract: addBatch normalizes nil → empty
+	// EventBatch{}, so the returned batch must have no Body
+	// oneof set, COMPRESSION_UNSPECIFIED, and zero from/to seq.
+	if got.GetBody() != nil {
+		t.Fatalf("WaitForFirstBatch.Body=%T; want nil (empty normalization broken)", got.GetBody())
+	}
+	if got.GetCompression() != wtpv1.Compression_COMPRESSION_UNSPECIFIED {
+		t.Fatalf("WaitForFirstBatch.Compression=%v; want UNSPECIFIED", got.GetCompression())
+	}
 
-	// 2. Batches() — same.
+	// 2. Batches() — same empty-shape contract.
 	bs := srv.Batches()
 	if len(bs) != 1 {
 		t.Fatalf("Batches len=%d, want 1", len(bs))
 	}
 	if bs[0] == nil {
 		t.Fatalf("Batches[0] is nil; want non-nil empty *EventBatch")
+	}
+	if bs[0].GetBody() != nil {
+		t.Fatalf("Batches[0].Body=%T; want nil", bs[0].GetBody())
 	}
 
 	// 3. AssertSequenceRange — ErrUnsupportedCompression with prefix.
