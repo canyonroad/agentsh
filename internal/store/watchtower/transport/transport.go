@@ -325,19 +325,35 @@ type stopReq struct {
 //
 // Stop is observed ONLY at interruptible checkpoints of the run loop.
 // It CANNOT preempt a blocked `Dial`, `Send`, `Recv`, or `NextBatch`
-// call — the Conn/WAL APIs are synchronous from the main goroutine's
-// perspective, and Stop has no mechanism to asynchronously cancel
-// them. Callers that need a bounded shutdown while blocked I/O is
-// in flight MUST combine Stop with one of:
+// call — those are synchronous from the main goroutine's perspective
+// and Stop has no mechanism to asynchronously cancel them. Callers
+// that need a bounded shutdown while blocked I/O is in flight must
+// combine Stop with an operation-specific cancellation lever. Each
+// lever has different reach:
 //
-//   - ctx cancellation (Run's parent ctx). Cancels propagate into
-//     Send/Recv/NextBatch through the Conn/WAL's own ctx-handling
-//     where implemented.
-//   - Out-of-band Conn.Close from a separate goroutine — this
-//     unblocks the in-flight Send/Recv/Dial and lets the run loop
-//     then observe Stop at its next interruptible checkpoint.
+//   - Blocked `Dial`: only parent-ctx cancellation or a dialer-
+//     specific cancel is effective. There is no Conn to Close out-
+//     of-band — the Conn does not exist until Dial returns. If the
+//     dialer ignores ctx, there is NO mechanism in this MVP to
+//     unblock a hung Dial.
+//   - Blocked `Send` (runLive, runReplaying, runConnecting's
+//     SessionInit): out-of-band `Conn.Close` from another goroutine
+//     (the test seam model) unblocks the Send by returning a stream-
+//     closed error; parent-ctx cancellation is NOT plumbed into the
+//     Conn layer's Send today.
+//   - Blocked `Recv` (runConnecting's SessionAck, runRecv's demux
+//     goroutine): same as Send — out-of-band `Conn.Close` unblocks,
+//     parent-ctx is not plumbed.
+//   - Replay-side `NextBatch`: ctx is consulted only between TryNext
+//     calls inside NextBatch (see replayer.NextBatch ctx check). The
+//     WAL Reader.TryNext itself has no ctx hook (see reader.go
+//     TryNext), so ctx cancellation is observed only at the ~per-
+//     record boundaries that NextBatch visits. For most batch sizes
+//     this is sufficient; for very large single-batch caps, the
+//     latency is bounded by the number of records in a batch.
 //
-// Interruptible checkpoints:
+// Interruptible checkpoints (Stop is observed here within one
+// scheduler hop):
 //
 //   - Top-of-iteration select (handleOuterStop).
 //   - Each of the three backoff sleeps (Connecting / Replaying
@@ -349,13 +365,15 @@ type stopReq struct {
 //     recvEventCh, recvErrCh, and tick.C.
 //
 // NOT interruptible windows (Stop queues into the buffered stopCh but
-// does not service until the blocked call returns):
+// does not service until the blocked call returns via the per-
+// operation levers documented above):
 //
-//   - Inside runConnecting (Dialer.Dial, Send(SessionInit),
-//     Recv(SessionAck)) — runConnecting has no stopCh arm.
-//   - Inside runReplaying's `Replayer.NextBatch` call or `Conn.Send`
-//     call (the stopCh case only runs at the top of the loop).
-//   - Inside runLive's `Conn.Send` call.
+//   - Inside runConnecting's Dialer.Dial, Send(SessionInit), or
+//     Recv(SessionAck) — runConnecting has no stopCh arm.
+//   - Inside runReplaying's `Replayer.NextBatch` or `Conn.Send`
+//     (the stopCh case only runs at the top of the loop, not mid-
+//     send).
+//   - Inside runLive's `Conn.Send`.
 //
 // Stop is single-use. A second call may block forever because the run
 // loop has already returned and nothing will close done. The intended
