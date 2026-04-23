@@ -323,6 +323,40 @@ type stopReq struct {
 // to drainDeadline in Live) and tear down the conn. It blocks until
 // the run loop has finished servicing the request.
 //
+// Stop is observed ONLY at interruptible checkpoints of the run loop.
+// It CANNOT preempt a blocked `Dial`, `Send`, `Recv`, or `NextBatch`
+// call — the Conn/WAL APIs are synchronous from the main goroutine's
+// perspective, and Stop has no mechanism to asynchronously cancel
+// them. Callers that need a bounded shutdown while blocked I/O is
+// in flight MUST combine Stop with one of:
+//
+//   - ctx cancellation (Run's parent ctx). Cancels propagate into
+//     Send/Recv/NextBatch through the Conn/WAL's own ctx-handling
+//     where implemented.
+//   - Out-of-band Conn.Close from a separate goroutine — this
+//     unblocks the in-flight Send/Recv/Dial and lets the run loop
+//     then observe Stop at its next interruptible checkpoint.
+//
+// Interruptible checkpoints:
+//
+//   - Top-of-iteration select (handleOuterStop).
+//   - Each of the three backoff sleeps (Connecting / Replaying
+//     stage-error / Live-error) — `time.After(bo.Next())` shares the
+//     select with stopCh.
+//   - Between replay iterations in runReplaying (`case sr := <-t.stopCh`
+//     at the top of its drain-and-send loop).
+//   - Inside runLive's main select alongside ctx.Done, Notify,
+//     recvEventCh, recvErrCh, and tick.C.
+//
+// NOT interruptible windows (Stop queues into the buffered stopCh but
+// does not service until the blocked call returns):
+//
+//   - Inside runConnecting (Dialer.Dial, Send(SessionInit),
+//     Recv(SessionAck)) — runConnecting has no stopCh arm.
+//   - Inside runReplaying's `Replayer.NextBatch` call or `Conn.Send`
+//     call (the stopCh case only runs at the top of the loop).
+//   - Inside runLive's `Conn.Send` call.
+//
 // Stop is single-use. A second call may block forever because the run
 // loop has already returned and nothing will close done. The intended
 // pairing is:
@@ -345,19 +379,21 @@ type stopReq struct {
 // require a second done-channel on Transport that the current plan
 // does not model.
 //
-// Behavior by state:
+// Behavior by state when Stop is observed:
 //
 //   - StateLive: runLive's select arm consumes the request, calls
 //     runShutdown for a best-effort drain, full-tears down the conn,
 //     and returns StateShutdown. The Run loop exits nil.
-//   - StateReplaying: runReplaying's select arm consumes the request,
+//   - StateReplaying: runReplaying's select arm (at the top of its
+//     loop, between NextBatch iterations) consumes the request,
 //     aborts in-flight replay (no drain — replay is send-after-build
 //     with no batcher to flush), full-tears down the conn, and
 //     returns StateShutdown. The Run loop exits nil.
-//   - Any other state (Connecting dial loop, backoff sleeps, between
-//     states): the Run loop's per-iteration stopCh check or one of
-//     the backoff-sleep stopCh arms observes the request, tears down
-//     any held conn (via handleOuterStop), and returns nil.
+//   - Backoff sleep between any state and Connecting: the sleep's
+//     stopCh arm fires, handleOuterStop tears down any held conn,
+//     and Run returns nil.
+//   - Between state transitions (top-of-iteration check): same as
+//     the backoff-sleep path.
 //
 // In all non-Live paths the drain is effectively no-op; drainDeadline
 // is consulted only by runShutdown.

@@ -104,19 +104,30 @@ func TestShutdown_StopDrainsThenCloseSends(t *testing.T) {
 	}
 
 	// By now Replaying has returned StateLive and the Run loop is
-	// inside runLive's select. Append a post-live record so the
-	// Live reader Notifies; runLive pulls the record and puts it in
-	// the batcher without flushing (MaxRecords=100, MaxAge=10s).
+	// inside runLive's select. Append a post-live record. Either of
+	// the following paths produces the Live-drain observable:
+	//
+	//   a) runLive's Notify arm fires first, pulls seq=2 via
+	//      TryNext, adds to the batcher (no flush — MaxRecords=100,
+	//      MaxAge=10s holds it), then Stop arrives, runShutdown's
+	//      Drain flushes the buffered batch.
+	//   b) Stop arrives first, runLive's stopCh arm runs
+	//      runShutdown, whose TryNext pulls seq=2 directly (TryNext
+	//      is synchronous; Append is visible immediately regardless
+	//      of Notify timing), adds to the batcher, and Drain flushes
+	//      one batch containing that record.
+	//
+	// Both produce the same observable: a second EventBatch on
+	// conn.sendCh followed by CloseSend. No intermediate sleep is
+	// needed — the race is resolved inside runLive/runShutdown, not
+	// by the test goroutine.
 	if _, err := w.Append(2, 0, []byte("live-payload")); err != nil {
 		t.Fatalf("wal.Append(live): %v", err)
 	}
 
-	// Brief settle so runLive's Notify handler adds the record to
-	// the batcher before Stop arrives.
-	time.Sleep(30 * time.Millisecond)
-
-	// Drain-observable: after Stop, runShutdown's Drain must emit
-	// the buffered Live record as an EventBatch BEFORE CloseSend.
+	// Drain-observable: after Stop, runShutdown's Drain (or
+	// runShutdown's own TryNext loop) emits the Live-era record as
+	// an EventBatch BEFORE CloseSend.
 	tr.Stop(200 * time.Millisecond)
 
 	select {
@@ -141,18 +152,31 @@ func TestShutdown_StopDrainsThenCloseSends(t *testing.T) {
 	}
 }
 
-// TestShutdown_StopDuringReplayAborts verifies that Stop arriving
-// while runReplaying is still in flight is serviced promptly (the
-// new stopCh arm in state_replaying.go) rather than blocking until
-// replay finishes. The test pins Replaying by making buildEventBatchFn's
-// Send block until released, which parks runReplaying inside the
-// Send call; Stop fires, runReplaying's select observes it, aborts
-// the send path, full-tears down, and Run returns nil.
+// TestShutdown_StopBetweenReplayBatches verifies the Stop-during-
+// Replaying contract as actually implemented: stopCh is observed at
+// the TOP of runReplaying's drain loop, between NextBatch iterations.
+// Stop does NOT preempt an in-flight Conn.Send or NextBatch (those
+// are synchronous calls with no ctx hook); the stopCh arm only runs
+// once the current Send/NextBatch has returned.
 //
-// Without the runReplaying stopCh arm this test deadlocks (2s
-// timeout on Run return). It is the regression guard for the Stop-
-// during-Replaying branch of the documented contract.
-func TestShutdown_StopDuringReplayAborts(t *testing.T) {
+// Test shape: seed the WAL with many records and use a small batch
+// cap so replay issues many Send calls. Drain a few Replaying
+// EventBatches off sendCh (proving the loop is actively iterating),
+// then call Stop. runReplaying's next top-of-loop select observes
+// stopCh BEFORE the next NextBatch; Run returns nil promptly without
+// shipping the remaining batches.
+//
+// Without the stopCh arm added to runReplaying, this test would
+// deadlock: Stop's blocking send into t.stopCh would never be
+// serviced by runReplaying (it would instead keep sending batches
+// until replay completed and the outer loop advanced).
+//
+// NB: "abort in the middle of a blocked Send" is NOT covered by this
+// contract. That would require asynchronous cancellation of the
+// blocked Conn.Send (out-of-band conn.Close from another goroutine
+// or ctx propagation into the Conn layer). See Stop's docstring for
+// the interruptible-windows contract.
+func TestShutdown_StopBetweenReplayBatches(t *testing.T) {
 	dir := t.TempDir()
 	w, err := wal.Open(wal.Options{Dir: dir, SegmentSize: 64 * 1024})
 	if err != nil {
@@ -160,41 +184,29 @@ func TestShutdown_StopDuringReplayAborts(t *testing.T) {
 	}
 	defer w.Close()
 
-	// Seed enough records that replay actually has work to do.
-	// Seqs start at 1 (Run opens the reader at remoteReplayCursor+1).
-	for i := int64(1); i <= 50; i++ {
+	// Seed many records; small batch cap means replay issues many
+	// Send calls and thus loops through runReplaying's top-of-loop
+	// select many times.
+	const totalRecords = 200
+	for i := int64(1); i <= totalRecords; i++ {
 		if _, err := w.Append(i, 0, []byte("replay-payload")); err != nil {
 			t.Fatalf("wal.Append: %v", err)
 		}
 	}
 
-	// Block Send calls during replay: the first EventBatch Send
-	// blocks until we signal release. This pins runReplaying inside
-	// the Send invocation so Stop is the only thing that can
-	// unblock the loop.
-	release := make(chan struct{})
+	// Count Send invocations so we can assert runReplaying stopped
+	// early (did not send all 200 batches' worth of sends).
 	var sendCalls atomic.Int32
 	conn := newFakeConn()
-	blockedSend := func(msg *wtpv1.ClientMessage) error {
-		n := sendCalls.Add(1)
-		// First send (SessionInit) passes through normally.
-		if n == 1 {
-			select {
-			case conn.sendCh <- msg:
-				return nil
-			case <-conn.closed:
-				return errors.New("closed")
-			}
-		}
-		// Second and later sends block on release OR conn close.
+	conn.sendFn = func(msg *wtpv1.ClientMessage) error {
+		sendCalls.Add(1)
 		select {
-		case <-release:
+		case conn.sendCh <- msg:
+			return nil
 		case <-conn.closed:
 			return errors.New("closed")
 		}
-		return nil
 	}
-	conn.sendFn = blockedSend
 	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
 		return conn, nil
 	})
@@ -219,7 +231,7 @@ func TestShutdown_StopDuringReplayAborts(t *testing.T) {
 	go func() {
 		done <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
 			Batcher: transport.BatcherOptions{
-				MaxRecords: 100,
+				MaxRecords: 1, // one record per batch on the Live side
 				MaxBytes:   1 << 16,
 				MaxAge:     10 * time.Second,
 			},
@@ -244,42 +256,50 @@ func TestShutdown_StopDuringReplayAborts(t *testing.T) {
 		},
 	}
 
-	// Let runReplaying enter and block on the first EventBatch Send.
-	// By the 2-send threshold we know we are past SessionInit and
-	// inside runReplaying.
-	deadline := time.After(2 * time.Second)
-	for {
-		if sendCalls.Load() >= 2 {
-			break
-		}
+	// Drain a few Replay EventBatches so we KNOW runReplaying is
+	// actively iterating. 3 is enough to prove the loop is running;
+	// remaining batches (up to totalRecords worth) must NOT all
+	// arrive after Stop.
+	for i := 0; i < 3; i++ {
 		select {
-		case <-deadline:
-			t.Fatalf("runReplaying did not reach its first EventBatch Send; sendCalls=%d", sendCalls.Load())
-		default:
-			time.Sleep(5 * time.Millisecond)
+		case <-conn.sendCh:
+		case <-time.After(1 * time.Second):
+			t.Fatalf("expected replay EventBatch %d within 1s", i+1)
 		}
 	}
+	sendsAtStopCall := sendCalls.Load()
 
-	// Stop while runReplaying is pinned in Send.
+	// Stop while runReplaying is iterating. The stopCh arm at the
+	// top of its loop must pick it up within a small number of
+	// additional NextBatch/Send iterations.
 	stopReturned := make(chan struct{})
 	go func() {
 		tr.Stop(200 * time.Millisecond)
 		close(stopReturned)
 	}()
 
-	// Releasing the blocked Send lets runReplaying unwind past the
-	// Send call; the select at the top of the loop then picks up
-	// stopCh. (If we do NOT release, conn.closed fires via the
-	// full-teardown in runReplaying's stopCh arm — also a valid
-	// unblocking path. Releasing avoids relying on ordering between
-	// close-as-unblock and the stopCh arm's actual execution.)
-	close(release)
+	// Drain remaining sendCh traffic so blocked Send calls do not
+	// block runReplaying from reaching its top-of-loop stopCh arm.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for {
+			select {
+			case <-conn.sendCh:
+			case <-stopReturned:
+				return
+			case <-time.After(2 * time.Second):
+				return
+			}
+		}
+	}()
 
 	select {
 	case <-stopReturned:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Stop did not return within 2s of signal; runReplaying did not observe stopCh")
+	case <-time.After(3 * time.Second):
+		t.Fatalf("Stop did not return within 3s; sends issued=%d / total=%d", sendCalls.Load(), totalRecords+1)
 	}
+	<-drainDone
 
 	select {
 	case err := <-done:
@@ -288,6 +308,18 @@ func TestShutdown_StopDuringReplayAborts(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return within 2s of Stop")
+	}
+
+	// Regression guard: Stop observed between batches, not after
+	// replay completed. Allow some grace — the Send issued right
+	// BEFORE Stop was signaled counts, and a handful of batches may
+	// issue between Stop and the next top-of-loop check (since
+	// NextBatch is synchronous). Conservatively: must stop well
+	// short of having issued one SessionInit + totalRecords batches.
+	totalSends := sendCalls.Load()
+	if int(totalSends) >= 1+totalRecords {
+		t.Fatalf("Stop did not interrupt replay: total sends=%d >= 1 (SessionInit) + %d (all replay). Sends at Stop call=%d.",
+			totalSends, totalRecords, sendsAtStopCall)
 	}
 }
 
