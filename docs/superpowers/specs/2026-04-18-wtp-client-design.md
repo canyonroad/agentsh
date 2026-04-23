@@ -1163,16 +1163,17 @@ WTP is a fire-and-forget transport sink. `QueryEvents` returns `(nil, ErrNotSupp
 ### `testserver` capabilities
 
 ```go
-ts := testserver.New(t,
-    testserver.AckImmediately(),
-    testserver.Drop(after: 3, then: testserver.Resume()),
-    testserver.Goaway(after: 5*time.Second, code: "DRAINING"),
-    testserver.AckDelay(500 * time.Millisecond),
-    testserver.StaleWatermark(returnSeq: 100),
-)
+ts := testserver.New(testserver.Options{
+    AckDelay:             500 * time.Millisecond,
+    DropAfterBatchN:      3,    // per stream; resets on reconnect
+    GoawayAfterBatchN:    5,    // per stream; same reset semantics
+    SessionAckSeq:        100,  // literal value on SessionAck; zero = zero
+    SessionAckGeneration: 0,
+    // RejectSession + RejectReason drive the terminal-StateShutdown path.
+})
 defer ts.Close()
 
-dialer := ts.NewDialer()
+dialer := ts.DialerFor()
 store, _ := watchtower.New(ctx, cfg, watchtower.WithDialer(dialer))
 
 // drive the store
@@ -1180,14 +1181,14 @@ for i := 0; i < 10; i++ { store.AppendEvent(ctx, ev) }
 
 // assertions — note: WaitForFirstBatch returns the FIRST batch ever
 // recorded on the server, not "the next batch after this call." For
-// multi-phase tests, snapshot len(srv.Batches()) before each phase
+// multi-phase tests, snapshot len(ts.Batches()) before each phase
 // and poll until it grows instead.
-ts.WaitForFirstBatch(5 * time.Second)
-ts.AssertSequenceRange(t, 1, 10)
-ts.AssertReplayObserved(t)
+if _, err := ts.WaitForFirstBatch(5 * time.Second); err != nil { t.Fatal(err) }
+if err := ts.AssertSequenceRange(1, 10); err != nil { t.Fatal(err) }
+if err := ts.AssertReplayObserved(1, 10); err != nil { t.Fatal(err) }
 ```
 
-The testserver also exposes a `Recorded()` accessor returning all batches it has received in order, so tests can assert against the full conversation, not just final state.
+The testserver also exposes a `Batches()` accessor returning deep-copied snapshots of all EventBatches it has received in order, so tests can assert against the full conversation, not just final state.
 
 ### Golden vectors — published in two locations
 

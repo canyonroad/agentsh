@@ -76,7 +76,18 @@ func (s *Server) Batches() []*wtpv1.EventBatch {
 
 // addBatch records a received EventBatch and returns the new total
 // count. Called under the stream handler's goroutine.
+//
+// A nil *EventBatch is normalized to an empty value before storage.
+// This is defensive — a malformed wire frame (or a future test that
+// sends a ClientMessage_EventBatch with EventBatch unset) must not
+// panic later assertions inside proto.Clone or the Body oneof
+// accessors. Storing an empty batch instead surfaces as
+// ErrUnsupportedCompression (Body oneof unset) from the assertion
+// helpers, which is the more useful diagnostic.
 func (s *Server) addBatch(b *wtpv1.EventBatch) int {
+	if b == nil {
+		b = &wtpv1.EventBatch{}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.batches = append(s.batches, b)

@@ -254,29 +254,41 @@ func TestAssertSequenceRange_DetectsGapsAndDuplicates(t *testing.T) {
 // TestAssertRange_InvalidBoundsRejected verifies that first > last
 // is rejected with ErrInvalidRange BEFORE any batch iteration. A
 // swapped-argument test-setup bug would otherwise silently pass
-// when no batches are recorded (empty loop = nil return).
+// when no batches are recorded (empty loop = nil return). Also
+// verifies the helper-name prefix so CI-log grep contracts don't
+// silently drift.
 func TestAssertRange_InvalidBoundsRejected(t *testing.T) {
 	srv := testserver.New(testserver.Options{})
 	defer srv.Close()
 
-	if err := srv.AssertSequenceRange(10, 5); err == nil {
+	err := srv.AssertSequenceRange(10, 5)
+	if err == nil {
 		t.Fatal("AssertSequenceRange(10, 5): want ErrInvalidRange, got nil")
-	} else if !errors.Is(err, testserver.ErrInvalidRange) {
+	}
+	if !errors.Is(err, testserver.ErrInvalidRange) {
 		t.Fatalf("AssertSequenceRange(10, 5) err=%v, want errors.Is(..., ErrInvalidRange)", err)
 	}
+	if !strings.HasPrefix(err.Error(), "AssertSequenceRange[10..5]: ") {
+		t.Fatalf("AssertSequenceRange err=%q, want helper-name prefix", err.Error())
+	}
 
-	if err := srv.AssertReplayObserved(10, 5); err == nil {
+	err = srv.AssertReplayObserved(10, 5)
+	if err == nil {
 		t.Fatal("AssertReplayObserved(10, 5): want ErrInvalidRange, got nil")
-	} else if !errors.Is(err, testserver.ErrInvalidRange) {
+	}
+	if !errors.Is(err, testserver.ErrInvalidRange) {
 		t.Fatalf("AssertReplayObserved(10, 5) err=%v, want errors.Is(..., ErrInvalidRange)", err)
+	}
+	if !strings.HasPrefix(err.Error(), "AssertReplayObserved[10..5]: ") {
+		t.Fatalf("AssertReplayObserved err=%q, want helper-name prefix", err.Error())
 	}
 }
 
 // TestAssertRange_CompressedBatchFailsFast verifies that a recorded
 // batch whose Body is not UncompressedEvents causes the assertion
 // helpers to return ErrUnsupportedCompression rather than silently
-// skip. Without this, a misconfigured test that enabled compression
-// would see misleading "missing seq" failures.
+// skip. Also checks the helper-name prefix so the grep-friendly
+// diagnostic contract is locked in.
 func TestAssertRange_CompressedBatchFailsFast(t *testing.T) {
 	srv := testserver.New(testserver.Options{})
 	defer srv.Close()
@@ -297,16 +309,92 @@ func TestAssertRange_CompressedBatchFailsFast(t *testing.T) {
 		t.Fatalf("WaitForFirstBatch: %v", err)
 	}
 
-	if err := srv.AssertSequenceRange(0, 0); err == nil {
+	err = srv.AssertSequenceRange(0, 0)
+	if err == nil {
 		t.Fatal("AssertSequenceRange on compressed batch: want ErrUnsupportedCompression, got nil")
-	} else if !errors.Is(err, testserver.ErrUnsupportedCompression) {
+	}
+	if !errors.Is(err, testserver.ErrUnsupportedCompression) {
 		t.Fatalf("AssertSequenceRange err=%v, want errors.Is(..., ErrUnsupportedCompression)", err)
 	}
+	if !strings.HasPrefix(err.Error(), "AssertSequenceRange[0..0]: ") {
+		t.Fatalf("AssertSequenceRange err=%q, want helper-name prefix", err.Error())
+	}
 
-	if err := srv.AssertReplayObserved(0, 0); err == nil {
+	err = srv.AssertReplayObserved(0, 0)
+	if err == nil {
 		t.Fatal("AssertReplayObserved on compressed batch: want ErrUnsupportedCompression, got nil")
-	} else if !errors.Is(err, testserver.ErrUnsupportedCompression) {
+	}
+	if !errors.Is(err, testserver.ErrUnsupportedCompression) {
 		t.Fatalf("AssertReplayObserved err=%v, want errors.Is(..., ErrUnsupportedCompression)", err)
+	}
+	if !strings.HasPrefix(err.Error(), "AssertReplayObserved[0..0]: ") {
+		t.Fatalf("AssertReplayObserved err=%q, want helper-name prefix", err.Error())
+	}
+}
+
+// TestServerBatches_DeepCopyIsolatesCallerMutation locks in the
+// Server.Batches() deep-copy contract. A caller that mutates the
+// returned *EventBatch (zeroing events, replacing oneof, etc.) MUST
+// NOT corrupt the server's internal record — later Batches() calls
+// and later assertion helpers must still see the original data.
+//
+// Regression guard: if a future refactor reverts Batches() to a
+// shallow copy, this test fails because the second snapshot would
+// inherit the mutation from the first.
+func TestServerBatches_DeepCopyIsolatesCallerMutation(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	defer srv.Close()
+
+	conn, err := srv.Dial(context.Background())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	sendSessionInit(t, conn)
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv SessionAck: %v", err)
+	}
+
+	sendUncompressedBatch(t, conn,
+		&wtpv1.CompactEvent{Sequence: 7, Generation: 2},
+	)
+	if _, err := srv.WaitForFirstBatch(2 * time.Second); err != nil {
+		t.Fatalf("WaitForFirstBatch: %v", err)
+	}
+
+	// Snapshot 1: mutate the returned batch aggressively.
+	snap1 := srv.Batches()
+	if len(snap1) != 1 {
+		t.Fatalf("snap1 len=%d, want 1", len(snap1))
+	}
+	snap1[0].Compression = wtpv1.Compression_COMPRESSION_ZSTD
+	snap1[0].Body = nil
+	if u := snap1[0].GetUncompressed(); u != nil {
+		u.Events = nil
+	}
+
+	// Snapshot 2: fresh deep copy — must be unaffected by snap1's
+	// mutations.
+	snap2 := srv.Batches()
+	if len(snap2) != 1 {
+		t.Fatalf("snap2 len=%d, want 1", len(snap2))
+	}
+	if snap2[0].GetCompression() != wtpv1.Compression_COMPRESSION_NONE {
+		t.Fatalf("snap2 compression=%v; want COMPRESSION_NONE (snap1 mutation leaked into server state)",
+			snap2[0].GetCompression())
+	}
+	events := snap2[0].GetUncompressed().GetEvents()
+	if len(events) != 1 || events[0].GetSequence() != 7 || events[0].GetGeneration() != 2 {
+		t.Fatalf("snap2 events=%+v; want one event (7, 2) (snap1 mutation corrupted server state)", events)
+	}
+
+	// The sequence-range assertion MUST also still see the original
+	// data — without the deep copy, snap1's mutation would have
+	// wiped the internal record and compactEventSequences would
+	// return empty.
+	if err := srv.AssertSequenceRange(7, 7); err != nil {
+		t.Fatalf("AssertSequenceRange post-mutation: %v (deep-copy broken)", err)
 	}
 }
 
