@@ -12285,7 +12285,7 @@ func TestWaitForBatch_ReturnsBatchOrTimesOut(t *testing.T) {
 }
 
 func TestAssertReplayObserved_DetectsReplayBoundary(t *testing.T) {
-	srv := testserver.New(testserver.Options{StaleWatermark: 10})
+	srv := testserver.New(testserver.Options{SessionAckSeq: 10})
 	defer srv.Close()
 
 	conn, _ := srv.Dial(context.Background())

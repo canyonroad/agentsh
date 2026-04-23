@@ -573,7 +573,7 @@ type Dialer interface {
 }
 ```
 
-Production: `GRPCDialer` wraps `grpc.NewClient` with TLS 1.3 credentials, ALPN `wtp/1`, configured timeouts, and the bidi stream `Watchtower/Stream`. Tests: `testserver.NewDialer()` returns a `Dialer` backed by `bufconn` and a scenario script.
+Production: `GRPCDialer` wraps `grpc.NewClient` with TLS 1.3 credentials, ALPN `wtp/1`, configured timeouts, and the bidi stream `Watchtower/Stream`. Tests: `srv.DialerFor()` on an in-process `testserver.Server` returns a `transport.Dialer` backed by `bufconn` and a scenario-driven server (see `internal/store/watchtower/testserver/`).
 
 The transport package never references `grpc-go` types in its own API surface, so tests don't need a real network listener.
 
@@ -1087,7 +1087,7 @@ func WithLogger(l *slog.Logger) Option          // injected by host
 func WithChainKey(key []byte, fp string) Option // injected by composite (Phase 0)
 ```
 
-The host (the agentsh daemon) is responsible for building the `Store` with the right options. In tests we pass `WithDialer(testserver.NewDialer(...))` and skip TLS entirely.
+The host (the agentsh daemon) is responsible for building the `Store` with the right options. In tests we construct an in-process `testserver.Server` and pass `WithDialer(srv.DialerFor())`, skipping TLS entirely.
 
 **Constructor lifecycle — chain init is a precheck.** `New` constructs the `audit.SinkChain` (via `audit.NewSinkChain`) **before** opening the WAL. Chain construction is pure (no IO side effects), so a failure here returns immediately without leaving a WAL file open or a lock file held. This ordering is mandatory: opening the WAL first and then failing chain construction would leak WAL state on the way out. If a future change reorders so the WAL opens first, that branch MUST `Close()` the WAL on chain-init failure before returning the error.
 

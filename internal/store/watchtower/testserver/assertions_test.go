@@ -442,3 +442,71 @@ func TestAssertReplayObserved_DetectsReplayBoundary(t *testing.T) {
 		t.Fatalf("AssertReplayObserved err=%q, want substring %q", err.Error(), "missing seq 10")
 	}
 }
+
+// TestServer_NilEventBatchDoesNotPanic verifies the test-harness
+// non-goal documented on addBatch: a ClientMessage_EventBatch whose
+// EventBatch pointer is nil must not panic the server's recording
+// path (proto.Clone + Body oneof accessors), and must surface as
+// ErrUnsupportedCompression on the assertion helpers.
+//
+// Regression guard for the Missing finding in roborev #5743: a
+// future refactor that drops the nil-normalization in addBatch
+// would panic inside proto.Clone or one of the GetXxx accessors
+// and this test would fail with a panic-recovered goroutine error
+// rather than a clean assertion. The test-harness contract is
+// that malformed client frames surface as a diagnostic error, not
+// a panic.
+func TestServer_NilEventBatchDoesNotPanic(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	defer srv.Close()
+
+	conn, err := srv.Dial(context.Background())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	sendSessionInit(t, conn)
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv SessionAck: %v", err)
+	}
+
+	// Send a ClientMessage_EventBatch with EventBatch=nil. The
+	// server's Stream handler calls addBatch(x.EventBatch) — with
+	// the nil-normalization guard this is recorded as an empty
+	// *EventBatch instead of nil.
+	if err := conn.Send(&wtpv1.ClientMessage{
+		Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: nil},
+	}); err != nil {
+		t.Fatalf("send nil EventBatch: %v", err)
+	}
+
+	// Server responds with BatchAck(0, 0) per the non-goal
+	// documented on addBatch — testserver does not enforce the
+	// proto's "reject unset Body" rule.
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv BatchAck: %v", err)
+	}
+
+	// Batches() must not panic — the deep-copy path proto.Clones
+	// each entry, which would have panicked on a typed-nil
+	// *EventBatch without the addBatch guard.
+	bs := srv.Batches()
+	if len(bs) != 1 {
+		t.Fatalf("Batches len=%d, want 1", len(bs))
+	}
+	if bs[0] == nil {
+		t.Fatalf("Batches[0] is nil; want non-nil empty *EventBatch")
+	}
+
+	// AssertSequenceRange surfaces the empty-Body batch as
+	// ErrUnsupportedCompression (Body oneof unset is treated like
+	// any other non-UncompressedEvents shape).
+	err = srv.AssertSequenceRange(1, 1)
+	if err == nil {
+		t.Fatal("AssertSequenceRange on nil-Body batch: want error, got nil")
+	}
+	if !errors.Is(err, testserver.ErrUnsupportedCompression) {
+		t.Fatalf("AssertSequenceRange err=%v, want errors.Is(..., ErrUnsupportedCompression)", err)
+	}
+}
