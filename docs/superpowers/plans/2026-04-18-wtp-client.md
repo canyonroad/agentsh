@@ -18091,22 +18091,38 @@ task starts):**
    (NOT a plain `bool`). The pointer form is mandatory because Step 4
    below preserves the option to flip the default at a later major
    version, and a plain `bool` makes the unset case indistinguishable
-   from explicit `false`. Validation rules:
-   - `nil` (field omitted from YAML) — defaults to the
-     PRD-defined-default-at-this-major-version (currently `false` per
-     spec §"`goaway_message` redaction policy"). The validator MUST
-     log a single INFO at daemon start indicating the default value
-     was applied because the field was omitted, so an operator
-     reading logs after a future default-flip can confirm whether
-     their fleet picked up the change implicitly.
+   from explicit `false`. **Critical implementation constraint
+   (round-31 finding):** `applyDefaultsWithSource` (and any other
+   `applyDefaults*` site in `internal/config/config.go`) MUST NOT
+   materialize a value into this field when the YAML omits it — the
+   existing pattern for `*bool` config fields in this file eagerly
+   fills `nil` with a default during config load, which would collapse
+   the `unset` state into explicit `false` BEFORE the daemon can
+   distinguish the two cases. The defaulting (translating `nil` to
+   the PRD-defined-default-at-this-major-version) MUST happen ONLY in
+   the audit-watchtower store-construction path (see Step 2), not in
+   the config layer. Validation rules:
+   - `nil` (field omitted from YAML) — passes config validation as
+     `nil`. Resolved to the PRD-defined-default-at-this-major-version
+     (currently `false`) ONLY at store-construction time. The store-
+     construction path MUST log a single INFO at daemon start
+     indicating the default value was applied because the field was
+     omitted, so an operator reading logs after a future default-flip
+     can confirm whether their fleet picked up the change implicitly.
+     The log emission lives in the audit-watchtower store-
+     construction site (NOT in `internal/config/config.go`'s
+     `Validate*`/`applyDefaults*` functions, which are shared by
+     `agentsh config show`, `agentsh config validate`, and server
+     startup — emitting operational startup logs from those shared
+     code paths would pollute non-daemon CLI subcommands).
    - `*bool == false` (explicit `false`) — same runtime behavior as
-     `nil` today, but documents operator intent. Validator emits no
-     log.
+     `nil` today, but documents operator intent. No log.
    - `*bool == true` — opt in to verbatim sanitized `goaway_message`
-     logging. Validator emits a single WARN at daemon start
-     reminding the operator that this enables logging of
+     logging. Store-construction path emits a single WARN at daemon
+     start reminding the operator that this enables logging of
      server-supplied text and depends on the server-side no-secrets
-     contract.
+     contract. (Same site/rationale as the `nil` INFO above — kept
+     out of generic config validation.)
 2. Wire the config field through the daemon's audit-watchtower
    construction path into `transport.Options.LogGoawayMessage` at
    store-creation time. Translate `nil` to the
@@ -18149,26 +18165,46 @@ task starts):**
    tests covering ALL THREE config presence states from Step 1, NOT
    just explicit `true` and `false`:
    - **`unset`** (YAML omits `audit.watchtower.log_goaway_message`)
-     — assert the daemon resolves to the
+     — TWO assertions are mandatory: (1) AFTER `Load(path)` returns
+     and `Validate()` passes, `cfg.Audit.Watchtower.LogGoawayMessage`
+     is STILL `nil` (proves `applyDefaultsWithSource` did NOT
+     materialize a value into this field — round-31 finding); (2)
+     the daemon's audit-watchtower store-construction path THEN
+     resolves the `nil` to the
      PRD-defined-default-at-this-major-version (currently `false`),
      the transport receives that resolved value, and the WARN payload
      omits `goaway_message` (only `goaway_message_present` is
      emitted). Include a YAML fixture where the field is absent.
-   - **explicit `false`** (`log_goaway_message: false`) — same
-     runtime assertions as `unset`. Include a YAML fixture where the
+     The first assertion is load-bearing: without it an
+     implementation that collapses `unset` -> `false` during config
+     load would still pass the second assertion (because both `unset`
+     and explicit `false` produce the same final transport behavior),
+     defeating the three-state semantics that exist precisely to
+     enable the future default-flip migration.
+   - **explicit `false`** (`log_goaway_message: false`) — assert
+     `cfg.Audit.Watchtower.LogGoawayMessage` is non-nil and points to
+     `false` after `Load`, and the same runtime assertions as `unset`
+     for the transport/WARN payload. Include a YAML fixture where the
      field is set to `false`.
-   - **explicit `true`** (`log_goaway_message: true`) — assert the
-     daemon resolves to `true`, the transport receives `true`, and
-     the WARN payload contains the sanitized `goaway_message` field.
-     Include a YAML fixture where the field is set to `true`.
+   - **explicit `true`** (`log_goaway_message: true`) — assert
+     `cfg.Audit.Watchtower.LogGoawayMessage` is non-nil and points to
+     `true` after `Load`, the daemon resolves to `true`, the
+     transport receives `true`, and the WARN payload contains the
+     sanitized `goaway_message` field. Include a YAML fixture where
+     the field is set to `true`.
 
-   The test helper SHOULD construct the daemon's `AuditWatchtowerConfig`
-   from each YAML fixture and assert `transport.Options.LogGoawayMessage`
-   takes the expected value AFTER defaulting. The unit-level coverage
-   of the WARN payload's mode-dependent shape already lives in
-   Task 22d's recv-multiplexer tests; this task's integration test
-   verifies only the config -> transport.Options plumbing AND the
-   defaulting logic.
+   The test helper SHOULD load each YAML fixture through the real
+   `config.Load` -> `Validate` -> `applyDefaultsWithSource` pipeline
+   (NOT a hand-constructed `AuditWatchtowerConfig`) so the load-time
+   defaulting behavior is exercised, then construct the audit-
+   watchtower store and assert `transport.Options.LogGoawayMessage`
+   takes the expected value AFTER store-construction-time defaulting.
+   The unit-level coverage of the WARN payload's mode-dependent shape
+   already lives in Task 22d's recv-multiplexer tests; this task's
+   integration test verifies the config -> transport.Options plumbing,
+   the defaulting-only-at-store-construction-time invariant, AND the
+   startup INFO/WARN log emission from the store-construction path
+   (NOT from `Validate`).
 6. **Reload model (operator contract).** `LogGoawayMessage` is read
    from `transport.Options` at transport-construction time and is
    NOT hot-reloadable. Changes to
