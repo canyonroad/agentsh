@@ -18035,50 +18035,156 @@ captured by the SRE/ops engineer who pushed the change.
 
 **Owner**: WTP transport implementation team (config wiring) + SRE/ops
 team (rollout coordination). NOT in scope for the initial WTP client
-phase — this task lands AFTER Tasks 22d and 27 close.
+phase — this task lands AFTER Tasks 22d AND 27 close, AND after the
+server-side contract dependency below is satisfied.
 
 **Type**: Code + operator-coordination follow-up. Expands the internal
 `transport.Options.LogGoawayMessage` flag (added in Task 22d as a
 construction-time-only opt-in) into a daemon-facing config surface.
 
-**Hard prerequisite (rollout-order gate)**: The Watchtower server
-team MUST publish a server-side contract in
-`proto/canyonroad/wtp/v1/wtp.proto` (or accompanying server-protocol
-documentation in the canyonroad repo) stating that `Goaway.message`
-MUST NOT contain credentials, secrets, or PII. The contract MUST be
-acknowledged in writing (link from spec
-§"`goaway_message` redaction policy" when published) BEFORE this task
-starts. Until then, operators have no daemon-config-level lever to
-enable verbatim `goaway_message` logging — the only path is direct
-construction of `transport.Options` (test/embedded callers).
+**Hard prerequisites (rollout-order gate — ALL must hold before this
+task starts):**
 
-**Steps** (executed only after the prereq lands):
+1. **Task 27 (daemon wiring) closed.** Task 27 lands the
+   `internal/config/config.go` removal of the `audit.watchtower.enabled`
+   "WTP sink not yet wired" rejection, the daemon-side
+   `AuditWatchtowerConfig` -> store construction path, and the
+   `cmd/wtp-testserver/main.go` binary. Until that ships, there is no
+   `AuditWatchtowerConfig` -> `transport.Options` plumbing for this
+   task to extend, and the implementation team should not start Step
+   1 below. Verify by grepping for the daemon-side
+   `audit.watchtower.enabled` rejection — its presence (in current
+   tree at `internal/config/config.go:1224`) means Task 27 has not
+   landed yet.
+2. **Task 22d (transport-side `LogGoawayMessage` flag) closed.** The
+   `transport.Options.LogGoawayMessage` field, the `sanitizeForLog`
+   helper, and the conservative-default WARN payload contract all
+   land in Task 22d. Verify by grepping
+   `internal/store/watchtower/transport/transport.go` for
+   `LogGoawayMessage`.
+3. **Watchtower-server-side `Goaway.message` no-secrets contract
+   published.** The Watchtower server team MUST publish a server-side
+   contract in `proto/canyonroad/wtp/v1/wtp.proto` (or accompanying
+   server-protocol documentation in the canyonroad repo) stating that
+   `Goaway.message` MUST NOT contain credentials, secrets, or PII.
+   Concrete unblock signal: a merged canyonroad PR/spec that adds
+   the no-secrets contract language to the proto comment OR to a
+   server-protocol design doc, AND a written acknowledgement (issue
+   comment, doc link, or RFC sign-off) from the server team's
+   technical lead. The owning team is the **Watchtower server /
+   canyonroad team** (same team that owns
+   `proto/canyonroad/wtp/v1/wtp.proto` upstream — a per-team alias
+   placeholder until the canyonroad repo's `OWNERS`/`CODEOWNERS`
+   resolves; replace with the concrete alias when known). Until this
+   prereq is satisfied, the canyonroad tracking link is a TODO in
+   spec §"`goaway_message` redaction policy" (replace
+   `<canyonroad PR/issue link TBD>` with the merged PR URL when the
+   contract lands). Without an external link there is no concrete
+   completion artifact for SRE/ops to point at when reviewing Step 4
+   below.
 
-1. Add `LogGoawayMessage *bool` (or equivalent presence-bearing form)
-   to `internal/config/config.go` `AuditWatchtowerConfig` with
-   validation that defaults to `false` when absent.
+**Steps** (executed only after ALL three prerequisites are satisfied):
+
+1. **Config field — three-state semantics.** Add
+   `LogGoawayMessage *bool` to `internal/config/config.go`
+   `AuditWatchtowerConfig` so the field carries presence semantics
+   (NOT a plain `bool`). The pointer form is mandatory because Step 4
+   below preserves the option to flip the default at a later major
+   version, and a plain `bool` makes the unset case indistinguishable
+   from explicit `false`. Validation rules:
+   - `nil` (field omitted from YAML) — defaults to the
+     PRD-defined-default-at-this-major-version (currently `false` per
+     spec §"`goaway_message` redaction policy"). The validator MUST
+     log a single INFO at daemon start indicating the default value
+     was applied because the field was omitted, so an operator
+     reading logs after a future default-flip can confirm whether
+     their fleet picked up the change implicitly.
+   - `*bool == false` (explicit `false`) — same runtime behavior as
+     `nil` today, but documents operator intent. Validator emits no
+     log.
+   - `*bool == true` — opt in to verbatim sanitized `goaway_message`
+     logging. Validator emits a single WARN at daemon start
+     reminding the operator that this enables logging of
+     server-supplied text and depends on the server-side no-secrets
+     contract.
 2. Wire the config field through the daemon's audit-watchtower
    construction path into `transport.Options.LogGoawayMessage` at
-   store-creation time.
+   store-creation time. Translate `nil` to the
+   PRD-defined-default-at-this-major-version BEFORE setting the
+   transport field (the transport layer sees only `bool`).
 3. Update operator-facing documentation
    (`docs/superpowers/operator/wtp-monitoring-migration.md` or its
    successor) to describe the flag, the server-side contract it
    depends on, the threat model (server is trusted not to leak secrets
-   in `Goaway.message`), and the recommended deployment posture
+   in `Goaway.message`), the three-state semantics from Step 1, the
+   reload model from Step 6, and the recommended deployment posture
    (default off; on only for trusted internal Watchtower fleets where
    the server-side contract is enforced).
-4. Decide whether to flip the default to `true` for trusted-server
-   deployments. The decision is a separate ops/security review that
-   weighs (a) the value of verbatim `goaway_message` for incident
-   triage against (b) the residual risk of server-side contract
-   violations leaking through to operator log aggregators. Default
-   stays `false` until that review explicitly signs off.
-5. Add a single integration test exercising the wired-through path
-   (config `LogGoawayMessage = true` produces a WARN with the
-   sanitized `goaway_message` field present; config `false` produces
-   a WARN with the field omitted and `goaway_message_present` marker
-   only). The unit-level coverage of both modes already lives in
-   Task 22d's recv-multiplexer tests.
+4. **Default-flip review (separate sub-task; NOT part of the initial
+   landing).** If a future operations/security review concludes that
+   the conservative default should flip to `true` for trusted
+   deployments, that flip MUST follow the explicit migration policy
+   below — NOT a silent runtime default change inside Task 27b's
+   landing PR. The decision weighs (a) the value of verbatim
+   `goaway_message` for incident triage against (b) the residual risk
+   of server-side contract violations leaking through to operator log
+   aggregators. The default stays `false` until the review explicitly
+   signs off.
+   - **Default-flip migration policy (binding even if Task 27b
+     itself never flips the default):** any change to the
+     PRD-defined-default-at-this-major-version is a major-version
+     bump in the daemon config schema. The flip PR MUST (a) bump
+     the schema major version in the appropriate
+     config/version constant, (b) add a release-notes entry calling
+     out the behavioral change for fleets running with
+     `LogGoawayMessage` omitted, (c) update spec §"`goaway_message`
+     redaction policy" with the new default and the version it took
+     effect, and (d) keep emitting the Step 1 INFO log so operators
+     can audit whether they picked up the change implicitly. Silent
+     default flips (changing the in-code default without a major
+     version bump) are forbidden because they would expose
+     `goaway_message` to log aggregators on upgrade for any fleet
+     that omitted the field.
+5. **Wired-through tests — three-case matrix.** Add integration
+   tests covering ALL THREE config presence states from Step 1, NOT
+   just explicit `true` and `false`:
+   - **`unset`** (YAML omits `audit.watchtower.log_goaway_message`)
+     — assert the daemon resolves to the
+     PRD-defined-default-at-this-major-version (currently `false`),
+     the transport receives that resolved value, and the WARN payload
+     omits `goaway_message` (only `goaway_message_present` is
+     emitted). Include a YAML fixture where the field is absent.
+   - **explicit `false`** (`log_goaway_message: false`) — same
+     runtime assertions as `unset`. Include a YAML fixture where the
+     field is set to `false`.
+   - **explicit `true`** (`log_goaway_message: true`) — assert the
+     daemon resolves to `true`, the transport receives `true`, and
+     the WARN payload contains the sanitized `goaway_message` field.
+     Include a YAML fixture where the field is set to `true`.
+
+   The test helper SHOULD construct the daemon's `AuditWatchtowerConfig`
+   from each YAML fixture and assert `transport.Options.LogGoawayMessage`
+   takes the expected value AFTER defaulting. The unit-level coverage
+   of the WARN payload's mode-dependent shape already lives in
+   Task 22d's recv-multiplexer tests; this task's integration test
+   verifies only the config -> transport.Options plumbing AND the
+   defaulting logic.
+6. **Reload model (operator contract).** `LogGoawayMessage` is read
+   from `transport.Options` at transport-construction time and is
+   NOT hot-reloadable. Changes to
+   `audit.watchtower.log_goaway_message` take effect ONLY after the
+   transport is reconstructed, which today means a daemon restart
+   (the watchtower store / audit sink is built once at daemon
+   startup; there is no in-place reload path). The operator docs
+   updated in Step 3 MUST state this explicitly so operators know
+   (a) editing the field while the daemon is running has no immediate
+   effect, and (b) the verification procedure for "did my flag flip
+   take effect?" is a daemon restart followed by inspection of the
+   Step 1 INFO/WARN startup log line. If a future task adds a
+   reload mechanism for `audit.watchtower.*`, that task is
+   responsible for re-deriving the new transport.Options and
+   reconstructing the transport — Task 27b explicitly defers that
+   work and does NOT introduce a partial in-place flag flip.
 
 **Non-goals**:
 
@@ -18091,24 +18197,42 @@ construction of `transport.Options` (test/embedded callers).
   the existing flag from daemon config to transport.
 - This task does NOT relax the conservative default for callers who
   do not opt in.
+- This task does NOT introduce hot-reload semantics for the flag (see
+  Step 6).
 
-**Acceptance**: `AuditWatchtowerConfig.LogGoawayMessage` is settable
-via daemon YAML; flipping it changes whether the WARN payload's
-`goaway_message` field is populated; operator docs describe the
-server-side contract dependency and the trust model.
+**Acceptance**: `AuditWatchtowerConfig.LogGoawayMessage` (a `*bool`
+with three-state semantics) is settable via daemon YAML; the unset,
+explicit-false, and explicit-true cases all produce the documented
+behavior; flipping the value AND restarting the daemon changes
+whether the WARN payload's `goaway_message` field is populated;
+operator docs describe the server-side contract dependency, the trust
+model, the three-state semantics, the default-flip migration policy,
+and the restart-required reload model.
 
 ---
 
-## Done
+## Definition of Done (end-state target — not current status)
 
-All 27 implementation tasks (1, 2, 3, 4, 4a-ii, 5, 6, 7, 8, 9, 10, 11,
+This section describes the target end-state when ALL 27 implementation
+tasks plus Task 27a and Task 27b have landed. It is NOT a current-status
+claim — at the time of writing, the plan is mid-execution (Task 17.X
+in flight); subsequent tasks (18, 19, 20, 21, 22, 22a, 22b, 22c, 22d,
+24, 25, 26, 27, 27a, 27b) are future work. The bullet enumeration
+below describes what "done" means, not what is done. Verify current
+status against `git log` and the in-tree task tracker, NOT this
+section.
+
+When all 27 implementation tasks (1, 2, 3, 4, 4a-ii, 5, 6, 7, 8, 9, 10, 11,
 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 22a, 22b, 24, 25, 26, 27)
 plus Task 27a (operator monitoring migration coordination — owned by
-SRE/ops, gates production rollout only) complete. The watchtower store
-is wired into the daemon behind `audit.watchtower.enabled: true`, the
-standalone `wtp-testserver` binary is available for manual integration
+SRE/ops, gates production rollout only) plus Task 27b (LogGoawayMessage
+config-surface expansion — owned by the WTP transport team, gated on
+the Watchtower-server-side `Goaway.message` no-secrets contract being
+published) are complete, the watchtower store will be wired into the
+daemon behind `audit.watchtower.enabled: true`, the standalone
+`wtp-testserver` binary will be available for manual integration
 testing, and the full test suite (unit, integrity-gating, component,
-integration) is green.
+integration) will be green.
 
 Before merge, run:
 
