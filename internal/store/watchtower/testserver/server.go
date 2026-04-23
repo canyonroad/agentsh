@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 )
 
 // bufSize is the bufconn listener's backing buffer. 1 MiB is enough for
@@ -55,13 +56,21 @@ func (s *Server) Close() {
 	s.grpcSrv.Stop()
 }
 
-// Batches returns a snapshot of EventBatch messages the server has
-// received in order. Safe to call concurrently with an active stream.
+// Batches returns a deep-copied snapshot of EventBatch messages the
+// server has received in order. Each *EventBatch in the returned
+// slice is a proto.Clone of the recorded message, so callers can
+// freely mutate, sort, or extract sub-fields without corrupting the
+// server's internal record (which later assertion helpers and
+// later test phases rely on).
+//
+// Safe to call concurrently with an active stream.
 func (s *Server) Batches() []*wtpv1.EventBatch {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]*wtpv1.EventBatch, len(s.batches))
-	copy(out, s.batches)
+	for i, b := range s.batches {
+		out[i] = proto.Clone(b).(*wtpv1.EventBatch)
+	}
 	return out
 }
 

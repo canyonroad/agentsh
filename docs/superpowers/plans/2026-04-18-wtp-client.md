@@ -85,8 +85,8 @@ internal/store/watchtower/transport/             # NEW (Tasks 15-19)
 
 internal/store/watchtower/testserver/            # NEW (Tasks 20-21)
   testserver.go                                  # bufconn server skeleton
-  scenarios.go                                   # Drop, Goaway, AckDelay, StaleWatermark
-  helpers.go                                     # WaitForBatch, AssertSequenceRange, AssertReplayObserved
+  scenarios.go                                   # Drop, Goaway, AckDelay, SessionAckSeq/Generation, RejectSession
+  assertions.go                                  # WaitForFirstBatch, AssertSequenceRange, AssertReplayObserved
   testserver_test.go
 
 internal/store/watchtower/                       # NEW (Tasks 22-26)

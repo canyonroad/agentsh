@@ -94,40 +94,43 @@ func (s *Server) compactEventSequences() ([]uint64, error) {
 // Returns nil iff the assertion holds. Otherwise a non-nil error
 // with a deterministic diagnostic precedence:
 //
-//  1. ErrInvalidRange if first > last.
-//  2. ErrUnsupportedCompression if any recorded batch is not
-//     uncompressed (via compactEventSequences).
+//  1. ErrInvalidRange (wrapped, with helper-name prefix) if first > last.
+//  2. ErrUnsupportedCompression (wrapped, with helper-name prefix) if
+//     any recorded batch is not uncompressed.
 //  3. Out-of-range seq (first observed seq <first or >last).
 //  4. Duplicate seq.
 //  5. Missing seq.
 //
-// Error messages include the "AssertSequenceRange[first..last]"
-// prefix and name the offending seq so callers can grep CI logs.
+// All error messages start with "AssertSequenceRange[first..last]: "
+// so callers can grep CI logs by the helper name. Sentinel-error
+// branches (1, 2) wrap the package-level sentinel so callers can
+// also use errors.Is to discriminate.
 //
 // Intended for happy-path tests expecting a known contiguous run.
 // For replay tests that tolerate extra seqs past `last`, use
 // AssertReplayObserved.
 func (s *Server) AssertSequenceRange(first, last uint64) error {
+	prefix := fmt.Sprintf("AssertSequenceRange[%d..%d]", first, last)
 	if first > last {
-		return fmt.Errorf("%w (first=%d, last=%d)", ErrInvalidRange, first, last)
+		return fmt.Errorf("%s: %w (first=%d, last=%d)", prefix, ErrInvalidRange, first, last)
 	}
 	seqs, err := s.compactEventSequences()
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", prefix, err)
 	}
 	seen := map[uint64]bool{}
 	for _, seq := range seqs {
 		if seq < first || seq > last {
-			return fmt.Errorf("AssertSequenceRange[%d..%d]: observed seq %d outside expected range", first, last, seq)
+			return fmt.Errorf("%s: observed seq %d outside expected range", prefix, seq)
 		}
 		if seen[seq] {
-			return fmt.Errorf("AssertSequenceRange[%d..%d]: duplicate seq %d", first, last, seq)
+			return fmt.Errorf("%s: duplicate seq %d", prefix, seq)
 		}
 		seen[seq] = true
 	}
 	for seq := first; seq <= last; seq++ {
 		if !seen[seq] {
-			return fmt.Errorf("AssertSequenceRange[%d..%d]: missing seq %d", first, last, seq)
+			return fmt.Errorf("%s: missing seq %d", prefix, seq)
 		}
 		if seq == ^uint64(0) {
 			// Defensive: last == math.MaxUint64 would underflow the
@@ -147,22 +150,24 @@ func (s *Server) AssertSequenceRange(first, last uint64) error {
 // tolerates duplicates (replay + live can legitimately overlap on
 // the boundary record in some configurations).
 //
-// Error precedence mirrors AssertSequenceRange:
+// Error precedence mirrors AssertSequenceRange (with prefix
+// "AssertReplayObserved[first..last]: "):
 //
-//  1. ErrInvalidRange if first > last.
-//  2. ErrUnsupportedCompression if any recorded batch is not
-//     uncompressed.
+//  1. ErrInvalidRange (wrapped) if first > last.
+//  2. ErrUnsupportedCompression (wrapped) if any recorded batch is
+//     not uncompressed.
 //  3. Missing seq in the [first, last] window.
 //
 // Intended for replay tests that prove "the replay window landed"
 // without over-constraining what happens after it.
 func (s *Server) AssertReplayObserved(first, last uint64) error {
+	prefix := fmt.Sprintf("AssertReplayObserved[%d..%d]", first, last)
 	if first > last {
-		return fmt.Errorf("%w (first=%d, last=%d)", ErrInvalidRange, first, last)
+		return fmt.Errorf("%s: %w (first=%d, last=%d)", prefix, ErrInvalidRange, first, last)
 	}
 	seqs, err := s.compactEventSequences()
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", prefix, err)
 	}
 	seen := map[uint64]bool{}
 	for _, seq := range seqs {
@@ -170,7 +175,7 @@ func (s *Server) AssertReplayObserved(first, last uint64) error {
 	}
 	for seq := first; seq <= last; seq++ {
 		if !seen[seq] {
-			return fmt.Errorf("AssertReplayObserved[%d..%d]: missing seq %d in observed batches", first, last, seq)
+			return fmt.Errorf("%s: missing seq %d in observed batches", prefix, seq)
 		}
 		if seq == ^uint64(0) {
 			break

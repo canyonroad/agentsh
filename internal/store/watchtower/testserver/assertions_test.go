@@ -34,19 +34,23 @@ func sendUncompressedBatch(t *testing.T, conn testserver.Conn, events ...*wtpv1.
 }
 
 // sendCompressedBatchMarker is a test helper that sends an EventBatch
-// whose Body is NOT UncompressedEvents — the server records it so the
-// assertion helpers can exercise their fail-fast compression branch.
-// We set Compression to ZSTD but leave Body nil; the testserver does
-// not decode the body so this is sufficient to produce "not
-// UncompressedEvents" on the recorded batch.
+// whose Body is the `compressed_payload` oneof variant — a valid wire
+// shape per the proto contract (§7.3): compression=ZSTD with a non-
+// empty bytes payload. The testserver records the message but does
+// not decode it; the assertion helpers must surface
+// ErrUnsupportedCompression for that recorded shape.
+//
+// The payload bytes are an opaque non-empty blob — the helpers never
+// look inside, and decoding is intentionally out of scope.
 func sendCompressedBatchMarker(t *testing.T, conn testserver.Conn) {
 	t.Helper()
 	if err := conn.Send(&wtpv1.ClientMessage{
 		Msg: &wtpv1.ClientMessage_EventBatch{
 			EventBatch: &wtpv1.EventBatch{
 				Compression: wtpv1.Compression_COMPRESSION_ZSTD,
-				// Body omitted — simulates a compressed wire payload
-				// that the testserver helpers cannot decode.
+				Body: &wtpv1.EventBatch_CompressedPayload{
+					CompressedPayload: []byte{0x01, 0x02, 0x03, 0x04},
+				},
 			},
 		},
 	}); err != nil {

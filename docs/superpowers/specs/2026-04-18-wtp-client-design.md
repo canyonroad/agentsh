@@ -87,9 +87,9 @@ internal/store/watchtower/
 
   testserver/
     server.go               // bufconn-based in-process WTP server stub
-    scenarios.go            // hooks: Drop, Goaway, AckDelay, StaleWatermark
+    scenarios.go            // hooks: Drop, Goaway, AckDelay, SessionAckSeq/Generation
     dialer.go               // returns a transport.Dialer wired to bufconn
-    matcher.go              // helpers: WaitForBatch(...), AssertSequenceRange(...)
+    assertions.go           // helpers: WaitForFirstBatch, AssertSequenceRange, AssertReplayObserved
 
 proto/canyonroad/wtp/v1/
   wtp.proto                 // service + messages from spec §7
@@ -1178,8 +1178,11 @@ store, _ := watchtower.New(ctx, cfg, watchtower.WithDialer(dialer))
 // drive the store
 for i := 0; i < 10; i++ { store.AppendEvent(ctx, ev) }
 
-// assertions
-ts.WaitForBatch(t, 5 * time.Second)
+// assertions — note: WaitForFirstBatch returns the FIRST batch ever
+// recorded on the server, not "the next batch after this call." For
+// multi-phase tests, snapshot len(srv.Batches()) before each phase
+// and poll until it grows instead.
+ts.WaitForFirstBatch(5 * time.Second)
 ts.AssertSequenceRange(t, 1, 10)
 ts.AssertReplayObserved(t)
 ```
@@ -1297,7 +1300,7 @@ This section enumerates ordered milestones with one-line entry/exit criteria, sc
 | 6 | **Compact encoder + mapper interface** | Phase 5 done. | `compact.Mapper` interface defined. Stub mapper for unit tests only. Per-OCSF-class projection helpers tested against `compact/payload/testdata/*.json`. |
 | 7 | **WAL package** | Phase 6 done. | `internal/store/watchtower/wal/`: segment header, framing, CRC32C, atomic seal, INPROGRESS lifecycle, meta.json, Reader API. **Required tests**: `TestWAL_RolloverAndReplay`, `TestWAL_GenerationBoundaryOrdering`, `TestWAL_CRCFailureEmitsCoarseLossRange`, `TestWAL_OverflowEmitsLossMarker`. |
 | 8 | **Transport state machine** | Phase 7 done. | `internal/store/watchtower/transport/`: Conn interface, Dialer pattern, four-state machine, Batcher with all six invariants, Replayer, Heartbeat. Mock-Conn-driven table tests cover every (state × event) cell. |
-| 9 | **In-tree testserver** | Phase 8 done. | `internal/store/watchtower/testserver/`: bufconn server, scenario hooks (Drop, Goaway, AckDelay, StaleWatermark), `WaitForBatch` / `AssertSequenceRange` / `AssertReplayObserved` helpers. Self-tested. |
+| 9 | **In-tree testserver** | Phase 8 done. | `internal/store/watchtower/testserver/`: bufconn server, scenario hooks (Drop, Goaway, AckDelay, SessionAckSeq/Generation, RejectSession), `WaitForFirstBatch` / `AssertSequenceRange` / `AssertReplayObserved` helpers. Self-tested. |
 | 10 | **Store integration + transactional Append** | Phase 9 done. | `internal/store/watchtower/store.go` glues compact + chain + wal + transport. Implements `store.EventStore`. **Required tests**: `TestStore_WALCleanFailure_NoChainAdvance`, `TestStore_WALAmbiguousFailure_LatchesFatal`. |
 | 11 | **Component + integration tests** | Phase 10 done. | The five-layer pyramid's component and integration rows pass: `TestStore_DropsMidBatchTriggersReplay`, `TestStore_ServerRestart_AcksCatchUp`, plus the testserver-driven scenario suite. |
 | 12 | **Daemon wiring** | Phase 11 done. | `cmd/agentsh` constructs a WTP `Store` when `audit.watchtower.enabled: true`, passes `WithMapper`, `WithMetrics`, `WithLogger`, `WithChainKey`. Manual end-to-end smoke test against `cmd/wtp-testserver` documented. |
