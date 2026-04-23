@@ -499,8 +499,11 @@ func TestServer_NilEventBatchDoesNotPanic(t *testing.T) {
 	if got.GetCompression() != wtpv1.Compression_COMPRESSION_UNSPECIFIED {
 		t.Fatalf("WaitForFirstBatch.Compression=%v; want UNSPECIFIED", got.GetCompression())
 	}
+	if got.GetFromSequence() != 0 || got.GetToSequence() != 0 {
+		t.Fatalf("WaitForFirstBatch from/to=(%d, %d); want (0, 0)", got.GetFromSequence(), got.GetToSequence())
+	}
 
-	// 2. Batches() — same empty-shape contract.
+	// 2. Batches() — same empty-shape contract on EVERY field.
 	bs := srv.Batches()
 	if len(bs) != 1 {
 		t.Fatalf("Batches len=%d, want 1", len(bs))
@@ -510,6 +513,12 @@ func TestServer_NilEventBatchDoesNotPanic(t *testing.T) {
 	}
 	if bs[0].GetBody() != nil {
 		t.Fatalf("Batches[0].Body=%T; want nil", bs[0].GetBody())
+	}
+	if bs[0].GetCompression() != wtpv1.Compression_COMPRESSION_UNSPECIFIED {
+		t.Fatalf("Batches[0].Compression=%v; want UNSPECIFIED", bs[0].GetCompression())
+	}
+	if bs[0].GetFromSequence() != 0 || bs[0].GetToSequence() != 0 {
+		t.Fatalf("Batches[0] from/to=(%d, %d); want (0, 0)", bs[0].GetFromSequence(), bs[0].GetToSequence())
 	}
 
 	// 3. AssertSequenceRange — ErrUnsupportedCompression with prefix.
