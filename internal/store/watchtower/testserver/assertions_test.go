@@ -445,17 +445,19 @@ func TestAssertReplayObserved_DetectsReplayBoundary(t *testing.T) {
 
 // TestServer_NilEventBatchDoesNotPanic verifies the test-harness
 // non-goal documented on addBatch: a ClientMessage_EventBatch whose
-// EventBatch pointer is nil must not panic the server's recording
-// path (proto.Clone + Body oneof accessors), and must surface as
-// ErrUnsupportedCompression on the assertion helpers.
+// EventBatch pointer is nil must not panic ANY of the public
+// recording / assertion entry points (Batches, WaitForFirstBatch,
+// AssertSequenceRange, AssertReplayObserved), and must surface as
+// ErrUnsupportedCompression with the helper-name prefix on both
+// assertion helpers.
 //
-// Regression guard for the Missing finding in roborev #5743: a
-// future refactor that drops the nil-normalization in addBatch
-// would panic inside proto.Clone or one of the GetXxx accessors
+// Regression guard for the Missing finding in roborev #5743+5746:
+// a future refactor that drops the nil-normalization in addBatch
+// would panic inside proto.Clone or one of the GetXxx accessors,
 // and this test would fail with a panic-recovered goroutine error
 // rather than a clean assertion. The test-harness contract is
 // that malformed client frames surface as a diagnostic error, not
-// a panic.
+// a panic — across the FULL public surface, not just one entry.
 func TestServer_NilEventBatchDoesNotPanic(t *testing.T) {
 	srv := testserver.New(testserver.Options{})
 	defer srv.Close()
@@ -471,26 +473,25 @@ func TestServer_NilEventBatchDoesNotPanic(t *testing.T) {
 		t.Fatalf("recv SessionAck: %v", err)
 	}
 
-	// Send a ClientMessage_EventBatch with EventBatch=nil. The
-	// server's Stream handler calls addBatch(x.EventBatch) — with
-	// the nil-normalization guard this is recorded as an empty
-	// *EventBatch instead of nil.
 	if err := conn.Send(&wtpv1.ClientMessage{
 		Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: nil},
 	}); err != nil {
 		t.Fatalf("send nil EventBatch: %v", err)
 	}
-
-	// Server responds with BatchAck(0, 0) per the non-goal
-	// documented on addBatch — testserver does not enforce the
-	// proto's "reject unset Body" rule.
 	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
 		t.Fatalf("recv BatchAck: %v", err)
 	}
 
-	// Batches() must not panic — the deep-copy path proto.Clones
-	// each entry, which would have panicked on a typed-nil
-	// *EventBatch without the addBatch guard.
+	// 1. WaitForFirstBatch — must not panic on the nil-Body batch.
+	got, err := srv.WaitForFirstBatch(2 * time.Second)
+	if err != nil {
+		t.Fatalf("WaitForFirstBatch: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("WaitForFirstBatch returned nil; want non-nil empty *EventBatch")
+	}
+
+	// 2. Batches() — same.
 	bs := srv.Batches()
 	if len(bs) != 1 {
 		t.Fatalf("Batches len=%d, want 1", len(bs))
@@ -499,14 +500,27 @@ func TestServer_NilEventBatchDoesNotPanic(t *testing.T) {
 		t.Fatalf("Batches[0] is nil; want non-nil empty *EventBatch")
 	}
 
-	// AssertSequenceRange surfaces the empty-Body batch as
-	// ErrUnsupportedCompression (Body oneof unset is treated like
-	// any other non-UncompressedEvents shape).
+	// 3. AssertSequenceRange — ErrUnsupportedCompression with prefix.
 	err = srv.AssertSequenceRange(1, 1)
 	if err == nil {
 		t.Fatal("AssertSequenceRange on nil-Body batch: want error, got nil")
 	}
 	if !errors.Is(err, testserver.ErrUnsupportedCompression) {
 		t.Fatalf("AssertSequenceRange err=%v, want errors.Is(..., ErrUnsupportedCompression)", err)
+	}
+	if !strings.HasPrefix(err.Error(), "AssertSequenceRange[1..1]: ") {
+		t.Fatalf("AssertSequenceRange err=%q, want helper-name prefix", err.Error())
+	}
+
+	// 4. AssertReplayObserved — same surface contract.
+	err = srv.AssertReplayObserved(1, 1)
+	if err == nil {
+		t.Fatal("AssertReplayObserved on nil-Body batch: want error, got nil")
+	}
+	if !errors.Is(err, testserver.ErrUnsupportedCompression) {
+		t.Fatalf("AssertReplayObserved err=%v, want errors.Is(..., ErrUnsupportedCompression)", err)
+	}
+	if !strings.HasPrefix(err.Error(), "AssertReplayObserved[1..1]: ") {
+		t.Fatalf("AssertReplayObserved err=%q, want helper-name prefix", err.Error())
 	}
 }

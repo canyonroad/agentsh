@@ -1190,6 +1190,23 @@ if err := ts.AssertReplayObserved(1, 10); err != nil { t.Fatal(err) }
 
 The testserver also exposes a `Batches()` accessor returning deep-copied snapshots of all EventBatches it has received in order, so tests can assert against the full conversation, not just final state.
 
+**Non-goal: protocol validation of malformed CLIENT frames.** The
+testserver intentionally records and acks malformed batches (e.g.
+`ClientMessage_EventBatch{EventBatch: nil}`, EventBatch with unset
+Body oneof) — they are appended to `Batches()`, increment per-stream
+DropAfterBatchN/GoawayAfterBatchN counters, and receive a normal
+`BatchAck(0, 0)`. The proto contract (§7.3) says receivers MUST
+reject unset-body batches; this harness deliberately deviates so
+that the assertion helpers can surface the malformed shape as
+`ErrUnsupportedCompression` (the more useful diagnostic for tests
+exercising client behavior). Spec-compliant CLIENT-side rejection
+belongs in transport / client-validation tests, NOT in scenario
+tests against this harness. Tests asserting end-to-end protocol
+compliance should verify their Transport never emits a malformed
+EventBatch in the first place; tests should NOT rely on
+`BatchAck(0, 0)` for malformed input as a meaningful replay/recovery
+signal — it is a harness artifact.
+
 ### Golden vectors — published in two locations
 
 1. `internal/store/watchtower/chain/testdata/vectors.json` — IntegrityRecord canonical-encoding vectors (added in Task 7). These will also be published in `docs/spec/wtp/conformance/` for cross-implementation use.
