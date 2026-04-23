@@ -691,3 +691,164 @@ func (t *Transport) computeReplayPlan(remoteReplayCursor AckCursor, persistedAck
 	}
 	return stages, nil
 }
+
+// Run loops the four-state state machine until ctx is cancelled or the
+// state machine reaches StateShutdown. It applies exponential backoff
+// with jitter between StateConnecting attempts (200ms → 30s, factor 2).
+//
+// rdrFactory takes the WAL generation AND the start sequence so the
+// caller can position the Reader explicitly per state entry. `gen` is
+// the WAL generation the Reader will be scoped to (segments with a
+// different SegmentHeader.Generation are skipped at segment iteration
+// before record decoding — see wal/reader.go ReaderOptions.Generation
+// and Task 14b); `start` is the inclusive lowest seq the returned
+// Reader will surface for RecordData (RecordLoss markers always
+// surface — see wal/reader.go NewReader).
+//
+// Replaying opens one Reader per stage returned by computeReplayPlan;
+// only the first stage carries a non-nil PrefixLoss. Subsequent stages
+// start at the generation's earliest sequence (the Reader handles
+// header-record skipping internally). Live opens its Reader at
+// max(rep.LastReplayedSequence()+1, t.remoteReplayCursor.Sequence+1)
+// so it picks up exactly past the boundary record without re-emitting
+// it AND without missing any trailing TransportLoss marker overflow GC
+// may have appended at the WAL tail mid-replay (loss markers bypass
+// the Reader's nextSeq filter — see wal/reader.go nextLocked).
+//
+// rep is threaded across the Replaying → Live boundary so Live can
+// compute its start cursor from rep.LastReplayedSequence(). On any
+// regress to StateConnecting (Replaying error, Live error) rep is
+// reset to nil so a stale handoff doesn't leak into the next Live
+// entry on the next connect cycle. rep is also consumed (cleared to
+// nil) at the top of StateLive so a subsequent Live entry after a
+// reconnect picks up the fresh value (or nil if no replay ran).
+//
+// PRODUCTION-BLOCKED surface: runReplaying and runLive today rely on
+// t.recv being populated by a recv-multiplexer goroutine (per
+// state_{live,replaying}.go). Wiring of that goroutine is a separate
+// concern landed alongside the store-integration task (Task 22/27);
+// until then, Run is safe to call but the recv arms in runLive /
+// runReplaying stay dormant (Go nil-channel semantics). Run itself
+// does not start runRecv — starting it requires a post-dial hook that
+// today lives outside the plan snippet for this step.
+func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start uint64) (*wal.Reader, error), liveOpts LiveOptions) error {
+	bo := NewBackoff(BackoffOptions{
+		Initial: 200 * time.Millisecond,
+		Max:     30 * time.Second,
+		Factor:  2.0,
+	})
+	st := StateConnecting
+	var rep *Replayer
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		switch st {
+		case StateConnecting:
+			next, err := t.runConnecting(ctx)
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(bo.Next()):
+				}
+				continue
+			}
+			bo.Reset()
+			rep = nil
+			st = next
+		case StateReplaying:
+			stages, lerr := t.computeReplayPlan(t.remoteReplayCursor, t.persistedAck)
+			if lerr != nil {
+				rep = nil
+				st = StateConnecting
+				continue
+			}
+			var stageErr error
+			stageTransitioned := false
+		stagesLoop:
+			for i := range stages {
+				stage := stages[i]
+				rdr, err := rdrFactory(stage.Generation, stage.StartSeq)
+				if err != nil {
+					stageErr = err
+					break stagesLoop
+				}
+				// TODO(Task 22): thread stage.PrefixLoss through
+				// ReplayerOptions once the Replayer gains the
+				// PrefixLoss + OnPrefixLossEmitted surface the plan
+				// describes. Today the Replayer has no such field, so
+				// a non-nil stage.PrefixLoss (Case A or C in
+				// computeReplayStart) is not yet surfaced as the first
+				// batch record. computeReplayPlan still emits the
+				// marker + INFO log so the decision is observable.
+				_ = stage.PrefixLoss
+				rep, err = NewReplayer(rdr, ReplayerOptions{
+					MaxBatchRecords: liveOpts.Batcher.MaxRecords,
+					MaxBatchBytes:   liveOpts.Batcher.MaxBytes,
+				})
+				if err != nil {
+					_ = rdr.Close()
+					stageErr = err
+					break stagesLoop
+				}
+				next, err := t.runReplaying(ctx, rep)
+				_ = rdr.Close()
+				if err != nil {
+					stageErr = err
+					break stagesLoop
+				}
+				if next != StateLive {
+					st = next
+					stageTransitioned = true
+					break stagesLoop
+				}
+			}
+			if stageErr != nil {
+				rep = nil
+				st = StateConnecting
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(bo.Next()):
+				}
+				continue
+			}
+			if !stageTransitioned {
+				st = StateLive
+			}
+		case StateLive:
+			start := t.remoteReplayCursor.Sequence + 1
+			if rep != nil {
+				if _, seq := rep.LastReplayedSequence(); seq+1 > start {
+					start = seq + 1
+				}
+			}
+			rep = nil
+			var liveGen uint32
+			if t.wal != nil {
+				liveGen = t.wal.HighGeneration()
+			}
+			rdr, err := rdrFactory(liveGen, start)
+			if err != nil {
+				st = StateConnecting
+				continue
+			}
+			next, err := t.runLive(ctx, rdr, liveOpts)
+			if err != nil {
+				st = StateConnecting
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(bo.Next()):
+				}
+				continue
+			}
+			st = next
+		case StateShutdown:
+			return nil
+		}
+	}
+}
