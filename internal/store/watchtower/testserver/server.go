@@ -1,0 +1,244 @@
+package testserver
+
+import (
+	"context"
+	"errors"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
+)
+
+// bufSize is the bufconn listener's backing buffer. 1 MiB is enough for
+// any single proto frame the Transport emits (EventBatch is capped well
+// below that by BatcherOptions.MaxBytes in test configurations).
+const bufSize = 1 << 20
+
+// Server is an in-process WTP server on a bufconn listener.
+type Server struct {
+	opts     Options
+	listener *bufconn.Listener
+	grpcSrv  *grpc.Server
+
+	mu      sync.Mutex
+	batches []*wtpv1.EventBatch
+
+	closed atomic.Bool
+}
+
+// New constructs a Server and starts serving in the background. Close
+// MUST be called when the test finishes so the grpc.Server's Serve
+// goroutine exits cleanly. New never returns an error — a failed
+// listener panics (the bufconn.Listen constructor does not fail).
+func New(opts Options) *Server {
+	s := &Server{
+		opts:     opts,
+		listener: bufconn.Listen(bufSize),
+		grpcSrv:  grpc.NewServer(),
+	}
+	wtpv1.RegisterWatchtowerServer(s.grpcSrv, s.handler())
+	go func() { _ = s.grpcSrv.Serve(s.listener) }()
+	return s
+}
+
+// Close stops the server. Idempotent via closed CAS so tests can call
+// it unconditionally (e.g. from defer and t.Cleanup).
+func (s *Server) Close() {
+	if !s.closed.CompareAndSwap(false, true) {
+		return
+	}
+	s.grpcSrv.Stop()
+}
+
+// Batches returns a snapshot of EventBatch messages the server has
+// received in order. Safe to call concurrently with an active stream.
+func (s *Server) Batches() []*wtpv1.EventBatch {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*wtpv1.EventBatch, len(s.batches))
+	copy(out, s.batches)
+	return out
+}
+
+// addBatch records a received EventBatch and returns the new total
+// count. Called under the stream handler's goroutine.
+func (s *Server) addBatch(b *wtpv1.EventBatch) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.batches = append(s.batches, b)
+	return len(s.batches)
+}
+
+// Conn is the full-duplex stream returned by Dial. It satisfies the
+// transport.Conn interface shape (Send / Recv / CloseSend / Close) so
+// a Server can drop into transport.New's Options.Dialer via DialerFor.
+type Conn interface {
+	Send(*wtpv1.ClientMessage) error
+	Recv() (*wtpv1.ServerMessage, error)
+	CloseSend() error
+	Close() error
+}
+
+// Dial opens a client-side stream over the bufconn listener. The
+// returned Conn wraps the gRPC stream and its ClientConn; Close
+// releases both.
+func (s *Server) Dial(ctx context.Context) (Conn, error) {
+	cc, err := grpc.DialContext(ctx,
+		"passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return s.listener.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := wtpv1.NewWatchtowerClient(cc).Stream(ctx)
+	if err != nil {
+		_ = cc.Close()
+		return nil, err
+	}
+	return &grpcConn{stream: stream, cc: cc}, nil
+}
+
+// grpcConn adapts a gRPC bidi stream + its ClientConn into the
+// transport.Conn-shaped Conn interface. CloseSend half-closes the
+// send side; Close fully tears down the underlying ClientConn and
+// cancels any in-flight Recv.
+type grpcConn struct {
+	stream wtpv1.Watchtower_StreamClient
+	cc     *grpc.ClientConn
+	closed atomic.Bool
+}
+
+func (g *grpcConn) Send(m *wtpv1.ClientMessage) error   { return g.stream.Send(m) }
+func (g *grpcConn) Recv() (*wtpv1.ServerMessage, error) { return g.stream.Recv() }
+func (g *grpcConn) CloseSend() error                    { return g.stream.CloseSend() }
+
+// Close is idempotent so error paths (including t.Cleanup + defer
+// pairs) can call it without coordinating with a graceful teardown.
+func (g *grpcConn) Close() error {
+	if !g.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	return g.cc.Close()
+}
+
+// srvHandler is the server-side WatchtowerServer implementation. The
+// Stream handler walks ClientMessage frames in a loop and applies the
+// Server's scenario options (drop, goaway, stale watermark, reject).
+type srvHandler struct {
+	wtpv1.UnimplementedWatchtowerServer
+	s *Server
+}
+
+func (s *Server) handler() *srvHandler { return &srvHandler{s: s} }
+
+// Stream implements the WatchtowerServer bidi streaming RPC. Every
+// ClientMessage variant the Transport can emit is handled:
+//
+//   - SessionInit → SessionAck (honouring RejectSession + StaleWatermark).
+//   - EventBatch → tally + BatchAck (honouring DropAfterBatchN +
+//     GoawayAfterBatchN).
+//   - Heartbeat → no-op (the Transport uses it as a liveness probe; the
+//     server's implicit "no error" response is the only signal needed).
+//
+// Unknown ClientMessage variants are ignored so a future proto addition
+// does not break existing tests silently. Add a scenario Option if a
+// specific negative test needs to observe unknown-frame handling.
+func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage, wtpv1.ServerMessage]) error {
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		switch x := msg.Msg.(type) {
+		case *wtpv1.ClientMessage_SessionInit:
+			_ = x
+			if h.s.opts.AckDelay > 0 {
+				select {
+				case <-stream.Context().Done():
+					return stream.Context().Err()
+				case <-time.After(h.s.opts.AckDelay):
+				}
+			}
+			if h.s.opts.RejectSession {
+				if err := stream.Send(&wtpv1.ServerMessage{
+					Msg: &wtpv1.ServerMessage_SessionAck{
+						SessionAck: &wtpv1.SessionAck{
+							Accepted:     false,
+							RejectReason: h.s.opts.RejectReason,
+						},
+					},
+				}); err != nil {
+					return err
+				}
+				return nil
+			}
+			if err := stream.Send(&wtpv1.ServerMessage{
+				Msg: &wtpv1.ServerMessage_SessionAck{
+					SessionAck: &wtpv1.SessionAck{
+						Accepted:            true,
+						AckHighWatermarkSeq: h.s.opts.StaleWatermark,
+						Generation:          0,
+					},
+				},
+			}); err != nil {
+				return err
+			}
+		case *wtpv1.ClientMessage_EventBatch:
+			n := h.s.addBatch(x.EventBatch)
+			if h.s.opts.DropAfterBatchN > 0 && n >= h.s.opts.DropAfterBatchN {
+				return errors.New("testserver: drop after batch")
+			}
+			if h.s.opts.GoawayAfterBatchN > 0 && n >= h.s.opts.GoawayAfterBatchN {
+				_ = stream.Send(&wtpv1.ServerMessage{
+					Msg: &wtpv1.ServerMessage_Goaway{Goaway: &wtpv1.Goaway{}},
+				})
+				return nil
+			}
+			// Normal case: one BatchAck per EventBatch, pointing at the
+			// last event's (generation, sequence). If the EventBatch is
+			// empty (e.g. a compressed batch we do not inspect, or a
+			// Heartbeat-style empty frame), the ack points at (0, 0)
+			// which the Transport's applyServerAckTuple helper treats
+			// as a no-op under the steady-state cursor.
+			var (
+				lastSeq uint64
+				lastGen uint32
+			)
+			if u := x.EventBatch.GetUncompressed(); u != nil {
+				if events := u.GetEvents(); len(events) > 0 {
+					last := events[len(events)-1]
+					lastSeq = last.GetSequence()
+					lastGen = last.GetGeneration()
+				}
+			}
+			if h.s.opts.AckDelay > 0 {
+				select {
+				case <-stream.Context().Done():
+					return stream.Context().Err()
+				case <-time.After(h.s.opts.AckDelay):
+				}
+			}
+			if err := stream.Send(&wtpv1.ServerMessage{
+				Msg: &wtpv1.ServerMessage_BatchAck{
+					BatchAck: &wtpv1.BatchAck{
+						AckHighWatermarkSeq: lastSeq,
+						Generation:          lastGen,
+					},
+				},
+			}); err != nil {
+				return err
+			}
+		case *wtpv1.ClientMessage_Heartbeat:
+			// Transport's liveness probe; no ack required.
+		}
+	}
+}
