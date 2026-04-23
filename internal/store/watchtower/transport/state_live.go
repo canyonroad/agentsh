@@ -89,6 +89,19 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			t.teardownRecv()
 			t.conn = nil
 			return StateShutdown, ctx.Err()
+		case sr := <-t.stopCh:
+			// Task 19: orderly shutdown. runShutdown drains the
+			// reader (best-effort, bounded by sr.drainDeadline),
+			// flushes the batcher, and CloseSend's the conn.
+			// Then full-tear down the conn + recvSession the same
+			// way ctx-cancellation does so the run loop's
+			// StateShutdown case returns nil with no leaked state.
+			t.runShutdown(ctx, b, rdr, sr.drainDeadline)
+			_ = t.conn.Close()
+			t.teardownRecv()
+			t.conn = nil
+			close(sr.done)
+			return StateShutdown, nil
 		case ev := <-recvEventCh:
 			// Recv-multiplexer arm per sub-step 17.X (plan §"Single
 			// FIFO ack-event channel"; round-22 Finding 1). The recv
