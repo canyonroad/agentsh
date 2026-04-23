@@ -692,9 +692,36 @@ func (t *Transport) computeReplayPlan(remoteReplayCursor AckCursor, persistedAck
 	return stages, nil
 }
 
-// Run loops the four-state state machine until ctx is cancelled or the
-// state machine reaches StateShutdown. It applies exponential backoff
-// with jitter between StateConnecting attempts (200ms → 30s, factor 2).
+// Run loops the four-state state machine until ctx is cancelled, the
+// state machine reaches StateShutdown, or runConnecting returns a
+// terminal error (StateShutdown + non-nil error). It applies
+// exponential backoff with jitter between StateConnecting attempts
+// (200ms → 30s, factor 2).
+//
+// SCAFFOLDING ONLY — NOT PRODUCTION-CONSUMABLE YET. This step lands
+// the loop skeleton so subsequent tasks (Task 19 Stop/drain, Task 22
+// Store integration) can layer on top. Three production prerequisites
+// remain unmet and any caller that adopts Run end-to-end today will
+// observe broken behavior:
+//
+//  1. NO recv-goroutine startup. Run never calls newRecvSession /
+//     runRecv after a successful dial, so runLive's recv arms remain
+//     dormant via Go nil-channel semantics. Inbound BatchAck and
+//     ServerHeartbeat frames are not consumed; cursors will not
+//     advance once Live is reached. Recv startup belongs to a
+//     post-dial hook the plan does not yet specify.
+//  2. STUB wire encoding. encodeBatchMessage (state_live.go) and the
+//     replay-side buildEventBatchFn return empty *wtpv1.ClientMessage
+//     envelopes. Any send is a placeholder frame, not a real EventBatch.
+//  3. inflight is increment-only in runLive. Live cannot decrement
+//     it on BatchAck, so once MaxInflight batches have shipped the
+//     send path stalls until the next reconnect. This is independent
+//     of whether recv startup is wired and predates Task 18 Step 4.
+//
+// Until those land (Task 22 / Task 27 wiring per the plan), Run is
+// useful only as the integration surface for the Stop/drain plumbing
+// of Task 19 and as a structural target for end-to-end tests that
+// stop short of Live's recv path.
 //
 // rdrFactory takes the WAL generation AND the start sequence so the
 // caller can position the Reader explicitly per state entry. `gen` is
@@ -722,15 +749,6 @@ func (t *Transport) computeReplayPlan(remoteReplayCursor AckCursor, persistedAck
 // entry on the next connect cycle. rep is also consumed (cleared to
 // nil) at the top of StateLive so a subsequent Live entry after a
 // reconnect picks up the fresh value (or nil if no replay ran).
-//
-// PRODUCTION-BLOCKED surface: runReplaying and runLive today rely on
-// t.recv being populated by a recv-multiplexer goroutine (per
-// state_{live,replaying}.go). Wiring of that goroutine is a separate
-// concern landed alongside the store-integration task (Task 22/27);
-// until then, Run is safe to call but the recv arms in runLive /
-// runReplaying stay dormant (Go nil-channel semantics). Run itself
-// does not start runRecv — starting it requires a post-dial hook that
-// today lives outside the plan snippet for this step.
 func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start uint64) (*wal.Reader, error), liveOpts LiveOptions) error {
 	bo := NewBackoff(BackoffOptions{
 		Initial: 200 * time.Millisecond,
@@ -749,6 +767,18 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 		case StateConnecting:
 			next, err := t.runConnecting(ctx)
 			if err != nil {
+				// Terminal-vs-retriable contract: runConnecting
+				// returns StateShutdown for unrecoverable failures
+				// (invalid SessionInit per local validation; server
+				// SessionAck rejection). For those, surface the
+				// error immediately instead of retrying — otherwise
+				// misconfiguration or a server-side reject would
+				// become an infinite reconnect loop. All other
+				// errors (dial / Send / Recv / unexpected frame)
+				// are transient and back off to retry.
+				if next == StateShutdown {
+					return err
+				}
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
