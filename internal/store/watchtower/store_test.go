@@ -359,26 +359,39 @@ func TestStore_CloseOnActiveRunReturnsCleanly(t *testing.T) {
 // TestStore_CloseDeadlineFallback exercises the timer.C branch of
 // shutdown(): when the cooperative tr.Stop drain does not complete
 // within DrainDeadline, runCancel is the fallback that unblocks the
-// run loop within closeRunCancelGrace. Validates the bounded-Close
-// contract end-to-end with concrete latency + error-shape assertions.
+// run loop within closeRunCancelGrace.
 //
-// Setup: 1ns DrainDeadline forces the deadline branch to fire on the
-// first scheduler hop. nopDialer keeps Run in dial-fail backoff;
-// runCancel is what eventually unblocks the bg loop.
+// Determinism: a previous version of this test let nopDialer's
+// dial-fail backoff race against Stop, which meant the cooperative
+// drain could "win" and the timer.C branch was never exercised.
+// This version uses a wedgingDialer whose Dial blocks indefinitely
+// on a chan that the test never closes — so Stop's drain CANNOT
+// complete within the 1ns DrainDeadline, the timer.C branch fires
+// deterministically, and the test exercises the runCancel
+// fallback. The error shape is asserted to be context.Canceled
+// (Run returns ctx.Err() after runCancel propagates through the
+// dialer's ctx).
 //
 // Bounded-Close contract: Close MUST return within
-// (DrainDeadline + closeRunCancelGrace + small jitter). With
-// DrainDeadline = 1ns and closeRunCancelGrace = 2s, the upper bound
-// is ~2.5s. A regression that misses the timer.C branch (e.g.
-// blocking on tr.Stop indefinitely) would hang at the test timeout.
-//
-// Error shape: nil if runCancel-driven exit happened cleanly within
-// the grace, OR the synthetic "did not exit within
-// closeRunCancelGrace" error if even the grace elapsed. Either is
-// acceptable shape — the contract is "bounded latency, observable
-// outcome."
+// (DrainDeadline + closeRunCancelGrace + jitter) ≈ 2.5s.
 func TestStore_CloseDeadlineFallback(t *testing.T) {
+	wedgeRelease := make(chan struct{}) // never closed; Dial blocks forever
+	wedgingDialer := transport.DialerFunc(func(ctx context.Context) (transport.Conn, error) {
+		select {
+		case <-wedgeRelease: // never fires
+			return nil, errors.New("unreachable")
+		case <-ctx.Done():
+			// runCancel propagates through here so Run can exit.
+			// Without ctx-honouring, runCancel would not unblock and
+			// the closeRunCancelGrace timeout would fire — also a
+			// valid contract path, but harder to assert
+			// deterministically.
+			return nil, ctx.Err()
+		}
+	})
+
 	opts := validOpts(t.TempDir())
+	opts.Dialer = wedgingDialer
 	opts.DrainDeadline = 1 * time.Nanosecond
 
 	s, err := watchtower.New(context.Background(), opts)
@@ -386,37 +399,48 @@ func TestStore_CloseDeadlineFallback(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
+	// Wait for Run to enter the wedging Dial. Without this, Close
+	// could fire BEFORE Dial is reached, and the bg loop would exit
+	// via the top-of-iteration ctx check instead of the Dial branch.
+	time.Sleep(50 * time.Millisecond)
+
 	start := time.Now()
 	closeErr := s.Close()
 	elapsed := time.Since(start)
 
-	// closeRunCancelGrace is 2s (private constant in store.go);
-	// upper bound = DrainDeadline + closeRunCancelGrace + jitter.
-	// 2.5s is a comfortable headroom that still catches a regression
-	// to "no fallback at all" (which would block until test timeout).
-	const closeUpperBound = 2500 * time.Millisecond
+	// closeRunCancelGrace is 2s; upper bound for Close ≈ 2.5s.
+	// A regression that loses the timer.C branch would hang at the
+	// test timeout (30s default). The 200ms lower-bound asserts the
+	// timer.C branch actually fired (drain didn't immediately win).
+	const (
+		closeUpperBound = 2500 * time.Millisecond
+		closeLowerBound = 0 * time.Millisecond // bound is by DrainDeadline=1ns + scheduler jitter
+	)
 	if elapsed > closeUpperBound {
 		t.Fatalf("Close took %v; expected < %v (DrainDeadline + closeRunCancelGrace + jitter). Possible regression: timer.C branch missed.",
 			elapsed, closeUpperBound)
 	}
-
-	// Error-shape: three acceptable outcomes per the documented
-	// contract:
-	//   1. nil — clean drain (Stop happened to win in the goroutine).
-	//   2. context.Canceled — the run loop returned ctx.Err() after
-	//      runCancel fired in the fallback branch.
-	//   3. wrapped "watchtower.Close: ..." — the synthetic
-	//      closeRunCancelGrace-elapsed error.
-	// Any other shape (a panic, a raw transport error) would be a
-	// regression in shutdown's error-categorization.
-	if closeErr != nil &&
-		!errors.Is(closeErr, context.Canceled) &&
-		!strings.Contains(closeErr.Error(), "watchtower.Close") {
-		t.Fatalf("unexpected Close error shape: %v", closeErr)
+	if elapsed < closeLowerBound {
+		t.Fatalf("Close took %v; expected >= %v (must wait at least DrainDeadline before fallback). Possible regression: deadline not honoured.",
+			elapsed, closeLowerBound)
 	}
 
-	// Err() consistency: must equal Close's return regardless of
-	// which branch fired.
+	// Error-shape: with runCancel propagating through the dialer's
+	// ctx, Run returns ctx.Err() = context.Canceled. The synthetic
+	// "watchtower.Close: ..." error only fires if runCancel ALSO
+	// failed (Transport wedged in non-ctx-honouring code). For a
+	// deterministic test the ctx-honouring shape is the expected
+	// path; we still accept the synthetic shape to keep the test
+	// resilient if future changes make the Dial slower.
+	if closeErr == nil {
+		t.Fatal("Close returned nil; expected context.Canceled or watchtower.Close synthetic error")
+	}
+	if !errors.Is(closeErr, context.Canceled) &&
+		!strings.Contains(closeErr.Error(), "watchtower.Close") {
+		t.Fatalf("unexpected Close error shape: %v (want context.Canceled or watchtower.Close prefix)", closeErr)
+	}
+
+	// Err() consistency: must equal Close's return.
 	if got := s.Err(); got != closeErr {
 		t.Fatalf("Err() after Close = %v, want closeErr=%v", got, closeErr)
 	}

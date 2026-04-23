@@ -63,16 +63,29 @@ const closeRunCancelGrace = 2 * time.Second
 //          gracefully.
 //       2. closeRunCancelGrace — a constant fallback (see
 //          store.go) that bounds how long Close waits on the run
-//          loop AFTER runCancel fires. The bg loop's per-iteration
-//          ctx checks unblock within a single backoff sleep on
-//          dial-fail or a single select hop on Live, so this grace
-//          is only relevant if the Transport is wedged in a non-
-//          interruptible call (Stop's documented limitation).
+//          loop AFTER runCancel fires.
 //       3. wal.Close — typically sub-millisecond.
 //
 //     Worst-case Close latency = DrainDeadline + closeRunCancelGrace +
-//     wal.Close. Idempotent — second and later calls return the same
-//     captured error.
+//     wal.Close.
+//
+//     IMPORTANT incomplete-cleanup case: if the Transport is wedged
+//     inside a non-interruptible call (Conn.Send / Recv / Dial that
+//     does not honour ctx — see Transport.Stop's documented
+//     limitations), runCancel does NOT unblock it. After
+//     closeRunCancelGrace elapses, Close returns a synthetic
+//     "watchtower.Close: run loop did not exit within
+//     closeRunCancelGrace" error AND ALSO emits a WARN log. The bg
+//     goroutine and the in-flight Stop goroutine MAY still be alive
+//     at that point — Close has done everything it can without
+//     unsafe force. Operators should treat the synthetic error as a
+//     "shutdown raised the safety net" signal and investigate
+//     transport health. The transport-side non-blocking-stop signal
+//     that would eliminate this case is a future-task concern (the
+//     Stop docstring tracks it inline; no plan task owns it yet).
+//
+//     Idempotent — second and later calls return the same captured
+//     error.
 //
 //   - Err() returns the run loop's terminal error if Run has
 //     already exited (or the canonical Close-captured error after
@@ -323,6 +336,17 @@ func (s *Store) shutdown() error {
 		select {
 		case runErr = <-s.runDone:
 		case <-time.After(closeRunCancelGrace):
+			// Synthetic-timeout case: runCancel did NOT unblock the
+			// run loop within closeRunCancelGrace. The bg goroutine
+			// AND the in-flight Stop goroutine MAY still be alive —
+			// see the "incomplete-cleanup case" note on the Store
+			// docstring. Surface BOTH a synthetic error AND a WARN
+			// log so operators can act on the safety-net hit; the
+			// returned error alone is easy to ignore at shutdown.
+			s.opts.Logger.Warn("watchtower.Close: shutdown safety net hit; transport likely wedged in non-interruptible Conn.Send/Recv/Dial",
+				"drain_deadline", s.opts.DrainDeadline,
+				"close_run_cancel_grace", closeRunCancelGrace,
+				"action", "returning synthetic timeout error; bg goroutine may still be alive")
 			runErr = fmt.Errorf("watchtower.Close: run loop did not exit within closeRunCancelGrace=%v after runCancel", closeRunCancelGrace)
 		}
 	}
