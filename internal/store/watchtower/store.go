@@ -114,14 +114,15 @@ var ErrCloseSafetyNet = errors.New("watchtower.Close: shutdown safety net hit; b
 //     from Close on the leak path. This avoids string-matching the
 //     wrapped error message for the same-process-reopen guard.
 //
-//     The transport-side fix that eliminates this entire path is
-//     tracked as **Task 27c** in the plan
-//     (docs/superpowers/plans/2026-04-18-wtp-client.md): make
-//     Transport.Stop non-blocking when no Run-loop consumer is
-//     alive (or add a RunDone signal Stop can observe). When that
-//     lands, ErrCloseSafetyNet becomes reserved-for-degenerate-
-//     cases and the conditional wal.Close in shutdown() becomes
-//     unconditional.
+//     Related tracked work: **Task 27c** in the plan
+//     (docs/superpowers/plans/2026-04-18-wtp-client.md) eliminates
+//     the narrower "Stop called AFTER Run has already exited" race
+//     by adding a Transport-side RunDone signal; the wedged-goroutine
+//     case (Run parked inside a ctx-ignoring Conn.Send/Recv/Dial)
+//     stays covered by ErrCloseSafetyNet and is reachable only via
+//     custom-dialer injection (production dialers honour ctx). If
+//     a production custom-dialer ever hits the wedge, Task 27d
+//     would cover reclamation — not pre-filed.
 //
 //   - Err() returns the run loop's terminal error if Run has
 //     already exited (or the canonical Close-captured error after

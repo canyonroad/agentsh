@@ -18249,83 +18249,82 @@ and the restart-required reload model.
 
 ## Definition of Done (end-state target — not current status)
 
-### Task 27c: Transport-side non-blocking Stop / RunDone signal (eliminate Close safety-net leak)
+### Task 27c: Transport-side `RunDone` signal (eliminate Close-vs-already-exited-Run race)
 
 **Owner:** WTP transport team.
 
-**Why:** Task 22's `watchtower.Store.Close()` returns
-`watchtower.ErrCloseSafetyNet` (a typed sentinel) when the bg run
-loop fails to exit within `closeRunCancelGrace` after `runCancel`.
-This happens when `Transport.Stop` is queued against a Run loop
-wedged inside a non-interruptible `Conn.Send` / `Recv` / `Dial` call
-that does not honour ctx — `Stop` then blocks on its `<-r.done` wait
-that nothing will close. The safety-net path leaks the bg goroutine,
-the in-flight `Stop` goroutine, and the WAL handle; same-process
-reopen is documented as a CONTRACT VIOLATION.
+**Why:** Task 22's `watchtower.Store.Close()` implements a
+non-blocking runDone peek BEFORE calling `tr.Stop` precisely because
+`Transport.Stop` deadlocks if called after the Run loop has already
+exited (nothing closes `r.done`). The peek handles the common case
+(Run exited cleanly, e.g. terminal SessionAck rejection) but
+creates a narrow race window: if Run exits between the peek and
+`Stop`'s `<-r.done` wait, `Stop` still deadlocks. Today this race
+is bounded by `closeRunCancelGrace` and surfaced via
+`watchtower.ErrCloseSafetyNet`; this task eliminates the race
+cleanly at the transport layer.
 
-**Scope (narrow):** this task ELIMINATES the *caller-blocking* part
-of the leak — `Transport.Stop` and `Close()` no longer block waiting
-on a Run loop that has already exited or is wedged. It does NOT
-guarantee the wedged goroutine itself can be reclaimed (a goroutine
-parked in a syscall that ignores ctx cannot be unwound from Go-land
-without OS-level facilities); that reclamation work is OUT OF SCOPE
-and tracked separately if it ever becomes a production concern. In
-practice, production Conn implementations (gRPC over TLS) all honour
-ctx, so the wedged-goroutine case is a test-injected anomaly rather
-than a real production failure mode — eliminating the caller-block
-is sufficient to declare the lifecycle contract sound.
+**Scope (explicitly narrow):** this task addresses ONLY the
+"Run has already exited" case. A `RunDone` chan/flag closed in the
+Run-loop's defer lets `Transport.Stop` observe the exit and return
+instead of waiting on a never-closed `r.done`. Concretely:
 
-**Acceptance criteria:**
+- Stop-called-AFTER-Run-exited → bounded return (this task).
+- Stop-called-while-Run-is-wedged-in-ctx-ignoring-Send/Recv/Dial →
+  NOT covered by this task. A goroutine parked inside a syscall
+  that ignores ctx never reaches the Run-loop defer, so `RunDone`
+  never fires. The `ErrCloseSafetyNet` sentinel + leak contract
+  REMAINS in place for that case.
 
-- `Transport.Stop` returns within a bounded time (target: under 100ms
-  beyond ctx.Done propagation) when called against a Run loop that
-  has already exited OR is wedged in a non-interruptible call. Done
-  via a RunDone signal Stop can observe so it returns instead of
-  waiting on a never-closed `r.done`.
-- `watchtower.Store.Close()` no longer needs to skip `wal.Close` on
-  the caller-blocking path; the conditional WAL-close in `store.go`
-  becomes unconditional for the cases this task covers (Stop returns
-  cleanly).
-- The Store lifecycle docstring's "IMPORTANT incomplete-cleanup
-  case" block is updated to reflect the narrower remaining failure
-  mode (production Conns always honour ctx; the residual case is
-  test-injected only).
-- `watchtower.ErrCloseSafetyNet` MAY be retained as a
-  reserved-for-degenerate sentinel for callers that already detect
-  it; deprecation/removal is a separate concern handled at API-
-  stability review time.
-- Same-process reopen on the same WAL Dir after `Close()` returns
-  becomes SUPPORTED for callers using a production Conn.
-- Acceptance test: a production-shaped Conn (testserver.Server) with
-  a slow drain — `Stop` and `Close()` MUST return without blocking
-  on a never-closed channel.
+The wedged case is reachable ONLY when callers inject a custom
+`Dialer`/`Conn` that ignores ctx. Production dialers landed by
+Task 27 honour ctx (gRPC over TLS propagates ctx into Send/Recv/
+Dial), so the wedged path is effectively test-injected today. If a
+production custom-dialer scenario ever triggers the wedged case,
+a follow-up "wedged-goroutine reclamation" task would need to
+address it — filed then, not pre-emptively.
+
+**Acceptance criteria (narrow):**
+
+- Add a `RunDone <-chan struct{}` (or equivalent atomic flag) on
+  `*Transport` that is closed/set from the Run-loop defer.
+- `Transport.Stop`'s `<-r.done` wait selects on `RunDone` so it
+  returns when Run has already exited without requiring a stopCh
+  consumer. Target latency: under 100ms beyond Run's defer firing.
+- Acceptance test: drive Run to exit (e.g. via terminal SessionAck
+  rejection), THEN call `Stop` — `Stop` MUST return without
+  blocking. Use testserver or a hand-rolled fake conn.
+- `watchtower.Store.Close()`'s non-blocking runDone peek becomes
+  redundant — can be left for defense-in-depth or removed. If
+  removed, the peek's "replay so Err() stays consistent" semantics
+  must be preserved via the RunDone path.
+
+**Out of scope (explicitly):**
+
+- Eliminating the wedged-goroutine synthetic-timeout path. `ErrCloseSafetyNet`
+  stays. `TestStore_CloseSafetyNetReturnsSentinel` stays.
+- The conditional `wal.Close` in `store.go`'s `shutdown()` stays
+  conditional — the synthetic-timeout path still must not call
+  `wal.Close` while a Reader may be in flight.
+- Same-process reopen after safety-net hit stays UNSUPPORTED.
 
 **Backwards compatibility:**
 
-- Callers using `errors.Is(err, ErrCloseSafetyNet)` continue to work
-  — the sentinel is retained.
-- The latency contract in store.go's `closeRunCancelGrace` comment
-  is unchanged (the constant and the bounded-Close upper bound
-  remain valid; the safety-net path becomes unreachable in
-  production but the bound stays a useful guarantee).
+- `errors.Is(err, ErrCloseSafetyNet)` keeps working (sentinel not
+  removed).
+- `closeRunCancelGrace` stays a valid bound (now rarely hit for the
+  already-exited case but still the upper bound for the synthetic-
+  timeout case).
+- Custom-dialer callers are unaffected — if their dialer ignores
+  ctx they can still hit the sentinel; the contract for that case
+  is unchanged.
 
-**Suggested execution order:**
+**Future work (not 27c):**
 
-1. Add a `RunDone` chan or atomic flag on `*Transport`; close/set
-   it from the Run loop's defer.
-2. Update `Transport.Stop`'s `<-r.done` wait to also select on
-   `RunDone` so it returns when Run has exited regardless of
-   stopCh consumption.
-3. Update `watchtower.Store.shutdown()` to call `wal.Close()`
-   unconditionally now that Stop is bounded.
-4. Update docstrings + plan to reflect the narrower remaining
-   failure mode.
-
-**Coordination:** Task 22's `ErrCloseSafetyNet` test
-(`TestStore_CloseSafetyNetReturnsSentinel`) currently exercises a
-ctx-ignoring dialer; after this task lands the test should be
-adjusted (or marked test-only for the synthetic case) since the
-production-Conn path no longer triggers the sentinel.
+- If a production custom-dialer is ever observed hitting the
+  wedged-goroutine safety net, file "Task 27d: wedged-goroutine
+  reclamation" with owner = WTP transport team, trigger condition
+  = production safety-net WARN firing > 1× / week fleet-wide.
 
 ---
 
