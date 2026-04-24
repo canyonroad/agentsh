@@ -50,6 +50,16 @@ var errFatalLatch = errors.New("watchtower: store fatal — refusing append")
 // propagating — that wiring is follow-up work alongside the Task 22a
 // counter surface and is not required for the Task 24 integrity tests.
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
+	// Serialize the full Compute → Append → Commit transaction. The
+	// composite store fans events out to sinks under RLock, so two
+	// callers can reach AppendEvent concurrently; without this mutex
+	// they would race on the shared prev_hash and one would lose at
+	// Commit with a stale-token error, turning normal concurrent
+	// traffic into a fatal latch. See Store.appendMu's docstring for
+	// the full rationale.
+	s.appendMu.Lock()
+	defer s.appendMu.Unlock()
+
 	if s.isFatal() {
 		return errFatalLatch
 	}

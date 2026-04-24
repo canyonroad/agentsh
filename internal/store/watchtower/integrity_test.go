@@ -123,4 +123,12 @@ func TestStore_WALAmbiguousFailure_LatchesFatal(t *testing.T) {
 	if got := err.Error(); got == "" {
 		t.Errorf("expected fatal-latch error with diagnostic text, got empty string")
 	}
+
+	// Roborev #5935 Medium: Err() MUST surface the stored cause once
+	// the store is latched fatal, without waiting for Close / run-loop
+	// exit. Operators polling the health surface should see the
+	// original I/O error, not a nil result.
+	if gotErr := s.Err(); gotErr == nil {
+		t.Error("Store.Err() returned nil after fatal latch — operators cannot discover the cause pre-Close")
+	}
 }

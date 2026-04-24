@@ -158,26 +158,40 @@ var ErrFatal = errors.New("wal: fatal error — WAL must be closed and reopened"
 
 // appendInjector is a TEST-ONLY hook used by Task 24's integrity tests
 // (internal/store/watchtower/integrity_test.go) to simulate clean and
-// ambiguous Append failures without touching the filesystem. When non-
-// nil, Append replaces its success path with the injector's return
-// value. If the injector returns an *AppendError classified as
-// FailureAmbiguous, Append latches w.fatalErr identically to a real
-// ambiguous I/O failure so subsequent Appends surface ErrFatal.
+// ambiguous Append failures without touching the filesystem.
 //
-// PRODUCTION CODE MUST NOT CALL SetAppendInjector. The hook is exposed
-// only because test-only filesystem fault injection (chmod 000, full-
-// disk emulation) is flaky across CI platforms; a Go-level hook gives
-// deterministic coverage of the clean-vs-ambiguous error classes the
-// Store's transactional pattern relies on.
+// CONTRACT (narrow, failure-injection only):
+//   - A non-nil return from the injector short-circuits Append: the
+//     error is returned to the caller verbatim and, if it unwraps to
+//     an *AppendError with Class == FailureAmbiguous, w.fatalErr is
+//     latched identically to a real I/O-ambiguous failure so
+//     subsequent Appends surface ErrFatal.
+//   - A nil return means "skip the injection; continue with the real
+//     write path." Tests that want to suppress I/O MUST return a
+//     non-nil error.
+//
+// Ordering: the injector runs AFTER the clean-validation preflight
+// checks (closed, fatal-latched, oversized-payload) so an installed
+// hook cannot convert a validation rejection into an injected
+// ambiguous latch — those checks would have returned a clean failure
+// independently of any injector, and the injector MUST NOT be able
+// to create WAL states unreachable by the real code path.
+//
+// PRODUCTION CODE MUST NOT CALL SetAppendInjector. The hook is
+// exposed only because test-only filesystem fault injection (chmod
+// 000, full-disk emulation) is flaky across CI platforms; a Go-level
+// hook gives deterministic coverage of the clean-vs-ambiguous error
+// classes the Store's transactional pattern relies on.
 var (
 	appendInjector   func() error
 	appendInjectorMu sync.Mutex
 )
 
-// SetAppendInjector installs a test-only hook that replaces Append's
-// terminal success path. Pass nil to remove a previously installed
-// injector. See the appendInjector package-level docstring for the
-// contract and the production-use prohibition.
+// SetAppendInjector installs a test-only failure-injection hook. See
+// the appendInjector package-level docstring for the full contract:
+// non-nil return short-circuits Append; nil return continues to the
+// real write path. Pass nil to remove a previously installed
+// injector.
 func SetAppendInjector(fn func() error) {
 	appendInjectorMu.Lock()
 	appendInjector = fn
@@ -957,14 +971,34 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 			Err:   fmt.Errorf("%w: %v", ErrFatal, w.fatalErr),
 		}
 	}
+	// The on-disk per-record cost is 8 (frame header) + 12 (seq/gen prefix)
+	// + len(payload). Reject up-front if even a fresh segment couldn't fit
+	// it after the 16-byte segment header; this is a clean failure because
+	// no I/O has been attempted yet.
+	if int64(recordOverhead+len(payload)) > w.opts.SegmentSize-int64(SegmentHeaderSize) {
+		return AppendResult{}, &AppendError{Class: FailureClean, Op: "append", Err: fmt.Errorf("payload %d exceeds segment budget", len(payload))}
+	}
 	// Test-only injector hook (see SetAppendInjector). Production code
 	// MUST NOT install an injector — the hook is gated behind a
-	// package-level variable that nil-production-callers leave untouched.
-	// When installed, the injector's return value replaces the real
-	// Append code path. An ambiguous-classified AppendError from the
-	// injector latches w.fatalErr identically to failAmbiguousLocked so
-	// the "ambiguous failure latches subsequent appends" invariant holds
-	// even under injected errors.
+	// package-level variable that nil-production-callers leave
+	// untouched.
+	//
+	// INJECTOR CONTRACT (narrow): the injector is a FAILURE-injection
+	// hook only. When it returns a non-nil error, Append replaces its
+	// remaining work with that error — an *AppendError classified as
+	// FailureAmbiguous latches w.fatalErr identically to a real I/O-
+	// ambiguous failure so subsequent Appends surface ErrFatal. When
+	// the injector returns nil, Append falls through to the real write
+	// path (this is intentional — tests that only want to simulate
+	// failure do not have to reimplement the success path).
+	//
+	// Injector ordering: the injector fires AFTER the clean-validation
+	// checks above (closed / fatal latched / oversized-payload). This
+	// prevents an installed injector from converting a validation
+	// rejection into an injected ambiguous latch — those checks would
+	// have returned a clean failure independently of the injector, so
+	// the real WAL cannot reach the latched state via that path and
+	// neither should the test-only hook.
 	if inj := getAppendInjector(); inj != nil {
 		if injErr := inj(); injErr != nil {
 			var ae *AppendError
@@ -973,13 +1007,6 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 			}
 			return AppendResult{}, injErr
 		}
-	}
-	// The on-disk per-record cost is 8 (frame header) + 12 (seq/gen prefix)
-	// + len(payload). Reject up-front if even a fresh segment couldn't fit
-	// it after the 16-byte segment header; this is a clean failure because
-	// no I/O has been attempted yet.
-	if int64(recordOverhead+len(payload)) > w.opts.SegmentSize-int64(SegmentHeaderSize) {
-		return AppendResult{}, &AppendError{Class: FailureClean, Op: "append", Err: fmt.Errorf("payload %d exceeds segment budget", len(payload))}
 	}
 
 	// Overflow reclamation, in two phases:

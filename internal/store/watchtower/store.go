@@ -173,6 +173,19 @@ type Store struct {
 	// logging via Err() / operator inspection. Guarded by the CAS in
 	// latchFatal so only the first latching call's error is stored.
 	fatalErr atomic.Value // error
+
+	// appendMu serializes the full Compute → Append → Commit sequence
+	// in AppendEvent. The composite store fans events out to its sinks
+	// under RLock, which admits multiple concurrent AppendEvent calls
+	// against this Store. Without this mutex, two concurrent Compute
+	// calls would both see the same prev_hash, both proceed to Append,
+	// and one would then lose at Commit as a stale result — turning
+	// ordinary concurrent traffic into a fatal-latch event and
+	// leaving a WAL record that never committed into the integrity
+	// chain. The mutex is held across the entire transaction so the
+	// (Compute, Append, Commit) triple is atomic with respect to
+	// other appenders.
+	appendMu sync.Mutex
 }
 
 // New constructs a Store, validates options, opens the WAL, wires the
@@ -441,15 +454,18 @@ func (s *Store) combineWALCloseErr(runErr error) error {
 }
 
 // Err returns the run loop's terminal error if it has already exited,
-// or nil if the loop is still running. Useful for callers polling on
-// transport health.
+// the AppendEvent fatal-latch cause if a prior Append latched the
+// store, or nil otherwise. Useful for callers polling on transport
+// health.
 //
-// Post-close behavior: after Close has run, Err returns the EXACT
-// value Close captured (terminal err, deadline-fallback wrap, OR
-// WAL-close-merged err). Pre-close behavior: peek runDone non-
-// blockingly; nil if Run is alive, the captured terminal err
-// otherwise. The closed flag (set inside closeOnce.Do AFTER closeErr
-// is fully populated) discriminates between the two paths.
+// Precedence (first non-nil wins):
+//  1. Post-close: closeErr (canonical post-close source captured by
+//     Close from runDone + wal.Close merging).
+//  2. Pre-close, fatal-latched: fatalErr (set by AppendEvent's
+//     ambiguous-WAL / terminal-Commit paths). Surfacing this before
+//     the run-loop-terminal check lets health probes see the cause
+//     without waiting for the run loop to unwind.
+//  3. Pre-close, run-loop already exited: peek runDone and replay.
 //
 // Non-blocking — peeks at runDone via a non-blocking receive so the
 // caller does not stall waiting for the run loop.
@@ -458,6 +474,19 @@ func (s *Store) Err() error {
 		// Canonical post-close source. Close has populated closeErr
 		// in full; the channel-state below has been consumed.
 		return s.closeErr
+	}
+	// Pre-close, fatal-latch visible to operators before the run loop
+	// unwinds. AppendEvent sets fatalLatched + stores fatalErr on
+	// ambiguous WAL or terminal Commit failure; surfacing it here
+	// gives health probes the diagnostic cause without depending on
+	// Close to run.
+	if s.fatalLatched.Load() {
+		if v := s.fatalErr.Load(); v != nil {
+			if e, ok := v.(error); ok && e != nil {
+				return e
+			}
+		}
+		return errFatalLatch
 	}
 	// Pre-close: peek runDone. If Run has terminated but Close has
 	// not yet run, replay so a subsequent peek (or Close's pre-Stop
