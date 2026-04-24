@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
@@ -220,6 +223,29 @@ func (t *Transport) runRecv(rs *recvSession) {
 				return
 			}
 		case *wtpv1.ServerMessage_Goaway:
+			// Task 22d: structured WARN before the errCh sentinel
+			// so operators see the branch without grepping the
+			// errCh substring. Standard fields plus the stable
+			// payload subset (code, retry, message-present marker).
+			// Message text is OMITTED by default (conservative
+			// posture) and only included verbatim when
+			// LogGoawayMessage is true — see transport.Options
+			// docstring for the rationale + server-contract gate.
+			g := m.Goaway
+			msgPresent := g.GetMessage() != ""
+			attrs := []slog.Attr{
+				slog.String("frame", "recv_control"),
+				slog.String("reason", "goaway_received"),
+				slog.String("goaway_code", g.GetCode().String()),
+				slog.Bool("goaway_retry_immediately", g.GetRetryImmediately()),
+				slog.Bool("goaway_message_present", msgPresent),
+			}
+			if t.opts.LogGoawayMessage {
+				attrs = append(attrs, slog.String("goaway_message", sanitizeForLog(g.GetMessage())))
+			}
+			attrs = append(attrs, slog.String("session_id", t.opts.SessionID))
+			t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+				"wtp: recv fail-closed control frame", attrs...)
 			// Tasks 18/19/20 will replace these with real handlers.
 			// Fail closed so the main goroutine drops to Connecting
 			// instead of silently dropping a session-critical frame
@@ -230,6 +256,15 @@ func (t *Transport) runRecv(rs *recvSession) {
 			}
 			return
 		case *wtpv1.ServerMessage_ServerUpdate:
+			// Task 22d: structured WARN. Standard fields only —
+			// Phase 4 has no SessionUpdate handler, so dragging
+			// payload fields into the WARN now would be churn (the
+			// WARN site goes away when Phase 5+ adds support).
+			t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+				"wtp: recv fail-closed control frame",
+				slog.String("frame", "recv_control"),
+				slog.String("reason", "server_update_unsupported_in_phase_4"),
+				slog.String("session_id", t.opts.SessionID))
 			// Tasks 18/19/20 will replace these with real handlers.
 			// Fail closed; see Goaway branch above.
 			select {
@@ -238,6 +273,16 @@ func (t *Transport) runRecv(rs *recvSession) {
 			}
 			return
 		default:
+			// Task 22d: structured WARN. Standard fields plus
+			// frame_type carrying the proto Go type for triage —
+			// the unknown-frame branch is the only one where the
+			// proto type is not statically known.
+			t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+				"wtp: recv fail-closed control frame",
+				slog.String("frame", "recv_control"),
+				slog.String("reason", "recv_unknown_frame_type"),
+				slog.String("frame_type", fmt.Sprintf("%T", m)),
+				slog.String("session_id", t.opts.SessionID))
 			// Unknown frame type — proto-evolution defence: the
 			// server may add new control frames the client predates.
 			// Surface as a recv error so the main goroutine drops to
@@ -357,4 +402,80 @@ func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq u
 	case AckOutcomeNoOp:
 		// No cursor moved; nothing to do.
 	}
+}
+
+const (
+	// goawayMessageMaxBytes caps the sanitized + truncated
+	// goaway_message log field at 512 bytes total INCLUDING the
+	// trailing truncation marker. Operators see "...[truncated]"
+	// at the end whenever the budget kicks in instead of a
+	// silently chopped string.
+	goawayMessageMaxBytes  = 512
+	goawayTruncationMarker = "...[truncated]"
+)
+
+// sanitizeForLog returns s safe for emission as a slog string field.
+// It enforces three guarantees, IN THIS ORDER:
+//
+//  1. Replace any invalid UTF-8 sequence with U+FFFD
+//     (strings.ToValidUTF8 — handles multi-byte invalid sequences
+//     correctly, where per-byte ASCII filtering would pass corrupted
+//     multi-byte runs through).
+//  2. Replace any control / non-printable rune with U+FFFD. ALL C0
+//     controls (U+0000..U+001F) including '\t' and '\n' are
+//     replaced — only the literal space character ' ' (U+0020) and
+//     printable Unicode pass through. This handler-agnostic policy
+//     eliminates log-injection risk regardless of which slog handler
+//     the operator's transport eventually uses (stdlib JSON, stdlib
+//     Text, or any custom handler).
+//  3. Truncate the SANITIZED OUTPUT to at most goawayMessageMaxBytes
+//     bytes WITH goawayTruncationMarker appended INSIDE that budget,
+//     ending at a UTF-8 rune boundary so the output is always valid
+//     UTF-8.
+//
+// Order matters. Sanitization can grow the string (a single invalid
+// byte expands to a 3-byte U+FFFD); truncating raw input could split
+// a valid multi-byte sequence at a non-rune boundary.
+//
+// Empty input passes through unchanged.
+//
+// Currently used only by the Goaway WARN site under the
+// LogGoawayMessage opt-in. If a second caller emerges, lift to
+// internal/log/sanitize.go and replace the local function with a
+// shared call WITHOUT changing the contract — the test sub-cases in
+// recv_multiplexer_failclosed_test.go are the regression for the
+// invariants above.
+func sanitizeForLog(s string) string {
+	if s == "" {
+		return ""
+	}
+	valid := strings.ToValidUTF8(s, "�")
+	var b strings.Builder
+	b.Grow(len(valid))
+	for _, r := range valid {
+		switch r {
+		case ' ':
+			// Only the literal space character passes through; '\t'
+			// and '\n' are C0 controls and fall into the default
+			// branch (handler-agnostic policy — see top-of-func
+			// docstring).
+			b.WriteRune(r)
+		default:
+			if unicode.IsPrint(r) {
+				b.WriteRune(r)
+			} else {
+				b.WriteRune('�')
+			}
+		}
+	}
+	out := b.String()
+	if len(out) <= goawayMessageMaxBytes {
+		return out
+	}
+	budget := goawayMessageMaxBytes - len(goawayTruncationMarker)
+	// Walk back to a rune boundary so we never chop mid-rune.
+	for budget > 0 && !utf8.RuneStart(out[budget]) {
+		budget--
+	}
+	return out[:budget] + goawayTruncationMarker
 }

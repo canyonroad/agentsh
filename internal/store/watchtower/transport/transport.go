@@ -155,6 +155,35 @@ type Options struct {
 	WAL *wal.WAL
 	// Metrics is the counter/gauge surface. Defaults to a no-op when nil.
 	Metrics Metrics
+
+	// LogGoawayMessage controls whether the Goaway WARN log emitted
+	// by the recv-multiplexer fail-closed branch (Task 22d) includes
+	// the server-supplied message text verbatim (after sanitization).
+	// Defaults to false (conservative posture) — the message is
+	// OMITTED from the log payload and only a goaway_message_present
+	// boolean marker is emitted.
+	//
+	// Setting this to true is OPT-IN and is gated on the Watchtower-
+	// server-side contract that forbids secrets, credentials, or PII
+	// in Goaway.message. That contract lives in the canyonroad repo
+	// (Watchtower server team — see spec §"`goaway_message`
+	// redaction policy" for the follow-up tracker). Operators who
+	// set this to true while the contract is pending take
+	// responsibility for their own server-side redaction posture
+	// (e.g. by trusting only their own internal Watchtower
+	// deployments).
+	//
+	// Independent of this flag, ALL logged Goaway message text is
+	// passed through sanitizeForLog — invalid UTF-8 is replaced with
+	// U+FFFD, all C0 control characters (including \t and \n) are
+	// replaced with U+FFFD, and the output is truncated to at most
+	// 512 bytes with a literal `...[truncated]` marker.
+	//
+	// This field is internal/construction-time only on
+	// transport.Options. It is NOT yet exposed via
+	// AuditWatchtowerConfig or daemon-facing config; Task 27b owns
+	// the config-surface expansion.
+	LogGoawayMessage bool
 }
 
 // validate enforces the construction-time invariants documented on
