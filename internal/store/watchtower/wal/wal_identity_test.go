@@ -327,3 +327,152 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// TestWAL_OpenContextDigestMatchAdopts verifies that reopening a WAL
+// whose persisted context_digest matches the caller's opts proceeds
+// without quarantine. Baseline for the context_digest identity check
+// added in roborev #5945/5957 Medium #2.
+func TestWAL_OpenContextDigestMatchAdopts(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(Options{
+		Dir:            dir,
+		SegmentSize:    4 * 1024,
+		MaxTotalBytes:  64 * 1024,
+		SyncMode:       SyncImmediate,
+		SessionID:      "s1",
+		KeyFingerprint: "k1",
+		ContextDigest:  "ctx-abc",
+	})
+	if err != nil {
+		t.Fatalf("initial Open: %v", err)
+	}
+	_ = w.Close()
+
+	// Reopen with the SAME context_digest — no quarantine expected.
+	w2, err := Open(Options{
+		Dir:            dir,
+		SegmentSize:    4 * 1024,
+		MaxTotalBytes:  64 * 1024,
+		SyncMode:       SyncImmediate,
+		SessionID:      "s1",
+		KeyFingerprint: "k1",
+		ContextDigest:  "ctx-abc",
+	})
+	if err != nil {
+		t.Errorf("reopen with matching context_digest: %v", err)
+	}
+	if w2 != nil {
+		_ = w2.Close()
+	}
+}
+
+// TestWAL_OpenContextDigestMismatchReturnsIdentityErr verifies that a
+// divergent context_digest is caught as ErrIdentityMismatch with the
+// MismatchedField set to "context_digest" and both persisted+expected
+// digests populated.
+func TestWAL_OpenContextDigestMismatchReturnsIdentityErr(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(Options{
+		Dir:            dir,
+		SegmentSize:    4 * 1024,
+		MaxTotalBytes:  64 * 1024,
+		SyncMode:       SyncImmediate,
+		SessionID:      "s1",
+		KeyFingerprint: "k1",
+		ContextDigest:  "ctx-first",
+	})
+	if err != nil {
+		t.Fatalf("initial Open: %v", err)
+	}
+	_ = w.Close()
+
+	_, err = Open(Options{
+		Dir:            dir,
+		SegmentSize:    4 * 1024,
+		MaxTotalBytes:  64 * 1024,
+		SyncMode:       SyncImmediate,
+		SessionID:      "s1",
+		KeyFingerprint: "k1",
+		ContextDigest:  "ctx-second",
+	})
+	if err == nil {
+		t.Fatal("reopen with mismatched context_digest returned nil; want ErrIdentityMismatch")
+	}
+	var idErr *ErrIdentityMismatch
+	if !errors.As(err, &idErr) {
+		t.Fatalf("want *ErrIdentityMismatch, got %T: %v", err, err)
+	}
+	if idErr.MismatchedField != "context_digest" {
+		t.Errorf("MismatchedField = %q, want %q", idErr.MismatchedField, "context_digest")
+	}
+	if idErr.PersistedContextDigest != "ctx-first" || idErr.ExpectedContextDigest != "ctx-second" {
+		t.Errorf("digests = (%q, %q), want (%q, %q)",
+			idErr.PersistedContextDigest, idErr.ExpectedContextDigest,
+			"ctx-first", "ctx-second")
+	}
+}
+
+// TestWAL_OpenEmptyPersistedContextDigestBackfills regresses roborev
+// #5976 Medium: if an existing WAL's meta.json predates the
+// context_digest field (empty persisted), Open MUST rewrite meta
+// in-place so the caller's value is persisted immediately. Without
+// this, a subsequent reopen under a DIFFERENT context_digest would
+// see empty-vs-non-empty (adopt) instead of mismatching, and records
+// from the old identity would silently replay under the new
+// SessionInit.
+func TestWAL_OpenEmptyPersistedContextDigestBackfills(t *testing.T) {
+	dir := t.TempDir()
+	// Seed an existing meta.json WITHOUT context_digest (simulates a
+	// pre-upgrade file).
+	if err := WriteMeta(dir, Meta{
+		SessionID:      "s1",
+		KeyFingerprint: "k1",
+	}); err != nil {
+		t.Fatalf("seed pre-upgrade meta: %v", err)
+	}
+
+	// Open with a context_digest — MUST backfill.
+	w, err := Open(Options{
+		Dir:            dir,
+		SegmentSize:    4 * 1024,
+		MaxTotalBytes:  64 * 1024,
+		SyncMode:       SyncImmediate,
+		SessionID:      "s1",
+		KeyFingerprint: "k1",
+		ContextDigest:  "ctx-upgrade",
+	})
+	if err != nil {
+		t.Fatalf("Open with backfill: %v", err)
+	}
+	_ = w.Close()
+
+	m, err := ReadMeta(dir)
+	if err != nil {
+		t.Fatalf("ReadMeta: %v", err)
+	}
+	if m.ContextDigest != "ctx-upgrade" {
+		t.Errorf("persisted ContextDigest = %q, want %q — backfill regressed", m.ContextDigest, "ctx-upgrade")
+	}
+
+	// A later reopen under a DIFFERENT digest MUST now be caught
+	// as a mismatch (not silently adopted).
+	_, err = Open(Options{
+		Dir:            dir,
+		SegmentSize:    4 * 1024,
+		MaxTotalBytes:  64 * 1024,
+		SyncMode:       SyncImmediate,
+		SessionID:      "s1",
+		KeyFingerprint: "k1",
+		ContextDigest:  "ctx-drift",
+	})
+	if err == nil {
+		t.Fatal("reopen with drifted context_digest returned nil; backfill did not persist")
+	}
+	var idErr *ErrIdentityMismatch
+	if !errors.As(err, &idErr) {
+		t.Fatalf("want *ErrIdentityMismatch, got %T: %v", err, err)
+	}
+	if idErr.MismatchedField != "context_digest" {
+		t.Errorf("MismatchedField = %q, want %q", idErr.MismatchedField, "context_digest")
+	}
+}

@@ -227,6 +227,16 @@ func getAppendInjector() func() error {
 	return appendInjector
 }
 
+// nonEmpty returns a if it's non-empty; otherwise b. Used by the
+// identity-backfill path on Open to adopt caller-supplied fields
+// only when the persisted field is empty.
+func nonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
 // recordOverhead is the per-record on-disk cost beyond the payload bytes
 // themselves: an 8-byte frame header (uint32 length + uint32 CRC) plus the
 // 12-byte (seq:int64 + gen:uint32) prefix this WAL adds to each record so
@@ -425,6 +435,33 @@ func Open(opts Options) (*WAL, error) {
 				ExpectedKeyFingerprint:  opts.KeyFingerprint,
 				PersistedContextDigest:  m.ContextDigest,
 				ExpectedContextDigest:   opts.ContextDigest,
+			}
+		}
+
+		// Upgrade-path backfill (roborev #5976 Medium). If the on-
+		// disk meta.json is missing any identity field that the
+		// caller now supplies, rewrite it in place so subsequent
+		// Opens can detect mismatches. Without this, a WAL created
+		// before ContextDigest existed (or before any identity
+		// field landed) would stay empty-persisted until the next
+		// MarkAcked — a Store that never receives an ack would keep
+		// the meta at its pre-upgrade shape, and a reopen under a
+		// different AgentID would silently adopt (empty-persisted
+		// means-adopt per the identity contract above) instead of
+		// quarantining.
+		backfillNeeded := (m.SessionID == "" && opts.SessionID != "") ||
+			(m.KeyFingerprint == "" && opts.KeyFingerprint != "") ||
+			(m.ContextDigest == "" && opts.ContextDigest != "")
+		if backfillNeeded {
+			// Preserve ack state verbatim (AckRecorded, watermark,
+			// and generation) so the backfill doesn't promote a
+			// pre-ack seed meta to "ack recorded" or lose the
+			// existing ack tuple.
+			m.SessionID = nonEmpty(m.SessionID, opts.SessionID)
+			m.KeyFingerprint = nonEmpty(m.KeyFingerprint, opts.KeyFingerprint)
+			m.ContextDigest = nonEmpty(m.ContextDigest, opts.ContextDigest)
+			if err := WriteMeta(opts.Dir, m); err != nil {
+				return nil, fmt.Errorf("backfill identity meta: %w", err)
 			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
