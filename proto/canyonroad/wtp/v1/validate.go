@@ -171,6 +171,24 @@ func ValidateEventBatch(b *EventBatch) error {
 			Inner:  fmt.Errorf("%w: batch is nil", ErrInvalidFrame),
 		}
 	}
+	// Schema-drift check FIRST (before Compression / Body switch):
+	// a peer-drift frame may have Body unset, Compression unset, AND
+	// unknown top-level fields simultaneously. Classifying
+	// "compression_unspecified" first would hide the drift signal
+	// under the generic missing-Compression bucket — operators paged
+	// on an unexpected peer schema need to see the "unknown" reason,
+	// not a misleading "compression_unspecified" that sends them
+	// hunting for a field-population bug that isn't there. The
+	// check is scoped to Body==nil because a peer that populates a
+	// known Body oneof arm but ALSO attaches unknown sibling fields
+	// still has usable payload; the Body switch below handles that
+	// case under the specific known-arm branches.
+	if b.Body == nil && len(b.ProtoReflect().GetUnknown()) > 0 {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: body unset but peer sent unknown fields (schema drift)", ErrInvalidFrame),
+		}
+	}
 	if b.Compression == Compression_COMPRESSION_UNSPECIFIED {
 		return &ValidationError{
 			Reason: ReasonEventBatchCompressionUnspecified,
@@ -179,31 +197,10 @@ func ValidateEventBatch(b *EventBatch) error {
 	}
 	switch body := b.Body.(type) {
 	case nil:
-		// Body is unset. Two disjoint wire-level situations produce
-		// this state:
-		//   (a) the peer genuinely did not populate the body oneof
-		//       and sent no other unknown fields — a pure
-		//       missing-payload bug.
-		//   (b) the peer sent at least one top-level field at a tag
-		//       the client's proto does not recognise. Proto3 parks
-		//       unknown fields in the message's unknown-field set
-		//       and leaves Body == nil regardless of whether the
-		//       unknown field was intended as a new body oneof arm
-		//       or a new sibling field — wire bytes alone cannot
-		//       tell those apart, and both point at the same
-		//       remediation (regenerate the client against the
-		//       peer's schema).
-		// Collapsing case (b) under ReasonEventBatchBodyUnset would
-		// hide the drift under the generic missing-payload bucket,
-		// so we branch here: non-empty unknown-field set ⇒
-		// ReasonUnknown (schema drift); empty unknown-field set ⇒
-		// ReasonEventBatchBodyUnset (genuine missing payload).
-		if len(b.ProtoReflect().GetUnknown()) > 0 {
-			return &ValidationError{
-				Reason: ReasonUnknown,
-				Inner:  fmt.Errorf("%w: body unset but peer sent unknown fields (schema drift)", ErrInvalidFrame),
-			}
-		}
+		// Body unset with no unknown fields — genuine missing-payload
+		// bug (the Body==nil + unknown-fields case is handled above
+		// before the Compression check so schema drift is never hidden
+		// under compression_unspecified).
 		return &ValidationError{
 			Reason: ReasonEventBatchBodyUnset,
 			Inner:  fmt.Errorf("%w: body unset", ErrInvalidFrame),

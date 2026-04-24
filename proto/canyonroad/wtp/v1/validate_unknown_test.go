@@ -95,3 +95,31 @@ func TestValidateEventBatch_NoUnknownFields_ReturnsBodyUnset(t *testing.T) {
 		t.Errorf("want ReasonEventBatchBodyUnset (no unknown fields, body truly unset), got %q", ve.Reason)
 	}
 }
+
+// TestValidateEventBatch_UnknownFieldsPrecedeCompressionCheck locks in
+// the check-order contract (roborev #5921 Medium): a peer-drift frame
+// with Body unset AND unknown top-level fields AND Compression unset
+// must be classified as ReasonUnknown, NOT
+// ReasonEventBatchCompressionUnspecified. The compression_unspecified
+// bucket is operator-readable as "peer forgot to populate the enum";
+// collapsing schema drift into that bucket hides the drift signal and
+// sends operators triaging a non-existent field-population bug.
+func TestValidateEventBatch_UnknownFieldsPrecedeCompressionCheck(t *testing.T) {
+	batch := &EventBatch{
+		// Compression deliberately left UNSPECIFIED to exercise the
+		// check-order fix: schema-drift detection must fire before
+		// the Compression==UNSPECIFIED branch.
+	}
+	raw := protowire.AppendTag(nil, 999, protowire.BytesType)
+	raw = protowire.AppendBytes(raw, []byte("peer-new-field"))
+	batch.ProtoReflect().SetUnknown(raw)
+
+	err := ValidateEventBatch(batch)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("want *ValidationError, got %T: %v", err, err)
+	}
+	if ve.Reason != ReasonUnknown {
+		t.Errorf("want ReasonUnknown (schema drift MUST outrank compression_unspecified), got %q", ve.Reason)
+	}
+}
