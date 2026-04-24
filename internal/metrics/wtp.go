@@ -405,29 +405,35 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 // ----- Task 22a: sink-failure metrics --------------------------------
 //
 // SCOPE & ROLLOUT NOTE. This task lands the metric DEFINITIONS,
-// exposition, and validation logic only. The actual increments are
-// wired by downstream tasks per the table below; until those land,
-// the new counters emit at zero on every scrape (always-emit
-// contract). "Task 22a complete" therefore means "the metric series
-// are stable and visible at zero," NOT "the system is fully
-// instrumented." Operators should NOT alert on values until the
-// listed wiring task ships.
+// exposition, and validation logic for nine new counter families.
+// Wiring status SPLITS into two groups per the table below:
 //
-//	Counter family                              Wired by
-//	wtp_dropped_invalid_utf8_total              AppendEvent (Task 23)
-//	wtp_dropped_sequence_overflow_total         AppendEvent (Task 23)
-//	wtp_dropped_invalid_mapper_total            AppendEvent (Task 23)
-//	wtp_dropped_invalid_timestamp_total         AppendEvent (Task 23)
-//	wtp_dropped_mapper_failure_total            AppendEvent (Task 23)
-//	wtp_dropped_invalid_frame_total{reason}     transport receivers (Task 17 Step 4a),
-//	                                            decompression path, and the metrics-
-//	                                            side invalid-label collapse below
-//	wtp_session_init_failures_total{reason}     transport (Phase 8)
-//	wtp_session_rotation_failures_total{reason} transport (Phase 8)
-//	wtp_wal_quarantine_total{reason}            store wal.Open recovery path
-//	                                            (wired in Task 22a R2 — see
-//	                                            openWALWithIdentityRecovery in
+//	Counter family                              Wired by                                 Status (as of Task 22a R2)
+//	wtp_dropped_invalid_utf8_total              AppendEvent (Task 23)                    NOT YET WIRED — emits zero
+//	wtp_dropped_sequence_overflow_total         AppendEvent (Task 23)                    NOT YET WIRED — emits zero
+//	wtp_dropped_invalid_mapper_total            AppendEvent (Task 23)                    NOT YET WIRED — emits zero
+//	wtp_dropped_invalid_timestamp_total         AppendEvent (Task 23)                    NOT YET WIRED — emits zero
+//	wtp_dropped_mapper_failure_total            AppendEvent (Task 23)                    NOT YET WIRED — emits zero
+//	wtp_dropped_invalid_frame_total{reason}     transport receivers (Task 17 Step 4a)    NOT YET WIRED — emits zero
+//	wtp_session_init_failures_total{reason}     transport (Phase 8)                      NOT YET WIRED — emits zero
+//	wtp_session_rotation_failures_total{reason} transport (Phase 8)                      NOT YET WIRED — emits zero
+//	wtp_wal_quarantine_total{reason}            store wal.Open recovery path             LIVE as of Task 22a R2
+//	                                            (openWALWithIdentityRecovery,
 //	                                            internal/store/watchtower/store.go)
+//
+// "Task 22a complete" therefore has TWO meanings depending on the
+// counter:
+//
+//   - For wtp_wal_quarantine_total: the metric is fully live.
+//     Operators MAY add alerts on the
+//     {key_fingerprint_mismatch, session_id_mismatch} labels per the
+//     spec §"Quarantine policy" + §"Operational signals" runbook
+//     entries.
+//   - For all other Task 22a counters: the series are stable and
+//     visible at zero (always-emit contract); operators should NOT
+//     alert on values until the listed wiring task ships. A
+//     permanently-zero series under a still-NOT-YET-WIRED row above
+//     is expected, not a healthy signal.
 //
 // MIGRATION NOTE. This task also REMOVES the legacy
 // wtp_dropped_missing_chain_total counter (Task 3). Removal is

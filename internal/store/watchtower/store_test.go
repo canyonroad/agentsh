@@ -103,6 +103,86 @@ func TestNew_QuarantinesOnSessionIDMismatch(t *testing.T) {
 	}
 }
 
+// TestNew_QuarantinesOnKeyFingerprintMismatch is the symmetric
+// counterpart to TestNew_QuarantinesOnSessionIDMismatch covering the
+// second real recovery reason. SessionID matches; KeyFingerprint
+// differs. Without this test a regression in the
+// PersistedKeyFingerprint != opts.KeyFingerprint classification
+// branch would only surface in production when an operator hits a
+// key-rotation or misconfigured-deploy case.
+func TestNew_QuarantinesOnKeyFingerprintMismatch(t *testing.T) {
+	parent := t.TempDir()
+	walDir := filepath.Join(parent, "wal")
+	if err := os.MkdirAll(walDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Pre-seed meta.json with sha256:k-old.
+	w, err := wal.Open(wal.Options{
+		Dir:            walDir,
+		SegmentSize:    256 * 1024,
+		MaxTotalBytes:  16 * 1024 * 1024,
+		SessionID:      "installation-A",
+		KeyFingerprint: "sha256:k-old",
+	})
+	if err != nil {
+		t.Fatalf("seed wal.Open: %v", err)
+	}
+	if _, err := w.Append(1, 0, []byte("seed")); err != nil {
+		t.Fatalf("seed Append: %v", err)
+	}
+	if err := w.MarkAcked(0, 1); err != nil {
+		t.Fatalf("seed MarkAcked: %v", err)
+	}
+	_ = w.Close()
+
+	// Same SessionID, different KeyFingerprint → key-fingerprint
+	// mismatch branch.
+	collector := metrics.New()
+	opts := validOpts(walDir)
+	opts.SessionID = "installation-A"
+	opts.KeyFingerprint = "sha256:k-new"
+	opts.Metrics = collector
+
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer closeStore(t, s)
+
+	// Same .quarantine.* sibling assertion as the SessionID test.
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	var sawQuarantine bool
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".quarantine.") {
+			sawQuarantine = true
+			break
+		}
+	}
+	if !sawQuarantine {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("expected .quarantine.* sibling in %s, got %v", parent, names)
+	}
+
+	// Metric must land on the key_fingerprint_mismatch label, NOT on
+	// session_id_mismatch (regression guard for a swapped or
+	// fall-through classification).
+	rr := httptest.NewRecorder()
+	collector.Handler(metrics.HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+	if !strings.Contains(body, `wtp_wal_quarantine_total{reason="key_fingerprint_mismatch"} 1`) {
+		t.Fatalf("expected wtp_wal_quarantine_total{reason=\"key_fingerprint_mismatch\"}=1 after quarantine\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_wal_quarantine_total{reason="session_id_mismatch"} 0`) {
+		t.Fatalf("expected session_id_mismatch to remain 0 (classification swap regression)\nbody:\n%s", body)
+	}
+}
+
 // TestNew_DoesNotSeedOnSessionIDMismatch covers the secondary
 // (defense-in-depth) identity gate inside readInitialAckTuple. With
 // the wal.Open quarantine path catching most cases, this gate fires
