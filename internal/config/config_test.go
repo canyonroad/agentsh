@@ -1978,7 +1978,7 @@ func TestAuditWatchtowerConfig_KMSSourcesMutualExclusion(t *testing.T) {
 		t.Run("only_"+c.name, func(t *testing.T) {
 			yaml := "audit:\n  watchtower:\n    enabled: true\n" +
 				"    endpoint: \"wtp.example.com:9443\"\n" +
-				"    state_dir: \"" + filepath.Join(t.TempDir(), "wtp-state") + "\"\n" +
+				"    state_dir: \"" + filepath.ToSlash(filepath.Join(t.TempDir(), "wtp-state")) + "\"\n" +
 				"    auth:\n      token_file: \"/t\"\n" +
 				"    chain:\n" + c.chain
 			_, err := loadFromString(t, yaml)
@@ -2037,7 +2037,7 @@ func TestAuditWatchtowerConfig_KeySourceSelectorMismatch(t *testing.T) {
 	// not-yet-wired gate).
 	yamlMatch := "audit:\n  watchtower:\n    enabled: true\n" +
 		"    endpoint: \"wtp.example.com:9443\"\n" +
-		"    state_dir: \"" + filepath.Join(t.TempDir(), "wtp-state") + "\"\n" +
+		"    state_dir: \"" + filepath.ToSlash(filepath.Join(t.TempDir(), "wtp-state")) + "\"\n" +
 		"    auth:\n      token_file: \"/t\"\n" +
 		"    chain:\n      key_source: \"aws_kms\"\n      aws_kms:\n        key_id: \"alias/k\"\n"
 	_, err = loadFromString(t, yamlMatch)
@@ -2075,7 +2075,7 @@ func TestAuditWatchtowerConfig_ProviderRequiredFields(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			yaml := "audit:\n  watchtower:\n    enabled: true\n" +
 				"    endpoint: \"wtp.example.com:9443\"\n" +
-				"    state_dir: \"" + filepath.Join(t.TempDir(), "wtp-state") + "\"\n" +
+				"    state_dir: \"" + filepath.ToSlash(filepath.Join(t.TempDir(), "wtp-state")) + "\"\n" +
 				"    auth:\n      token_file: \"/t\"\n" +
 				"    chain:\n" + tc.chain
 			_, err := loadFromString(t, yaml)
