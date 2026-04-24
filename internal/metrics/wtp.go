@@ -25,23 +25,34 @@ const (
 type WTPReconnectReason string
 
 const (
-	WTPReconnectReasonDialFailed       WTPReconnectReason = "dial_failed"
-	WTPReconnectReasonStreamRecvError  WTPReconnectReason = "stream_recv_error"
-	WTPReconnectReasonSendError        WTPReconnectReason = "send_error"
-	WTPReconnectReasonAckTimeout       WTPReconnectReason = "ack_timeout"
-	WTPReconnectReasonHeartbeatTimeout WTPReconnectReason = "heartbeat_timeout"
-	WTPReconnectReasonServerGoaway     WTPReconnectReason = "server_goaway"
-	WTPReconnectReasonUnknown          WTPReconnectReason = "unknown"
+	WTPReconnectReasonDialFailed              WTPReconnectReason = "dial_failed"
+	WTPReconnectReasonStreamRecvError         WTPReconnectReason = "stream_recv_error"
+	WTPReconnectReasonSendError               WTPReconnectReason = "send_error"
+	WTPReconnectReasonAckTimeout              WTPReconnectReason = "ack_timeout"
+	WTPReconnectReasonHeartbeatTimeout        WTPReconnectReason = "heartbeat_timeout"
+	WTPReconnectReasonServerGoaway            WTPReconnectReason = "server_goaway"
+	// WTPReconnectReasonServerUpdateUnsupported and
+	// WTPReconnectReasonRecvUnknownFrame are the Task 22c dedicated
+	// labels for the fail-closed recv branches that previously
+	// collapsed onto WTPReconnectReasonUnknown. The labels exist at
+	// zero from the moment Task 22c lands; emitter call sites land
+	// in Tasks 18/19 (recv-multiplexer fail-closed paths) and the
+	// structured WARN logging lands in Task 22d.
+	WTPReconnectReasonServerUpdateUnsupported WTPReconnectReason = "server_update_unsupported"
+	WTPReconnectReasonRecvUnknownFrame        WTPReconnectReason = "recv_unknown_frame"
+	WTPReconnectReasonUnknown                 WTPReconnectReason = "unknown"
 )
 
 var wtpReconnectReasonsValid = map[WTPReconnectReason]struct{}{
-	WTPReconnectReasonDialFailed:       {},
-	WTPReconnectReasonStreamRecvError:  {},
-	WTPReconnectReasonSendError:        {},
-	WTPReconnectReasonAckTimeout:       {},
-	WTPReconnectReasonHeartbeatTimeout: {},
-	WTPReconnectReasonServerGoaway:     {},
-	WTPReconnectReasonUnknown:          {},
+	WTPReconnectReasonDialFailed:              {},
+	WTPReconnectReasonStreamRecvError:         {},
+	WTPReconnectReasonSendError:               {},
+	WTPReconnectReasonAckTimeout:              {},
+	WTPReconnectReasonHeartbeatTimeout:        {},
+	WTPReconnectReasonServerGoaway:            {},
+	WTPReconnectReasonServerUpdateUnsupported: {},
+	WTPReconnectReasonRecvUnknownFrame:        {},
+	WTPReconnectReasonUnknown:                 {},
 }
 
 // wtpReconnectReasonsEmitOrder is the canonical, sorted-by-string emission
@@ -53,8 +64,10 @@ var wtpReconnectReasonsEmitOrder = []WTPReconnectReason{
 	WTPReconnectReasonAckTimeout,
 	WTPReconnectReasonDialFailed,
 	WTPReconnectReasonHeartbeatTimeout,
+	WTPReconnectReasonRecvUnknownFrame,
 	WTPReconnectReasonSendError,
 	WTPReconnectReasonServerGoaway,
+	WTPReconnectReasonServerUpdateUnsupported,
 	WTPReconnectReasonStreamRecvError,
 	WTPReconnectReasonUnknown,
 }

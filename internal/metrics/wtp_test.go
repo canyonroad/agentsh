@@ -184,8 +184,10 @@ func TestWTPMetrics_ReconnectsAlwaysEmittedAllReasons(t *testing.T) {
 		"ack_timeout",
 		"dial_failed",
 		"heartbeat_timeout",
+		"recv_unknown_frame",
 		"send_error",
 		"server_goaway",
+		"server_update_unsupported",
 		"stream_recv_error",
 		"unknown",
 	}
@@ -630,5 +632,43 @@ func TestWTPMetrics_WALQuarantineAlwaysEmittedAllReasons(t *testing.T) {
 	}
 	if strings.Contains(body, `evil`) {
 		t.Errorf("invalid reason leaked through validator into output:\n%s", body)
+	}
+}
+
+// TestWTPMetrics_ReconnectsAlwaysEmittedIncludesFailClosedControlFrameLabels
+// is the Task 22c regression guard for the two new fail-closed-recv
+// reason labels (server_update_unsupported, recv_unknown_frame).
+// Mirrors the Task 3 always-emit pattern: zero-init at registration,
+// then increment, then assert the targeted label flips to 1.
+//
+// Tests the SCHEMA only; emitter call sites in transport land in
+// Tasks 18/19, and structured WARN logging lands in Task 22d. Step 4
+// of Task 22c (spec rewrite to "live operator surface") is gated on
+// all three predecessor tasks landing.
+func TestWTPMetrics_ReconnectsAlwaysEmittedIncludesFailClosedControlFrameLabels(t *testing.T) {
+	c := New()
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	for _, reason := range []string{"server_update_unsupported", "recv_unknown_frame"} {
+		want := fmt.Sprintf(`wtp_reconnects_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("missing zero-valued reconnect series %q (Task 22c always-emit)\nbody:\n%s", want, body)
+		}
+	}
+
+	c.WTP().IncReconnects(WTPReconnectReasonServerUpdateUnsupported)
+	c.WTP().IncReconnects(WTPReconnectReasonRecvUnknownFrame)
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	for _, want := range []string{
+		`wtp_reconnects_total{reason="server_update_unsupported"} 1`,
+		`wtp_reconnects_total{reason="recv_unknown_frame"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q after IncReconnects\nbody:\n%s", want, body)
+		}
 	}
 }
