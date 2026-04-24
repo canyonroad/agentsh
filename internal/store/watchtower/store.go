@@ -447,17 +447,24 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
 		// Gate new AppendEvent transactions from entering the
-		// Compute → Append → Commit path, then wait for any
-		// already-in-flight transaction to finish before draining
-		// the transport. Without this, a concurrent appender could
-		// land a record in the WAL after Stop has already drained
-		// the in-memory send queue — the record would be durable
-		// but miss the final send window, surprising callers who
-		// assume post-Close records do not linger. (roborev
-		// #5957 Medium #1)
+		// Compute → Append → Commit path, then wait (bounded by
+		// opts.DrainDeadline) for any already-in-flight transaction
+		// to finish before draining the transport. Without this, a
+		// concurrent appender could land a record in the WAL after
+		// Stop has already drained the in-memory send queue — the
+		// record would be durable but miss the final send window,
+		// surprising callers who assume post-Close records do not
+		// linger. (roborev #5957 Medium #1)
+		//
+		// BOUNDED: an append stuck in fsync / WAL I/O cannot hang
+		// shutdown past the documented DrainDeadline. On timeout we
+		// log and proceed with the transport drain anyway — the
+		// stuck append will eventually complete and its record will
+		// land on disk (picked up on the next session's replay),
+		// but it will NOT block Close from returning within its
+		// deadline budget. (roborev #5985 High #1)
 		s.closing.Store(true)
-		s.appendMu.Lock()
-		s.appendMu.Unlock()
+		s.waitAppendDrain()
 
 		s.closeErr = s.shutdown()
 		// Mark closed AFTER closeErr is fully populated so a
@@ -466,6 +473,34 @@ func (s *Store) Close() error {
 		s.closed.Store(true)
 	})
 	return s.closeErr
+}
+
+// waitAppendDrain blocks up to opts.DrainDeadline for in-flight
+// AppendEvent transactions to complete. Acquires appendMu in a
+// goroutine so the deadline is interruptible; on timeout logs a
+// WARN and returns without holding the mutex (shutdown proceeds
+// and the stuck append's record will appear on next-session
+// replay if/when the fsync eventually completes).
+func (s *Store) waitAppendDrain() {
+	drainDeadline := s.opts.DrainDeadline
+	if drainDeadline <= 0 {
+		drainDeadline = 2 * time.Second
+	}
+	drained := make(chan struct{})
+	go func() {
+		s.appendMu.Lock()
+		s.appendMu.Unlock()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		// All in-flight appends completed before the deadline.
+	case <-time.After(drainDeadline):
+		s.opts.Logger.Warn(
+			"watchtower: append drain timed out during Close; proceeding with shutdown",
+			"drain_deadline", drainDeadline,
+		)
+	}
 }
 
 // shutdown is the body of Close, factored out so closeOnce.Do can

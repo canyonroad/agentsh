@@ -237,6 +237,65 @@ func nonEmpty(a, b string) string {
 	return b
 }
 
+// segmentsDirHasRecords reports whether segDir contains any .seg or
+// .seg.INPROGRESS files. Used by Open's identity-backfill and seed
+// paths to refuse silent caller-identity adoption when the WAL
+// already carries records — those records may have been chained
+// under a different identity and must not be silently re-chained
+// under the new caller's values (roborev #5985 High #2).
+//
+// Returns (false, nil) when segDir does not yet exist (fresh
+// directory, first open).
+func segmentsDirHasRecords(segDir string) (bool, error) {
+	entries, err := os.ReadDir(segDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasSuffix(name, sealedSuffix) || strings.HasSuffix(name, inprogressSuffix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// recordBearingBackfillMismatch constructs an ErrIdentityMismatch for
+// the roborev #5985 High #2 case: a WAL with existing records whose
+// persisted identity is empty while the caller supplies non-empty
+// values. The mismatched field is the first empty-persisted field
+// the caller is trying to backfill (priority: session_id →
+// key_fingerprint → context_digest) — this matches the priority of
+// the full-identity-check path and keeps the operator-facing
+// reporting deterministic.
+func recordBearingBackfillMismatch(m Meta, opts Options) *ErrIdentityMismatch {
+	e := &ErrIdentityMismatch{
+		PersistedSessionID:      m.SessionID,
+		ExpectedSessionID:       opts.SessionID,
+		PersistedKeyFingerprint: m.KeyFingerprint,
+		ExpectedKeyFingerprint:  opts.KeyFingerprint,
+		PersistedContextDigest:  m.ContextDigest,
+		ExpectedContextDigest:   opts.ContextDigest,
+	}
+	switch {
+	case m.SessionID == "" && opts.SessionID != "":
+		e.MismatchedField = "session_id"
+	case m.KeyFingerprint == "" && opts.KeyFingerprint != "":
+		e.MismatchedField = "key_fingerprint"
+	case m.ContextDigest == "" && opts.ContextDigest != "":
+		e.MismatchedField = "context_digest"
+	default:
+		// All persisted fields are present but the backfill code
+		// called here with nothing to fill — shouldn't happen; fall
+		// back to context_digest so the error is informative.
+		e.MismatchedField = "context_digest"
+	}
+	return e
+}
+
 // recordOverhead is the per-record on-disk cost beyond the payload bytes
 // themselves: an 8-byte frame header (uint32 length + uint32 CRC) plus the
 // 12-byte (seq:int64 + gen:uint32) prefix this WAL adds to each record so
@@ -438,21 +497,32 @@ func Open(opts Options) (*WAL, error) {
 			}
 		}
 
-		// Upgrade-path backfill (roborev #5976 Medium). If the on-
-		// disk meta.json is missing any identity field that the
-		// caller now supplies, rewrite it in place so subsequent
-		// Opens can detect mismatches. Without this, a WAL created
-		// before ContextDigest existed (or before any identity
-		// field landed) would stay empty-persisted until the next
-		// MarkAcked — a Store that never receives an ack would keep
-		// the meta at its pre-upgrade shape, and a reopen under a
-		// different AgentID would silently adopt (empty-persisted
-		// means-adopt per the identity contract above) instead of
-		// quarantining.
+		// Upgrade-path backfill (roborev #5976 Medium / #5985 High #2).
+		// If the on-disk meta.json is missing any identity field that
+		// the caller now supplies, rewrite it in place so subsequent
+		// Opens can detect mismatches.
+		//
+		// SAFETY GATE: adopt-and-backfill is ONLY safe when the WAL
+		// is empty. A record-bearing WAL whose persisted identity is
+		// empty (because the file was created before this identity
+		// field existed) cannot prove its records were chained under
+		// the caller's identity — they might be from a different
+		// AgentID / session. Silently backfilling would let stale
+		// records replay under a new SessionInit advertising a
+		// different digest. For record-bearing WALs we instead
+		// return ErrIdentityMismatch so the Store-layer quarantine
+		// path runs and the WAL is renamed out of the way.
 		backfillNeeded := (m.SessionID == "" && opts.SessionID != "") ||
 			(m.KeyFingerprint == "" && opts.KeyFingerprint != "") ||
 			(m.ContextDigest == "" && opts.ContextDigest != "")
 		if backfillNeeded {
+			hasRecords, err := segmentsDirHasRecords(segDir)
+			if err != nil {
+				return nil, fmt.Errorf("scan segments for backfill safety: %w", err)
+			}
+			if hasRecords {
+				return nil, recordBearingBackfillMismatch(m, opts)
+			}
 			// Preserve ack state verbatim (AckRecorded, watermark,
 			// and generation) so the backfill doesn't promote a
 			// pre-ack seed meta to "ack recorded" or lose the
@@ -468,16 +538,19 @@ func Open(opts Options) (*WAL, error) {
 		return nil, fmt.Errorf("read meta: %w", err)
 	} else if opts.SessionID != "" || opts.KeyFingerprint != "" || opts.ContextDigest != "" {
 		// No meta.json yet AND the caller supplied at least one
-		// identity field — write an initial Meta so reopens can
-		// detect mismatch (roborev #5957 Medium #2). Without this,
-		// the identity triple would only land in meta.json after
-		// the first MarkAcked call; a Store that never receives an
-		// ack would leave the WAL empty-identity and a subsequent
-		// reopen with different identity would silently adopt.
-		// AckRecorded=false marks this as a pre-ack seed meta;
-		// readers that rely on AckRecorded to distinguish real
-		// (gen=0, seq=0) acks from the sentinel will still see
-		// that distinction.
+		// identity field. Seed meta only when the WAL is also
+		// empty — a record-bearing WAL without meta is suspicious
+		// (records exist but we have no identity to validate them
+		// against) and MUST NOT adopt caller identity silently.
+		// Same rationale as the backfill path above (roborev
+		// #5985 High #2).
+		hasRecords, err := segmentsDirHasRecords(segDir)
+		if err != nil {
+			return nil, fmt.Errorf("scan segments for seed safety: %w", err)
+		}
+		if hasRecords {
+			return nil, recordBearingBackfillMismatch(Meta{}, opts)
+		}
 		if err := WriteMeta(opts.Dir, Meta{
 			AckRecorded:    false,
 			SessionID:      opts.SessionID,

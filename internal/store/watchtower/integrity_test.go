@@ -863,30 +863,18 @@ func TestStore_AgentIDChangeAcrossRestartsQuarantines(t *testing.T) {
 	}
 
 	// A quarantine sibling MUST exist next to the fresh WAL dir
-	// (Task 14a identity-recovery contract).
-	parent, err := os.ReadDir(dir + "/..")
-	if err != nil {
-		// dir/.. may not be readable (t.TempDir returns an absolute
-		// path); instead look in the parent directory returned by
-		// filepath.Dir(dir).
-		parent = nil
-	}
+	// (Task 14a identity-recovery contract). Use filepath.Dir so
+	// the parent lookup works on every platform (roborev #5985
+	// Low — no string-concat path math).
 	foundQuarantine := false
-	for _, e := range parent {
+	entries, err := os.ReadDir(filepath.Dir(dir))
+	if err != nil {
+		t.Fatalf("ReadDir(parent): %v", err)
+	}
+	for _, e := range entries {
 		if strings.Contains(e.Name(), ".quarantine.") {
 			foundQuarantine = true
 			break
-		}
-	}
-	// Fallback: list the immediate parent via filepath.Dir.
-	if !foundQuarantine {
-		if entries, err := os.ReadDir(filepath.Dir(dir)); err == nil {
-			for _, e := range entries {
-				if strings.Contains(e.Name(), ".quarantine.") {
-					foundQuarantine = true
-					break
-				}
-			}
 		}
 	}
 	if !foundQuarantine {
