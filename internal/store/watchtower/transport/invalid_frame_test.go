@@ -40,8 +40,8 @@ func TestReceiver_NonTypedErrorClassifiedAsClassifierBypass(t *testing.T) {
 
 	bare := fmt.Errorf("%w: synthetic non-typed error", wtpv1.ErrInvalidFrame)
 
-	classifyAndIncInvalidFrame(logger, m, bare)
-	classifyAndIncInvalidFrame(logger, m, bare)
+	ClassifyAndIncInvalidFrame(logger, m, bare)
+	ClassifyAndIncInvalidFrame(logger, m, bare)
 
 	if got := m.DroppedInvalidFrame(metrics.WTPInvalidFrameReasonClassifierBypass); got != 2 {
 		t.Errorf("DroppedInvalidFrame(classifier_bypass) = %d, want 2 (counter MUST be unconditional even when WARN is rate-limited)", got)
@@ -93,7 +93,7 @@ func TestReceiver_PerPathLimiterNotStarvedByMetricsSide(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	bare := fmt.Errorf("%w: synthetic after metrics drain", wtpv1.ErrInvalidFrame)
-	classifyAndIncInvalidFrame(logger, m, bare)
+	ClassifyAndIncInvalidFrame(logger, m, bare)
 
 	if buf.Len() == 0 {
 		t.Error("receiver-side WARN was suppressed after metrics-side drain — limiters are not per-path")
@@ -118,7 +118,7 @@ func TestReceiver_TypedValidationErrorClassifiedByReason(t *testing.T) {
 		Inner:  fmt.Errorf("%w: 32MiB > 8MiB cap", wtpv1.ErrPayloadTooLarge),
 	}
 
-	classifyAndIncInvalidFrame(logger, m, typed)
+	ClassifyAndIncInvalidFrame(logger, m, typed)
 
 	if got := m.DroppedInvalidFrame(metrics.WTPInvalidFrameReasonPayloadTooLarge); got != 1 {
 		t.Errorf("DroppedInvalidFrame(payload_too_large) = %d, want 1", got)
@@ -147,7 +147,7 @@ func TestReceiver_UnknownReasonClassifiedAsUnknown(t *testing.T) {
 		Inner:  fmt.Errorf("%w: synthetic unknown oneof", wtpv1.ErrInvalidFrame),
 	}
 
-	classifyAndIncInvalidFrame(logger, m, typed)
+	ClassifyAndIncInvalidFrame(logger, m, typed)
 
 	if got := m.DroppedInvalidFrame(metrics.WTPInvalidFrameReasonUnknown); got != 1 {
 		t.Errorf("DroppedInvalidFrame(unknown) = %d, want 1", got)

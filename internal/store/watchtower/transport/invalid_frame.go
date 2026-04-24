@@ -9,7 +9,7 @@ import (
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
-// classifyAndIncInvalidFrame is the canonical receiver-side wrapper for
+// ClassifyAndIncInvalidFrame is the canonical receiver-side wrapper for
 // a validator failure. It implements the two-step classification from
 // spec §"Frame validation and forward compatibility":
 //
@@ -32,7 +32,13 @@ import (
 // *ValidationError, so the classifier_bypass branch SHOULD never trigger
 // in production — any non-zero increment is a local-side caller bug
 // (non-validator error reached the receiver-side classifier).
-func classifyAndIncInvalidFrame(logger *slog.Logger, m Metrics, err error) {
+//
+// Exported so callers outside the transport package (notably the
+// testserver's EventBatch receive path) can route validator failures
+// through the single canonical classifier. Any client-owned or server-
+// owned receive site that calls ValidateEventBatch / ValidateSessionInit
+// MUST call this helper on the non-nil error.
+func ClassifyAndIncInvalidFrame(logger *slog.Logger, m Metrics, err error) {
 	var ve *wtpv1.ValidationError
 	if !errors.As(err, &ve) {
 		// Rate-limited WARN: the counter increments unconditionally (the

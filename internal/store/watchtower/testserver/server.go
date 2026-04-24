@@ -3,11 +3,14 @@ package testserver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -226,6 +229,28 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 				return err
 			}
 		case *wtpv1.ClientMessage_EventBatch:
+			if h.s.opts.Metrics != nil {
+				// Receiver-side frame validation (spec §"Frame
+				// validation and forward compatibility"). On the
+				// server side this is the canonical live call site
+				// for transport.ClassifyAndIncInvalidFrame: the
+				// classifier stamps
+				// wtp_dropped_invalid_frame_total{reason=...}
+				// using the proto-typed Reason, and the stream is
+				// dropped so the client backs off and reconnects.
+				// Gated on opts.Metrics so the existing tests that
+				// don't wire metrics keep their pre-Task-22b
+				// behavior (placeholder empty EventBatches are
+				// tallied, not validated).
+				if verr := wtpv1.ValidateEventBatch(x.EventBatch); verr != nil {
+					logger := h.s.opts.Logger
+					if logger == nil {
+						logger = slog.Default()
+					}
+					transport.ClassifyAndIncInvalidFrame(logger, h.s.opts.Metrics, verr)
+					return fmt.Errorf("testserver: invalid inbound EventBatch: %w", verr)
+				}
+			}
 			_ = h.s.addBatch(x.EventBatch)
 			streamBatches++
 			if h.s.opts.DropAfterBatchN > 0 && streamBatches >= h.s.opts.DropAfterBatchN {

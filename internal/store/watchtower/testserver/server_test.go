@@ -1,13 +1,16 @@
 package testserver_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/testserver"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
@@ -408,3 +411,68 @@ func TestServer_PerStreamCountersResetOnReconnect(t *testing.T) {
 	}
 }
 
+
+// TestServer_InvalidEventBatchClassifiedAndStreamDropped is the live-
+// path acceptance for transport.ClassifyAndIncInvalidFrame (Task 22b
+// follow-up). The test wires a real *metrics.WTPMetrics into the
+// testserver and sends an EventBatch that fails wtpv1.ValidateEventBatch
+// (Compression=UNSPECIFIED). Expected: (1) the per-reason
+// wtp_dropped_invalid_frame_total counter increments under the typed
+// ReasonEventBatchCompressionUnspecified label, (2) the stream is
+// dropped (next Recv observes a non-nil error), (3) no WARN fires on
+// the typed path (only the defense-in-depth classifier_bypass path
+// WARNs, and the validator emitted a typed *ValidationError).
+func TestServer_InvalidEventBatchClassifiedAndStreamDropped(t *testing.T) {
+	metrics.ResetClassifierBypassLimiterForTest()
+	t.Cleanup(metrics.ResetClassifierBypassLimiterForTest)
+
+	c := metrics.New()
+	m := c.WTP()
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	srv := testserver.New(testserver.Options{
+		Metrics: m,
+		Logger:  logger,
+	})
+	defer srv.Close()
+
+	conn := dialOrFatal(t, srv)
+	defer conn.Close()
+
+	sendSessionInit(t, conn)
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv SessionAck: %v", err)
+	}
+
+	// Fails ValidateEventBatch: Compression is UNSPECIFIED.
+	if err := conn.Send(&wtpv1.ClientMessage{
+		Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: &wtpv1.EventBatch{
+			Compression: wtpv1.Compression_COMPRESSION_UNSPECIFIED,
+		}},
+	}); err != nil {
+		t.Fatalf("send invalid EventBatch: %v", err)
+	}
+
+	// Server drops the stream on validation failure — next Recv sees
+	// a non-nil error instead of a BatchAck.
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err == nil {
+		t.Fatal("Recv returned nil error; stream should have been dropped on invalid EventBatch")
+	}
+
+	if got := m.DroppedInvalidFrame(metrics.WTPInvalidFrameReasonEventBatchCompressionUnspec); got != 1 {
+		t.Errorf("DroppedInvalidFrame(event_batch_compression_unspecified) = %d, want 1", got)
+	}
+	if got := m.DroppedInvalidFrame(metrics.WTPInvalidFrameReasonClassifierBypass); got != 0 {
+		t.Errorf("DroppedInvalidFrame(classifier_bypass) = %d, want 0 (validator emitted typed *ValidationError — no bypass)", got)
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("expected no WARN on typed validator path, got:\n%s", logBuf.String())
+	}
+
+	// The server-side tally MUST skip the invalid batch (the validator
+	// returns before addBatch is called).
+	if got := len(srv.Batches()); got != 0 {
+		t.Errorf("Batches len=%d, want 0 (invalid batch must not be tallied)", got)
+	}
+}

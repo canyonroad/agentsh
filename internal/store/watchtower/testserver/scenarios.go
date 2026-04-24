@@ -37,7 +37,12 @@
 // consumer is _test.go code in the transport / store packages.
 package testserver
 
-import "time"
+import (
+	"log/slog"
+	"time"
+
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
+)
 
 // Options controls the server's behavior. Zero values use defaults
 // (SessionAck Accepted=true with watermark (0, 0), no drops, no
@@ -78,4 +83,21 @@ type Options struct {
 	// StateShutdown path in runConnecting.
 	RejectSession bool
 	RejectReason  string
+
+	// Metrics, if non-nil, enables inbound-EventBatch validation. Each
+	// received EventBatch runs through wtpv1.ValidateEventBatch; a
+	// non-nil validation error is routed through
+	// transport.ClassifyAndIncInvalidFrame (which bumps
+	// wtp_dropped_invalid_frame_total{reason=...}) and the stream is
+	// dropped — matching the spec §"Frame validation and forward
+	// compatibility" receiver contract. Nil keeps the pre-Task-22b
+	// behavior (no validation; EventBatches are tallied regardless of
+	// envelope correctness), which is what the existing tests expect
+	// since the Transport currently emits placeholder empty batches.
+	Metrics transport.Metrics
+
+	// Logger sinks the classifier's WARN output when the defense-in-
+	// depth path fires. Defaults to slog.Default() if nil. Only
+	// consulted when Metrics is non-nil.
+	Logger *slog.Logger
 }
