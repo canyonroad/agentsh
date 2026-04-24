@@ -21,16 +21,15 @@ import (
 func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 	init := t.sessionInit()
 	if err := wtpv1.ValidateSessionInit(init.GetSessionInit()); err != nil {
-		// Outbound self-check: the client detected a malformed
-		// SessionInit BEFORE putting it on the wire. Route through the
-		// canonical classifier so wtp_dropped_invalid_frame_total
-		// {reason=...} reflects the drop. The Reason label will be
-		// ReasonSessionInitAlgorithmUnspecified when the missing field
-		// is the algorithm enum — same typed Reason the server-side
-		// receiver would have stamped. Counting both directions under
-		// one metric gives operators a single panel for frame-validation
-		// drops regardless of which side caught them.
-		ClassifyAndIncInvalidFrame(t.opts.Logger, t.metrics, err)
+		// Outbound self-check: this is a local construction bug
+		// (Options misconfig, bookkeeping drift) — NOT a dropped
+		// peer frame, so it does NOT increment
+		// wtp_dropped_invalid_frame_total. That metric is scoped
+		// to inbound peer traffic per its help text; mixing local
+		// bugs into the same series would confuse alerting and
+		// triage. The error is surfaced via the returned state
+		// transition (StateShutdown); Transport.Err() carries the
+		// wrapped detail for the caller's diagnostic log.
 		return StateShutdown, fmt.Errorf("invalid SessionInit: %w", err)
 	}
 

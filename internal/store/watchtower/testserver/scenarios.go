@@ -84,20 +84,23 @@ type Options struct {
 	RejectSession bool
 	RejectReason  string
 
-	// Metrics, if non-nil, enables inbound-EventBatch validation. Each
-	// received EventBatch runs through wtpv1.ValidateEventBatch; a
-	// non-nil validation error is routed through
-	// transport.ClassifyAndIncInvalidFrame (which bumps
-	// wtp_dropped_invalid_frame_total{reason=...}) and the stream is
-	// dropped — matching the spec §"Frame validation and forward
-	// compatibility" receiver contract. Nil keeps the pre-Task-22b
-	// behavior (no validation; EventBatches are tallied regardless of
-	// envelope correctness), which is what the existing tests expect
-	// since the Transport currently emits placeholder empty batches.
+	// Metrics, if non-nil, receives counter increments for inbound
+	// EventBatch / SessionInit validation failures via
+	// transport.ClassifyAndIncInvalidFrame. Validation itself is
+	// UNCONDITIONAL — spec compliance is not coupled to observability
+	// wiring. When Metrics is nil the server routes classification to
+	// a local noop sink, so malformed SessionInit / EventBatch frames
+	// are STILL dropped (the stream is torn down and the batch is
+	// not tallied); only the metric side-effect is suppressed. Wire
+	// a real *internal/metrics.WTPMetrics when the test asserts on
+	// the wtp_dropped_invalid_frame_total{reason=...} counter or the
+	// defense-in-depth WARN.
 	Metrics transport.Metrics
 
-	// Logger sinks the classifier's WARN output when the defense-in-
-	// depth path fires. Defaults to slog.Default() if nil. Only
-	// consulted when Metrics is non-nil.
+	// Logger sinks the classifier's defense-in-depth WARN (emitted
+	// only when a non-*wtpv1.ValidationError reaches the classifier —
+	// SHOULD NEVER happen in production; if it does, the log lets
+	// operators identify the non-validator caller). Defaults to
+	// slog.Default() when nil.
 	Logger *slog.Logger
 }
