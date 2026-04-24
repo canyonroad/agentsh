@@ -3,12 +3,14 @@ package watchtower_test
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
@@ -46,10 +48,16 @@ func TestNew_QuarantinesOnSessionIDMismatch(t *testing.T) {
 	_ = w.Close()
 
 	// Now construct a Store with installation-B identity. New must
-	// quarantine the existing dir and reopen on a fresh WAL.
+	// quarantine the existing dir and reopen on a fresh WAL. Pass a
+	// real metrics.Collector so we can verify the quarantine path
+	// emits the wtp_wal_quarantine_total{reason} increment per Task
+	// 22a — without this assertion the metric wiring could regress
+	// silently to a TODO.
+	collector := metrics.New()
 	opts := validOpts(walDir)
 	opts.SessionID = "installation-B"
 	opts.KeyFingerprint = "sha256:k-A"
+	opts.Metrics = collector
 
 	s, err := watchtower.New(context.Background(), opts)
 	if err != nil {
@@ -80,6 +88,18 @@ func TestNew_QuarantinesOnSessionIDMismatch(t *testing.T) {
 	// The fresh WAL must have no meta.json yet (pre-ack cold start).
 	if _, err := wal.ReadMeta(walDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("post-quarantine ReadMeta: got %v, want ErrNotExist", err)
+	}
+
+	// End-to-end Task 22a wiring: scrape /metrics and assert the
+	// session_id_mismatch label flipped to 1. Without this assertion
+	// a regression that drops opts.Metrics.WTP().IncWALQuarantine
+	// from openWALWithIdentityRecovery would leave the metric
+	// permanently zero in production while the collector-only test
+	// in internal/metrics still passed.
+	rr := httptest.NewRecorder()
+	collector.Handler(metrics.HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if got := rr.Body.String(); !strings.Contains(got, `wtp_wal_quarantine_total{reason="session_id_mismatch"} 1`) {
+		t.Fatalf("expected wtp_wal_quarantine_total{reason=\"session_id_mismatch\"}=1 after quarantine\nbody:\n%s", got)
 	}
 }
 

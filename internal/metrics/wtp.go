@@ -425,7 +425,9 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 //	wtp_session_init_failures_total{reason}     transport (Phase 8)
 //	wtp_session_rotation_failures_total{reason} transport (Phase 8)
 //	wtp_wal_quarantine_total{reason}            store wal.Open recovery path
-//	                                            (already wired in Task 22 Step 3)
+//	                                            (wired in Task 22a R2 — see
+//	                                            openWALWithIdentityRecovery in
+//	                                            internal/store/watchtower/store.go)
 //
 // MIGRATION NOTE. This task also REMOVES the legacy
 // wtp_dropped_missing_chain_total counter (Task 3). Removal is
@@ -747,9 +749,10 @@ func (w *WTPMetrics) DroppedMapperFailure() uint64 {
 // *wtpv1.ValidationError and forward `WTPInvalidFrameReason(ve.Reason)`
 // when the validator emitted the error; for downstream paths
 // (decompression, defense-in-depth) use the dedicated metrics-only
-// constants directly. The current production callers (transport
-// receivers, AppendEvent) all observe this contract; new callers MUST
-// be reviewed against it.
+// constants directly. INTENDED callers (transport receivers via
+// Task 17 Step 4a, AppendEvent decompression path) are not yet
+// landed; new and existing callers MUST be reviewed against this
+// contract when wiring lands.
 //
 // The raw_reason is treated as internal under this contract — it is
 // safe to log verbatim per spec §"Operator runbook" and the invalid-

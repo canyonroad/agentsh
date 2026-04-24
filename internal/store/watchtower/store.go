@@ -187,12 +187,6 @@ type Store struct {
 // OTEL store convention so callers can write
 // `s, err := watchtower.New(setupCtx, opts)` without worrying that a
 // short-lived setupCtx will silently kill the transport.
-//
-// TODO(Task 22a): the WAL identity-mismatch recovery path needs to
-// emit metrics.IncWALQuarantine(reason). The metric does not exist in
-// the metrics package yet (Task 22a adds it); the recovery path is
-// implemented without the metric for now and the call site is
-// commented inline so Task 22a can wire it in.
 func New(ctx context.Context, opts Options) (*Store, error) {
 	opts.applyDefaults()
 	if err := opts.validate(); err != nil {
@@ -468,12 +462,9 @@ func (s *Store) Err() error {
 // openWALWithIdentityRecovery wraps wal.Open with the Task 14a
 // quarantine recovery path. On wal.ErrIdentityMismatch the stale dir
 // is renamed to "<dir>.quarantine.<unix-nanos>-<rand4hex>" and a fresh
-// WAL is opened against the now-empty Dir.
-//
-// TODO(Task 22a): the recovery path does NOT yet emit
-// metrics.IncWALQuarantine — the metric is added in Task 22a per the
-// plan. The reason classification is kept here as a string so Task
-// 22a can drop in the typed reason directly.
+// WAL is opened against the now-empty Dir. Each quarantine increments
+// metrics.IncWALQuarantine with the typed reason classified from
+// idErr.PersistedSessionID / PersistedKeyFingerprint.
 func openWALWithIdentityRecovery(opts Options) (*wal.WAL, error) {
 	w, err := wal.Open(wal.Options{
 		Dir:            opts.WALDir,
@@ -501,11 +492,14 @@ func openWALWithIdentityRecovery(opts Options) (*wal.WAL, error) {
 	}
 
 	reasonField := "unknown"
+	reason := metrics.WTPWALQuarantineReasonUnknown
 	switch {
 	case idErr.PersistedSessionID != opts.SessionID:
 		reasonField = "session_id_mismatch"
+		reason = metrics.WTPWALQuarantineReasonSessionIDMismatch
 	case idErr.PersistedKeyFingerprint != opts.KeyFingerprint:
 		reasonField = "key_fingerprint_mismatch"
+		reason = metrics.WTPWALQuarantineReasonKeyFingerprintMismatch
 	}
 	opts.Logger.Warn("wtp: WAL identity mismatch; quarantining stale WAL dir",
 		"persisted_session_id", idErr.PersistedSessionID,
@@ -515,8 +509,11 @@ func openWALWithIdentityRecovery(opts Options) (*wal.WAL, error) {
 		"reason", reasonField,
 		"quarantine_dir", quarantineDir,
 		"action", "renamed stale WAL dir; opening fresh WAL with new identity")
-	// TODO(Task 22a): opts.Metrics.WTP().IncWALQuarantine(reason) —
-	// metric not present in metrics package yet.
+	// Task 22a: increment the always-emit wtp_wal_quarantine_total
+	// {reason} family. opts.Metrics.WTP() is nil-safe so a Store
+	// constructed with Options.Metrics == nil (production wiring not
+	// yet plumbed, or a test deliberately using a no-op) is a no-op.
+	opts.Metrics.WTP().IncWALQuarantine(reason)
 
 	w, err = wal.Open(wal.Options{
 		Dir:            opts.WALDir,
