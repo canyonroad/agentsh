@@ -820,12 +820,13 @@ func (w *WTPMetrics) IncDroppedInvalidFrame(reason WTPInvalidFrameReason) {
 		return
 	}
 	if _, ok := wtpInvalidFrameReasonsValid[reason]; !ok {
-		// Emit the WARN only if the shared classifier_bypass rate-limiter
-		// allows; the metric counter ALWAYS increments regardless so the
-		// true volume is visible in /metrics even when the WARN is
-		// sampled. See wtp_ratelimit.go for why the limiter is shared
-		// with the receiver-side defense-in-depth WARN path.
-		if AllowClassifierBypassWARN() {
+		// Emit the WARN only if the metrics-side per-path rate-limiter
+		// allows; the metric counter ALWAYS increments regardless so
+		// the true volume is visible in /metrics even when the WARN is
+		// sampled. The receiver-side defense-in-depth WARN has its OWN
+		// per-path bucket — see wtp_ratelimit.go for why the two paths
+		// are independent (non-starvation guarantee).
+		if AllowMetricsClassifierBypassWARN() {
 			slog.Warn("invalid invalid-frame reason label",
 				slog.String("raw_reason", string(reason)),
 				slog.String("reason", string(WTPInvalidFrameReasonClassifierBypass)),

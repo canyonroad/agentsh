@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"golang.org/x/time/rate"
@@ -21,14 +22,16 @@ type Metrics interface {
 	IncAnomalousAck(reason string)
 	IncResendNeeded()
 	IncAckRegressionLoss()
+	IncDroppedInvalidFrame(reason metrics.WTPInvalidFrameReason)
 }
 
 type noopMetrics struct{}
 
-func (noopMetrics) SetAckHighWatermark(int64)  {}
-func (noopMetrics) IncAnomalousAck(string)     {}
-func (noopMetrics) IncResendNeeded()           {}
-func (noopMetrics) IncAckRegressionLoss()      {}
+func (noopMetrics) SetAckHighWatermark(int64)                             {}
+func (noopMetrics) IncAnomalousAck(string)                                {}
+func (noopMetrics) IncResendNeeded()                                      {}
+func (noopMetrics) IncAckRegressionLoss()                                 {}
+func (noopMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {}
 
 // AckTuple is the persisted (gen, seq) ack pair seeded from wal.Meta on
 // cold start. Present=false means the WAL has never recorded an ack

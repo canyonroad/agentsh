@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"golang.org/x/time/rate"
@@ -21,16 +22,22 @@ import (
 // assertion. Mirrors the production *internal/metrics.WTPMetrics surface
 // the Task 22a/22b wiring will satisfy once those tasks land.
 type fakeMetrics struct {
-	ackHWMs              []int64
-	anomalousAckReasons  []string
-	resendNeeded         int
-	ackRegressionLoss    int
+	ackHWMs                    []int64
+	anomalousAckReasons        []string
+	resendNeeded               int
+	ackRegressionLoss          int
+	droppedInvalidFrameReasons []metrics.WTPInvalidFrameReason
 }
 
-func (f *fakeMetrics) SetAckHighWatermark(seq int64)   { f.ackHWMs = append(f.ackHWMs, seq) }
-func (f *fakeMetrics) IncAnomalousAck(reason string)   { f.anomalousAckReasons = append(f.anomalousAckReasons, reason) }
-func (f *fakeMetrics) IncResendNeeded()                { f.resendNeeded++ }
-func (f *fakeMetrics) IncAckRegressionLoss()           { f.ackRegressionLoss++ }
+func (f *fakeMetrics) SetAckHighWatermark(seq int64) { f.ackHWMs = append(f.ackHWMs, seq) }
+func (f *fakeMetrics) IncAnomalousAck(reason string) {
+	f.anomalousAckReasons = append(f.anomalousAckReasons, reason)
+}
+func (f *fakeMetrics) IncResendNeeded()      { f.resendNeeded++ }
+func (f *fakeMetrics) IncAckRegressionLoss() { f.ackRegressionLoss++ }
+func (f *fakeMetrics) IncDroppedInvalidFrame(reason metrics.WTPInvalidFrameReason) {
+	f.droppedInvalidFrameReasons = append(f.droppedInvalidFrameReasons, reason)
+}
 
 // logEntry decodes a single JSON-formatted slog record.
 type logEntry struct {

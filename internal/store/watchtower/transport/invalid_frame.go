@@ -32,16 +32,16 @@ import (
 // *ValidationError, so the classifier_bypass branch SHOULD never trigger
 // in production — any non-zero increment is a local-side caller bug
 // (non-validator error reached the receiver-side classifier).
-func classifyAndIncInvalidFrame(logger *slog.Logger, m *metrics.WTPMetrics, err error) {
+func classifyAndIncInvalidFrame(logger *slog.Logger, m Metrics, err error) {
 	var ve *wtpv1.ValidationError
 	if !errors.As(err, &ve) {
 		// Rate-limited WARN: the counter increments unconditionally (the
 		// metric is the canonical volume signal) but the WARN is sampled
-		// by the shared classifier_bypass limiter in internal/metrics so
-		// a hot-path bug cannot flood logs. The metrics-side invalid-
-		// label WARN in IncDroppedInvalidFrame draws from the same
-		// bucket — total WARN volume across both paths is bounded.
-		if metrics.AllowClassifierBypassWARN() {
+		// by the receiver-side classifier_bypass limiter so a hot-path
+		// bug cannot flood logs. The metrics-side invalid-label WARN in
+		// IncDroppedInvalidFrame has its OWN limiter — per-path budgets
+		// prevent one path from starving the other.
+		if metrics.AllowReceiverClassifierBypassWARN() {
 			logger.Warn("non-typed frame validation error",
 				slog.String("err_type", fmt.Sprintf("%T", err)),
 				slog.String("reason", string(metrics.WTPInvalidFrameReasonClassifierBypass)))

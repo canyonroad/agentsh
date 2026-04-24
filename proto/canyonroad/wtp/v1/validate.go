@@ -169,6 +169,29 @@ func ValidateEventBatch(b *EventBatch) error {
 	}
 	switch body := b.Body.(type) {
 	case nil:
+		// Body is unset. In pure proto3 semantics this can mean one of
+		// two things:
+		//   (a) the peer genuinely did not populate the body oneof, OR
+		//   (b) the peer populated a body oneof arm using a tag number
+		//       the client's proto revision does not know — the unknown
+		//       arm ends up in the message's unknown-field set and Body
+		//       stays nil.
+		// Case (b) is a schema-drift signal the operator MUST see.
+		// Collapsing it under ReasonEventBatchBodyUnset would hide the
+		// drift under the normal "no payload" metric bucket. Detect
+		// case (b) by inspecting the unknown-field set: any non-empty
+		// unknown-field slice while Body is nil indicates the peer
+		// sent fields we don't understand (either a new oneof arm or
+		// a new sibling field at a tag number we don't know). Either
+		// way, ReasonUnknown is the correct bucket — operators paged
+		// on non-zero wtp_dropped_invalid_frame_total{reason="unknown"}
+		// investigate schema revisions, not missing-payload bugs.
+		if len(b.ProtoReflect().GetUnknown()) > 0 {
+			return &ValidationError{
+				Reason: ReasonUnknown,
+				Inner:  fmt.Errorf("%w: body unset but peer sent unknown fields (schema drift)", ErrInvalidFrame),
+			}
+		}
 		return &ValidationError{
 			Reason: ReasonEventBatchBodyUnset,
 			Inner:  fmt.Errorf("%w: body unset", ErrInvalidFrame),
@@ -194,12 +217,15 @@ func ValidateEventBatch(b *EventBatch) error {
 			}
 		}
 	default:
-		// Forward-compat: a future protobuf revision that adds a new
-		// oneof arm without updating this switch surfaces as
-		// wtp_dropped_invalid_frame_total{reason="unknown"} downstream.
-		// The validator MUST return *ValidationError (NOT a bare
-		// fmt.Errorf) so the receiver-side errors.As classifier always
-		// succeeds.
+		// In-tree validator-vs-schema drift: a developer added a new
+		// oneof arm to wtp.proto, regenerated wtp.pb.go, but forgot to
+		// update this switch. The generated Body field now typed to the
+		// new arm lands here. Peer-driven schema drift does NOT reach
+		// this branch in real proto3 decoding — unknown peer arms stay
+		// in the unknown-field set and are caught in the `case nil:`
+		// branch above via the ProtoReflect().GetUnknown() check. The
+		// ReasonUnknown bucket is shared across both drift classes so
+		// operators see one reason regardless of where the drift lives.
 		return &ValidationError{
 			Reason: ReasonUnknown,
 			Inner:  fmt.Errorf("%w: unknown body oneof case", ErrInvalidFrame),
