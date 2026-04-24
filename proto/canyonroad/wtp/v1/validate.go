@@ -65,17 +65,27 @@ const (
 	// exceeds MaxCompressedPayloadBytes.
 	ReasonPayloadTooLarge ValidationReason = "payload_too_large"
 
-	// ReasonUnknown is the forward-compat reason returned when a new
-	// oneof discriminator is added to the proto schema before the
-	// validator switch is updated to classify it. The validator returns
-	// &ValidationError{Reason: ReasonUnknown, ...} — it MUST NOT fall
-	// back to a bare fmt.Errorf return. A non-zero
-	// wtp_dropped_invalid_frame_total{reason="unknown"} series is the
-	// operator-visible signal that a new validator failure class has
-	// shipped and the next maintenance cycle MUST extend the enum to
-	// classify it. This reason is RESERVED for the validator-emitted
-	// forward-compat case; the receiver-side defense-in-depth path uses
-	// the separate metrics-only "classifier_bypass" reason.
+	// ReasonUnknown is the schema-drift reason. It covers two
+	// failure classes that share one operator response ("investigate
+	// the proto schema delta"):
+	//   (i)  the VALIDATOR-VS-SCHEMA drift case: a developer added a
+	//        new oneof arm in wtp.proto, regenerated wtp.pb.go, but
+	//        forgot to update ValidateEventBatch's body switch. The
+	//        new Body arm lands on the switch `default:` branch.
+	//   (ii) the PEER-DRIFT-WITH-UNKNOWN-FIELDS case: the peer sent a
+	//        message that leaves Body unset AND contains unknown
+	//        top-level fields (any tag the client's proto does not
+	//        know). This fires regardless of whether the unknown
+	//        field was intended as a new body oneof arm or a new
+	//        sibling field — wire bytes alone cannot distinguish
+	//        those intents, and both point at the same remediation
+	//        (regenerate the client against the peer's schema).
+	// A non-zero wtp_dropped_invalid_frame_total{reason="unknown"}
+	// series is the operator-visible signal that schema drift has
+	// landed somewhere in the pipeline. The "unknown" reason is
+	// RESERVED for these two validator-adjacent drift classes; the
+	// receiver-side defense-in-depth path uses the separate metrics-
+	// only "classifier_bypass" reason.
 	ReasonUnknown ValidationReason = "unknown"
 )
 
@@ -169,23 +179,25 @@ func ValidateEventBatch(b *EventBatch) error {
 	}
 	switch body := b.Body.(type) {
 	case nil:
-		// Body is unset. In pure proto3 semantics this can mean one of
-		// two things:
-		//   (a) the peer genuinely did not populate the body oneof, OR
-		//   (b) the peer populated a body oneof arm using a tag number
-		//       the client's proto revision does not know — the unknown
-		//       arm ends up in the message's unknown-field set and Body
-		//       stays nil.
-		// Case (b) is a schema-drift signal the operator MUST see.
-		// Collapsing it under ReasonEventBatchBodyUnset would hide the
-		// drift under the normal "no payload" metric bucket. Detect
-		// case (b) by inspecting the unknown-field set: any non-empty
-		// unknown-field slice while Body is nil indicates the peer
-		// sent fields we don't understand (either a new oneof arm or
-		// a new sibling field at a tag number we don't know). Either
-		// way, ReasonUnknown is the correct bucket — operators paged
-		// on non-zero wtp_dropped_invalid_frame_total{reason="unknown"}
-		// investigate schema revisions, not missing-payload bugs.
+		// Body is unset. Two disjoint wire-level situations produce
+		// this state:
+		//   (a) the peer genuinely did not populate the body oneof
+		//       and sent no other unknown fields — a pure
+		//       missing-payload bug.
+		//   (b) the peer sent at least one top-level field at a tag
+		//       the client's proto does not recognise. Proto3 parks
+		//       unknown fields in the message's unknown-field set
+		//       and leaves Body == nil regardless of whether the
+		//       unknown field was intended as a new body oneof arm
+		//       or a new sibling field — wire bytes alone cannot
+		//       tell those apart, and both point at the same
+		//       remediation (regenerate the client against the
+		//       peer's schema).
+		// Collapsing case (b) under ReasonEventBatchBodyUnset would
+		// hide the drift under the generic missing-payload bucket,
+		// so we branch here: non-empty unknown-field set ⇒
+		// ReasonUnknown (schema drift); empty unknown-field set ⇒
+		// ReasonEventBatchBodyUnset (genuine missing payload).
 		if len(b.ProtoReflect().GetUnknown()) > 0 {
 			return &ValidationError{
 				Reason: ReasonUnknown,

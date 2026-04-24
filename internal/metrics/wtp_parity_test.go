@@ -30,14 +30,32 @@ import (
 // Adding a new reason in either package without the other will fail this
 // test with a precise actionable message.
 func TestWTPInvalidFrameReason_ParityWithValidator(t *testing.T) {
-	validatorAll := make(map[wtpv1.ValidationReason]struct{})
-	for _, r := range wtpv1.AllValidationReasons() {
-		validatorAll[r] = struct{}{}
+	// Per-package dedup guards. The cross-package length/set checks
+	// below would silently accept a same-value alias added to BOTH
+	// sides in lock-step (e.g., two metrics-side constants pointing
+	// at "payload_too_large" alongside two proto-side constants at
+	// the same string). Catch that class of drift up front by
+	// asserting each package's slice is already deduplicated before
+	// comparing across packages.
+	validatorSlice := wtpv1.AllValidationReasons()
+	validatorDedup := make(map[wtpv1.ValidationReason]struct{}, len(validatorSlice))
+	for _, r := range validatorSlice {
+		if _, dup := validatorDedup[r]; dup {
+			t.Errorf("wtpv1.AllValidationReasons() contains duplicate reason %q — aliases are forbidden (see proto/canyonroad/wtp/v1/validate.go)", r)
+		}
+		validatorDedup[r] = struct{}{}
 	}
-	metricsShared := make(map[metrics.WTPInvalidFrameReason]struct{})
-	for _, r := range metrics.ValidationReasons() {
-		metricsShared[r] = struct{}{}
+	metricsSlice := metrics.ValidationReasons()
+	metricsDedup := make(map[metrics.WTPInvalidFrameReason]struct{}, len(metricsSlice))
+	for _, r := range metricsSlice {
+		if _, dup := metricsDedup[r]; dup {
+			t.Errorf("metrics.ValidationReasons() contains duplicate reason %q — aliases are forbidden (see internal/metrics/wtp.go)", r)
+		}
+		metricsDedup[r] = struct{}{}
 	}
+
+	validatorAll := validatorDedup
+	metricsShared := metricsDedup
 
 	// Length equality catches alias duplication (multiple constants
 	// pointing at one string value) that a map-based dedupe would

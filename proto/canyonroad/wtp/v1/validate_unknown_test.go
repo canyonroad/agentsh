@@ -42,28 +42,34 @@ func TestValidateEventBatch_UnknownOneof_ReturnsReasonUnknown(t *testing.T) {
 	}
 }
 
-// TestValidateEventBatch_PeerUnknownOneof_ReturnsReasonUnknown simulates
-// the peer-driven forward-compat case: the peer's proto has a NEW body
-// oneof arm at a tag the client's proto doesn't know. Proto3 decoding
-// puts the unknown arm into the message's unknown-field set and leaves
-// Body == nil. The validator MUST classify this as ReasonUnknown (NOT
-// ReasonEventBatchBodyUnset) so operators see the schema-drift signal
-// instead of collapsing it under the generic "no payload" bucket.
-func TestValidateEventBatch_PeerUnknownOneof_ReturnsReasonUnknown(t *testing.T) {
+// TestValidateEventBatch_PeerUnknownFields_ReturnsReasonUnknown covers
+// the peer schema-drift case: the peer sent an EventBatch with Body
+// unset AND a top-level field at a tag number the client's proto does
+// not recognise. Proto3 decoding parks the unknown field in the
+// message's unknown-field set and leaves Body == nil. The validator
+// MUST classify this as ReasonUnknown (NOT ReasonEventBatchBodyUnset)
+// so operators see the schema-drift signal instead of collapsing it
+// under the generic missing-payload bucket. The wire bytes cannot tell
+// us whether the unknown field was intended as a new body oneof arm
+// or a new sibling field — and both point at the same remediation
+// (regenerate the client against the peer's schema), so ReasonUnknown
+// covers both per the doc comment on the constant.
+func TestValidateEventBatch_PeerUnknownFields_ReturnsReasonUnknown(t *testing.T) {
 	batch := &EventBatch{
 		Compression: Compression_COMPRESSION_NONE,
 	}
-	// Inject an unknown wire-format field at tag 999 (a tag number the
-	// client's proto does not know; in reality the server would have
-	// added this tag as a new oneof arm AND the client's proto would
-	// have deposited it here on decode).
+	// Inject an unknown wire-format field at tag 999 (a tag the client's
+	// proto does not know). This simulates either a new body oneof arm
+	// or a new unrelated sibling field on the peer's side — the
+	// validator's ReasonUnknown bucket covers both cases per the
+	// constant's doc comment.
 	raw := protowire.AppendTag(nil, 999, protowire.BytesType)
-	raw = protowire.AppendBytes(raw, []byte("peer-new-oneof-payload"))
+	raw = protowire.AppendBytes(raw, []byte("peer-unknown-field-payload"))
 	batch.ProtoReflect().SetUnknown(raw)
 
 	err := ValidateEventBatch(batch)
 	if err == nil {
-		t.Fatal("ValidateEventBatch returned nil for peer-unknown body oneof; expected *ValidationError")
+		t.Fatal("ValidateEventBatch returned nil for peer-unknown field; expected *ValidationError")
 	}
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
