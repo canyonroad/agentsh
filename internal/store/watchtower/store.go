@@ -161,6 +161,18 @@ type Store struct {
 	closeOnce sync.Once
 	closed    atomic.Bool
 	closeErr  error
+
+	// fatalLatched is set by AppendEvent when an ambiguous WAL failure
+	// or a terminal chain.Commit failure occurs. Once latched, every
+	// subsequent AppendEvent returns errFatalLatch without touching
+	// the WAL or the chain. atomic.Bool is sufficient — the latch is
+	// one-shot and no field other than the boolean is read back by
+	// isFatal.
+	fatalLatched atomic.Bool
+	// fatalErr carries the original cause of the latch for diagnostic
+	// logging via Err() / operator inspection. Guarded by the CAS in
+	// latchFatal so only the first latching call's error is stored.
+	fatalErr atomic.Value // error
 }
 
 // New constructs a Store, validates options, opens the WAL, wires the
