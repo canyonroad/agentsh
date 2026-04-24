@@ -1722,7 +1722,12 @@ audit:
 	}
 }
 
-// writeTempFile creates a temporary file in t.TempDir() and returns its path.
+// writeTempFile creates a temporary file in t.TempDir() and returns its path
+// in forward-slash form safe for embedding in double-quoted YAML strings.
+// Go's os package accepts forward slashes on every OS, so the filesystem
+// operations still locate the file, but the YAML parser no longer sees
+// backslash-escape sequences like "\U" (from "C:\Users\...") that trip
+// up the Windows runner with "did not find expected hexdecimal number".
 // Used by WTP tests to materialise TLS cert/key/chain key files referenced
 // from YAML fixtures.
 func writeTempFile(t *testing.T, name string) string {
@@ -1731,17 +1736,20 @@ func writeTempFile(t *testing.T, name string) string {
 	if err := os.WriteFile(p, []byte("placeholder"), 0o600); err != nil {
 		t.Fatalf("write %s: %v", p, err)
 	}
-	return p
+	return filepath.ToSlash(p)
 }
 
 // validWatchtowerYAML returns a YAML fragment with all required WTP fields
 // populated using files that actually exist on disk. The state_dir points at
 // a writable temp directory. Callers may override individual fields with
 // extra YAML appended after the returned base via the overrides parameter.
+//
+// All embedded paths are converted to forward-slash form so the resulting
+// YAML parses cleanly on Windows (see writeTempFile docstring).
 func validWatchtowerYAML(t *testing.T, enabled bool, overrides string) string {
 	t.Helper()
 	chainKey := writeTempFile(t, "wtp.key")
-	stateDir := filepath.Join(t.TempDir(), "wtp-state")
+	stateDir := filepath.ToSlash(filepath.Join(t.TempDir(), "wtp-state"))
 	return "audit:\n  watchtower:\n    enabled: " +
 		map[bool]string{true: "true", false: "false"}[enabled] + "\n" +
 		"    endpoint: \"wtp.example.com:9443\"\n" +
@@ -1797,7 +1805,7 @@ func TestAuditWatchtowerConfig_StateDirNotWritable(t *testing.T) {
 	}
 
 	chainKey := writeTempFile(t, "wtp.key")
-	stateDir := filepath.Join(parent, "wtp-state")
+	stateDir := filepath.ToSlash(filepath.Join(parent, "wtp-state"))
 	yaml := "audit:\n  watchtower:\n    enabled: true\n" +
 		"    endpoint: \"wtp.example.com:9443\"\n" +
 		"    state_dir: \"" + stateDir + "\"\n" +
@@ -1815,7 +1823,7 @@ func TestAuditWatchtowerConfig_StateDirNotWritable(t *testing.T) {
 }
 
 func TestAuditWatchtowerConfig_TLSFileMissing(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "does-not-exist.pem")
+	missing := filepath.ToSlash(filepath.Join(t.TempDir(), "does-not-exist.pem"))
 	yaml := validWatchtowerYAML(t, true, "    tls:\n      ca_cert_file: \""+missing+"\"\n")
 	_, err := loadFromString(t, yaml)
 	if err == nil {
@@ -1829,7 +1837,7 @@ func TestAuditWatchtowerConfig_TLSFileMissing(t *testing.T) {
 func TestAuditWatchtowerConfig_ClientCertAuthRequiresCertAndKey(t *testing.T) {
 	// client_cert_auth: true with no cert/key under tls.* must fail.
 	chainKey := writeTempFile(t, "wtp.key")
-	stateDir := filepath.Join(t.TempDir(), "wtp-state")
+	stateDir := filepath.ToSlash(filepath.Join(t.TempDir(), "wtp-state"))
 	yaml := "audit:\n  watchtower:\n    enabled: true\n" +
 		"    endpoint: \"wtp.example.com:9443\"\n" +
 		"    state_dir: \"" + stateDir + "\"\n" +
@@ -1904,7 +1912,7 @@ func TestAuditWatchtowerConfig_FilterMinRiskLevelEnum(t *testing.T) {
 }
 
 func TestAuditWatchtowerConfig_KMSSourcesMutualExclusion(t *testing.T) {
-	stateDir := filepath.Join(t.TempDir(), "wtp-state")
+	stateDir := filepath.ToSlash(filepath.Join(t.TempDir(), "wtp-state"))
 	chainKey := writeTempFile(t, "wtp.key")
 
 	t.Run("none", func(t *testing.T) {
@@ -2011,7 +2019,7 @@ func TestAuditWatchtowerConfig_KeySourceSelectorMismatch(t *testing.T) {
 	// otherwise the daemon (Task 27) would honor key_source and build a
 	// provider that ignores the populated block, silently sending events
 	// elsewhere.
-	stateDir := filepath.Join(t.TempDir(), "wtp-state")
+	stateDir := filepath.ToSlash(filepath.Join(t.TempDir(), "wtp-state"))
 	yaml := "audit:\n  watchtower:\n    enabled: true\n" +
 		"    endpoint: \"wtp.example.com:9443\"\n" +
 		"    state_dir: \"" + stateDir + "\"\n" +
@@ -2113,7 +2121,7 @@ func TestAuditWatchtowerConfig_NoFilesystemArtifactsOnGateRejection(t *testing.T
 	// every dry-run config check pollutes the user's filesystem. (If the
 	// state_dir already existed before validation, we leave it alone.)
 	stateRoot := t.TempDir()
-	stateDir := filepath.Join(stateRoot, "fresh-wtp-state")
+	stateDir := filepath.ToSlash(filepath.Join(stateRoot, "fresh-wtp-state"))
 	chainKey := writeTempFile(t, "wtp.key")
 
 	yaml := "audit:\n  watchtower:\n    enabled: true\n" +
