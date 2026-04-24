@@ -34,10 +34,33 @@ const (
 	// WTPReconnectReasonServerUpdateUnsupported and
 	// WTPReconnectReasonRecvUnknownFrame are the Task 22c dedicated
 	// labels for the fail-closed recv branches that previously
-	// collapsed onto WTPReconnectReasonUnknown. The labels exist at
-	// zero from the moment Task 22c lands; emitter call sites land
-	// in Tasks 18/19 (recv-multiplexer fail-closed paths) and the
-	// structured WARN logging lands in Task 22d.
+	// would have collapsed onto WTPReconnectReasonUnknown. The
+	// labels exist at zero from the moment Task 22c lands; emitter
+	// call sites land in Tasks 18/19 (recv-multiplexer fail-closed
+	// paths) and the structured WARN logging lands in Task 22d.
+	//
+	// BACKWARDS-COMPATIBILITY for the `unknown` label. Because no
+	// non-test IncReconnects call site exists today for either of
+	// these branches (verified at commit 0b28f74e), there is no
+	// production traffic to "shift" — the labels move from
+	// non-existent to live in a single transition once Tasks 18/19
+	// land. The `unknown` label is RESERVED for truly unmapped
+	// reconnect causes after this task; if a future fail-closed
+	// branch is added without a dedicated label it should be
+	// treated as a bug, not as expected unknown-bucket growth.
+	//
+	// MONITORING-ARTIFACT PREREQUISITE for the Tasks 18/19 emitter
+	// wiring. Operator-facing dashboards/alerts that filter on
+	// wtp_reconnects_total{reason=~...} will see TWO new series flip
+	// from zero to non-zero the moment the emitter call sites land.
+	// Per Task 22c Step 5 the operator team must update those
+	// artifacts BEFORE Tasks 18/19 ship — without that update,
+	// alerts keyed on a `reason=~"unknown"`-only filter would
+	// undercount the new branches and dashboards would silently miss
+	// them. The gate is enforced by Step 5's named-owner sign-off in
+	// docs/superpowers/operator/wtp-monitoring-migration.md, NOT by
+	// a runtime check; Tasks 18/19 must verify Step 5 sign-off
+	// before landing their emitter wiring.
 	WTPReconnectReasonServerUpdateUnsupported WTPReconnectReason = "server_update_unsupported"
 	WTPReconnectReasonRecvUnknownFrame        WTPReconnectReason = "recv_unknown_frame"
 	WTPReconnectReasonUnknown                 WTPReconnectReason = "unknown"

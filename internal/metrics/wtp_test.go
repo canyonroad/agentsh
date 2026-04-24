@@ -639,7 +639,10 @@ func TestWTPMetrics_WALQuarantineAlwaysEmittedAllReasons(t *testing.T) {
 // is the Task 22c regression guard for the two new fail-closed-recv
 // reason labels (server_update_unsupported, recv_unknown_frame).
 // Mirrors the Task 3 always-emit pattern: zero-init at registration,
-// then increment, then assert the targeted label flips to 1.
+// then increment, then assert (a) the targeted labels flip to 1 AND
+// (b) every other reason in the canonical set stays at 0 (cross-
+// series mutation guard — without (b) a future bug that mis-keys an
+// increment under another label would still pass the test).
 //
 // Tests the SCHEMA only; emitter call sites in transport land in
 // Tasks 18/19, and structured WARN logging lands in Task 22d. Step 4
@@ -669,6 +672,28 @@ func TestWTPMetrics_ReconnectsAlwaysEmittedIncludesFailClosedControlFrameLabels(
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected %q after IncReconnects\nbody:\n%s", want, body)
+		}
+	}
+
+	// Cross-series mutation guard: every OTHER reason must still
+	// emit at zero. Without this assertion a regression that mis-
+	// keyed the new-label increment under another label (e.g. a
+	// switch fallthrough that bumped `unknown` instead of
+	// `server_update_unsupported`) would still pass the increment
+	// assertions above.
+	otherReasons := []string{
+		"ack_timeout",
+		"dial_failed",
+		"heartbeat_timeout",
+		"send_error",
+		"server_goaway",
+		"stream_recv_error",
+		"unknown",
+	}
+	for _, reason := range otherReasons {
+		want := fmt.Sprintf(`wtp_reconnects_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("expected non-targeted reason %q to remain at 0; cross-series mutation suspected\nbody:\n%s", reason, body)
 		}
 	}
 }
