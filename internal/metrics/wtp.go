@@ -57,10 +57,25 @@ const (
 	// artifacts BEFORE Tasks 18/19 ship — without that update,
 	// alerts keyed on a `reason=~"unknown"`-only filter would
 	// undercount the new branches and dashboards would silently miss
-	// them. The gate is enforced by Step 5's named-owner sign-off in
-	// docs/superpowers/operator/wtp-monitoring-migration.md, NOT by
-	// a runtime check; Tasks 18/19 must verify Step 5 sign-off
-	// before landing their emitter wiring.
+	// them. The gate is enforced procedurally:
+	//
+	//   - The authoritative monitoring inventory + named-owner
+	//     sign-off lives in
+	//     `docs/superpowers/operator/wtp-monitoring-migration.md`,
+	//     which is CREATED OR UPDATED by Task 27a Step 1a (the file
+	//     does not yet exist in this tree at the time Task 22c
+	//     ships — Task 27a creates it).
+	//   - Task 18 and Task 19 each carry an explicit "Prerequisite
+	//     (rollout-order gate)" line in the implementation plan
+	//     naming this dependency. The gate is doc-enforced (plan
+	//     execution) NOT runtime-enforced (no CI/build check), so
+	//     implementers of Tasks 18/19 are responsible for verifying
+	//     Step 5 sign-off before landing emitter wiring.
+	//
+	// If Task 27a's monitoring-migration artifact has not yet
+	// landed when Tasks 18/19 are scheduled, treat that as the gate
+	// being unsatisfied: either land the artifact first (pulled
+	// forward from Task 27a) or block the emitter wiring.
 	WTPReconnectReasonServerUpdateUnsupported WTPReconnectReason = "server_update_unsupported"
 	WTPReconnectReasonRecvUnknownFrame        WTPReconnectReason = "recv_unknown_frame"
 	WTPReconnectReasonUnknown                 WTPReconnectReason = "unknown"

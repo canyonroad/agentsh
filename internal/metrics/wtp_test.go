@@ -681,17 +681,22 @@ func TestWTPMetrics_ReconnectsAlwaysEmittedIncludesFailClosedControlFrameLabels(
 	// switch fallthrough that bumped `unknown` instead of
 	// `server_update_unsupported`) would still pass the increment
 	// assertions above.
-	otherReasons := []string{
-		"ack_timeout",
-		"dial_failed",
-		"heartbeat_timeout",
-		"send_error",
-		"server_goaway",
-		"stream_recv_error",
-		"unknown",
+	//
+	// The "other" set is derived from the canonical
+	// wtpReconnectReasonsEmitOrder slice (this test file lives in
+	// `package metrics`, so the unexported slice is in scope) so a
+	// future reconnect-reason addition automatically extends the
+	// guard — without this, a hardcoded list would silently miss
+	// the new reason.
+	targeted := map[WTPReconnectReason]struct{}{
+		WTPReconnectReasonServerUpdateUnsupported: {},
+		WTPReconnectReasonRecvUnknownFrame:        {},
 	}
-	for _, reason := range otherReasons {
-		want := fmt.Sprintf(`wtp_reconnects_total{reason=%q} 0`, reason)
+	for _, reason := range wtpReconnectReasonsEmitOrder {
+		if _, ok := targeted[reason]; ok {
+			continue
+		}
+		want := fmt.Sprintf(`wtp_reconnects_total{reason=%q} 0`, string(reason))
 		if !strings.Contains(body, want) {
 			t.Errorf("expected non-targeted reason %q to remain at 0; cross-series mutation suspected\nbody:\n%s", reason, body)
 		}
