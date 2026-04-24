@@ -186,6 +186,15 @@ type Store struct {
 	// (Compute, Append, Commit) triple is atomic with respect to
 	// other appenders.
 	appendMu sync.Mutex
+
+	// contextDigest is the session-bound chain.ComputeContextDigest
+	// value stamped into every IntegrityRecord.ContextDigest. Computed
+	// once in New() from the Options-provided SessionContext fields
+	// (AgentID, SessionID, KeyFingerprint, HMACAlgorithm, format
+	// version) and held for the lifetime of the Store. Session rotation
+	// / key rollover re-computation is follow-up work; today a Store
+	// binds exactly one context digest.
+	contextDigest string
 }
 
 // New constructs a Store, validates options, opens the WAL, wires the
@@ -281,14 +290,38 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	// bg goroutine — see the lifecycle docstring above.
 	runCtx, runCancel := context.WithCancel(context.Background())
 
+	// Compute the session-bound context digest once at construction.
+	// AppendEvent stamps this value into every IntegrityRecord so
+	// records are tied to the negotiated session and key-rotation
+	// boundary (spec §6.4.6). The AgentVersion / OCSFVersion fields
+	// default to empty until wired through Options; the digest
+	// remains stable across appends because all inputs are bound
+	// here.
+	algo := opts.HMACAlgorithm
+	if algo == "" {
+		algo = "hmac-sha256"
+	}
+	ctxDigest, err := chain.ComputeContextDigest(chain.SessionContext{
+		SessionID:      opts.SessionID,
+		AgentID:        opts.AgentID,
+		FormatVersion:  uint32(audit.IntegrityFormatVersion),
+		Algorithm:      algo,
+		KeyFingerprint: opts.KeyFingerprint,
+	})
+	if err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("chain.ComputeContextDigest: %w", err)
+	}
+
 	s := &Store{
-		opts:      opts,
-		w:         w,
-		tr:        tr,
-		sink:      sinkChain,
-		metrics:   mw,
-		runCancel: runCancel,
-		runDone:   make(chan error, 1),
+		opts:          opts,
+		w:             w,
+		tr:            tr,
+		sink:          sinkChain,
+		metrics:       mw,
+		runCancel:     runCancel,
+		runDone:       make(chan error, 1),
+		contextDigest: ctxDigest,
 	}
 
 	go func() {
