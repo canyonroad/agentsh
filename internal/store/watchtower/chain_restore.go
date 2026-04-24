@@ -30,32 +30,35 @@ import (
 // ephemeral chain yields the post-record state (Generation,
 // PrevHash=entry_hash). Restore that state onto the production chain.
 //
-// No-op when the WAL is empty (HighGeneration() == 0 AND no data in
-// any generation) — the fresh-chain default is already correct.
+// Generation 0 IS in scope for the scan: the common "no generation
+// roll has happened yet" case has every record in gen=0, and an early-
+// restart before the first roll MUST still restore continuity.
+//
+// Loss markers (wal.RecordLoss) are ignored when selecting the last
+// record to replay: loss markers advance the WAL tail but do NOT
+// advance the audit chain, so restoring off a trailing loss marker
+// would fall back to the fresh-chain default and break continuity
+// after any overflow/CRC-loss boundary.
 func restoreChainFromWAL(innerChain *audit.SinkChain, w *wal.WAL, opts Options) error {
 	lastGen := w.HighGeneration()
-	if lastGen == 0 && w.HighWatermark() == 0 {
-		// Empty WAL; nothing to restore.
-		return nil
-	}
 
-	// Walk down from the highest generation to the lowest to find the
-	// most recent generation that actually carries data records
+	// Scan from the highest generation DOWN TO AND INCLUDING gen=0
+	// to find the most recent generation that carries data records
 	// (header-only or loss-only segments don't advance the chain).
-	// The loop bounds are small in practice — generation rolls are
-	// rare events and WAL GC drops very old ones.
+	// Using int32 + signed comparison lets us probe gen=0 and stop
+	// without underflow.
 	var (
 		targetGen uint32
 		targetSeq uint64
 		found     bool
 	)
-	for g := lastGen; g > 0; g-- {
-		seq, ok, err := w.WrittenDataHighWater(g)
+	for g := int64(lastGen); g >= 0; g-- {
+		seq, ok, err := w.WrittenDataHighWater(uint32(g))
 		if err != nil {
 			return fmt.Errorf("WrittenDataHighWater(gen=%d): %w", g, err)
 		}
 		if ok {
-			targetGen, targetSeq, found = g, seq, true
+			targetGen, targetSeq, found = uint32(g), seq, true
 			break
 		}
 	}
@@ -71,9 +74,13 @@ func restoreChainFromWAL(innerChain *audit.SinkChain, w *wal.WAL, opts Options) 
 	}
 	defer rdr.Close()
 
-	// Advance to the last data record at targetSeq. Loss markers and
-	// later records (if any) are skipped — we want the
-	// highest-(gen,seq) data record.
+	// Advance to the last data record at/after targetSeq. Loss
+	// markers (wal.RecordLoss) advance the WAL tail but do NOT
+	// advance the audit chain, so they MUST be ignored when
+	// selecting the restore source — otherwise the unmarshal below
+	// would see an empty/non-event payload and silently fall back
+	// to the fresh-chain default, losing continuity across any
+	// overflow / CRC-loss boundary.
 	var lastRec *wal.Record
 	for {
 		rec, err := rdr.Next()
@@ -82,6 +89,9 @@ func restoreChainFromWAL(innerChain *audit.SinkChain, w *wal.WAL, opts Options) 
 		}
 		if err != nil {
 			return fmt.Errorf("wal.Reader.Next: %w", err)
+		}
+		if rec.Kind != wal.RecordData {
+			continue
 		}
 		recCopy := rec
 		lastRec = &recCopy
