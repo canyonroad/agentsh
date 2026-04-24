@@ -32,6 +32,14 @@ type Server struct {
 
 	mu      sync.Mutex
 	batches []*wtpv1.EventBatch
+	// firstSessionInit captures the SessionInit from the FIRST accepted
+	// stream. Nil until Stream handles its first SessionInit. Tests use
+	// WaitForFirstSessionInit to block until the handshake has landed.
+	firstSessionInit *wtpv1.SessionInit
+	// sessionInitReady is closed when firstSessionInit is set. A fresh
+	// Server starts with a live channel; Close leaves it open (nil
+	// waiters will surface via the WaitForFirstSessionInit deadline).
+	sessionInitReady chan struct{}
 
 	closed atomic.Bool
 }
@@ -42,9 +50,10 @@ type Server struct {
 // listener panics (the bufconn.Listen constructor does not fail).
 func New(opts Options) *Server {
 	s := &Server{
-		opts:     opts,
-		listener: bufconn.Listen(bufSize),
-		grpcSrv:  grpc.NewServer(),
+		opts:             opts,
+		listener:         bufconn.Listen(bufSize),
+		grpcSrv:          grpc.NewServer(),
+		sessionInitReady: make(chan struct{}),
 	}
 	wtpv1.RegisterWatchtowerServer(s.grpcSrv, s.handler())
 	go func() { _ = s.grpcSrv.Serve(s.listener) }()
@@ -164,6 +173,26 @@ type srvHandler struct {
 
 func (s *Server) handler() *srvHandler { return &srvHandler{s: s} }
 
+// WaitForFirstSessionInit blocks until the first accepted stream has
+// processed its SessionInit, then returns a deep-copied snapshot of
+// that frame. On timeout returns (nil, ctx-deadline-style error). The
+// returned *SessionInit is isolated from subsequent mutation by the
+// handler goroutine (proto.Clone at capture time).
+//
+// Roborev #5945 High #1 test seam: handshake tests inspect Algorithm
+// / KeyFingerprint / ContextDigest on the returned frame to confirm
+// watchtower.New wired the configured values through transport.Options.
+func (s *Server) WaitForFirstSessionInit(timeout time.Duration) (*wtpv1.SessionInit, error) {
+	select {
+	case <-s.sessionInitReady:
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return proto.Clone(s.firstSessionInit).(*wtpv1.SessionInit), nil
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("testserver: no SessionInit received within %s", timeout)
+	}
+}
+
 // classifierMetrics returns the metrics sink the frame-validation
 // classifier should stamp counters into. Defaults to a noop sink when
 // opts.Metrics is nil so validation runs unconditionally (spec
@@ -243,6 +272,17 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 				transport.ClassifyAndIncInvalidFrame(h.s.classifierLogger(), h.s.classifierMetrics(), verr)
 				return fmt.Errorf("testserver: invalid inbound SessionInit: %w", verr)
 			}
+			// Capture the first accepted SessionInit so handshake
+			// tests can assert the client's advertised identity
+			// metadata. Deep-clone to isolate the test from any
+			// later mutation, and signal the readiness channel
+			// exactly once.
+			h.s.mu.Lock()
+			if h.s.firstSessionInit == nil {
+				h.s.firstSessionInit = proto.Clone(x.SessionInit).(*wtpv1.SessionInit)
+				close(h.s.sessionInitReady)
+			}
+			h.s.mu.Unlock()
 			if h.s.opts.AckDelay > 0 {
 				select {
 				case <-stream.Context().Done():

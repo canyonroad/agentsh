@@ -411,3 +411,175 @@ func TestStore_AppendEvent_ConcurrentCallersDoNotLatchFatal(t *testing.T) {
 		t.Errorf("Store.Err() = %v after concurrent appends; store should not be latched fatal", err)
 	}
 }
+
+// TestStore_RestartRestoresChainState regresses roborev #5945 High #2:
+// after a clean restart, the next AppendEvent MUST chain to the last
+// committed record's entry hash — NOT reset prev_hash to "". Without
+// the restore path in watchtower.New, the new chain instance would
+// begin at prev_hash="" even though the WAL carries earlier records,
+// breaking cross-restart integrity continuity.
+func TestStore_RestartRestoresChainState(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	newOpts := func() watchtower.Options {
+		return watchtower.Options{
+			WALDir:          dir,
+			Mapper:          compact.StubMapper{},
+			Allocator:       audit.NewSequenceAllocator(),
+			AgentID:         "a",
+			SessionID:       "s",
+			KeyFingerprint:  "sha256:deadbeef",
+			HMACKeyID:       "k1",
+			HMACSecret:      bytes.Repeat([]byte("a"), 32),
+			HMACAlgorithm:   "hmac-sha256",
+			BatchMaxRecords: 8,
+			BatchMaxBytes:   8 * 1024,
+			BatchMaxAge:     50 * time.Millisecond,
+			AllowStubMapper: true,
+			Dialer:          srv.DialerFor(),
+		}
+	}
+
+	// Phase 1: first Store writes seqs 1+2 in gen=1, then Closes.
+	s1, err := watchtower.New(context.Background(), newOpts())
+	if err != nil {
+		t.Fatalf("first watchtower.New: %v", err)
+	}
+	if err := s1.AppendEvent(context.Background(), mkEvent(1, 1)); err != nil {
+		t.Fatalf("seq=1 AppendEvent: %v", err)
+	}
+	if err := s1.AppendEvent(context.Background(), mkEvent(2, 1)); err != nil {
+		t.Fatalf("seq=2 AppendEvent: %v", err)
+	}
+	prevBeforeClose := s1.PeekPrevHash()
+	if prevBeforeClose == "" {
+		t.Fatal("pre-close PeekPrevHash is empty; chain did not advance")
+	}
+	if err := s1.Close(); err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	// Phase 2: re-open the SAME WAL dir with a fresh Store. The
+	// chain restore path MUST re-derive the post-commit state from
+	// the last WAL record so PeekPrevHash matches what the first
+	// Store had at close.
+	s2, err := watchtower.New(context.Background(), newOpts())
+	if err != nil {
+		t.Fatalf("second watchtower.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	if got := s2.PeekPrevHash(); got != prevBeforeClose {
+		t.Fatalf("post-restart PeekPrevHash = %q, want %q (chain state not restored)", got, prevBeforeClose)
+	}
+
+	// Phase 3: append seq=3 in the same generation. Its stored
+	// IntegrityRecord.PrevHash MUST equal prevBeforeClose (the
+	// restored state), NOT "" — otherwise a verifier replaying the
+	// full WAL would see a broken chain link at the restart boundary.
+	if err := s2.AppendEvent(context.Background(), mkEvent(3, 1)); err != nil {
+		t.Fatalf("seq=3 AppendEvent: %v", err)
+	}
+	if err := s2.Close(); err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second Close: %v", err)
+	}
+
+	w, err := wal.Open(wal.Options{
+		Dir:            dir,
+		SegmentSize:    64 * 1024,
+		MaxTotalBytes:  1024 * 1024,
+		SyncMode:       wal.SyncImmediate,
+		SessionID:      "s",
+		KeyFingerprint: "sha256:deadbeef",
+	})
+	if err != nil {
+		t.Fatalf("wal.Open for readback: %v", err)
+	}
+	defer w.Close()
+
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 3})
+	if err != nil {
+		t.Fatalf("wal.NewReader(start=3): %v", err)
+	}
+	defer rdr.Close()
+	rec, err := rdr.Next()
+	if err != nil {
+		t.Fatalf("Reader.Next(seq=3): %v", err)
+	}
+	ce := &wtpv1.CompactEvent{}
+	if err := proto.Unmarshal(rec.Payload, ce); err != nil {
+		t.Fatalf("unmarshal seq=3: %v", err)
+	}
+	if got := ce.GetIntegrity().GetPrevHash(); got != prevBeforeClose {
+		t.Errorf("seq=3 IntegrityRecord.PrevHash = %q, want %q (chain restore failed)", got, prevBeforeClose)
+	}
+}
+
+// TestStore_TransportSessionInitUsesConfiguredAlgorithm regresses
+// roborev #5945 High #1: the transport's SessionInit frame MUST
+// advertise the same algorithm / key_fingerprint / context_digest the
+// Store chains its WAL records with. The test drives one AppendEvent
+// through an hmac-sha512 Store + testserver, then inspects the
+// SessionInit the server received for matching identity fields.
+func TestStore_TransportSessionInitUsesConfiguredAlgorithm(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	keyFP := "sha512:cafebabe"
+	opts := watchtower.Options{
+		WALDir:          dir,
+		Mapper:          compact.StubMapper{},
+		Allocator:       audit.NewSequenceAllocator(),
+		AgentID:         "agent-x",
+		SessionID:       "session-y",
+		KeyFingerprint:  keyFP,
+		HMACKeyID:       "k1",
+		HMACSecret:      bytes.Repeat([]byte("b"), 64), // sha512 wants 64 bytes
+		HMACAlgorithm:   "hmac-sha512",
+		BatchMaxRecords: 8,
+		BatchMaxBytes:   8 * 1024,
+		BatchMaxAge:     50 * time.Millisecond,
+		AllowStubMapper: true,
+		Dialer:          srv.DialerFor(),
+	}
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("watchtower.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Wait up to 2s for the transport to complete its SessionInit
+	// handshake with the testserver. The testserver records the
+	// accepting stream's SessionInit on WaitForFirstSessionInit.
+	init, err := srv.WaitForFirstSessionInit(2 * time.Second)
+	if err != nil {
+		t.Fatalf("WaitForFirstSessionInit: %v", err)
+	}
+
+	if got := init.GetAlgorithm(); got != wtpv1.HashAlgorithm_HASH_ALGORITHM_HMAC_SHA512 {
+		t.Errorf("SessionInit.Algorithm = %v, want HMAC_SHA512 (configured via Options.HMACAlgorithm)", got)
+	}
+	if got := init.GetKeyFingerprint(); got != keyFP {
+		t.Errorf("SessionInit.KeyFingerprint = %q, want %q", got, keyFP)
+	}
+	wantCtx, err := chain.ComputeContextDigest(chain.SessionContext{
+		SessionID:      opts.SessionID,
+		AgentID:        opts.AgentID,
+		FormatVersion:  uint32(audit.IntegrityFormatVersion),
+		Algorithm:      opts.HMACAlgorithm,
+		KeyFingerprint: opts.KeyFingerprint,
+	})
+	if err != nil {
+		t.Fatalf("ComputeContextDigest: %v", err)
+	}
+	if got := init.GetContextDigest(); got != wantCtx {
+		t.Errorf("SessionInit.ContextDigest = %q, want %q", got, wantCtx)
+	}
+}

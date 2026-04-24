@@ -16,6 +16,7 @@ import (
 	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
+	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
 // closeRunCancelGrace bounds how long Close waits on the run loop
@@ -243,6 +244,24 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		return nil, err
 	}
 
+	// Restore the chain state from the last committed WAL record so
+	// the next AppendEvent chains correctly across restarts. Without
+	// this, every cold start begins at prev_hash="" regardless of
+	// existing on-disk data, and the first record of the new process
+	// would serialise an empty prev_hash even though earlier records
+	// had committed a real chain — breaking integrity continuity.
+	// (roborev #5945 High #2)
+	//
+	// Skipped when SinkChainOverrideForTests is set: test overrides
+	// bring their own state and do not want the production restore
+	// path replaying records into them.
+	if opts.SinkChainOverrideForTests == nil {
+		if err := restoreChainFromWAL(innerChain, w, opts); err != nil {
+			_ = w.Close()
+			return nil, fmt.Errorf("restore chain from WAL: %w", err)
+		}
+	}
+
 	initialAck, err := readInitialAckTuple(opts, w)
 	if err != nil {
 		_ = w.Close()
@@ -271,32 +290,16 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	}
 
 	mw := opts.Metrics.WTP()
-	tr, err := transport.New(transport.Options{
-		Dialer:          dialer,
-		AgentID:         opts.AgentID,
-		SessionID:       opts.SessionID,
-		InitialAckTuple: initialAck,
-		Logger:          opts.Logger,
-		WAL:             w,
-		Metrics:         mw,
-	})
-	if err != nil {
-		_ = w.Close()
-		return nil, fmt.Errorf("transport.New: %w", err)
-	}
 
-	// Internal context owned by the Store; cancelled by Close. The
-	// caller's ctx parameter is intentionally NOT threaded into the
-	// bg goroutine — see the lifecycle docstring above.
-	runCtx, runCancel := context.WithCancel(context.Background())
-
-	// Compute the session-bound context digest once at construction.
-	// AppendEvent stamps this value into every IntegrityRecord so
-	// records are tied to the negotiated session and key-rotation
-	// boundary (spec §6.4.6). The AgentVersion / OCSFVersion fields
-	// default to empty until wired through Options; the digest
-	// remains stable across appends because all inputs are bound
-	// here.
+	// Session identity: the SessionInit frame, the chain context
+	// digest, and every IntegrityRecord MUST agree on (algorithm,
+	// key_fingerprint, context_digest). Compute the context digest
+	// here so the same value feeds transport.New (below, via
+	// Options.ContextDigest) and Store.contextDigest (stamped into
+	// every AppendEvent's IntegrityRecord). A mismatch between the
+	// SessionInit advertisement and the chained records would make
+	// the receiver reject records whose chain doesn't match the
+	// advertised session — roborev #5945 High.
 	algo := opts.HMACAlgorithm
 	if algo == "" {
 		algo = "hmac-sha256"
@@ -312,6 +315,48 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		_ = w.Close()
 		return nil, fmt.Errorf("chain.ComputeContextDigest: %w", err)
 	}
+
+	// Map the chain HMAC algorithm string to the proto enum the
+	// transport advertises in SessionInit. validate() rejects unknown
+	// algorithm strings upstream, so the default branch is unreachable
+	// for valid Options.
+	var tpAlgo wtpv1.HashAlgorithm
+	switch algo {
+	case "hmac-sha256":
+		tpAlgo = wtpv1.HashAlgorithm_HASH_ALGORITHM_HMAC_SHA256
+	case "hmac-sha512":
+		tpAlgo = wtpv1.HashAlgorithm_HASH_ALGORITHM_HMAC_SHA512
+	default:
+		tpAlgo = wtpv1.HashAlgorithm_HASH_ALGORITHM_HMAC_SHA256
+	}
+
+	tr, err := transport.New(transport.Options{
+		Dialer:          dialer,
+		AgentID:         opts.AgentID,
+		SessionID:       opts.SessionID,
+		InitialAckTuple: initialAck,
+		Logger:          opts.Logger,
+		WAL:             w,
+		Metrics:         mw,
+		// Handshake metadata: the SessionInit frame MUST advertise the
+		// SAME algorithm / key fingerprint / context digest that the
+		// WAL records are chained with; otherwise the receiver sees a
+		// handshake that doesn't match the integrity chain it's about
+		// to verify. (roborev #5945 High)
+		FormatVersion:  uint32(audit.IntegrityFormatVersion),
+		Algorithm:      tpAlgo,
+		KeyFingerprint: opts.KeyFingerprint,
+		ContextDigest:  ctxDigest,
+	})
+	if err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("transport.New: %w", err)
+	}
+
+	// Internal context owned by the Store; cancelled by Close. The
+	// caller's ctx parameter is intentionally NOT threaded into the
+	// bg goroutine — see the lifecycle docstring above.
+	runCtx, runCancel := context.WithCancel(context.Background())
 
 	s := &Store{
 		opts:          opts,
