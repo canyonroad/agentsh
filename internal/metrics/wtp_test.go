@@ -504,6 +504,9 @@ func TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons(t *testing.T) {
 }
 
 func TestIncDroppedInvalidFrame_InvalidLabelLogsAndCollapses(t *testing.T) {
+	ResetClassifierBypassLimiterForTest()
+	t.Cleanup(ResetClassifierBypassLimiterForTest)
+
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))

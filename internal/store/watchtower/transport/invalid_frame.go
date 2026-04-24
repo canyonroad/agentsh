@@ -35,9 +35,17 @@ import (
 func classifyAndIncInvalidFrame(logger *slog.Logger, m *metrics.WTPMetrics, err error) {
 	var ve *wtpv1.ValidationError
 	if !errors.As(err, &ve) {
-		logger.Warn("non-typed frame validation error",
-			slog.String("err_type", fmt.Sprintf("%T", err)),
-			slog.String("reason", string(metrics.WTPInvalidFrameReasonClassifierBypass)))
+		// Rate-limited WARN: the counter increments unconditionally (the
+		// metric is the canonical volume signal) but the WARN is sampled
+		// by the shared classifier_bypass limiter in internal/metrics so
+		// a hot-path bug cannot flood logs. The metrics-side invalid-
+		// label WARN in IncDroppedInvalidFrame draws from the same
+		// bucket — total WARN volume across both paths is bounded.
+		if metrics.AllowClassifierBypassWARN() {
+			logger.Warn("non-typed frame validation error",
+				slog.String("err_type", fmt.Sprintf("%T", err)),
+				slog.String("reason", string(metrics.WTPInvalidFrameReasonClassifierBypass)))
+		}
 		m.IncDroppedInvalidFrame(metrics.WTPInvalidFrameReasonClassifierBypass)
 		return
 	}

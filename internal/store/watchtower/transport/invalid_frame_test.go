@@ -21,6 +21,9 @@ import (
 // path that bypasses ValidateEventBatch) might pass a bare error, and
 // the WARN + metric make that drift visible to operators.
 func TestReceiver_NonTypedErrorClassifiedAsClassifierBypass(t *testing.T) {
+	metrics.ResetClassifierBypassLimiterForTest()
+	t.Cleanup(metrics.ResetClassifierBypassLimiterForTest)
+
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	c := metrics.New()

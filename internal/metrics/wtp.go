@@ -820,10 +820,17 @@ func (w *WTPMetrics) IncDroppedInvalidFrame(reason WTPInvalidFrameReason) {
 		return
 	}
 	if _, ok := wtpInvalidFrameReasonsValid[reason]; !ok {
-		slog.Warn("invalid invalid-frame reason label",
-			slog.String("raw_reason", string(reason)),
-			slog.String("reason", string(WTPInvalidFrameReasonClassifierBypass)),
-		)
+		// Emit the WARN only if the shared classifier_bypass rate-limiter
+		// allows; the metric counter ALWAYS increments regardless so the
+		// true volume is visible in /metrics even when the WARN is
+		// sampled. See wtp_ratelimit.go for why the limiter is shared
+		// with the receiver-side defense-in-depth WARN path.
+		if AllowClassifierBypassWARN() {
+			slog.Warn("invalid invalid-frame reason label",
+				slog.String("raw_reason", string(reason)),
+				slog.String("reason", string(WTPInvalidFrameReasonClassifierBypass)),
+			)
+		}
 		reason = WTPInvalidFrameReasonClassifierBypass
 	}
 	ptr, _ := w.c.wtpDroppedInvalidFrameByReason.LoadOrStore(string(reason), &atomic.Uint64{})
