@@ -156,6 +156,44 @@ var ErrClosed = errors.New("wal: closed")
 // via errors.Is(err, ErrFatal) and the formatted message.
 var ErrFatal = errors.New("wal: fatal error — WAL must be closed and reopened")
 
+// appendInjector is a TEST-ONLY hook used by Task 24's integrity tests
+// (internal/store/watchtower/integrity_test.go) to simulate clean and
+// ambiguous Append failures without touching the filesystem. When non-
+// nil, Append replaces its success path with the injector's return
+// value. If the injector returns an *AppendError classified as
+// FailureAmbiguous, Append latches w.fatalErr identically to a real
+// ambiguous I/O failure so subsequent Appends surface ErrFatal.
+//
+// PRODUCTION CODE MUST NOT CALL SetAppendInjector. The hook is exposed
+// only because test-only filesystem fault injection (chmod 000, full-
+// disk emulation) is flaky across CI platforms; a Go-level hook gives
+// deterministic coverage of the clean-vs-ambiguous error classes the
+// Store's transactional pattern relies on.
+var (
+	appendInjector   func() error
+	appendInjectorMu sync.Mutex
+)
+
+// SetAppendInjector installs a test-only hook that replaces Append's
+// terminal success path. Pass nil to remove a previously installed
+// injector. See the appendInjector package-level docstring for the
+// contract and the production-use prohibition.
+func SetAppendInjector(fn func() error) {
+	appendInjectorMu.Lock()
+	appendInjector = fn
+	appendInjectorMu.Unlock()
+}
+
+// getAppendInjector returns the currently installed test-only hook, or
+// nil when none is installed. Holds the mutex briefly so concurrent
+// SetAppendInjector calls from test cleanup don't race the production
+// Append path.
+func getAppendInjector() func() error {
+	appendInjectorMu.Lock()
+	defer appendInjectorMu.Unlock()
+	return appendInjector
+}
+
 // recordOverhead is the per-record on-disk cost beyond the payload bytes
 // themselves: an 8-byte frame header (uint32 length + uint32 CRC) plus the
 // 12-byte (seq:int64 + gen:uint32) prefix this WAL adds to each record so
@@ -917,6 +955,23 @@ func (w *WAL) Append(seq int64, gen uint32, payload []byte) (AppendResult, error
 			Class: FailureClean,
 			Op:    "append",
 			Err:   fmt.Errorf("%w: %v", ErrFatal, w.fatalErr),
+		}
+	}
+	// Test-only injector hook (see SetAppendInjector). Production code
+	// MUST NOT install an injector — the hook is gated behind a
+	// package-level variable that nil-production-callers leave untouched.
+	// When installed, the injector's return value replaces the real
+	// Append code path. An ambiguous-classified AppendError from the
+	// injector latches w.fatalErr identically to failAmbiguousLocked so
+	// the "ambiguous failure latches subsequent appends" invariant holds
+	// even under injected errors.
+	if inj := getAppendInjector(); inj != nil {
+		if injErr := inj(); injErr != nil {
+			var ae *AppendError
+			if errors.As(injErr, &ae) && ae.Class == FailureAmbiguous && w.fatalErr == nil {
+				w.fatalErr = injErr
+			}
+			return AppendResult{}, injErr
 		}
 	}
 	// The on-disk per-record cost is 8 (frame header) + 12 (seq/gen prefix)
