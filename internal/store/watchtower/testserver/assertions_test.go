@@ -1,12 +1,15 @@
 package testserver_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/testserver"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
@@ -443,23 +446,33 @@ func TestAssertReplayObserved_DetectsReplayBoundary(t *testing.T) {
 	}
 }
 
-// TestServer_NilEventBatchDoesNotPanic verifies the test-harness
-// non-goal documented on addBatch: a ClientMessage_EventBatch whose
-// EventBatch pointer is nil must not panic ANY of the public
-// recording / assertion entry points (Batches, WaitForFirstBatch,
-// AssertSequenceRange, AssertReplayObserved), and must surface as
-// ErrUnsupportedCompression with the helper-name prefix on both
-// assertion helpers.
+// TestServer_NilEventBatchRejectedByValidator locks in the post-
+// Task-22b contract: a ClientMessage_EventBatch whose EventBatch
+// pointer is nil is caught by the testserver's unconditional
+// wtpv1.ValidateEventBatch call, classified under
+// ReasonEventBatchBodyUnset, and dropped — the stream is torn down
+// and the batch never reaches s.addBatch, so the public recording
+// surface (Batches, WaitForFirstBatch, AssertSequenceRange,
+// AssertReplayObserved) NEVER sees the malformed frame.
 //
-// Regression guard for the Missing finding in roborev #5743+5746:
-// a future refactor that drops the nil-normalization in addBatch
-// would panic inside proto.Clone or one of the GetXxx accessors,
-// and this test would fail with a panic-recovered goroutine error
-// rather than a clean assertion. The test-harness contract is
-// that malformed client frames surface as a diagnostic error, not
-// a panic — across the FULL public surface, not just one entry.
-func TestServer_NilEventBatchDoesNotPanic(t *testing.T) {
-	srv := testserver.New(testserver.Options{})
+// Rationale: pre-Task-22b this test relied on addBatch's nil-
+// normalization to keep the harness's assertion entry points panic-
+// free. Unconditional validation now catches the bad frame upstream,
+// so the nil-normalization is still valuable as code-level
+// defense-in-depth (direct callers of addBatch stay safe) but is no
+// longer wire-observable. The test therefore verifies the new
+// wire-side contract: the harness rejects malformed frames with a
+// typed validator reason instead of recording-then-normalising them.
+func TestServer_NilEventBatchRejectedByValidator(t *testing.T) {
+	metrics.ResetClassifierBypassLimiterForTest()
+	t.Cleanup(metrics.ResetClassifierBypassLimiterForTest)
+
+	c := metrics.New()
+	m := c.WTP()
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	srv := testserver.New(testserver.Options{Metrics: m, Logger: logger})
 	defer srv.Close()
 
 	conn, err := srv.Dial(context.Background())
@@ -478,70 +491,32 @@ func TestServer_NilEventBatchDoesNotPanic(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send nil EventBatch: %v", err)
 	}
-	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
-		t.Fatalf("recv BatchAck: %v", err)
+
+	// Validator caught the nil batch → stream dropped → next Recv
+	// observes a non-nil error, NOT a BatchAck.
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err == nil {
+		t.Fatal("Recv returned nil error; nil EventBatch should have dropped the stream")
 	}
 
-	// 1. WaitForFirstBatch — must not panic on the nil-Body batch.
-	got, err := srv.WaitForFirstBatch(2 * time.Second)
-	if err != nil {
-		t.Fatalf("WaitForFirstBatch: %v", err)
+	// Counter reflects the classified reason. proto3 round-trips
+	// `ClientMessage_EventBatch{EventBatch: nil}` as
+	// `ClientMessage_EventBatch{EventBatch: &EventBatch{}}` on the
+	// server side (nil oneof inner gets normalised to an empty
+	// message by the unmarshaler), so the validator catches the
+	// missing Compression enum first, not the nil batch pointer.
+	// The counter lands under ReasonEventBatchCompressionUnspecified.
+	if got := m.DroppedInvalidFrame(metrics.WTPInvalidFrameReasonEventBatchCompressionUnspec); got != 1 {
+		t.Errorf("DroppedInvalidFrame(event_batch_compression_unspecified) = %d, want 1", got)
 	}
-	if got == nil {
-		t.Fatalf("WaitForFirstBatch returned nil; want non-nil empty *EventBatch")
+	if got := m.DroppedInvalidFrame(metrics.WTPInvalidFrameReasonClassifierBypass); got != 0 {
+		t.Errorf("DroppedInvalidFrame(classifier_bypass) = %d, want 0 (validator emitted typed *ValidationError)", got)
 	}
-	// Empty-shape contract: addBatch normalizes nil → empty
-	// EventBatch{}, so the returned batch must have no Body
-	// oneof set, COMPRESSION_UNSPECIFIED, and zero from/to seq.
-	if got.GetBody() != nil {
-		t.Fatalf("WaitForFirstBatch.Body=%T; want nil (empty normalization broken)", got.GetBody())
-	}
-	if got.GetCompression() != wtpv1.Compression_COMPRESSION_UNSPECIFIED {
-		t.Fatalf("WaitForFirstBatch.Compression=%v; want UNSPECIFIED", got.GetCompression())
-	}
-	if got.GetFromSequence() != 0 || got.GetToSequence() != 0 {
-		t.Fatalf("WaitForFirstBatch from/to=(%d, %d); want (0, 0)", got.GetFromSequence(), got.GetToSequence())
+	if logBuf.Len() != 0 {
+		t.Errorf("expected no defense-in-depth WARN on typed path, got:\n%s", logBuf.String())
 	}
 
-	// 2. Batches() — same empty-shape contract on EVERY field.
-	bs := srv.Batches()
-	if len(bs) != 1 {
-		t.Fatalf("Batches len=%d, want 1", len(bs))
-	}
-	if bs[0] == nil {
-		t.Fatalf("Batches[0] is nil; want non-nil empty *EventBatch")
-	}
-	if bs[0].GetBody() != nil {
-		t.Fatalf("Batches[0].Body=%T; want nil", bs[0].GetBody())
-	}
-	if bs[0].GetCompression() != wtpv1.Compression_COMPRESSION_UNSPECIFIED {
-		t.Fatalf("Batches[0].Compression=%v; want UNSPECIFIED", bs[0].GetCompression())
-	}
-	if bs[0].GetFromSequence() != 0 || bs[0].GetToSequence() != 0 {
-		t.Fatalf("Batches[0] from/to=(%d, %d); want (0, 0)", bs[0].GetFromSequence(), bs[0].GetToSequence())
-	}
-
-	// 3. AssertSequenceRange — ErrUnsupportedCompression with prefix.
-	err = srv.AssertSequenceRange(1, 1)
-	if err == nil {
-		t.Fatal("AssertSequenceRange on nil-Body batch: want error, got nil")
-	}
-	if !errors.Is(err, testserver.ErrUnsupportedCompression) {
-		t.Fatalf("AssertSequenceRange err=%v, want errors.Is(..., ErrUnsupportedCompression)", err)
-	}
-	if !strings.HasPrefix(err.Error(), "AssertSequenceRange[1..1]: ") {
-		t.Fatalf("AssertSequenceRange err=%q, want helper-name prefix", err.Error())
-	}
-
-	// 4. AssertReplayObserved — same surface contract.
-	err = srv.AssertReplayObserved(1, 1)
-	if err == nil {
-		t.Fatal("AssertReplayObserved on nil-Body batch: want error, got nil")
-	}
-	if !errors.Is(err, testserver.ErrUnsupportedCompression) {
-		t.Fatalf("AssertReplayObserved err=%v, want errors.Is(..., ErrUnsupportedCompression)", err)
-	}
-	if !strings.HasPrefix(err.Error(), "AssertReplayObserved[1..1]: ") {
-		t.Fatalf("AssertReplayObserved err=%q, want helper-name prefix", err.Error())
+	// Harness never recorded the rejected batch.
+	if got := len(srv.Batches()); got != 0 {
+		t.Errorf("Batches len=%d, want 0 (rejected batch must not be tallied)", got)
 	}
 }

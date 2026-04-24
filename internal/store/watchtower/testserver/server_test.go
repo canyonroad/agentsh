@@ -33,14 +33,22 @@ func sendSessionInit(t *testing.T, conn testserver.Conn) {
 	}
 }
 
-// sendEmptyBatch fires a minimal EventBatch (no events) on conn. The
-// drop/goaway scenarios trigger on frame COUNT, not content, so an
-// empty batch is sufficient to advance the per-stream counter.
+// sendEmptyBatch fires a minimal but valid EventBatch (Compression=NONE
+// with an empty Uncompressed body) on conn. The drop/goaway scenarios
+// trigger on frame COUNT, not content, so an empty batch is sufficient
+// to advance the per-stream counter. The batch MUST pass
+// wtpv1.ValidateEventBatch — the testserver's receiver-side validation
+// is unconditional (spec compliance is not gated on observability),
+// so a bare &EventBatch{} would be rejected with
+// event_batch_compression_unspecified.
 func sendEmptyBatch(t *testing.T, conn testserver.Conn) {
 	t.Helper()
 	if err := conn.Send(&wtpv1.ClientMessage{
 		Msg: &wtpv1.ClientMessage_EventBatch{
-			EventBatch: &wtpv1.EventBatch{},
+			EventBatch: &wtpv1.EventBatch{
+				Compression: wtpv1.Compression_COMPRESSION_NONE,
+				Body:        &wtpv1.EventBatch_Uncompressed{Uncompressed: &wtpv1.UncompressedEvents{}},
+			},
 		},
 	}); err != nil {
 		t.Fatalf("send EventBatch: %v", err)
@@ -474,5 +482,55 @@ func TestServer_InvalidEventBatchClassifiedAndStreamDropped(t *testing.T) {
 	// returns before addBatch is called).
 	if got := len(srv.Batches()); got != 0 {
 		t.Errorf("Batches len=%d, want 0 (invalid batch must not be tallied)", got)
+	}
+}
+
+// TestServer_InvalidSessionInitClassifiedAndStreamDropped is the
+// SessionInit sibling of TestServer_InvalidEventBatchClassifiedAndStreamDropped
+// (Task 22b / roborev #5916 Low). The test sends a SessionInit with
+// Algorithm=HASH_ALGORITHM_UNSPECIFIED and asserts: (1) the per-reason
+// counter increments under ReasonSessionInitAlgorithmUnspecified,
+// (2) the stream is dropped before SessionAck is sent, (3) no
+// defense-in-depth WARN fires on the typed path.
+func TestServer_InvalidSessionInitClassifiedAndStreamDropped(t *testing.T) {
+	metrics.ResetClassifierBypassLimiterForTest()
+	t.Cleanup(metrics.ResetClassifierBypassLimiterForTest)
+
+	c := metrics.New()
+	m := c.WTP()
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	srv := testserver.New(testserver.Options{Metrics: m, Logger: logger})
+	defer srv.Close()
+
+	conn := dialOrFatal(t, srv)
+	defer conn.Close()
+
+	// SessionInit with Algorithm=UNSPECIFIED fails ValidateSessionInit.
+	if err := conn.Send(&wtpv1.ClientMessage{
+		Msg: &wtpv1.ClientMessage_SessionInit{SessionInit: &wtpv1.SessionInit{
+			AgentId:   "test",
+			SessionId: "s-invalid",
+			Algorithm: wtpv1.HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED,
+		}},
+	}); err != nil {
+		t.Fatalf("send invalid SessionInit: %v", err)
+	}
+
+	// Server drops the stream on validation failure — no SessionAck
+	// arrives; next Recv observes a non-nil error.
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err == nil {
+		t.Fatal("Recv returned nil error; invalid SessionInit should have dropped the stream")
+	}
+
+	if got := m.DroppedInvalidFrame(metrics.WTPInvalidFrameReasonSessionInitAlgorithmUnspec); got != 1 {
+		t.Errorf("DroppedInvalidFrame(session_init_algorithm_unspecified) = %d, want 1", got)
+	}
+	if got := m.DroppedInvalidFrame(metrics.WTPInvalidFrameReasonClassifierBypass); got != 0 {
+		t.Errorf("DroppedInvalidFrame(classifier_bypass) = %d, want 0 (validator emitted typed *ValidationError)", got)
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("expected no defense-in-depth WARN on typed path, got:\n%s", logBuf.String())
 	}
 }

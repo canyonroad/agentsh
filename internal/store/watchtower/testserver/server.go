@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"google.golang.org/grpc"
@@ -163,6 +164,40 @@ type srvHandler struct {
 
 func (s *Server) handler() *srvHandler { return &srvHandler{s: s} }
 
+// classifierMetrics returns the metrics sink the frame-validation
+// classifier should stamp counters into. Defaults to a noop sink when
+// opts.Metrics is nil so validation runs unconditionally (spec
+// compliance) without coupling to observability wiring.
+func (s *Server) classifierMetrics() transport.Metrics {
+	if s.opts.Metrics != nil {
+		return s.opts.Metrics
+	}
+	return noopClassifierMetrics{}
+}
+
+// classifierLogger returns the logger the classifier's WARN path uses.
+// Defaults to slog.Default() so the defense-in-depth WARN always has a
+// sink even when opts.Logger is nil.
+func (s *Server) classifierLogger() *slog.Logger {
+	if s.opts.Logger != nil {
+		return s.opts.Logger
+	}
+	return slog.Default()
+}
+
+// noopClassifierMetrics is the transport.Metrics implementation used
+// when Server.opts.Metrics is nil. Only IncDroppedInvalidFrame is
+// reachable from the classifier path; the other methods are present
+// for interface satisfaction and never called here.
+type noopClassifierMetrics struct{}
+
+func (noopClassifierMetrics) SetAckHighWatermark(int64) {}
+func (noopClassifierMetrics) IncAnomalousAck(string)    {}
+func (noopClassifierMetrics) IncResendNeeded()          {}
+func (noopClassifierMetrics) IncAckRegressionLoss()     {}
+func (noopClassifierMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {
+}
+
 // Stream implements the WatchtowerServer bidi streaming RPC. Every
 // ClientMessage variant the Transport can emit is handled:
 //
@@ -196,24 +231,17 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 		}
 		switch x := msg.Msg.(type) {
 		case *wtpv1.ClientMessage_SessionInit:
-			if h.s.opts.Metrics != nil {
-				// Receiver-side frame validation (spec §"Frame
-				// validation and forward compatibility") mirrors the
-				// EventBatch branch below: validate the inbound
-				// SessionInit, route any failure through the canonical
-				// classifier (bumps
-				// wtp_dropped_invalid_frame_total{reason=...}), and
-				// drop the stream so the client backs off. Gated on
-				// opts.Metrics so the existing tests keep their
-				// pre-Task-22b behavior.
-				if verr := wtpv1.ValidateSessionInit(x.SessionInit); verr != nil {
-					logger := h.s.opts.Logger
-					if logger == nil {
-						logger = slog.Default()
-					}
-					transport.ClassifyAndIncInvalidFrame(logger, h.s.opts.Metrics, verr)
-					return fmt.Errorf("testserver: invalid inbound SessionInit: %w", verr)
-				}
+			// Receiver-side frame validation (spec §"Frame
+			// validation and forward compatibility"): unconditionally
+			// validate inbound SessionInit. Spec compliance MUST NOT
+			// be coupled to observability wiring — a malformed frame
+			// is dropped regardless of whether Metrics is configured.
+			// The classifier picks a noop sink when Metrics is nil so
+			// counter side-effects stay off without gating the
+			// validation itself.
+			if verr := wtpv1.ValidateSessionInit(x.SessionInit); verr != nil {
+				transport.ClassifyAndIncInvalidFrame(h.s.classifierLogger(), h.s.classifierMetrics(), verr)
+				return fmt.Errorf("testserver: invalid inbound SessionInit: %w", verr)
 			}
 			if h.s.opts.AckDelay > 0 {
 				select {
@@ -247,27 +275,13 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 				return err
 			}
 		case *wtpv1.ClientMessage_EventBatch:
-			if h.s.opts.Metrics != nil {
-				// Receiver-side frame validation (spec §"Frame
-				// validation and forward compatibility"). On the
-				// server side this is the canonical live call site
-				// for transport.ClassifyAndIncInvalidFrame: the
-				// classifier stamps
-				// wtp_dropped_invalid_frame_total{reason=...}
-				// using the proto-typed Reason, and the stream is
-				// dropped so the client backs off and reconnects.
-				// Gated on opts.Metrics so the existing tests that
-				// don't wire metrics keep their pre-Task-22b
-				// behavior (placeholder empty EventBatches are
-				// tallied, not validated).
-				if verr := wtpv1.ValidateEventBatch(x.EventBatch); verr != nil {
-					logger := h.s.opts.Logger
-					if logger == nil {
-						logger = slog.Default()
-					}
-					transport.ClassifyAndIncInvalidFrame(logger, h.s.opts.Metrics, verr)
-					return fmt.Errorf("testserver: invalid inbound EventBatch: %w", verr)
-				}
+			// Receiver-side frame validation. Always on — spec
+			// compliance is not gated on observability wiring; the
+			// classifier routes to a noop metrics sink when the
+			// caller hasn't configured one.
+			if verr := wtpv1.ValidateEventBatch(x.EventBatch); verr != nil {
+				transport.ClassifyAndIncInvalidFrame(h.s.classifierLogger(), h.s.classifierMetrics(), verr)
+				return fmt.Errorf("testserver: invalid inbound EventBatch: %w", verr)
 			}
 			_ = h.s.addBatch(x.EventBatch)
 			streamBatches++
