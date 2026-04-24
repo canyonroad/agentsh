@@ -196,7 +196,25 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 		}
 		switch x := msg.Msg.(type) {
 		case *wtpv1.ClientMessage_SessionInit:
-			_ = x
+			if h.s.opts.Metrics != nil {
+				// Receiver-side frame validation (spec §"Frame
+				// validation and forward compatibility") mirrors the
+				// EventBatch branch below: validate the inbound
+				// SessionInit, route any failure through the canonical
+				// classifier (bumps
+				// wtp_dropped_invalid_frame_total{reason=...}), and
+				// drop the stream so the client backs off. Gated on
+				// opts.Metrics so the existing tests keep their
+				// pre-Task-22b behavior.
+				if verr := wtpv1.ValidateSessionInit(x.SessionInit); verr != nil {
+					logger := h.s.opts.Logger
+					if logger == nil {
+						logger = slog.Default()
+					}
+					transport.ClassifyAndIncInvalidFrame(logger, h.s.opts.Metrics, verr)
+					return fmt.Errorf("testserver: invalid inbound SessionInit: %w", verr)
+				}
+			}
 			if h.s.opts.AckDelay > 0 {
 				select {
 				case <-stream.Context().Done():

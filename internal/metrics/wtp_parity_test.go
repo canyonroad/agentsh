@@ -53,6 +53,14 @@ func TestWTPInvalidFrameReason_ParityWithValidator(t *testing.T) {
 		}
 		metricsDedup[r] = struct{}{}
 	}
+	metricsOnlySlice := metrics.MetricsOnlyReasons()
+	metricsOnlyDedup := make(map[metrics.WTPInvalidFrameReason]struct{}, len(metricsOnlySlice))
+	for _, r := range metricsOnlySlice {
+		if _, dup := metricsOnlyDedup[r]; dup {
+			t.Errorf("metrics.MetricsOnlyReasons() contains duplicate reason %q — aliases are forbidden (see internal/metrics/wtp.go)", r)
+		}
+		metricsOnlyDedup[r] = struct{}{}
+	}
 
 	validatorAll := validatorDedup
 	metricsShared := metricsDedup
