@@ -55,36 +55,55 @@ type Options struct {
 	// ("sha256:<hex>"). Same persistence and immutability rules as
 	// SessionID; same back-compat allowance for empty values.
 	KeyFingerprint string
+
+	// ContextDigest is the chain.ComputeContextDigest value the
+	// caller has bound to this session (computed from AgentID +
+	// SessionID + KeyFingerprint + algorithm + format_version). Same
+	// persistence and immutability rules as SessionID: persisted on
+	// every WriteMeta call, validated on Open when BOTH the on-disk
+	// value AND the caller-supplied value are non-empty. A mismatch
+	// triggers ErrIdentityMismatch so the Store can quarantine the
+	// old directory and reopen with the new identity — preventing a
+	// stale chain (e.g., old AgentID's records) from replaying under
+	// a new SessionInit advertising a different digest. Empty is
+	// allowed for back-compat with pre-ContextDigest meta files.
+	ContextDigest string
 }
 
 // ErrIdentityMismatch is returned by Open when the persisted meta.json
-// carries a SessionID or KeyFingerprint that disagrees with the
-// caller-supplied opts. The persisted-vs-expected pairs are exposed so
-// upstream callers can include them in operator-facing logs without
-// re-parsing the error message.
+// carries a SessionID, KeyFingerprint, or ContextDigest that disagrees
+// with the caller-supplied opts. The persisted-vs-expected pairs are
+// exposed so upstream callers can include them in operator-facing logs
+// without re-parsing the error message.
 //
-// Both fields are populated even when only one mismatched — the
-// non-mismatching field carries the matching value on both sides
-// (so the operator sees the full identity context). The
-// MismatchedField string is one of "session_id" or "key_fingerprint"
-// and identifies which check tripped first; if both mismatched, the
-// session_id check runs first and is reported.
+// All three pairs are populated even when only one mismatched — the
+// non-mismatching pair carries the matching value on both sides (so
+// the operator sees the full identity context). The MismatchedField
+// string is one of "session_id", "key_fingerprint", or
+// "context_digest" and identifies which check tripped first; the
+// checks run in that priority order.
 type ErrIdentityMismatch struct {
-	MismatchedField         string // "session_id" or "key_fingerprint"
+	MismatchedField         string // "session_id" | "key_fingerprint" | "context_digest"
 	PersistedSessionID      string
 	ExpectedSessionID       string
 	PersistedKeyFingerprint string
 	ExpectedKeyFingerprint  string
+	PersistedContextDigest  string
+	ExpectedContextDigest   string
 }
 
 // Error implements the error interface for ErrIdentityMismatch. The message
 // shape ("wal.Open: <field> mismatch: persisted=%q opts=%q") is part of the
 // public contract so log scrapers and tests can match without re-parsing.
 func (e *ErrIdentityMismatch) Error() string {
-	if e.MismatchedField == "session_id" {
+	switch e.MismatchedField {
+	case "session_id":
 		return fmt.Sprintf("wal.Open: session_id mismatch: persisted=%q opts=%q", e.PersistedSessionID, e.ExpectedSessionID)
+	case "context_digest":
+		return fmt.Sprintf("wal.Open: context_digest mismatch: persisted=%q opts=%q", e.PersistedContextDigest, e.ExpectedContextDigest)
+	default:
+		return fmt.Sprintf("wal.Open: key_fingerprint mismatch: persisted=%q opts=%q", e.PersistedKeyFingerprint, e.ExpectedKeyFingerprint)
 	}
-	return fmt.Sprintf("wal.Open: key_fingerprint mismatch: persisted=%q opts=%q", e.PersistedKeyFingerprint, e.ExpectedKeyFingerprint)
 }
 
 // AppendResult is returned by WAL.Append. GenerationRolled is set exactly when
@@ -364,14 +383,17 @@ func Open(opts Options) (*WAL, error) {
 			w.ackHighGen = m.AckHighWatermarkGen
 			w.ackPresent = true
 		}
-		// Identity check (Task 14a). Only validate when BOTH the on-disk
-		// value is non-empty AND the caller-supplied value is non-empty.
-		// The "either side empty" case is the v2-with-empty-identity
-		// migration: a pre-Task-14a meta.json had no identity fields, OR
-		// the test caller deliberately omits identity. In both, we adopt
-		// (don't error) — the next meta write will populate the field
-		// from opts. session_id check runs first; on simultaneous mismatch
-		// the session_id is reported.
+		// Identity check (Task 14a + roborev #5957 Medium #2). Only
+		// validate when BOTH the on-disk value is non-empty AND the
+		// caller-supplied value is non-empty. The "either side empty"
+		// case is the v2-with-empty-identity migration: a pre-Task-14a
+		// (or pre-ContextDigest) meta.json carried a subset of the
+		// identity triple, OR the test caller deliberately omits a
+		// field. In both, we adopt (don't error) — the next meta
+		// write populates the field from opts. Checks run in priority
+		// order: session_id → key_fingerprint → context_digest; on
+		// simultaneous mismatch the earliest-priority field is
+		// reported.
 		if m.SessionID != "" && opts.SessionID != "" && m.SessionID != opts.SessionID {
 			return nil, &ErrIdentityMismatch{
 				MismatchedField:         "session_id",
@@ -379,6 +401,8 @@ func Open(opts Options) (*WAL, error) {
 				ExpectedSessionID:       opts.SessionID,
 				PersistedKeyFingerprint: m.KeyFingerprint,
 				ExpectedKeyFingerprint:  opts.KeyFingerprint,
+				PersistedContextDigest:  m.ContextDigest,
+				ExpectedContextDigest:   opts.ContextDigest,
 			}
 		}
 		if m.KeyFingerprint != "" && opts.KeyFingerprint != "" && m.KeyFingerprint != opts.KeyFingerprint {
@@ -388,10 +412,43 @@ func Open(opts Options) (*WAL, error) {
 				ExpectedSessionID:       opts.SessionID,
 				PersistedKeyFingerprint: m.KeyFingerprint,
 				ExpectedKeyFingerprint:  opts.KeyFingerprint,
+				PersistedContextDigest:  m.ContextDigest,
+				ExpectedContextDigest:   opts.ContextDigest,
+			}
+		}
+		if m.ContextDigest != "" && opts.ContextDigest != "" && m.ContextDigest != opts.ContextDigest {
+			return nil, &ErrIdentityMismatch{
+				MismatchedField:         "context_digest",
+				PersistedSessionID:      m.SessionID,
+				ExpectedSessionID:       opts.SessionID,
+				PersistedKeyFingerprint: m.KeyFingerprint,
+				ExpectedKeyFingerprint:  opts.KeyFingerprint,
+				PersistedContextDigest:  m.ContextDigest,
+				ExpectedContextDigest:   opts.ContextDigest,
 			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read meta: %w", err)
+	} else if opts.SessionID != "" || opts.KeyFingerprint != "" || opts.ContextDigest != "" {
+		// No meta.json yet AND the caller supplied at least one
+		// identity field — write an initial Meta so reopens can
+		// detect mismatch (roborev #5957 Medium #2). Without this,
+		// the identity triple would only land in meta.json after
+		// the first MarkAcked call; a Store that never receives an
+		// ack would leave the WAL empty-identity and a subsequent
+		// reopen with different identity would silently adopt.
+		// AckRecorded=false marks this as a pre-ack seed meta;
+		// readers that rely on AckRecorded to distinguish real
+		// (gen=0, seq=0) acks from the sentinel will still see
+		// that distinction.
+		if err := WriteMeta(opts.Dir, Meta{
+			AckRecorded:    false,
+			SessionID:      opts.SessionID,
+			KeyFingerprint: opts.KeyFingerprint,
+			ContextDigest:  opts.ContextDigest,
+		}); err != nil {
+			return nil, fmt.Errorf("seed identity meta: %w", err)
+		}
 	}
 	if err := w.recover(); err != nil {
 		return nil, err
@@ -1385,6 +1442,7 @@ func (w *WAL) MarkAcked(gen uint32, seq uint64) error {
 		AckRecorded:         true,
 		SessionID:           w.opts.SessionID,
 		KeyFingerprint:      w.opts.KeyFingerprint,
+		ContextDigest:       w.opts.ContextDigest,
 	}); err != nil {
 		return err
 	}

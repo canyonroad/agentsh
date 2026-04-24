@@ -656,18 +656,21 @@ type WTPWALQuarantineReason string
 const (
 	WTPWALQuarantineReasonSessionIDMismatch      WTPWALQuarantineReason = "session_id_mismatch"
 	WTPWALQuarantineReasonKeyFingerprintMismatch WTPWALQuarantineReason = "key_fingerprint_mismatch"
+	WTPWALQuarantineReasonContextDigestMismatch  WTPWALQuarantineReason = "context_digest_mismatch"
 	WTPWALQuarantineReasonUnknown                WTPWALQuarantineReason = "unknown_identity_mismatch"
 )
 
 var wtpWALQuarantineReasonsValid = map[WTPWALQuarantineReason]struct{}{
 	WTPWALQuarantineReasonSessionIDMismatch:      {},
 	WTPWALQuarantineReasonKeyFingerprintMismatch: {},
+	WTPWALQuarantineReasonContextDigestMismatch:  {},
 	WTPWALQuarantineReasonUnknown:                {},
 }
 
 // wtpWALQuarantineReasonsEmitOrder is the canonical sort-by-string
 // emission order. Mirrors wtpReconnectReasonsEmitOrder.
 var wtpWALQuarantineReasonsEmitOrder = []WTPWALQuarantineReason{
+	WTPWALQuarantineReasonContextDigestMismatch,
 	WTPWALQuarantineReasonKeyFingerprintMismatch,
 	WTPWALQuarantineReasonSessionIDMismatch,
 	WTPWALQuarantineReasonUnknown,

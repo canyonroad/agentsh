@@ -18,6 +18,19 @@ type Meta struct {
 	AckRecorded    bool   `json:"ack_recorded"`
 	SessionID      string `json:"session_id"`
 	KeyFingerprint string `json:"key_fingerprint"`
+	// ContextDigest is the chain.ComputeContextDigest value the Store
+	// had when it last wrote this file. Included in the identity
+	// triple so a reopen whose current ContextDigest differs (e.g.,
+	// AgentID changed across restarts while session_id/key_fingerprint
+	// stayed) is caught as an identity mismatch — otherwise the old
+	// records would silently replay under a new SessionInit
+	// advertising a different digest.
+	//
+	// Back-compat: pre-ContextDigest meta files (v1 legacy, early v2
+	// without this field) default to empty. Open's identity check
+	// enforces mismatch only when BOTH sides are non-empty, matching
+	// the session_id / key_fingerprint back-compat rule.
+	ContextDigest string `json:"context_digest,omitempty"`
 }
 
 // metaFormatVersion 2 added the ack_recorded field. v1 files are accepted on

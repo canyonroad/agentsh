@@ -15,6 +15,13 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// errStoreClosing is returned by AppendEvent when Close has begun
+// draining the store. Appends that had already acquired appendMu
+// before Close ran complete normally; appends arriving after bail
+// with this error so Close's transport-drain window is not polluted
+// by late records.
+var errStoreClosing = errors.New("watchtower: store closing — refusing append")
+
 // errFatalLatch is returned when AppendEvent is called after a prior
 // ambiguous WAL failure (or terminal chain.Commit failure) latched the
 // store into a fatal state. No further writes can proceed safely — the
@@ -77,6 +84,16 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
 
+	// Close-gate: reject new appends once shutdown has begun. Close
+	// acquires appendMu AFTER setting closing=true, so any append
+	// that had already taken the mutex completes normally; late
+	// arrivals bail here. Checked under appendMu so the observable
+	// ordering is: (a) all pre-Close appends fully commit before
+	// Close's appendMu.Lock() returns, (b) all post-Close appends
+	// see closing=true and bail.
+	if s.closing.Load() {
+		return errStoreClosing
+	}
 	if s.isFatal() {
 		return errFatalLatch
 	}

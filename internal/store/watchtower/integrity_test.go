@@ -6,11 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower"
 	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
@@ -581,5 +585,311 @@ func TestStore_TransportSessionInitUsesConfiguredAlgorithm(t *testing.T) {
 	}
 	if got := init.GetContextDigest(); got != wantCtx {
 		t.Errorf("SessionInit.ContextDigest = %q, want %q", got, wantCtx)
+	}
+}
+
+// TestStore_RestartRestoresChainState_Gen0Only is the gen=0 regression
+// for roborev #5952. A WAL whose records ALL live in generation 0
+// (the common initial-session case before the first generation roll)
+// must still have its chain state restored on restart. Earlier
+// restoreChainFromWAL implementations skipped gen=0 because the
+// scan loop was bounded `g > 0`; the fix iterates `g >= 0` using a
+// signed counter.
+func TestStore_RestartRestoresChainState_Gen0Only(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	newOpts := func() watchtower.Options {
+		return watchtower.Options{
+			WALDir:          dir,
+			Mapper:          compact.StubMapper{},
+			Allocator:       audit.NewSequenceAllocator(),
+			AgentID:         "a",
+			SessionID:       "s-gen0",
+			KeyFingerprint:  "sha256:gen0key",
+			HMACKeyID:       "k1",
+			HMACSecret:      bytes.Repeat([]byte("c"), 32),
+			HMACAlgorithm:   "hmac-sha256",
+			BatchMaxRecords: 8,
+			BatchMaxBytes:   8 * 1024,
+			BatchMaxAge:     50 * time.Millisecond,
+			AllowStubMapper: true,
+			Dialer:          srv.DialerFor(),
+		}
+	}
+
+	s1, err := watchtower.New(context.Background(), newOpts())
+	if err != nil {
+		t.Fatalf("first watchtower.New: %v", err)
+	}
+	// Two records, both at generation 0.
+	if err := s1.AppendEvent(context.Background(), mkEvent(1, 0)); err != nil {
+		t.Fatalf("seq=1/gen=0 AppendEvent: %v", err)
+	}
+	if err := s1.AppendEvent(context.Background(), mkEvent(2, 0)); err != nil {
+		t.Fatalf("seq=2/gen=0 AppendEvent: %v", err)
+	}
+	prev := s1.PeekPrevHash()
+	if prev == "" {
+		t.Fatal("pre-close PeekPrevHash empty; chain did not advance at gen=0")
+	}
+	if err := s1.Close(); err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	// Re-open — restore MUST probe gen=0 and seed the new chain.
+	s2, err := watchtower.New(context.Background(), newOpts())
+	if err != nil {
+		t.Fatalf("second watchtower.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	if got := s2.PeekPrevHash(); got != prev {
+		t.Errorf("post-restart PeekPrevHash (gen=0) = %q, want %q — restore scan missed gen=0", got, prev)
+	}
+}
+
+// TestStore_RestartRestoresChainState_IgnoresTrailingLossMarker is
+// the RecordLoss regression for roborev #5952/5957. When the WAL's
+// last record is a loss marker (overflow / CRC-corruption boundary),
+// the restore scan MUST select the last DATA record before the
+// marker as the replay source — NOT the marker itself. A loss marker
+// advances the WAL tail but carries no IntegrityRecord, so treating
+// it as the restore source would fall back to a fresh chain and
+// lose continuity across the boundary.
+func TestStore_RestartRestoresChainState_IgnoresTrailingLossMarker(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	newOpts := func() watchtower.Options {
+		return watchtower.Options{
+			WALDir:          dir,
+			Mapper:          compact.StubMapper{},
+			Allocator:       audit.NewSequenceAllocator(),
+			AgentID:         "a",
+			SessionID:       "s-loss",
+			KeyFingerprint:  "sha256:losskey",
+			HMACKeyID:       "k1",
+			HMACSecret:      bytes.Repeat([]byte("d"), 32),
+			HMACAlgorithm:   "hmac-sha256",
+			BatchMaxRecords: 8,
+			BatchMaxBytes:   8 * 1024,
+			BatchMaxAge:     50 * time.Millisecond,
+			AllowStubMapper: true,
+			Dialer:          srv.DialerFor(),
+		}
+	}
+
+	// Phase 1: write one data record at gen=1 via the Store, close.
+	s1, err := watchtower.New(context.Background(), newOpts())
+	if err != nil {
+		t.Fatalf("first watchtower.New: %v", err)
+	}
+	if err := s1.AppendEvent(context.Background(), mkEvent(1, 1)); err != nil {
+		t.Fatalf("seq=1/gen=1 AppendEvent: %v", err)
+	}
+	prev := s1.PeekPrevHash()
+	if prev == "" {
+		t.Fatal("pre-close PeekPrevHash empty")
+	}
+	if err := s1.Close(); err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	// Phase 2: open the WAL directly and append a synthetic loss
+	// marker AFTER the data record. This simulates the overflow /
+	// CRC-corruption path surfacing a tail-side loss marker.
+	w, err := wal.Open(wal.Options{
+		Dir:            dir,
+		SegmentSize:    64 * 1024,
+		MaxTotalBytes:  1024 * 1024,
+		SyncMode:       wal.SyncImmediate,
+		SessionID:      "s-loss",
+		KeyFingerprint: "sha256:losskey",
+	})
+	if err != nil {
+		t.Fatalf("direct wal.Open: %v", err)
+	}
+	if err := w.AppendLoss(wal.LossRecord{
+		FromSequence: 2,
+		ToSequence:   3,
+		Generation:   1,
+		Reason:       "overflow",
+	}); err != nil {
+		t.Fatalf("AppendLoss: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("direct wal.Close: %v", err)
+	}
+
+	// Phase 3: re-open through watchtower.New — restore MUST skip
+	// the trailing loss marker and seed from the data record's
+	// IntegrityRecord, so PeekPrevHash matches the pre-close value.
+	s2, err := watchtower.New(context.Background(), newOpts())
+	if err != nil {
+		t.Fatalf("second watchtower.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	if got := s2.PeekPrevHash(); got != prev {
+		t.Errorf("post-restart PeekPrevHash after trailing loss marker = %q, want %q — restore fell back to fresh chain", got, prev)
+	}
+}
+
+// TestStore_CloseGatesAppendEvent regresses roborev #5957 Medium #1:
+// once Close begins, new AppendEvent calls MUST be rejected so
+// transport drain is not polluted by late records. Sequencing:
+//   1. Start Store.
+//   2. Call Close (completes fully).
+//   3. Call AppendEvent — MUST return errStoreClosing, NOT land a
+//      record in the WAL.
+//
+// Appends that had already acquired appendMu before Close ran
+// complete normally (by design); that path is exercised implicitly
+// by the other integrity tests whose Cleanup calls Close after
+// successful AppendEvent completion.
+func TestStore_CloseGatesAppendEvent(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	t.Cleanup(srv.Close)
+
+	s, err := watchtower.New(context.Background(), watchtower.Options{
+		WALDir:          t.TempDir(),
+		Mapper:          compact.StubMapper{},
+		Allocator:       audit.NewSequenceAllocator(),
+		AgentID:         "a",
+		SessionID:       "s-closegate",
+		KeyFingerprint:  "sha256:closekey",
+		HMACKeyID:       "k1",
+		HMACSecret:      bytes.Repeat([]byte("e"), 32),
+		HMACAlgorithm:   "hmac-sha256",
+		BatchMaxRecords: 8,
+		BatchMaxBytes:   8 * 1024,
+		BatchMaxAge:     50 * time.Millisecond,
+		AllowStubMapper: true,
+		Dialer:          srv.DialerFor(),
+	})
+	if err != nil {
+		t.Fatalf("watchtower.New: %v", err)
+	}
+
+	// Close fully.
+	if err := s.Close(); err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Post-Close AppendEvent MUST be rejected.
+	err = s.AppendEvent(context.Background(), mkEvent(1, 1))
+	if err == nil {
+		t.Fatal("AppendEvent after Close returned nil; expected close-gate rejection")
+	}
+	// The error text must mention closing so operators tracing logs
+	// can distinguish this path from errFatalLatch.
+	if msg := err.Error(); !strings.Contains(msg, "closing") {
+		t.Errorf("post-Close AppendEvent error = %q, want one mentioning 'closing'", msg)
+	}
+}
+
+// TestStore_AgentIDChangeAcrossRestartsQuarantines regresses roborev
+// #5957 Medium #2. A WAL whose persisted context_digest disagrees
+// with the new Options (e.g., AgentID changed) MUST be quarantined
+// on reopen — otherwise the old records (chained with the old
+// digest) would replay under a new SessionInit advertising a new
+// digest, violating the "handshake must match chained records"
+// contract.
+func TestStore_AgentIDChangeAcrossRestartsQuarantines(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	baseOpts := func() watchtower.Options {
+		return watchtower.Options{
+			WALDir:          dir,
+			Mapper:          compact.StubMapper{},
+			Allocator:       audit.NewSequenceAllocator(),
+			SessionID:       "s-ctxid",
+			KeyFingerprint:  "sha256:ctxidkey",
+			HMACKeyID:       "k1",
+			HMACSecret:      bytes.Repeat([]byte("f"), 32),
+			HMACAlgorithm:   "hmac-sha256",
+			BatchMaxRecords: 8,
+			BatchMaxBytes:   8 * 1024,
+			BatchMaxAge:     50 * time.Millisecond,
+			AllowStubMapper: true,
+			Dialer:          srv.DialerFor(),
+			Metrics:         metrics.New(),
+		}
+	}
+
+	// Phase 1: first Store with AgentID="alice" writes one record.
+	optsAlice := baseOpts()
+	optsAlice.AgentID = "alice"
+	s1, err := watchtower.New(context.Background(), optsAlice)
+	if err != nil {
+		t.Fatalf("first watchtower.New: %v", err)
+	}
+	if err := s1.AppendEvent(context.Background(), mkEvent(1, 1)); err != nil {
+		t.Fatalf("seq=1 AppendEvent: %v", err)
+	}
+	if err := s1.Close(); err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	// Phase 2: re-open with AgentID="bob" — same SessionID +
+	// KeyFingerprint but a different AgentID produces a different
+	// context_digest. wal.Open MUST detect the mismatch and
+	// quarantine the old directory; the new Store comes up on a
+	// fresh WAL.
+	optsBob := baseOpts()
+	optsBob.AgentID = "bob"
+	s2, err := watchtower.New(context.Background(), optsBob)
+	if err != nil {
+		t.Fatalf("second watchtower.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	// Fresh WAL → genesis chain state (empty prev_hash).
+	if got := s2.PeekPrevHash(); got != "" {
+		t.Errorf("post-AgentID-change PeekPrevHash = %q, want \"\" (quarantine did not produce a fresh WAL)", got)
+	}
+
+	// A quarantine sibling MUST exist next to the fresh WAL dir
+	// (Task 14a identity-recovery contract).
+	parent, err := os.ReadDir(dir + "/..")
+	if err != nil {
+		// dir/.. may not be readable (t.TempDir returns an absolute
+		// path); instead look in the parent directory returned by
+		// filepath.Dir(dir).
+		parent = nil
+	}
+	foundQuarantine := false
+	for _, e := range parent {
+		if strings.Contains(e.Name(), ".quarantine.") {
+			foundQuarantine = true
+			break
+		}
+	}
+	// Fallback: list the immediate parent via filepath.Dir.
+	if !foundQuarantine {
+		if entries, err := os.ReadDir(filepath.Dir(dir)); err == nil {
+			for _, e := range entries {
+				if strings.Contains(e.Name(), ".quarantine.") {
+					foundQuarantine = true
+					break
+				}
+			}
+		}
+	}
+	if !foundQuarantine {
+		t.Error("no quarantine sibling found after AgentID change — wal.Open did not detect context_digest mismatch")
 	}
 }

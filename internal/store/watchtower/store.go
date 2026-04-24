@@ -186,7 +186,21 @@ type Store struct {
 	// chain. The mutex is held across the entire transaction so the
 	// (Compute, Append, Commit) triple is atomic with respect to
 	// other appenders.
+	//
+	// Close() ALSO acquires this mutex to wait for in-flight
+	// transactions before draining transport + closing the WAL
+	// (roborev #5957 Medium #1 — without the drain, a concurrent
+	// AppendEvent could land a record after Stop has already drained
+	// the transport, so the record would miss the final send window).
 	appendMu sync.Mutex
+
+	// closing is set by Close BEFORE it drains the transport and
+	// closes the WAL. AppendEvent checks it AFTER acquiring appendMu
+	// and returns errStoreClosing to reject new appends once shutdown
+	// has begun. Appends that had already acquired appendMu before
+	// Close ran complete normally — Close waits on appendMu for that
+	// drain to finish.
+	closing atomic.Bool
 
 	// contextDigest is the session-bound chain.ComputeContextDigest
 	// value stamped into every IntegrityRecord.ContextDigest. Computed
@@ -239,7 +253,30 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		sinkChain = opts.SinkChainOverrideForTests
 	}
 
-	w, err := openWALWithIdentityRecovery(opts)
+	// Compute context_digest BEFORE wal.Open so it can participate in
+	// the identity check. Same computation as the transport handshake
+	// below — a shared value across both the SessionInit advertisement
+	// AND the WAL's persisted identity triple (roborev #5957
+	// Medium #2): if AgentID changes across restarts while session_id
+	// / key_fingerprint stay, wal.Open quarantines the stale dir
+	// instead of silently replaying records whose chain carries a
+	// different digest than the new SessionInit.
+	algo := opts.HMACAlgorithm
+	if algo == "" {
+		algo = "hmac-sha256"
+	}
+	ctxDigest, err := chain.ComputeContextDigest(chain.SessionContext{
+		SessionID:      opts.SessionID,
+		AgentID:        opts.AgentID,
+		FormatVersion:  uint32(audit.IntegrityFormatVersion),
+		Algorithm:      algo,
+		KeyFingerprint: opts.KeyFingerprint,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("chain.ComputeContextDigest: %w", err)
+	}
+
+	w, err := openWALWithIdentityRecovery(opts, ctxDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -291,30 +328,11 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 
 	mw := opts.Metrics.WTP()
 
-	// Session identity: the SessionInit frame, the chain context
-	// digest, and every IntegrityRecord MUST agree on (algorithm,
-	// key_fingerprint, context_digest). Compute the context digest
-	// here so the same value feeds transport.New (below, via
-	// Options.ContextDigest) and Store.contextDigest (stamped into
-	// every AppendEvent's IntegrityRecord). A mismatch between the
-	// SessionInit advertisement and the chained records would make
-	// the receiver reject records whose chain doesn't match the
-	// advertised session — roborev #5945 High.
-	algo := opts.HMACAlgorithm
-	if algo == "" {
-		algo = "hmac-sha256"
-	}
-	ctxDigest, err := chain.ComputeContextDigest(chain.SessionContext{
-		SessionID:      opts.SessionID,
-		AgentID:        opts.AgentID,
-		FormatVersion:  uint32(audit.IntegrityFormatVersion),
-		Algorithm:      algo,
-		KeyFingerprint: opts.KeyFingerprint,
-	})
-	if err != nil {
-		_ = w.Close()
-		return nil, fmt.Errorf("chain.ComputeContextDigest: %w", err)
-	}
+	// ctxDigest was computed up-front (before wal.Open) so it could
+	// participate in the WAL identity check. It's also stamped into
+	// Store.contextDigest and fed to transport.New below so the
+	// SessionInit handshake, the IntegrityRecord on every append,
+	// and the persisted WAL identity all agree.
 
 	// Map the chain HMAC algorithm string to the proto enum the
 	// transport advertises in SessionInit. validate() rejects unknown
@@ -428,6 +446,19 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 // no-ctx contract while still attempting graceful drain.
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
+		// Gate new AppendEvent transactions from entering the
+		// Compute → Append → Commit path, then wait for any
+		// already-in-flight transaction to finish before draining
+		// the transport. Without this, a concurrent appender could
+		// land a record in the WAL after Stop has already drained
+		// the in-memory send queue — the record would be durable
+		// but miss the final send window, surprising callers who
+		// assume post-Close records do not linger. (roborev
+		// #5957 Medium #1)
+		s.closing.Store(true)
+		s.appendMu.Lock()
+		s.appendMu.Unlock()
+
 		s.closeErr = s.shutdown()
 		// Mark closed AFTER closeErr is fully populated so a
 		// concurrent Err() never sees the closed flag with a
@@ -584,13 +615,14 @@ func (s *Store) Err() error {
 // WAL is opened against the now-empty Dir. Each quarantine increments
 // metrics.IncWALQuarantine with the typed reason classified from
 // idErr.PersistedSessionID / PersistedKeyFingerprint.
-func openWALWithIdentityRecovery(opts Options) (*wal.WAL, error) {
+func openWALWithIdentityRecovery(opts Options, contextDigest string) (*wal.WAL, error) {
 	w, err := wal.Open(wal.Options{
 		Dir:            opts.WALDir,
 		SegmentSize:    opts.WALSegmentSize,
 		MaxTotalBytes:  opts.WALMaxTotalSize,
 		SessionID:      opts.SessionID,
 		KeyFingerprint: opts.KeyFingerprint,
+		ContextDigest:  contextDigest,
 	})
 	if err == nil {
 		return w, nil
@@ -619,6 +651,9 @@ func openWALWithIdentityRecovery(opts Options) (*wal.WAL, error) {
 	case idErr.PersistedKeyFingerprint != opts.KeyFingerprint:
 		reasonField = "key_fingerprint_mismatch"
 		reason = metrics.WTPWALQuarantineReasonKeyFingerprintMismatch
+	case idErr.MismatchedField == "context_digest":
+		reasonField = "context_digest_mismatch"
+		reason = metrics.WTPWALQuarantineReasonContextDigestMismatch
 	}
 	opts.Logger.Warn("wtp: WAL identity mismatch; quarantining stale WAL dir",
 		"persisted_session_id", idErr.PersistedSessionID,
@@ -640,6 +675,7 @@ func openWALWithIdentityRecovery(opts Options) (*wal.WAL, error) {
 		MaxTotalBytes:  opts.WALMaxTotalSize,
 		SessionID:      opts.SessionID,
 		KeyFingerprint: opts.KeyFingerprint,
+		ContextDigest:  contextDigest,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open WAL (post-quarantine): %w", err)
