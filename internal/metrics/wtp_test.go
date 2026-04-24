@@ -584,3 +584,51 @@ func TestWTPInvalidFrameReason_ValidationPlusMetricsOnlyCoversAllValid(t *testin
 		}
 	}
 }
+
+func TestWTPMetrics_WALQuarantineAlwaysEmittedAllReasons(t *testing.T) {
+	c := New()
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	// Always-emit contract: every enumerated reason present at zero.
+	expectedReasons := []string{
+		"key_fingerprint_mismatch",
+		"session_id_mismatch",
+		"unknown_identity_mismatch",
+	}
+	for _, reason := range expectedReasons {
+		want := fmt.Sprintf(`wtp_wal_quarantine_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("missing zero-valued series %q\nbody:\n%s", want, body)
+		}
+	}
+
+	// After one increment, only that reason flips to 1; the others stay 0.
+	c.WTP().IncWALQuarantine(WTPWALQuarantineReasonSessionIDMismatch)
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_wal_quarantine_total{reason="session_id_mismatch"} 1`) {
+		t.Errorf("expected session_id_mismatch=1 after one IncWALQuarantine\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_wal_quarantine_total{reason="key_fingerprint_mismatch"} 0`) {
+		t.Errorf("expected key_fingerprint_mismatch to remain 0\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_wal_quarantine_total{reason="unknown_identity_mismatch"} 0`) {
+		t.Errorf("expected unknown_identity_mismatch to remain 0\nbody:\n%s", body)
+	}
+
+	// Invalid (unknown enum) collapses to WTPWALQuarantineReasonUnknown.
+	// Bypass the typed enum by casting a raw string.
+	c.WTP().IncWALQuarantine(WTPWALQuarantineReason("evil\"label\\value"))
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_wal_quarantine_total{reason="unknown_identity_mismatch"} 1`) {
+		t.Errorf("expected unknown_identity_mismatch=1 after invalid-label collapse\nbody:\n%s", body)
+	}
+	if strings.Contains(body, `evil`) {
+		t.Errorf("invalid reason leaked through validator into output:\n%s", body)
+	}
+}

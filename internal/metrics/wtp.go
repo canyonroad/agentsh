@@ -403,6 +403,43 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 }
 
 // ----- Task 22a: sink-failure metrics --------------------------------
+//
+// SCOPE & ROLLOUT NOTE. This task lands the metric DEFINITIONS,
+// exposition, and validation logic only. The actual increments are
+// wired by downstream tasks per the table below; until those land,
+// the new counters emit at zero on every scrape (always-emit
+// contract). "Task 22a complete" therefore means "the metric series
+// are stable and visible at zero," NOT "the system is fully
+// instrumented." Operators should NOT alert on values until the
+// listed wiring task ships.
+//
+//	Counter family                              Wired by
+//	wtp_dropped_invalid_utf8_total              AppendEvent (Task 23)
+//	wtp_dropped_sequence_overflow_total         AppendEvent (Task 23)
+//	wtp_dropped_invalid_mapper_total            AppendEvent (Task 23)
+//	wtp_dropped_invalid_timestamp_total         AppendEvent (Task 23)
+//	wtp_dropped_mapper_failure_total            AppendEvent (Task 23)
+//	wtp_dropped_invalid_frame_total{reason}     transport receivers (Task 17 Step 4a),
+//	                                            decompression path, and the metrics-
+//	                                            side invalid-label collapse below
+//	wtp_session_init_failures_total{reason}     transport (Phase 8)
+//	wtp_session_rotation_failures_total{reason} transport (Phase 8)
+//	wtp_wal_quarantine_total{reason}            store wal.Open recovery path
+//	                                            (already wired in Task 22 Step 3)
+//
+// MIGRATION NOTE. This task also REMOVES the legacy
+// wtp_dropped_missing_chain_total counter (Task 3). Removal is
+// safe-by-construction — the missing-chain class is now propagated
+// from AppendEvent as a wrapped compact.ErrMissingChain rather than
+// silently dropped, so the underlying event the counter tracked no
+// longer exists. There is NO zero-emit deprecation window — the
+// field, accessor, and emit lines are all deleted in this task. Per
+// spec §"Migration guidance: removed wtp_dropped_missing_chain_total"
+// and §"Rollout precondition," operator monitoring artifacts MUST be
+// updated to drop or redirect references to that series BEFORE this
+// code rolls to production. Implementers should not re-introduce the
+// counter; see also the "Superseded by Task 22a Step 3.5" admonitions
+// in the historical Task 3 plan body.
 
 // WTPSessionFailureReason is a fixed, low-cardinality classification of
 // why a session-init or session-rotation step failed. Adding new
@@ -699,10 +736,25 @@ func (w *WTPMetrics) DroppedMapperFailure() uint64 {
 // WARN-level structured log carrying the offending raw_reason so
 // operators paged on classifier_bypass can identify the callsite.
 //
-// The raw_reason is internal — caller-controlled, NEVER peer-derived
-// — so it is safe to log verbatim per spec §"Operator runbook" and the
-// invalid-frame log sanitization rule. This complements the receiver-
-// side WARN log emitted by Task 17 Step 4a's defense-in-depth guard.
+// CALLER CONTRACT (load-bearing): the `reason` argument MUST be one of
+// the WTPInvalidFrameReason* constants — i.e. a fixed, internally-
+// controlled enumeration. Callers MUST NOT pass peer-derived strings
+// (raw protobuf field values, server-supplied tags, etc.) under any
+// circumstances. The invalid-label collapse path logs the raw_reason
+// verbatim; if a caller forwards a high-cardinality or peer-controlled
+// string here, the resulting WARN log can be turned into a log-spam
+// vector by a malicious or buggy peer. Use errors.As against
+// *wtpv1.ValidationError and forward `WTPInvalidFrameReason(ve.Reason)`
+// when the validator emitted the error; for downstream paths
+// (decompression, defense-in-depth) use the dedicated metrics-only
+// constants directly. The current production callers (transport
+// receivers, AppendEvent) all observe this contract; new callers MUST
+// be reviewed against it.
+//
+// The raw_reason is treated as internal under this contract — it is
+// safe to log verbatim per spec §"Operator runbook" and the invalid-
+// frame log sanitization rule. This complements the receiver-side
+// WARN log emitted by Task 17 Step 4a's defense-in-depth guard.
 func (w *WTPMetrics) IncDroppedInvalidFrame(reason WTPInvalidFrameReason) {
 	if w == nil || w.c == nil {
 		return
