@@ -2,7 +2,6 @@ package wtpv1
 
 import (
 	"errors"
-	"strings"
 	"testing"
 )
 
@@ -12,8 +11,9 @@ func TestValidateEventBatch_UnsetBodyRejected(t *testing.T) {
 	if !errors.Is(err, ErrInvalidFrame) {
 		t.Fatalf("expected ErrInvalidFrame; got %v", err)
 	}
-	if !strings.Contains(err.Error(), "body unset") {
-		t.Errorf("error should mention body unset; got %q", err)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Reason != ReasonEventBatchBodyUnset {
+		t.Errorf("expected *ValidationError with Reason=%q; got %v", ReasonEventBatchBodyUnset, err)
 	}
 }
 
