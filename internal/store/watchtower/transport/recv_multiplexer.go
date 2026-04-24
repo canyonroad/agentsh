@@ -164,6 +164,22 @@ func (t *Transport) teardownRecv() {
 //   - rs.ctx cancellation (per-connection cancel; round-22 Finding 2)
 //   - any non-nil error from t.conn.Recv() (stream closed by peer)
 //   - any unhandled control frame or unknown frame type (fail-closed)
+//
+// WARN-VOLUME POLICY (Task 22d): the three fail-closed branches each
+// emit ONE WARN per occurrence — no rate-limiting, no dedup. This is
+// intentional. Each fail-closed return tears the connection down and
+// drops the run loop back to Connecting, which exponentially backs
+// off (200ms → 30s) before the next dial. The reconnect backoff IS
+// the rate limiter for upstream WARN volume: a server stuck in a
+// Goaway/ServerUpdate/unknown-frame loop produces at most one WARN
+// per backoff interval (~one per 30s in steady state once the
+// backoff cap kicks in). Adding an in-process rate limiter on top
+// would mask repeated occurrences and prevent operators from seeing
+// the bug pattern. If a future server-side bug ever generates WARN
+// volume above what reconnect backoff bounds, the right fix is at
+// the server (or at a future SLI threshold on
+// wtp_reconnects_total{reason=~"server_update_unsupported|recv_unknown_frame|server_goaway"}),
+// not in-process suppression here.
 func (t *Transport) runRecv(rs *recvSession) {
 	// Closing rs.done is what unblocks teardownRecv's wait. defer at the
 	// top guarantees every exit path (ctx cancel, Recv error, fail-closed

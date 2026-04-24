@@ -14725,8 +14725,8 @@ All three rows must be green before this step's spec rewrite can land. The Goawa
 Tests are the authoritative gate; greps are illustrative only. Run BOTH test commands below and confirm all three branches' assertions pass:
 
 1. Confirm Task 22d's WARN logging tests are present and passing:
-   - `go test ./internal/store/watchtower/transport/... -run TestRecvMultiplexer_FailClosedWARN -count=1 -race -v`
-   - Each branch (Goaway / ServerUpdate / unknown-frame) must have a passing assertion that exactly one WARN-level log was emitted with the expected `reason=<...>` field (`goaway_received` / `server_update_unsupported_in_phase_4` / `recv_unknown_frame_type`).
+   - `go test ./internal/store/watchtower/transport/... -run TestRecvMultiplexer_FailClosedWarnLog -count=1 -race -v`
+   - The landed test functions are `TestRecvMultiplexer_FailClosedWarnLogGoawayDefault`, `TestRecvMultiplexer_FailClosedWarnLogGoawayOptIn`, `TestRecvMultiplexer_FailClosedWarnLogGoawayZeroValues`, `TestRecvMultiplexer_FailClosedWarnLogGoawaySanitization`, `TestRecvMultiplexer_FailClosedWarnLogServerUpdate`, and `TestRecvMultiplexer_FailClosedWarnLogUnknownFrame` (see `internal/store/watchtower/transport/recv_multiplexer_failclosed_test.go`). The `-run TestRecvMultiplexer_FailClosedWarnLog` prefix matches all six. Each branch (Goaway / ServerUpdate / unknown-frame) must have a passing assertion that exactly one WARN-level log was emitted with the expected `reason=<...>` field (`goaway_received` / `server_update_unsupported_in_phase_4` / `recv_unknown_frame_type`).
 2. Confirm Tasks 18 and 19's emitter calls are present and tested:
    - `go test ./internal/store/watchtower/transport/... -run TestRun_Reconnect -count=1 -race -v`
    - Each branch's reconnect path must have a passing test that asserts `wtp_reconnects_total{reason=<...>}` incremented from 0 to 1 (one assertion per branch: `server_goaway`, `server_update_unsupported`, `recv_unknown_frame`).
