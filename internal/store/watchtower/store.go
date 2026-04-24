@@ -202,6 +202,17 @@ type Store struct {
 	// drain to finish.
 	closing atomic.Bool
 
+	// appendDrained is set by Close after waitAppendDrain returns,
+	// reflecting whether the in-flight append drain completed within
+	// DrainDeadline (true) or timed out (false). combineWALCloseErr
+	// consults this to decide whether it's safe to call w.Close(); a
+	// timed-out drain means a goroutine may still be inside
+	// wal.Append holding w.mu, so calling w.Close() would block
+	// indefinitely — defeating the bounded-latency contract of
+	// Close. (roborev #5985/#5989 High: shutdown must not re-block
+	// on the same stuck append.)
+	appendDrained atomic.Bool
+
 	// contextDigest is the session-bound chain.ComputeContextDigest
 	// value stamped into every IntegrityRecord.ContextDigest. Computed
 	// once in New() from the Options-provided SessionContext fields
@@ -464,7 +475,8 @@ func (s *Store) Close() error {
 		// but it will NOT block Close from returning within its
 		// deadline budget. (roborev #5985 High #1)
 		s.closing.Store(true)
-		s.waitAppendDrain()
+		drained := s.waitAppendDrain()
+		s.appendDrained.Store(drained)
 
 		s.closeErr = s.shutdown()
 		// Mark closed AFTER closeErr is fully populated so a
@@ -478,10 +490,10 @@ func (s *Store) Close() error {
 // waitAppendDrain blocks up to opts.DrainDeadline for in-flight
 // AppendEvent transactions to complete. Acquires appendMu in a
 // goroutine so the deadline is interruptible; on timeout logs a
-// WARN and returns without holding the mutex (shutdown proceeds
-// and the stuck append's record will appear on next-session
-// replay if/when the fsync eventually completes).
-func (s *Store) waitAppendDrain() {
+// WARN and returns false so the caller can skip the subsequent
+// blocking wal.Close() (which would re-acquire w.mu and re-block
+// on the same stuck append). Returns true on clean drain.
+func (s *Store) waitAppendDrain() bool {
 	drainDeadline := s.opts.DrainDeadline
 	if drainDeadline <= 0 {
 		drainDeadline = 2 * time.Second
@@ -494,12 +506,13 @@ func (s *Store) waitAppendDrain() {
 	}()
 	select {
 	case <-drained:
-		// All in-flight appends completed before the deadline.
+		return true
 	case <-time.After(drainDeadline):
 		s.opts.Logger.Warn(
-			"watchtower: append drain timed out during Close; proceeding with shutdown",
+			"watchtower: append drain timed out during Close; proceeding without WAL close",
 			"drain_deadline", drainDeadline,
 		)
+		return false
 	}
 }
 
@@ -587,6 +600,21 @@ func (s *Store) shutdown() error {
 // Both errors are surfaced in the returned message; neither is
 // silently dropped.
 func (s *Store) combineWALCloseErr(runErr error) error {
+	// If the append drain timed out, a goroutine may still be inside
+	// wal.Append holding w.mu. Calling w.Close() would take w.mu and
+	// block indefinitely, which would defeat Close's bounded-latency
+	// contract — the whole point of the drain timeout. Skip wal.Close
+	// on that path and surface a synthetic diagnostic so callers see
+	// WHY the WAL wasn't flushed on this Close. The WAL's in-progress
+	// segment stays on disk; the next wal.Open will recover it.
+	// (roborev #5989 High)
+	if !s.appendDrained.Load() {
+		drainErr := fmt.Errorf("watchtower.Close: append drain timed out; skipped wal.Close to preserve bounded-latency shutdown")
+		if runErr == nil {
+			return drainErr
+		}
+		return fmt.Errorf("%w (also: %v)", runErr, drainErr)
+	}
 	walErr := s.w.Close()
 	if walErr == nil {
 		return runErr

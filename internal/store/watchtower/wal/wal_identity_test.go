@@ -476,3 +476,113 @@ func TestWAL_OpenEmptyPersistedContextDigestBackfills(t *testing.T) {
 		t.Errorf("MismatchedField = %q, want %q", idErr.MismatchedField, "context_digest")
 	}
 }
+
+// TestWAL_HeaderOnlySegmentDoesNotBlockIdentityBackfill regresses
+// roborev #5989 Medium: segmentsDirHasRecords must distinguish
+// header-only / loss-only segments from record-bearing ones.
+// Scenario: a WAL ends up with a segment that carries no RecordData
+// (e.g., only a loss marker, or a header-only segment from a
+// generation roll). On reopen under the same caller identity, the
+// backfill path MUST adopt the caller's identity rather than
+// incorrectly quarantining a benign upgrade.
+func TestWAL_HeaderOnlySegmentDoesNotBlockIdentityBackfill(t *testing.T) {
+	dir := t.TempDir()
+
+	// Phase 1: open a WAL WITHOUT identity (simulates a
+	// pre-ContextDigest WAL), write ONLY a loss marker (no
+	// RecordData), and close.
+	w1, err := Open(Options{
+		Dir:           dir,
+		SegmentSize:   4 * 1024,
+		MaxTotalBytes: 64 * 1024,
+		SyncMode:      SyncImmediate,
+	})
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	if err := w1.AppendLoss(LossRecord{
+		FromSequence: 1,
+		ToSequence:   5,
+		Generation:   1,
+		Reason:       "crc_corruption",
+	}); err != nil {
+		t.Fatalf("AppendLoss: %v", err)
+	}
+	if err := w1.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	// Phase 2: reopen WITH identity. The segment on disk has no
+	// RecordData (only a loss marker). segmentsDirHasRecords MUST
+	// report hasUser=false, so the backfill path adopts caller
+	// identity — NOT quarantines.
+	w2, err := Open(Options{
+		Dir:            dir,
+		SegmentSize:    4 * 1024,
+		MaxTotalBytes:  64 * 1024,
+		SyncMode:       SyncImmediate,
+		SessionID:      "s-upgrade",
+		KeyFingerprint: "k-upgrade",
+		ContextDigest:  "ctx-upgrade",
+	})
+	if err != nil {
+		t.Fatalf("reopen with new identity (loss-marker-only WAL should NOT quarantine): %v", err)
+	}
+	_ = w2.Close()
+
+	m, err := ReadMeta(dir)
+	if err != nil {
+		t.Fatalf("ReadMeta after reopen: %v", err)
+	}
+	if m.SessionID != "s-upgrade" || m.KeyFingerprint != "k-upgrade" || m.ContextDigest != "ctx-upgrade" {
+		t.Errorf("identity backfill after loss-only segment failed: got (%q, %q, %q)",
+			m.SessionID, m.KeyFingerprint, m.ContextDigest)
+	}
+}
+
+// TestWAL_RecordBearingSegmentBlocksIdentityBackfill is the
+// complementary positive-case regression for roborev #5985 High #2:
+// a segment carrying actual RecordData with missing identity meta
+// MUST refuse the backfill and surface ErrIdentityMismatch.
+func TestWAL_RecordBearingSegmentBlocksIdentityBackfill(t *testing.T) {
+	dir := t.TempDir()
+
+	// Phase 1: open WITHOUT identity, write a real data record,
+	// close. Simulates a pre-identity WAL that actually carries
+	// chained records.
+	w1, err := Open(Options{
+		Dir:           dir,
+		SegmentSize:   4 * 1024,
+		MaxTotalBytes: 64 * 1024,
+		SyncMode:      SyncImmediate,
+	})
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	if _, err := w1.Append(1, 1, []byte("legacy-record")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := w1.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	// Phase 2: reopen WITH identity. Records exist but carry no
+	// identity — refuse the backfill (they may belong to a
+	// different session/agent).
+	_, err = Open(Options{
+		Dir:            dir,
+		SegmentSize:    4 * 1024,
+		MaxTotalBytes:  64 * 1024,
+		SyncMode:       SyncImmediate,
+		SessionID:      "s-new",
+		KeyFingerprint: "k-new",
+		ContextDigest:  "ctx-new",
+	})
+	if err == nil {
+		t.Fatal("reopen with record-bearing WAL + new identity silently adopted; want ErrIdentityMismatch")
+	}
+	var idErr *ErrIdentityMismatch
+	if !errors.As(err, &idErr) {
+		t.Fatalf("want *ErrIdentityMismatch, got %T: %v", err, err)
+	}
+}

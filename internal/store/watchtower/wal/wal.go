@@ -237,16 +237,30 @@ func nonEmpty(a, b string) string {
 	return b
 }
 
-// segmentsDirHasRecords reports whether segDir contains any .seg or
-// .seg.INPROGRESS files. Used by Open's identity-backfill and seed
-// paths to refuse silent caller-identity adoption when the WAL
-// already carries records — those records may have been chained
-// under a different identity and must not be silently re-chained
-// under the new caller's values (roborev #5985 High #2).
+// segmentsDirHasRecords reports whether segDir contains at least one
+// segment with an actual user-record (RecordData) payload. Used by
+// Open's identity-backfill and seed paths to refuse silent caller-
+// identity adoption when the WAL already carries records — those
+// records may have been chained under a different identity and must
+// not be silently re-chained under the new caller's values (roborev
+// #5985 High #2).
+//
+// FILENAME PRESENCE IS NOT ENOUGH (roborev #5989 Medium): the WAL
+// supports header-only segments (e.g., the AppendLoss path opens a
+// new segment for a loss marker on a fresh generation, and a close
+// that happens before any data record lands leaves a header-only
+// .seg file). A header-only segment carries no IntegrityRecord, so
+// it has no identity to drift from; classifying it as "record-
+// bearing" would incorrectly quarantine a benign upgrade. We instead
+// scan each segment's frames via segmentHighSeqAndGen and report
+// true only when hasUser=true (at least one RecordData record).
+//
+// maxPayload is the segment's maximum record payload size, derived
+// from opts.SegmentSize - SegmentHeaderSize (same as w.maxRec).
 //
 // Returns (false, nil) when segDir does not yet exist (fresh
 // directory, first open).
-func segmentsDirHasRecords(segDir string) (bool, error) {
+func segmentsDirHasRecords(segDir string, maxPayload int) (bool, error) {
 	entries, err := os.ReadDir(segDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -256,7 +270,19 @@ func segmentsDirHasRecords(segDir string) (bool, error) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasSuffix(name, sealedSuffix) || strings.HasSuffix(name, inprogressSuffix) {
+		if !strings.HasSuffix(name, sealedSuffix) && !strings.HasSuffix(name, inprogressSuffix) {
+			continue
+		}
+		path := filepath.Join(segDir, name)
+		_, hasUser, _, _, scanErr := segmentHighSeqAndGen(path, maxPayload)
+		if scanErr != nil {
+			// A corrupt/truncated segment is still evidence the WAL
+			// was used at some point; err on the safe side and
+			// treat as record-bearing so the caller quarantines
+			// rather than silently adopting.
+			return true, nil
+		}
+		if hasUser {
 			return true, nil
 		}
 	}
@@ -516,7 +542,7 @@ func Open(opts Options) (*WAL, error) {
 			(m.KeyFingerprint == "" && opts.KeyFingerprint != "") ||
 			(m.ContextDigest == "" && opts.ContextDigest != "")
 		if backfillNeeded {
-			hasRecords, err := segmentsDirHasRecords(segDir)
+			hasRecords, err := segmentsDirHasRecords(segDir, maxRec)
 			if err != nil {
 				return nil, fmt.Errorf("scan segments for backfill safety: %w", err)
 			}
@@ -544,7 +570,7 @@ func Open(opts Options) (*WAL, error) {
 		// against) and MUST NOT adopt caller identity silently.
 		// Same rationale as the backfill path above (roborev
 		// #5985 High #2).
-		hasRecords, err := segmentsDirHasRecords(segDir)
+		hasRecords, err := segmentsDirHasRecords(segDir, maxRec)
 		if err != nil {
 			return nil, fmt.Errorf("scan segments for seed safety: %w", err)
 		}
