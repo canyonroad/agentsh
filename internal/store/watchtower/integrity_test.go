@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -281,5 +282,132 @@ func TestStore_AppendEvent_PopulatesIntegrityRecord(t *testing.T) {
 	wantEventHash := hex.EncodeToString(sum[:])
 	if got := ir.GetEventHash(); got != wantEventHash {
 		t.Errorf("IntegrityRecord.EventHash = %q, want %q — event_hash is not sha256(canonical event)", got, wantEventHash)
+	}
+}
+
+// TestStore_AppendEvent_GenerationRollResetsPrevHash regresses the
+// roborev #5942 High finding: when ev.Chain.Generation differs from
+// the chain's current generation, audit.SinkChain.Compute resets
+// prev_hash to "" for the rollover record. AppendEvent MUST mirror
+// that rule when stamping IntegrityRecord.PrevHash; otherwise the
+// first record of the new generation would serialise the prior
+// generation's hash and break cross-implementation replay.
+func TestStore_AppendEvent_GenerationRollResetsPrevHash(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	opts := watchtower.Options{
+		WALDir:          dir,
+		Mapper:          compact.StubMapper{},
+		Allocator:       audit.NewSequenceAllocator(),
+		AgentID:         "a",
+		SessionID:       "s",
+		KeyFingerprint:  "sha256:deadbeef",
+		HMACKeyID:       "k1",
+		HMACSecret:      bytes.Repeat([]byte("a"), 32),
+		HMACAlgorithm:   "hmac-sha256",
+		BatchMaxRecords: 8,
+		BatchMaxBytes:   8 * 1024,
+		BatchMaxAge:     50 * time.Millisecond,
+		AllowStubMapper: true,
+		Dialer:          srv.DialerFor(),
+	}
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("watchtower.New: %v", err)
+	}
+
+	// First event in generation 1 — advances the chain.
+	if err := s.AppendEvent(context.Background(), mkEvent(1, 1)); err != nil {
+		t.Fatalf("gen=1 AppendEvent: %v", err)
+	}
+
+	// Second event in NEW generation 2 — chain rolls; IntegrityRecord
+	// MUST serialise PrevHash="" not the gen=1 entry hash.
+	if err := s.AppendEvent(context.Background(), mkEvent(2, 2)); err != nil {
+		t.Fatalf("gen=2 AppendEvent: %v", err)
+	}
+
+	if err := s.Close(); err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close: %v", err)
+	}
+
+	w, err := wal.Open(wal.Options{
+		Dir:            dir,
+		SegmentSize:    64 * 1024,
+		MaxTotalBytes:  1024 * 1024,
+		SyncMode:       wal.SyncImmediate,
+		SessionID:      opts.SessionID,
+		KeyFingerprint: opts.KeyFingerprint,
+	})
+	if err != nil {
+		t.Fatalf("wal.Open for readback: %v", err)
+	}
+	defer w.Close()
+
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 2, Start: 2})
+	if err != nil {
+		t.Fatalf("wal.NewReader(gen=2): %v", err)
+	}
+	defer rdr.Close()
+
+	rec, err := rdr.Next()
+	if err != nil {
+		t.Fatalf("Reader.Next: %v", err)
+	}
+	ce := &wtpv1.CompactEvent{}
+	if err := proto.Unmarshal(rec.Payload, ce); err != nil {
+		t.Fatalf("unmarshal gen=2 record: %v", err)
+	}
+	if got := ce.GetIntegrity().GetPrevHash(); got != "" {
+		t.Errorf("IntegrityRecord.PrevHash on gen=2 first record = %q, want \"\" (generation roll)", got)
+	}
+	if got := ce.GetIntegrity().GetGeneration(); got != 2 {
+		t.Errorf("IntegrityRecord.Generation = %d, want 2", got)
+	}
+}
+
+// TestStore_AppendEvent_ConcurrentCallersDoNotLatchFatal regresses the
+// roborev #5935 High concurrency fix and its #5942 Low follow-up:
+// many goroutines calling AppendEvent on one Store MUST complete
+// without any latching fatal, and the chain MUST advance once per
+// successful call. Store.appendMu serialises the Compute → Append →
+// Commit transaction so two concurrent calls cannot race on the
+// shared prev_hash.
+func TestStore_AppendEvent_ConcurrentCallersDoNotLatchFatal(t *testing.T) {
+	s := mkIntegrityStore(t)
+
+	const n = 32
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Unique (seq, gen) per call — the Allocator is the
+			// composite-store concern; here we simulate by passing
+			// distinct values. All goroutines run against one Store
+			// so the mutex serialises them.
+			errs <- s.AppendEvent(context.Background(), mkEvent(uint64(i+1), 1))
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	var failed int
+	for err := range errs {
+		if err != nil {
+			failed++
+			t.Errorf("concurrent AppendEvent: %v", err)
+		}
+	}
+	if failed > 0 {
+		t.Fatalf("%d/%d concurrent AppendEvent calls failed — serialisation regression", failed, n)
+	}
+	if err := s.Err(); err != nil {
+		t.Errorf("Store.Err() = %v after concurrent appends; store should not be latched fatal", err)
 	}
 }

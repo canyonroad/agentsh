@@ -104,17 +104,28 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	}
 	eventHash := chain.ComputeEventHash(canonicalEvent)
 
-	// 2. Build the WTP IntegrityRecord. prev_hash comes from the
-	//    sink's CURRENT state (pre-advance) — the audit chain
-	//    advances only after Commit. Reading via PeekPrevHash keeps
-	//    the two in lock-step: the chain's Compute call below re-
-	//    derives this same prev_hash from its internal state, and
-	//    cr.PrevHash() matches the value we stamped here.
+	// 2. Build the WTP IntegrityRecord. prev_hash MUST match what
+	//    sink.Compute will use internally on the next call:
+	//      - if ev.Chain.Generation == chain.Generation, prev_hash is
+	//        the chain's current prev_hash;
+	//      - if ev.Chain.Generation != chain.Generation (generation
+	//        roll), prev_hash resets to "" — matching
+	//        audit.SinkChain.Compute's rollover rule.
+	//    Reading state here and mirroring that rule keeps
+	//    IntegrityRecord.PrevHash in lock-step with the HMAC the
+	//    chain will produce; otherwise a first-record-of-new-
+	//    generation would serialise the prior generation's hash and
+	//    break cross-implementation replay / verification.
+	state := s.sink.State()
+	var prevForRecord string
+	if ev.Chain.Generation == state.Generation {
+		prevForRecord = state.PrevHash
+	}
 	integrityRec := chain.IntegrityRecord{
 		FormatVersion:  uint32(audit.IntegrityFormatVersion),
 		Sequence:       ev.Chain.Sequence,
 		Generation:     ev.Chain.Generation,
-		PrevHash:       s.sink.PeekPrevHash(),
+		PrevHash:       prevForRecord,
 		EventHash:      eventHash,
 		ContextDigest:  s.contextDigest,
 		KeyFingerprint: s.opts.KeyFingerprint,

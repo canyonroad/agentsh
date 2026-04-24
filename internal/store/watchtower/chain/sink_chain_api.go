@@ -31,4 +31,14 @@ type SinkChainAPI interface {
 	Commit(result *audit.ComputeResult) error
 	Fatal(reason error)
 	PeekPrevHash() string
+	// State returns the chain's current generation + prev_hash snapshot.
+	// AppendEvent uses it to populate IntegrityRecord.PrevHash with the
+	// SAME value Compute will internally use on the next call: when the
+	// event's generation matches state.Generation, prev_hash is
+	// state.PrevHash; when it differs (generation roll), prev_hash
+	// resets to "" — matching audit.SinkChain.Compute's rollover rule.
+	// Without this, a record on the first event of a new generation
+	// would serialise the previous generation's hash and break
+	// cross-implementation replay / verification.
+	State() audit.SinkChainState
 }

@@ -50,3 +50,12 @@ func (s *WatchtowerSink) Fatal(reason error) {
 func (s *WatchtowerSink) PeekPrevHash() string {
 	return s.inner.State().PrevHash
 }
+
+// State returns the chain's current (Generation, PrevHash, Fatal)
+// snapshot. AppendEvent reads this to populate
+// IntegrityRecord.PrevHash with the value Compute will internally
+// use — matching the rollover rule where prev_hash resets to "" on
+// a generation change. Direct pass-through to audit.SinkChain.State.
+func (s *WatchtowerSink) State() audit.SinkChainState {
+	return s.inner.State()
+}
