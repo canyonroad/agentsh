@@ -123,10 +123,6 @@ var ErrCloseSafetyNet = errors.New("watchtower.Close: shutdown safety net hit; b
 //     cases and the conditional wal.Close in shutdown() becomes
 //     unconditional.
 //
-//     The transport-side non-blocking-stop signal that would
-//     eliminate the leak case is a future-task concern (the Stop
-//     docstring tracks it inline; no plan task owns it yet).
-//
 //   - Err() returns the run loop's terminal error if Run has
 //     already exited (or the canonical Close-captured error after
 //     Close has run). Non-blocking; returns nil if Run is still

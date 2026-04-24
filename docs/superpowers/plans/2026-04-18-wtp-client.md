@@ -18263,46 +18263,80 @@ that nothing will close. The safety-net path leaks the bg goroutine,
 the in-flight `Stop` goroutine, and the WAL handle; same-process
 reopen is documented as a CONTRACT VIOLATION.
 
-This task eliminates the leak by making `Transport.Stop` non-
-blocking when no Run-loop consumer is alive (or by adding a
-RunDone signal Stop can observe so it returns instead of waiting on
-a never-closed `r.done`).
+**Scope (narrow):** this task ELIMINATES the *caller-blocking* part
+of the leak — `Transport.Stop` and `Close()` no longer block waiting
+on a Run loop that has already exited or is wedged. It does NOT
+guarantee the wedged goroutine itself can be reclaimed (a goroutine
+parked in a syscall that ignores ctx cannot be unwound from Go-land
+without OS-level facilities); that reclamation work is OUT OF SCOPE
+and tracked separately if it ever becomes a production concern. In
+practice, production Conn implementations (gRPC over TLS) all honour
+ctx, so the wedged-goroutine case is a test-injected anomaly rather
+than a real production failure mode — eliminating the caller-block
+is sufficient to declare the lifecycle contract sound.
 
 **Acceptance criteria:**
 
-- `Transport.Stop` returns within a bounded time when called against
-  a Run loop that has already exited OR is wedged in a non-
-  interruptible call. No goroutine leak.
+- `Transport.Stop` returns within a bounded time (target: under 100ms
+  beyond ctx.Done propagation) when called against a Run loop that
+  has already exited OR is wedged in a non-interruptible call. Done
+  via a RunDone signal Stop can observe so it returns instead of
+  waiting on a never-closed `r.done`.
 - `watchtower.Store.Close()` no longer needs to skip `wal.Close` on
-  any path; the conditional WAL-close in `store.go` becomes
-  unconditional.
-- `watchtower.ErrCloseSafetyNet` is removed (or downgraded to a
-  reserved-for-degenerate-cases sentinel that no realistic
-  production scenario triggers).
-- The `Store` lifecycle docstring's "IMPORTANT incomplete-cleanup
-  case" block is removed.
+  the caller-blocking path; the conditional WAL-close in `store.go`
+  becomes unconditional for the cases this task covers (Stop returns
+  cleanly).
+- The Store lifecycle docstring's "IMPORTANT incomplete-cleanup
+  case" block is updated to reflect the narrower remaining failure
+  mode (production Conns always honour ctx; the residual case is
+  test-injected only).
+- `watchtower.ErrCloseSafetyNet` MAY be retained as a
+  reserved-for-degenerate sentinel for callers that already detect
+  it; deprecation/removal is a separate concern handled at API-
+  stability review time.
 - Same-process reopen on the same WAL Dir after `Close()` returns
-  becomes SUPPORTED (contract change documented in the plan +
-  spec).
-- Acceptance test: a fault-injecting dialer that wedges `Dial`
-  AND ignores ctx — `Close()` MUST still return without leaking
-  the bg goroutine.
+  becomes SUPPORTED for callers using a production Conn.
+- Acceptance test: a production-shaped Conn (testserver.Server) with
+  a slow drain — `Stop` and `Close()` MUST return without blocking
+  on a never-closed channel.
+
+**Backwards compatibility:**
+
+- Callers using `errors.Is(err, ErrCloseSafetyNet)` continue to work
+  — the sentinel is retained.
+- The latency contract in store.go's `closeRunCancelGrace` comment
+  is unchanged (the constant and the bounded-Close upper bound
+  remain valid; the safety-net path becomes unreachable in
+  production but the bound stays a useful guarantee).
+
+**Suggested execution order:**
+
+1. Add a `RunDone` chan or atomic flag on `*Transport`; close/set
+   it from the Run loop's defer.
+2. Update `Transport.Stop`'s `<-r.done` wait to also select on
+   `RunDone` so it returns when Run has exited regardless of
+   stopCh consumption.
+3. Update `watchtower.Store.shutdown()` to call `wal.Close()`
+   unconditionally now that Stop is bounded.
+4. Update docstrings + plan to reflect the narrower remaining
+   failure mode.
 
 **Coordination:** Task 22's `ErrCloseSafetyNet` test
-(`TestStore_CloseSafetyNetReturnsSentinel`) becomes the regression
-guard for the leak fix: after this task lands, that test should be
-updated or removed (the path it exercises no longer exists).
+(`TestStore_CloseSafetyNetReturnsSentinel`) currently exercises a
+ctx-ignoring dialer; after this task lands the test should be
+adjusted (or marked test-only for the synthetic case) since the
+production-Conn path no longer triggers the sentinel.
 
 ---
 
 This section describes the target end-state when ALL 27 implementation
-tasks plus Task 27a and Task 27b have landed. It is NOT a current-status
-claim — at the time of writing, the plan is mid-execution (Task 17.X
-in flight); subsequent tasks (18, 19, 20, 21, 22, 22a, 22b, 22c, 22d,
-24, 25, 26, 27, 27a, 27b) are future work. The bullet enumeration
-below describes what "done" means, not what is done. Verify current
-status against `git log` and the in-tree task tracker, NOT this
-section.
+tasks plus Task 27a, Task 27b, and Task 27c have landed. It is NOT a
+current-status claim — at the time of writing, the plan is mid-
+execution (Task 17.X in flight); subsequent tasks (18, 19, 20, 21,
+22, 22a, 22b, 22c, 22d, 24, 25, 26, 27, 27a, 27b, 27c) are future
+work. The bullet enumeration below describes what "done" means, not
+what is done. Verify current status against `git log` and the
+in-tree task tracker, NOT this section.
 
 When all 27 implementation tasks (1, 2, 3, 4, 4a-ii, 5, 6, 7, 8, 9, 10, 11,
 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 22a, 22b, 24, 25, 26, 27)
@@ -18310,11 +18344,13 @@ plus Task 27a (operator monitoring migration coordination — owned by
 SRE/ops, gates production rollout only) plus Task 27b (LogGoawayMessage
 config-surface expansion — owned by the WTP transport team, gated on
 the Watchtower-server-side `Goaway.message` no-secrets contract being
-published) are complete, the watchtower store will be wired into the
-daemon behind `audit.watchtower.enabled: true`, the standalone
-`wtp-testserver` binary will be available for manual integration
-testing, and the full test suite (unit, integrity-gating, component,
-integration) will be green.
+published) plus Task 27c (transport-side non-blocking Stop — owned by
+the WTP transport team, eliminates the caller-blocking part of the
+Close safety-net leak) are complete, the watchtower store will be
+wired into the daemon behind `audit.watchtower.enabled: true`, the
+standalone `wtp-testserver` binary will be available for manual
+integration testing, and the full test suite (unit, integrity-gating,
+component, integration) will be green.
 
 Before merge, run:
 
