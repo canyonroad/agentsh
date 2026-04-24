@@ -18276,13 +18276,17 @@ instead of waiting on a never-closed `r.done`. Concretely:
   never fires. The `ErrCloseSafetyNet` sentinel + leak contract
   REMAINS in place for that case.
 
-The wedged case is reachable ONLY when callers inject a custom
-`Dialer`/`Conn` that ignores ctx. Production dialers landed by
-Task 27 honour ctx (gRPC over TLS propagates ctx into Send/Recv/
-Dial), so the wedged path is effectively test-injected today. If a
-production custom-dialer scenario ever triggers the wedged case,
-a follow-up "wedged-goroutine reclamation" task would need to
-address it — filed then, not pre-emptively.
+The wedged case is reachable today (and will stay reachable) when
+callers inject a custom `Dialer`/`Conn` that ignores ctx. Note:
+TODAY all dialers are injected via `Options.Dialer` because the
+built-in production dialer does not exist yet (Task 27 lands it),
+so every current caller is on the custom-dialer path. Once Task 27
+lands its built-in dialer (gRPC over TLS, ctx-honouring), the
+wedged path becomes effectively test-injected for callers using
+the built-in dialer; injected/custom dialers may still hit the
+sentinel. If a production custom-dialer scenario ever triggers
+the wedged case, a follow-up "wedged-goroutine reclamation" task
+would need to address it — filed then, not pre-emptively.
 
 **Acceptance criteria (narrow):**
 

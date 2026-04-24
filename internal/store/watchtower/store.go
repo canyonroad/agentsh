@@ -119,10 +119,15 @@ var ErrCloseSafetyNet = errors.New("watchtower.Close: shutdown safety net hit; b
 //     the narrower "Stop called AFTER Run has already exited" race
 //     by adding a Transport-side RunDone signal; the wedged-goroutine
 //     case (Run parked inside a ctx-ignoring Conn.Send/Recv/Dial)
-//     stays covered by ErrCloseSafetyNet and is reachable only via
-//     custom-dialer injection (production dialers honour ctx). If
-//     a production custom-dialer ever hits the wedge, Task 27d
-//     would cover reclamation — not pre-filed.
+//     stays covered by ErrCloseSafetyNet. Today ALL dialers are
+//     injected via Options.Dialer (the built-in production dialer
+//     lands in Task 27), so every current caller is on the
+//     custom-dialer path and the sentinel/no-reopen contract
+//     applies universally. Once Task 27 lands its built-in dialer
+//     (gRPC over TLS, ctx-honouring) the wedge case becomes
+//     reachable only via custom-dialer injection. If a production
+//     custom-dialer ever hits the wedge, Task 27d would cover
+//     reclamation — not pre-filed.
 //
 //   - Err() returns the run loop's terminal error if Run has
 //     already exited (or the canonical Close-captured error after
