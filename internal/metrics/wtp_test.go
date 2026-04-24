@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"net/http/httptest"
 	"strconv"
 	"strings"
@@ -23,7 +25,6 @@ func TestWTPMetrics_AppendAndExpose(t *testing.T) {
 	w.SetWALSegments(7)
 	w.SetWALBytes(16 * 1024 * 1024)
 	w.SetAckHighWatermark(42)
-	w.IncDroppedMissingChain(1)
 	w.ObserveSendLatency(150 * time.Millisecond)
 
 	rr := httptest.NewRecorder()
@@ -41,7 +42,6 @@ func TestWTPMetrics_AppendAndExpose(t *testing.T) {
 		"wtp_wal_segments 7",
 		"wtp_wal_bytes 16777216",
 		"wtp_ack_high_watermark 42",
-		"wtp_dropped_missing_chain_total 1",
 		"wtp_send_latency_seconds_count 1",
 	} {
 		if !strings.Contains(body, want) {
@@ -257,5 +257,330 @@ func TestWTPMetrics_AnomalousAckAlwaysEmittedAllReasons(t *testing.T) {
 	body = rr.Body.String()
 	if !strings.Contains(body, `wtp_anomalous_ack_total{reason="future_unknown_reason"} 1`) {
 		t.Errorf("expected out-of-band reason to surface\nbody:\n%s", body)
+	}
+}
+
+// --------------------------------------------------------------------
+// Task 22a Step 1: failing tests for the new sink-failure counters.
+// --------------------------------------------------------------------
+
+func TestWTPMetrics_DroppedInvalidUTF8(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_invalid_utf8_total 0") {
+		t.Errorf("expected zero-valued wtp_dropped_invalid_utf8_total in initial scrape\nbody:\n%s", rr.Body.String())
+	}
+
+	w.IncDroppedInvalidUTF8(2)
+
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_invalid_utf8_total 2") {
+		t.Errorf("expected wtp_dropped_invalid_utf8_total 2 after IncDroppedInvalidUTF8(2)\nbody:\n%s", rr.Body.String())
+	}
+	if got := c.WTP().DroppedInvalidUTF8(); got != 2 {
+		t.Errorf("DroppedInvalidUTF8 accessor returned %d, want 2", got)
+	}
+}
+
+func TestWTPMetrics_DroppedSequenceOverflow(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_sequence_overflow_total 0") {
+		t.Errorf("expected zero-valued wtp_dropped_sequence_overflow_total in initial scrape\nbody:\n%s", rr.Body.String())
+	}
+
+	w.IncDroppedSequenceOverflow(3)
+
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_sequence_overflow_total 3") {
+		t.Errorf("expected wtp_dropped_sequence_overflow_total 3 after IncDroppedSequenceOverflow(3)\nbody:\n%s", rr.Body.String())
+	}
+	if got := c.WTP().DroppedSequenceOverflow(); got != 3 {
+		t.Errorf("DroppedSequenceOverflow accessor returned %d, want 3", got)
+	}
+}
+
+func TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons(t *testing.T) {
+	c := New()
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	expectedReasons := []string{"invalid_utf8", "unknown"}
+	for _, reason := range expectedReasons {
+		want := fmt.Sprintf(`wtp_session_init_failures_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("missing zero-valued series %q\nbody:\n%s", want, body)
+		}
+	}
+	c.WTP().IncSessionInitFailures(WTPSessionFailureReasonInvalidUTF8)
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_session_init_failures_total{reason="invalid_utf8"} 1`) {
+		t.Errorf("expected invalid_utf8=1 after one IncSessionInitFailures\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_session_init_failures_total{reason="unknown"} 0`) {
+		t.Errorf("expected unknown to remain 0 after invalid_utf8 increment\nbody:\n%s", body)
+	}
+}
+
+func TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons(t *testing.T) {
+	c := New()
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	expectedReasons := []string{"invalid_utf8", "unknown"}
+	for _, reason := range expectedReasons {
+		want := fmt.Sprintf(`wtp_session_rotation_failures_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("missing zero-valued series %q\nbody:\n%s", want, body)
+		}
+	}
+	c.WTP().IncSessionRotationFailures(WTPSessionFailureReasonInvalidUTF8)
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_session_rotation_failures_total{reason="invalid_utf8"} 1`) {
+		t.Errorf("expected invalid_utf8=1 after one IncSessionRotationFailures\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_session_rotation_failures_total{reason="unknown"} 0`) {
+		t.Errorf("expected unknown to remain 0 after invalid_utf8 increment\nbody:\n%s", body)
+	}
+}
+
+func TestWTPMetrics_SessionFailureReasonValidationAndEscape(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	w.IncSessionInitFailures(WTPSessionFailureReasonInvalidUTF8)
+	w.IncSessionInitFailures(WTPSessionFailureReason("evil\"label\\value"))
+	w.IncSessionRotationFailures(WTPSessionFailureReasonInvalidUTF8)
+	w.IncSessionRotationFailures(WTPSessionFailureReason("evil\"label\\value"))
+
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	for _, want := range []string{
+		`wtp_session_init_failures_total{reason="invalid_utf8"} 1`,
+		`wtp_session_init_failures_total{reason="unknown"} 1`,
+		`wtp_session_rotation_failures_total{reason="invalid_utf8"} 1`,
+		`wtp_session_rotation_failures_total{reason="unknown"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing line %q\nbody:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `evil`) {
+		t.Errorf("invalid reason leaked through validator into output:\n%s", body)
+	}
+}
+
+func TestWTPMetrics_DroppedInvalidMapper(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_invalid_mapper_total 0") {
+		t.Errorf("expected zero-valued wtp_dropped_invalid_mapper_total in initial scrape\nbody:\n%s", rr.Body.String())
+	}
+
+	w.IncDroppedInvalidMapper(1)
+
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_invalid_mapper_total 1") {
+		t.Errorf("expected wtp_dropped_invalid_mapper_total 1 after IncDroppedInvalidMapper(1)\nbody:\n%s", rr.Body.String())
+	}
+	if got := c.WTP().DroppedInvalidMapper(); got != 1 {
+		t.Errorf("DroppedInvalidMapper accessor returned %d, want 1", got)
+	}
+}
+
+func TestWTPMetrics_DroppedInvalidTimestamp(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_invalid_timestamp_total 0") {
+		t.Errorf("expected zero-valued wtp_dropped_invalid_timestamp_total in initial scrape\nbody:\n%s", rr.Body.String())
+	}
+
+	w.IncDroppedInvalidTimestamp(2)
+
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_invalid_timestamp_total 2") {
+		t.Errorf("expected wtp_dropped_invalid_timestamp_total 2 after IncDroppedInvalidTimestamp(2)\nbody:\n%s", rr.Body.String())
+	}
+	if got := c.WTP().DroppedInvalidTimestamp(); got != 2 {
+		t.Errorf("DroppedInvalidTimestamp accessor returned %d, want 2", got)
+	}
+}
+
+func TestWTPMetrics_DroppedMapperFailure(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_mapper_failure_total 0") {
+		t.Errorf("expected zero-valued wtp_dropped_mapper_failure_total in initial scrape\nbody:\n%s", rr.Body.String())
+	}
+
+	w.IncDroppedMapperFailure(4)
+
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_mapper_failure_total 4") {
+		t.Errorf("expected wtp_dropped_mapper_failure_total 4 after IncDroppedMapperFailure(4)\nbody:\n%s", rr.Body.String())
+	}
+	if got := c.WTP().DroppedMapperFailure(); got != 4 {
+		t.Errorf("DroppedMapperFailure accessor returned %d, want 4", got)
+	}
+}
+
+func TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons(t *testing.T) {
+	c := New()
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	expectedReasons := []string{
+		"classifier_bypass",
+		"decompress_error",
+		"event_batch_body_unset",
+		"event_batch_compression_mismatch",
+		"event_batch_compression_unspecified",
+		"payload_too_large",
+		"session_init_algorithm_unspecified",
+		"unknown",
+	}
+	for _, reason := range expectedReasons {
+		want := fmt.Sprintf(`wtp_dropped_invalid_frame_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("missing zero-valued series %q\nbody:\n%s", want, body)
+		}
+	}
+
+	c.WTP().IncDroppedInvalidFrame(WTPInvalidFrameReasonEventBatchBodyUnset)
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_dropped_invalid_frame_total{reason="event_batch_body_unset"} 1`) {
+		t.Errorf("expected event_batch_body_unset=1 after one IncDroppedInvalidFrame\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_dropped_invalid_frame_total{reason="unknown"} 0`) {
+		t.Errorf("expected unknown to remain 0 after event_batch_body_unset increment\nbody:\n%s", body)
+	}
+
+	c.WTP().IncDroppedInvalidFrame(WTPInvalidFrameReason("evil\"label\\value"))
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_dropped_invalid_frame_total{reason="classifier_bypass"} 1`) {
+		t.Errorf("expected classifier_bypass=1 after invalid-reason fallback\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_dropped_invalid_frame_total{reason="unknown"} 0`) {
+		t.Errorf("expected unknown to remain 0 after invalid-reason fallback\nbody:\n%s", body)
+	}
+	if strings.Contains(body, `evil`) {
+		t.Errorf("invalid reason leaked through validator into output:\n%s", body)
+	}
+}
+
+func TestIncDroppedInvalidFrame_InvalidLabelLogsAndCollapses(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	c := New()
+	const badRaw = "not-a-canonical-reason"
+	c.WTP().IncDroppedInvalidFrame(WTPInvalidFrameReason(badRaw))
+
+	if got := c.WTP().DroppedInvalidFrame(WTPInvalidFrameReasonClassifierBypass); got != 1 {
+		t.Errorf("DroppedInvalidFrame(classifier_bypass) = %d, want 1", got)
+	}
+	if got := c.WTP().DroppedInvalidFrame(WTPInvalidFrameReasonUnknown); got != 0 {
+		t.Errorf("DroppedInvalidFrame(unknown) = %d, want 0 (must NOT collapse to unknown)", got)
+	}
+
+	logOutput := buf.String()
+	if want := "invalid invalid-frame reason label"; !strings.Contains(logOutput, want) {
+		t.Errorf("expected WARN log message %q in captured log output\nlog:\n%s", want, logOutput)
+	}
+	if want := `"raw_reason":"` + badRaw + `"`; !strings.Contains(logOutput, want) {
+		t.Errorf("expected raw_reason field %q in captured log output\nlog:\n%s", want, logOutput)
+	}
+	if want := `"reason":"classifier_bypass"`; !strings.Contains(logOutput, want) {
+		t.Errorf("expected reason=classifier_bypass field in captured log output\nlog:\n%s", logOutput)
+	}
+	if got := strings.Count(strings.TrimRight(logOutput, "\n"), "\n") + 1; got != 1 {
+		t.Errorf("expected exactly one WARN log entry, got %d\nlog:\n%s", got, logOutput)
+	}
+}
+
+// --------------------------------------------------------------------
+// Task 22a Step 4: metrics-internal parity assertions for the
+// WTPInvalidFrameReason enum. These tests use package-private state
+// (wtpInvalidFrameReasonsValid, validationReasonsShared,
+// metricsOnlyReasons) to assert the four invariants the enum must
+// hold. The cross-package parity test against wtpv1.AllValidationReasons
+// is deferred to Task 22b.
+// --------------------------------------------------------------------
+
+func TestWTPInvalidFrameReason_ValidationReasonsAllValid(t *testing.T) {
+	for _, r := range validationReasonsShared {
+		if _, ok := wtpInvalidFrameReasonsValid[r]; !ok {
+			t.Errorf("validationReasonsShared contains %q but wtpInvalidFrameReasonsValid does not", r)
+		}
+	}
+}
+
+func TestWTPInvalidFrameReason_MetricsOnlyReasonsAllValid(t *testing.T) {
+	for _, r := range metricsOnlyReasons {
+		if _, ok := wtpInvalidFrameReasonsValid[r]; !ok {
+			t.Errorf("metricsOnlyReasons contains %q but wtpInvalidFrameReasonsValid does not", r)
+		}
+	}
+}
+
+func TestWTPInvalidFrameReason_ValidationAndMetricsOnlyDisjoint(t *testing.T) {
+	validation := make(map[WTPInvalidFrameReason]struct{}, len(validationReasonsShared))
+	for _, r := range validationReasonsShared {
+		validation[r] = struct{}{}
+	}
+	for _, r := range metricsOnlyReasons {
+		if _, ok := validation[r]; ok {
+			t.Errorf("reason %q appears in BOTH validationReasonsShared and metricsOnlyReasons (must be disjoint)", r)
+		}
+	}
+}
+
+func TestWTPInvalidFrameReason_ValidationPlusMetricsOnlyCoversAllValid(t *testing.T) {
+	covered := make(map[WTPInvalidFrameReason]struct{}, len(wtpInvalidFrameReasonsValid))
+	for _, r := range validationReasonsShared {
+		covered[r] = struct{}{}
+	}
+	for _, r := range metricsOnlyReasons {
+		covered[r] = struct{}{}
+	}
+	for r := range wtpInvalidFrameReasonsValid {
+		if _, ok := covered[r]; !ok {
+			t.Errorf("wtpInvalidFrameReasonsValid contains %q but neither validationReasonsShared nor metricsOnlyReasons covers it", r)
+		}
 	}
 }
