@@ -89,7 +89,12 @@ The existing `compact.Encode` and `chain.EncodeCanonical` returns already use `%
 
 ## Testing
 
-Two test files. The split exists because `Options.validate` rejects nil and typed-nil `Mapper` at construction (`internal/store/watchtower/options.go:181-185`), so `compact.ErrInvalidMapper` is unreachable from `AppendEvent` through a real `watchtower.New` flow. The wiring is still defense-in-depth — operators want the counter to fire if the validation surface ever changes — but the test for that branch must call the helper directly.
+Two test files. The split exists because two of the five drop classes are pure defense-in-depth — the construction surface validates them before `AppendEvent` is reachable:
+
+- **`compact.ErrInvalidMapper`** — `Options.validate` rejects nil and typed-nil `Mapper` at construction (`internal/store/watchtower/options.go:181-185`).
+- **`chain.ErrInvalidUTF8`** — `chain.ComputeContextDigest` (called by `watchtower.New` at `store.go:279-287`) UTF-8-validates every `SessionContext` string including `KeyFingerprint`. The other strings that reach `chain.EncodeCanonical` at append time (`ContextDigest`, `EventHash`, `PrevHash`) are computed internally from validated inputs.
+
+The wiring is still right — operators want the counter to fire if the validation surface ever changes — but the tests for these two branches must call the helper directly.
 
 ### `internal/store/watchtower/append_drop_test.go` (external `watchtower_test` package)
 
@@ -98,16 +103,18 @@ Real `watchtower.New` + `AppendEvent` integration tests, one per reachable drop 
 | Test | Trigger | Counter asserted | Reason label asserted |
 |---|---|---|---|
 | `TestAppendEvent_DropsOnInvalidTimestamp` | `ev.Timestamp = time.Time{}` | `DroppedInvalidTimestamp() == 1` | `invalid_timestamp` |
-| `TestAppendEvent_DropsOnMapperFailure` | Test-fixture mapper whose `MapEvent` returns an error | `DroppedMapperFailure() == 1` | `mapper_failure` |
+| `TestAppendEvent_DropsOnMapperFailure` | Test-fixture mapper whose `Map` returns an error | `DroppedMapperFailure() == 1` | `mapper_failure` |
 | `TestAppendEvent_DropsOnSequenceOverflow` | `ev.Chain.Sequence = math.MaxInt64 + 1` | `DroppedSequenceOverflow() == 1` | `sequence_overflow` |
-| `TestAppendEvent_DropsOnInvalidUTF8` | `Options.KeyFingerprint` containing a non-UTF-8 byte (flows into `IntegrityRecord.KeyFingerprint` → `chain.EncodeCanonical` → `chain.ErrInvalidUTF8`) | `DroppedInvalidUTF8() == 1` | `invalid_utf8` |
 | `TestAppendEvent_HappyPath_NoDrops` | Valid mapper, timestamp, sequence, key fingerprint | ALL five counters stay at 0; no WARN | — |
 
 ### `internal/store/watchtower/append_drop_internal_test.go` (internal `watchtower` package)
 
+Direct helper invocations for the two defense-in-depth branches:
+
 | Test | Approach | Counter asserted | Reason label asserted |
 |---|---|---|---|
 | `TestRecordCompactEncodeFailure_ClassifiesInvalidMapper` | Construct a Store, call `s.recordCompactEncodeFailure(compact.ErrInvalidMapper, ev)` directly | `DroppedInvalidMapper() == 1` | `invalid_mapper` |
+| `TestRecordCanonicalFailure_ClassifiesInvalidUTF8` | Construct a Store, call `s.recordCanonicalFailure(chain.ErrInvalidUTF8, ev)` directly | `DroppedInvalidUTF8() == 1` | `invalid_utf8` |
 
 Each failing-path test (both files) also asserts:
 - `errors.Is(err, <expected sentinel>)` on the returned error where applicable (preserves existing semantics; sequence overflow has no sentinel and asserts on the message instead).
@@ -120,8 +127,8 @@ The happy-path test catches a regression where every successful append accidenta
 | File | Change |
 |---|---|
 | `internal/store/watchtower/append.go` | Add 3 private helpers; insert 3 helper calls at the existing reject sites; remove the SCOPE NOTE referencing this work as future. |
-| `internal/store/watchtower/append_drop_test.go` | NEW: 5 tests via real `AppendEvent` (4 reachable drop classes + 1 happy path). |
-| `internal/store/watchtower/append_drop_internal_test.go` | NEW: 1 test calling `recordCompactEncodeFailure` directly to cover the defense-in-depth `ErrInvalidMapper` branch (unreachable through Options validation). |
+| `internal/store/watchtower/append_drop_test.go` | NEW: 4 tests via real `AppendEvent` (3 reachable drop classes + 1 happy path). |
+| `internal/store/watchtower/append_drop_internal_test.go` | NEW: 2 tests calling helpers directly to cover defense-in-depth `ErrInvalidMapper` and `ErrInvalidUTF8` (both unreachable through normal construction). |
 | `internal/metrics/wtp.go` | Update the "NOT YET WIRED — emits zero" comments at lines 463-467 to point at `AppendEvent` as the live producer. |
 
 ## Acceptance
