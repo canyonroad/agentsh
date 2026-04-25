@@ -47,6 +47,12 @@ func TestShutdown_StopDrainsThenCloseSends(t *testing.T) {
 	}
 	defer w.Close()
 
+	// The test seeds raw non-CompactEvent payloads; swap both the
+	// Live-state and Replaying-state encoders for deterministic stubs
+	// so the production proto.Unmarshal path doesn't reject them.
+	defer transport.SetEncodeBatchMessageFnForTest(nonEmptyMsg)()
+	defer transport.SetBuildEventBatchFnForTest(nonEmptyMsg)()
+
 	// Seed one record so Replaying has something to drain (and thus
 	// we know Replaying's EventBatch is a distinct send on sendCh
 	// from whatever Live's runShutdown Drain emits later).
@@ -201,6 +207,11 @@ func TestShutdown_StopBetweenReplayBatches(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	defer w.Close()
+
+	// Same non-CompactEvent payload as StopDrainsThenCloseSends —
+	// swap both encoders for stubs.
+	defer transport.SetEncodeBatchMessageFnForTest(nonEmptyMsg)()
+	defer transport.SetBuildEventBatchFnForTest(nonEmptyMsg)()
 
 	// Seed many records; small batch cap means replay issues many
 	// Send calls and thus loops through runReplaying's top-of-loop

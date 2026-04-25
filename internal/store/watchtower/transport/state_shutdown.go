@@ -56,7 +56,7 @@ func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Rea
 				break
 			}
 			if outBatch := b.Add(rec); outBatch != nil {
-				msg, err := encodeBatchMessage(outBatch.Records)
+				msg, err := encodeBatchMessageFn(outBatch.Records)
 				if err != nil {
 					break drainLoop
 				}
@@ -67,7 +67,7 @@ func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Rea
 		}
 	}
 	if final := b.Drain(); final != nil {
-		if msg, err := encodeBatchMessage(final.Records); err == nil {
+		if msg, err := encodeBatchMessageFn(final.Records); err == nil {
 			_ = t.conn.Send(msg)
 		}
 	}

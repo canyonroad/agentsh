@@ -60,6 +60,15 @@ type Options struct {
 	// attempt. Zero = never drop.
 	DropAfterBatchN int
 
+	// DropAfterBatchNOnce, when true, arms DropAfterBatchN for the
+	// FIRST stream only — subsequent reconnects are served normally.
+	// Lets Phase 11 "drop-then-replay" component tests exercise a
+	// single drop boundary and then verify the replay completes,
+	// without falling into an infinite drop loop (the default
+	// per-stream DropAfterBatchN would fire again on every reconnect
+	// and the replayed records after the Nth batch would never land).
+	DropAfterBatchNOnce bool
+
 	// GoawayAfterBatchN sends a Goaway ServerMessage after observing
 	// N EventBatch messages on the CURRENT STREAM, then returns nil
 	// from the Stream handler. Per-stream semantics identical to

@@ -52,13 +52,30 @@ func setBuildEventBatchFnForTest(fn func([]wal.Record) (*wtpv1.ClientMessage, er
 
 // SetBuildEventBatchFnForTest is the external test helper for
 // setBuildEventBatchFnForTest. transport_test (external package) callers
-// can invoke this to swap the stub for a deterministic builder; the
-// returned restore func MUST be deferred to avoid leaking the override.
+// can invoke this to swap the Replaying-state encoder for a deterministic
+// builder; the returned restore func MUST be deferred to avoid leaking
+// the override.
 //
 // Lives in *_test.go so the helper is compiled out of the production
 // binary.
 func SetBuildEventBatchFnForTest(fn func([]wal.Record) (*wtpv1.ClientMessage, error)) func() {
 	return setBuildEventBatchFnForTest(fn)
+}
+
+// SetEncodeBatchMessageFnForTest swaps the Live-state's package-level
+// encodeBatchMessageFn for the duration of a test. Tests that drive the
+// Live state with raw (non-CompactEvent) WAL payloads use this to avoid
+// proto.Unmarshal failures in the production encoder. Returns a restore
+// func the caller MUST defer so the global var reverts after the test.
+//
+// Internal-only seam mirroring SetBuildEventBatchFnForTest; both exist
+// because the Live and Replaying states historically diverged on
+// encoder plumbing and keeping two knobs is less invasive than
+// unifying them in a test-driven refactor.
+func SetEncodeBatchMessageFnForTest(fn func([]wal.Record) (*wtpv1.ClientMessage, error)) func() {
+	prev := encodeBatchMessageFn
+	encodeBatchMessageFn = fn
+	return func() { encodeBatchMessageFn = prev }
 }
 
 // SetConnForTest attaches a Conn to the Transport so external tests can

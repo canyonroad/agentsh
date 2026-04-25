@@ -3,9 +3,6 @@ package transport
 import (
 	"context"
 	"fmt"
-
-	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
-	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
 // runReplaying drains the WAL via the supplied Replayer and ships records
@@ -160,18 +157,14 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 // via setBuildEventBatchFnForTest (see state_replaying_internal_test.go);
 // production code MUST NOT mutate this variable outside of the
 // initialization performed by Task 22.
-var buildEventBatchFn = buildEventBatchStub
-
-// buildEventBatchStub is a no-op wire-format placeholder. Returns an empty
-// ClientMessage so the Replaying state machine can be exercised in tests
-// without depending on the unpublished EventBatch wire schema.
+// buildEventBatchFn is the function variable runReplaying calls to wrap
+// WAL records into a wtpv1.EventBatch envelope. Defaults to
+// encodeBatchMessage so the Live and Replaying states share one
+// implementation — both flows wrap already-marshaled CompactEvents
+// into an UncompressedEvents body with matching (from_sequence,
+// to_sequence, generation) metadata.
 //
-// TODO(Task 17): replace with the real builder that wraps records'
-// payloads (already-serialized CompactEvent bytes) plus their (sequence,
-// generation) and integrity records into a wtpv1.EventBatch envelope.
-// Task 22 (Store integration) is responsible for the wiring that points
-// buildEventBatchFn at the real implementation before the run loop ever
-// reaches runReplaying in production.
-func buildEventBatchStub(_ []wal.Record) (*wtpv1.ClientMessage, error) {
-	return &wtpv1.ClientMessage{}, nil
-}
+// Tests that need to assert against a custom wire shape can override
+// via setBuildEventBatchFnForTest (see state_replaying_internal_test.go).
+// Production code MUST NOT mutate this variable.
+var buildEventBatchFn = encodeBatchMessage

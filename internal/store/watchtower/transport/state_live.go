@@ -7,6 +7,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // LiveOptions configures the Live state's batcher and inflight window.
@@ -52,7 +53,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 		if batch == nil {
 			return nil
 		}
-		msg, err := encodeBatchMessage(batch.Records)
+		msg, err := encodeBatchMessageFn(batch.Records)
 		if err != nil {
 			return err
 		}
@@ -144,7 +145,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 					break
 				}
 				if outBatch := b.Add(rec); outBatch != nil {
-					msg, err := encodeBatchMessage(outBatch.Records)
+					msg, err := encodeBatchMessageFn(outBatch.Records)
 					if err != nil {
 						_ = t.conn.Close()
 						t.teardownRecv()
@@ -162,7 +163,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			}
 		case now := <-tick.C:
 			if outBatch := b.Tick(now); outBatch != nil {
-				msg, err := encodeBatchMessage(outBatch.Records)
+				msg, err := encodeBatchMessageFn(outBatch.Records)
 				if err != nil {
 					_ = t.conn.Close()
 					t.teardownRecv()
@@ -182,8 +183,59 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 	}
 }
 
-// encodeBatchMessage packs WAL records into a wtpv1.EventBatch envelope.
-func encodeBatchMessage(_ []wal.Record) (*wtpv1.ClientMessage, error) {
-	// Stub — full encoding is integrated with chain/compact in Task 22.
-	return &wtpv1.ClientMessage{}, nil
+// encodeBatchMessageFn packs WAL records into a wtpv1.EventBatch envelope.
+// Declared as a package-level variable (not a plain function) so tests
+// that drive the Live state with raw non-CompactEvent payloads can
+// swap in a stub via SetEncodeBatchMessageFnForTest without needing to
+// produce real marshaled CompactEvent bytes.
+var encodeBatchMessageFn = encodeBatchMessage
+
+// encodeBatchMessage is the production EventBatch encoder. It unmarshals
+// each data record's wal.Record.Payload (already the marshaled
+// CompactEvent bytes the Store produced) into a *wtpv1.CompactEvent and
+// wraps the slice in an UncompressedEvents body. Loss markers
+// (wal.RecordLoss) are NOT forwarded inside an UncompressedEvents batch
+// — the transport emits them via a dedicated TransportLoss message flow
+// (Task 13), not inline; skip them here so the batch carries only real
+// events.
+//
+// from_sequence / to_sequence / generation reflect the first and last
+// data record. Compression is COMPRESSION_NONE because we send raw
+// CompactEvents; zstd/gzip is a post-MVP enhancement.
+func encodeBatchMessage(records []wal.Record) (*wtpv1.ClientMessage, error) {
+	events := make([]*wtpv1.CompactEvent, 0, len(records))
+	var (
+		fromSeq uint64
+		toSeq   uint64
+		gen     uint32
+		seenOne bool
+	)
+	for _, rec := range records {
+		if rec.Kind != wal.RecordData {
+			continue
+		}
+		ce := &wtpv1.CompactEvent{}
+		if err := proto.Unmarshal(rec.Payload, ce); err != nil {
+			return nil, fmt.Errorf("encodeBatchMessage: unmarshal record seq=%d: %w", rec.Sequence, err)
+		}
+		events = append(events, ce)
+		if !seenOne {
+			fromSeq = rec.Sequence
+			gen = rec.Generation
+			seenOne = true
+		}
+		toSeq = rec.Sequence
+	}
+	batch := &wtpv1.EventBatch{
+		FromSequence: fromSeq,
+		ToSequence:   toSeq,
+		Generation:   gen,
+		Compression:  wtpv1.Compression_COMPRESSION_NONE,
+		Body: &wtpv1.EventBatch_Uncompressed{
+			Uncompressed: &wtpv1.UncompressedEvents{Events: events},
+		},
+	}
+	return &wtpv1.ClientMessage{
+		Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: batch},
+	}, nil
 }

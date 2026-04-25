@@ -41,6 +41,13 @@ type Server struct {
 	// waiters will surface via the WaitForFirstSessionInit deadline).
 	sessionInitReady chan struct{}
 
+	// dropOnceFired is set by the DropAfterBatchNOnce path when the
+	// first drop has already been served. Subsequent streams consult
+	// it to skip the drop and ack normally — required for Phase 11
+	// "drop-then-replay" component tests that otherwise fall into an
+	// infinite drop loop under the default per-stream semantics.
+	dropOnceFired atomic.Bool
+
 	closed atomic.Bool
 }
 
@@ -326,7 +333,22 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 			_ = h.s.addBatch(x.EventBatch)
 			streamBatches++
 			if h.s.opts.DropAfterBatchN > 0 && streamBatches >= h.s.opts.DropAfterBatchN {
-				return errors.New("testserver: drop after batch")
+				// DropAfterBatchNOnce: honour the drop on the FIRST
+				// stream only. Subsequent reconnects skip the drop
+				// and ack normally — required for Phase 11
+				// "drop-then-replay" component tests, where the
+				// default per-stream drop would fire on every
+				// reconnect and permanently strand records past the
+				// Nth batch of each stream.
+				if h.s.opts.DropAfterBatchNOnce {
+					if h.s.dropOnceFired.CompareAndSwap(false, true) {
+						return errors.New("testserver: drop after batch (once)")
+					}
+					// Drop already fired on an earlier stream; fall
+					// through to the normal BatchAck path below.
+				} else {
+					return errors.New("testserver: drop after batch")
+				}
 			}
 			if h.s.opts.GoawayAfterBatchN > 0 && streamBatches >= h.s.opts.GoawayAfterBatchN {
 				// Best-effort goaway — propagate any Send error so
