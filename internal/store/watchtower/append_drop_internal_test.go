@@ -3,12 +3,15 @@ package watchtower
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/metrics"
+	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -77,3 +80,85 @@ func TestRecordSequenceOverflow_IncrementsCounterAndEmitsWarn(t *testing.T) {
 		t.Fatalf("agent_id = %v, want a-test", got)
 	}
 }
+
+func TestRecordCompactEncodeFailure_ClassifiesInvalidMapper(t *testing.T) {
+	s, m, buf := newDropTestStore(t)
+
+	ev := types.Event{
+		Timestamp: time.Unix(1700000000, 0),
+		Chain:     &types.ChainState{Sequence: 1, Generation: 1},
+	}
+	s.recordCompactEncodeFailure(compact.ErrInvalidMapper, ev)
+
+	if got := m.DroppedInvalidMapper(); got != 1 {
+		t.Fatalf("DroppedInvalidMapper() = %d, want 1", got)
+	}
+	if got := m.DroppedInvalidTimestamp(); got != 0 {
+		t.Fatalf("DroppedInvalidTimestamp() = %d, want 0 (wrong branch fired)", got)
+	}
+	if got := m.DroppedMapperFailure(); got != 0 {
+		t.Fatalf("DroppedMapperFailure() = %d, want 0 (wrong branch fired)", got)
+	}
+
+	entry := findWarnEntry(t, buf)
+	if got := entry["reason"]; got != "invalid_mapper" {
+		t.Fatalf("reason = %v, want invalid_mapper", got)
+	}
+	if got := entry["err"]; got == nil || !strings.Contains(got.(string), "mapper is required") {
+		t.Fatalf("err attr = %v, want non-empty containing %q", got, "mapper is required")
+	}
+}
+
+func TestRecordCompactEncodeFailure_ClassifiesInvalidTimestamp(t *testing.T) {
+	s, m, buf := newDropTestStore(t)
+
+	ev := types.Event{
+		Timestamp: time.Unix(1700000000, 0),
+		Chain:     &types.ChainState{Sequence: 2, Generation: 1},
+	}
+	wrapped := fmt.Errorf("compact.Encode: %w", compact.ErrInvalidTimestamp)
+	s.recordCompactEncodeFailure(wrapped, ev)
+
+	if got := m.DroppedInvalidTimestamp(); got != 1 {
+		t.Fatalf("DroppedInvalidTimestamp() = %d, want 1", got)
+	}
+	if got := m.DroppedInvalidMapper(); got != 0 {
+		t.Fatalf("DroppedInvalidMapper() = %d, want 0 (wrong branch fired)", got)
+	}
+	if got := m.DroppedMapperFailure(); got != 0 {
+		t.Fatalf("DroppedMapperFailure() = %d, want 0 (wrong branch fired)", got)
+	}
+
+	entry := findWarnEntry(t, buf)
+	if got := entry["reason"]; got != "invalid_timestamp" {
+		t.Fatalf("reason = %v, want invalid_timestamp", got)
+	}
+}
+
+func TestRecordCompactEncodeFailure_ClassifiesMapperFailureCatchAll(t *testing.T) {
+	s, m, buf := newDropTestStore(t)
+
+	ev := types.Event{
+		Timestamp: time.Unix(1700000000, 0),
+		Chain:     &types.ChainState{Sequence: 3, Generation: 1},
+	}
+	// A mapper-side error wrapped exactly like compact/encoder.go:71 does.
+	wrapped := fmt.Errorf("compact mapper: %w", errors.New("synthetic mapper failure"))
+	s.recordCompactEncodeFailure(wrapped, ev)
+
+	if got := m.DroppedMapperFailure(); got != 1 {
+		t.Fatalf("DroppedMapperFailure() = %d, want 1", got)
+	}
+	if got := m.DroppedInvalidMapper(); got != 0 {
+		t.Fatalf("DroppedInvalidMapper() = %d, want 0 (wrong branch fired)", got)
+	}
+	if got := m.DroppedInvalidTimestamp(); got != 0 {
+		t.Fatalf("DroppedInvalidTimestamp() = %d, want 0 (wrong branch fired)", got)
+	}
+
+	entry := findWarnEntry(t, buf)
+	if got := entry["reason"]; got != "mapper_failure" {
+		t.Fatalf("reason = %v, want mapper_failure", got)
+	}
+}
+

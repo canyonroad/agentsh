@@ -242,3 +242,43 @@ func (s *Store) recordSequenceOverflow(ev types.Event) {
 		slog.String("session_id", s.opts.SessionID),
 		slog.String("agent_id", s.opts.AgentID))
 }
+
+// recordCompactEncodeFailure inspects err for the compact.Encode
+// sentinels and routes the drop to the matching counter + WARN.
+// Called from AppendEvent's compact.Encode error branch BEFORE the
+// existing error return.
+//
+// Classification priority (errors.Is order):
+//   - compact.ErrInvalidMapper    → IncDroppedInvalidMapper / "invalid_mapper"
+//   - compact.ErrInvalidTimestamp → IncDroppedInvalidTimestamp / "invalid_timestamp"
+//   - (fallthrough)               → IncDroppedMapperFailure / "mapper_failure"
+//
+// The fallthrough catches the mapper-wrapped error returned by
+// compact/encoder.go:71 (`fmt.Errorf("compact mapper: %w", err)`),
+// which intentionally does not preserve a typed sentinel. The
+// compact.ErrMissingChain sentinel is unreachable from AppendEvent
+// because the ev.Chain == nil check earlier in the function bails
+// before compact.Encode runs; if a future change makes it reachable,
+// it falls into the mapper_failure catch-all and surfaces in logs.
+func (s *Store) recordCompactEncodeFailure(err error, ev types.Event) {
+	var reason string
+	switch {
+	case errors.Is(err, compact.ErrInvalidMapper):
+		s.metrics.IncDroppedInvalidMapper(1)
+		reason = "invalid_mapper"
+	case errors.Is(err, compact.ErrInvalidTimestamp):
+		s.metrics.IncDroppedInvalidTimestamp(1)
+		reason = "invalid_timestamp"
+	default:
+		s.metrics.IncDroppedMapperFailure(1)
+		reason = "mapper_failure"
+	}
+	s.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+		"wtp: dropping event before WAL append",
+		slog.String("reason", reason),
+		slog.String("err", err.Error()),
+		slog.Uint64("event_seq", ev.Chain.Sequence),
+		slog.Uint64("event_gen", uint64(ev.Chain.Generation)),
+		slog.String("session_id", s.opts.SessionID),
+		slog.String("agent_id", s.opts.AgentID))
+}
