@@ -1,0 +1,118 @@
+[
+  {
+    "name": "minimal_zero_record",
+    "kind": "integrity_record",
+    "input": {"format_version":2,"sequence":0,"generation":0,"prev_hash":"","event_hash":"","context_digest":"","key_fingerprint":""},
+    "expected": "{\"context_digest\":\"\",\"event_hash\":\"\",\"format_version\":2,\"generation\":0,\"key_fingerprint\":\"\",\"prev_hash\":\"\",\"sequence\":0}"
+  },
+  {
+    "name": "typical_record",
+    "kind": "integrity_record",
+    "input": {"format_version":2,"sequence":42,"generation":7,"prev_hash":"deadbeef","event_hash":"cafef00d","context_digest":"0123456789abcdef","key_fingerprint":"sha256:aabbccdd"},
+    "expected": "{\"context_digest\":\"0123456789abcdef\",\"event_hash\":\"cafef00d\",\"format_version\":2,\"generation\":7,\"key_fingerprint\":\"sha256:aabbccdd\",\"prev_hash\":\"deadbeef\",\"sequence\":42}"
+  },
+  {
+    "name": "uint64_max_sequence",
+    "kind": "integrity_record",
+    "input": {"format_version":2,"sequence":18446744073709551615,"generation":4294967295,"prev_hash":"","event_hash":"","context_digest":"","key_fingerprint":""},
+    "expected": "{\"context_digest\":\"\",\"event_hash\":\"\",\"format_version\":2,\"generation\":4294967295,\"key_fingerprint\":\"\",\"prev_hash\":\"\",\"sequence\":18446744073709551615}"
+  },
+  {
+    "name": "non_ascii_in_key_fingerprint",
+    "kind": "integrity_record",
+    "input": {"format_version":2,"sequence":1,"generation":0,"prev_hash":"","event_hash":"","context_digest":"","key_fingerprint":"caf\u00e9"},
+    "expected": "{\"context_digest\":\"\",\"event_hash\":\"\",\"format_version\":2,\"generation\":0,\"key_fingerprint\":\"caf\\u00e9\",\"prev_hash\":\"\",\"sequence\":1}"
+  },
+  {
+    "name": "non_bmp_in_key_fingerprint",
+    "kind": "integrity_record",
+    "input": {"format_version":2,"sequence":1,"generation":0,"prev_hash":"","event_hash":"","context_digest":"","key_fingerprint":"\ud83d\udd11"},
+    "expected": "{\"context_digest\":\"\",\"event_hash\":\"\",\"format_version\":2,\"generation\":0,\"key_fingerprint\":\"\\ud83d\\udd11\",\"prev_hash\":\"\",\"sequence\":1}"
+  },
+  {
+    "name": "context_digest_typical",
+    "kind": "context_digest",
+    "input": {"session_id":"01HXAVD2N5VX3CZQK7Q7QWNYKE","agent_id":"agentsh","agent_version":"1.0.0","ocsf_version":"1.8.0","format_version":2,"algorithm":"hmac-sha256","key_fingerprint":"sha256:aabbccdd"},
+    "expected": "a2d26350f1f1e3f5b3459b4ce225cf06359be7cd97beb2ecf528b135ce7ba2a4"
+  },
+  {
+    "name": "negative_invalid_utf8_in_prev_hash",
+    "kind": "integrity_record",
+    "input": {"format_version":2,"sequence":1,"generation":0},
+    "input_b64": "dmFsaWQtcHJlZml4gGludmFsaWQ=",
+    "input_field": "prev_hash",
+    "expected_error": "ErrInvalidUTF8"
+  },
+  {
+    "name": "negative_invalid_utf8_in_event_hash",
+    "kind": "integrity_record",
+    "input": {"format_version":2,"sequence":1,"generation":0},
+    "input_b64": "dmFsaWQtcHJlZml4gGludmFsaWQ=",
+    "input_field": "event_hash",
+    "expected_error": "ErrInvalidUTF8"
+  },
+  {
+    "name": "negative_invalid_utf8_in_context_digest",
+    "kind": "integrity_record",
+    "input": {"format_version":2,"sequence":1,"generation":0},
+    "input_b64": "dmFsaWQtcHJlZml4gGludmFsaWQ=",
+    "input_field": "context_digest",
+    "expected_error": "ErrInvalidUTF8"
+  },
+  {
+    "name": "negative_invalid_utf8_in_key_fingerprint",
+    "kind": "integrity_record",
+    "input": {"format_version":2,"sequence":1,"generation":0},
+    "input_b64": "dmFsaWQtcHJlZml4gGludmFsaWQ=",
+    "input_field": "key_fingerprint",
+    "expected_error": "ErrInvalidUTF8"
+  },
+  {
+    "name": "negative_invalid_utf8_in_session_id",
+    "kind": "context_digest",
+    "input": {"format_version":2,"agent_id":"agentsh","agent_version":"1.0.0","ocsf_version":"1.8.0","algorithm":"hmac-sha256","key_fingerprint":"sha256:test"},
+    "input_b64": "c4BiYWQ=",
+    "input_field": "session_id",
+    "expected_error": "ErrInvalidUTF8"
+  },
+  {
+    "name": "negative_invalid_utf8_in_agent_id",
+    "kind": "context_digest",
+    "input": {"format_version":2,"session_id":"01HXAVD2N5VX3CZQK7Q7QWNYKE","agent_version":"1.0.0","ocsf_version":"1.8.0","algorithm":"hmac-sha256","key_fingerprint":"sha256:test"},
+    "input_b64": "c4BiYWQ=",
+    "input_field": "agent_id",
+    "expected_error": "ErrInvalidUTF8"
+  },
+  {
+    "name": "negative_invalid_utf8_in_agent_version",
+    "kind": "context_digest",
+    "input": {"format_version":2,"session_id":"01HXAVD2N5VX3CZQK7Q7QWNYKE","agent_id":"agentsh","ocsf_version":"1.8.0","algorithm":"hmac-sha256","key_fingerprint":"sha256:test"},
+    "input_b64": "c4BiYWQ=",
+    "input_field": "agent_version",
+    "expected_error": "ErrInvalidUTF8"
+  },
+  {
+    "name": "negative_invalid_utf8_in_ocsf_version",
+    "kind": "context_digest",
+    "input": {"format_version":2,"session_id":"01HXAVD2N5VX3CZQK7Q7QWNYKE","agent_id":"agentsh","agent_version":"1.0.0","algorithm":"hmac-sha256","key_fingerprint":"sha256:test"},
+    "input_b64": "c4BiYWQ=",
+    "input_field": "ocsf_version",
+    "expected_error": "ErrInvalidUTF8"
+  },
+  {
+    "name": "negative_invalid_utf8_in_algorithm",
+    "kind": "context_digest",
+    "input": {"format_version":2,"session_id":"01HXAVD2N5VX3CZQK7Q7QWNYKE","agent_id":"agentsh","agent_version":"1.0.0","ocsf_version":"1.8.0","key_fingerprint":"sha256:test"},
+    "input_b64": "c4BiYWQ=",
+    "input_field": "algorithm",
+    "expected_error": "ErrInvalidUTF8"
+  },
+  {
+    "name": "negative_invalid_utf8_in_context_key_fingerprint",
+    "kind": "context_digest",
+    "input": {"format_version":2,"session_id":"01HXAVD2N5VX3CZQK7Q7QWNYKE","agent_id":"agentsh","agent_version":"1.0.0","ocsf_version":"1.8.0","algorithm":"hmac-sha256"},
+    "input_b64": "c4BiYWQ=",
+    "input_field": "key_fingerprint",
+    "expected_error": "ErrInvalidUTF8"
+  }
+]

@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -104,7 +106,9 @@ func TestIntegrityChain_Restore_ContinuesFromLastWrittenSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewIntegrityChain() error = %v", err)
 	}
-	chain.Restore(41, "prev-hash")
+	if err := chain.Restore(41, "0000000000000000000000000000000000000000000000000000000000000000"); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
 
 	wrapped, err := chain.Wrap([]byte(`{"event":"after_restore"}`))
 	if err != nil {
@@ -120,8 +124,8 @@ func TestIntegrityChain_Restore_ContinuesFromLastWrittenSequence(t *testing.T) {
 	if got := int64(integrity["sequence"].(float64)); got != 42 {
 		t.Fatalf("sequence = %d, want 42", got)
 	}
-	if got := integrity["prev_hash"].(string); got != "prev-hash" {
-		t.Fatalf("prev_hash = %q, want prev-hash", got)
+	if got := integrity["prev_hash"].(string); got != "0000000000000000000000000000000000000000000000000000000000000000" {
+		t.Fatalf("prev_hash = %q, want zero hex", got)
 	}
 }
 
@@ -160,7 +164,10 @@ func TestIntegrityChain_Wrap_ReturnsSequenceOverflowAtMaxInt64(t *testing.T) {
 		t.Fatalf("NewIntegrityChain() error = %v", err)
 	}
 
-	chain.Restore(math.MaxInt64, "prev-hash")
+	const zeroHash = "0000000000000000000000000000000000000000000000000000000000000000"
+	if err := chain.Restore(math.MaxInt64, zeroHash); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
 
 	_, err = chain.Wrap([]byte(`{"event":"overflow"}`))
 	if !errors.Is(err, ErrSequenceOverflow) {
@@ -171,8 +178,8 @@ func TestIntegrityChain_Wrap_ReturnsSequenceOverflowAtMaxInt64(t *testing.T) {
 	if state.Sequence != math.MaxInt64 {
 		t.Fatalf("State().Sequence = %d, want %d", state.Sequence, int64(math.MaxInt64))
 	}
-	if state.PrevHash != "prev-hash" {
-		t.Fatalf("State().PrevHash = %q, want %q", state.PrevHash, "prev-hash")
+	if state.PrevHash != zeroHash {
+		t.Fatalf("State().PrevHash = %q, want %q", state.PrevHash, zeroHash)
 	}
 }
 
@@ -426,7 +433,9 @@ func TestIntegrityChain_VerifyWrapped_PreservesLargeSequencePrecision(t *testing
 	}
 
 	const lastWrittenSequence int64 = 9007199254740992
-	chain.Restore(lastWrittenSequence, "prev-hash")
+	if err := chain.Restore(lastWrittenSequence, ""); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
 
 	wrapped, err := chain.Wrap([]byte(`{"event":"high_sequence"}`))
 	if err != nil {
@@ -551,7 +560,9 @@ func TestIntegrityChain_Restore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewIntegrityChain() error = %v", err)
 	}
-	newChain.Restore(state.Sequence, state.PrevHash)
+	if err := newChain.Restore(state.Sequence, state.PrevHash); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
 
 	// Wrap a new entry
 	wrapped, err := newChain.Wrap([]byte(`{"event":"after_restore"}`))
@@ -850,5 +861,260 @@ func TestNewIntegrityChainWithAlgorithm_EmptyAlgorithmDefaultsToSHA256(t *testin
 	// SHA-256 produces 64 hex characters (32 bytes)
 	if len(entryHash) != 64 {
 		t.Errorf("entry_hash length = %d, want 64 for SHA-256 (default)", len(entryHash))
+	}
+}
+
+// TestIntegrityChain_Wrap_ConcurrentSafety verifies that the legacy
+// IntegrityChain.Wrap() preserves the single-mutex atomicity contract
+// when called concurrently. Without wrapper-level locking, alloc.Next()
+// from one goroutine can interleave with chain.Compute() from another,
+// producing chains where prev_hash[seq] != entry_hash[seq-1] (or
+// latching the chain fatal with ErrStaleResult).
+func TestIntegrityChain_Wrap_ConcurrentSafety(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+
+	const goroutines = 50
+	const perGoroutine = 20
+	const total = goroutines * perGoroutine
+
+	var (
+		mu      sync.Mutex
+		entries = make([][]byte, 0, total)
+		wrapErr error
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		g := g
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				payload := []byte(fmt.Sprintf(`{"goroutine":%d,"iteration":%d}`, g, i))
+				wrapped, err := chain.Wrap(payload)
+				mu.Lock()
+				if err != nil && wrapErr == nil {
+					wrapErr = fmt.Errorf("g=%d i=%d: Wrap: %w", g, i, err)
+				}
+				if err == nil {
+					entries = append(entries, wrapped)
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if wrapErr != nil {
+		t.Fatalf("concurrent Wrap returned error: %v", wrapErr)
+	}
+	if len(entries) != total {
+		t.Fatalf("got %d wrapped entries, want %d", len(entries), total)
+	}
+
+	entryHash := make(map[int64]string, total)
+	prevHash := make(map[int64]string, total)
+	for i, wrapped := range entries {
+		var result map[string]any
+		if err := json.Unmarshal(wrapped, &result); err != nil {
+			t.Fatalf("entry %d unmarshal: %v", i, err)
+		}
+		integrity, ok := result["integrity"].(map[string]any)
+		if !ok {
+			t.Fatalf("entry %d: integrity field missing or not an object", i)
+		}
+		seq := int64(integrity["sequence"].(float64))
+		eh := integrity["entry_hash"].(string)
+		ph := integrity["prev_hash"].(string)
+		if existing, dup := entryHash[seq]; dup {
+			t.Fatalf("duplicate sequence %d: entry_hash=%q vs %q", seq, existing, eh)
+		}
+		entryHash[seq] = eh
+		prevHash[seq] = ph
+	}
+
+	for seq := int64(0); seq < int64(total); seq++ {
+		if _, ok := entryHash[seq]; !ok {
+			t.Fatalf("missing sequence %d (sequences must be exactly 0..%d)", seq, total-1)
+		}
+	}
+
+	for seq := int64(1); seq < int64(total); seq++ {
+		want := entryHash[seq-1]
+		if got := prevHash[seq]; got != want {
+			t.Fatalf("chain integrity break at seq=%d: prev_hash=%q, want entry_hash[%d]=%q",
+				seq, got, seq-1, want)
+		}
+	}
+	if got := prevHash[0]; got != "" {
+		t.Fatalf("genesis seq=0: prev_hash=%q, want empty", got)
+	}
+
+	for i, wrapped := range entries {
+		ok, err := chain.VerifyWrapped(wrapped)
+		if err != nil {
+			t.Fatalf("entry %d VerifyWrapped: %v", i, err)
+		}
+		if !ok {
+			t.Fatalf("entry %d VerifyWrapped: false (chain integrity broken)", i)
+		}
+	}
+}
+
+// TestIntegrityChain_State_SnapshotConsistency verifies that State()
+// returns a consistent (sequence, prev_hash) snapshot — never a torn
+// read where Sequence is from a newer wrap than PrevHash, or vice versa.
+//
+// Without wrapper-level locking, State() reads alloc.State() then
+// chain.State() with no atomicity, so a concurrent Wrap can advance the
+// allocator between the two reads (producing state.Sequence=N but
+// state.PrevHash=hash[N-1]) or advance both (producing state.Sequence=N
+// but state.PrevHash=hash[N+1] if the chain commit lands between reads).
+func TestIntegrityChain_State_SnapshotConsistency(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+
+	const wraps = 200
+	const samples = 200
+
+	// entryHashBySeq[seq] = entry_hash for the entry at that sequence.
+	var entryHashBySeq sync.Map
+
+	done := make(chan struct{})
+	var wrapErr error
+	go func() {
+		defer close(done)
+		for i := 0; i < wraps; i++ {
+			payload := []byte(fmt.Sprintf(`{"i":%d}`, i))
+			wrapped, err := chain.Wrap(payload)
+			if err != nil {
+				wrapErr = fmt.Errorf("Wrap %d: %w", i, err)
+				return
+			}
+			var result map[string]any
+			if err := json.Unmarshal(wrapped, &result); err != nil {
+				wrapErr = fmt.Errorf("unmarshal %d: %w", i, err)
+				return
+			}
+			integrity := result["integrity"].(map[string]any)
+			seq := int64(integrity["sequence"].(float64))
+			eh := integrity["entry_hash"].(string)
+			entryHashBySeq.Store(seq, eh)
+		}
+	}()
+
+	// Sample State() in parallel.
+	type torn struct {
+		seq      int64
+		prevHash string
+		want     string
+	}
+	var tornReads []torn
+	for s := 0; s < samples; s++ {
+		st := chain.State()
+		// Genesis: sequence == -1 means no Wrap has completed; prev_hash must be empty.
+		if st.Sequence == -1 {
+			if st.PrevHash != "" {
+				tornReads = append(tornReads, torn{seq: -1, prevHash: st.PrevHash, want: ""})
+			}
+			continue
+		}
+		// For any committed sequence s, the legacy contract is:
+		// state.PrevHash == entry_hash[s] (the chain head equals the
+		// most-recently-committed entry's hash).
+		v, ok := entryHashBySeq.Load(st.Sequence)
+		if !ok {
+			// Allocator advanced past s but Wrap hasn't recorded entry_hash[s] yet.
+			// This is itself a torn snapshot: alloc reports seq=s but the
+			// committing goroutine hasn't yet stored its entry_hash, meaning
+			// the wrapper exposed an alloc-state that is ahead of the
+			// chain-state caller would observe. Defer the check by retrying
+			// once after the writer goroutine completes.
+			<-done
+			if wrapErr != nil {
+				t.Fatalf("background Wrap failed: %v", wrapErr)
+			}
+			v, ok = entryHashBySeq.Load(st.Sequence)
+			if !ok {
+				t.Fatalf("no entry_hash recorded for sampled seq=%d", st.Sequence)
+			}
+		}
+		want := v.(string)
+		if st.PrevHash != want {
+			tornReads = append(tornReads, torn{seq: st.Sequence, prevHash: st.PrevHash, want: want})
+		}
+	}
+	<-done
+	if wrapErr != nil {
+		t.Fatalf("background Wrap failed: %v", wrapErr)
+	}
+	if len(tornReads) > 0 {
+		t.Fatalf("State() returned %d torn snapshots; first: seq=%d prev_hash=%q want=%q",
+			len(tornReads), tornReads[0].seq, tornReads[0].prevHash, tornReads[0].want)
+	}
+}
+
+// TestIntegrityChain_Restore_PartialFailure_LeavesStateIntact verifies
+// that a Restore call rejected by the chain (invalid prev_hash) leaves
+// the allocator unchanged. Without rollback, the allocator would be
+// advanced before the chain validation runs, leaving the wrapper in a
+// half-restored state where State().Sequence and State().PrevHash are
+// inconsistent.
+func TestIntegrityChain_Restore_PartialFailure_LeavesStateIntact(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := chain.Wrap([]byte(`{"event":"warmup"}`)); err != nil {
+			t.Fatalf("Wrap %d: %v", i, err)
+		}
+	}
+
+	s0 := chain.State()
+	if s0.Sequence != 2 {
+		t.Fatalf("pre-Restore State().Sequence = %d, want 2", s0.Sequence)
+	}
+
+	err = chain.Restore(99, "not-valid-hex")
+	if err == nil {
+		t.Fatal("Restore(99, \"not-valid-hex\") returned nil error, want rejection")
+	}
+	if !errors.Is(err, ErrInvalidChainState) {
+		t.Fatalf("Restore error = %v, want errors.Is(err, ErrInvalidChainState)", err)
+	}
+
+	s1 := chain.State()
+	if s1.Sequence != s0.Sequence {
+		t.Fatalf("post-failed-Restore State().Sequence = %d, want %d (pre-call S0)",
+			s1.Sequence, s0.Sequence)
+	}
+	if s1.PrevHash != s0.PrevHash {
+		t.Fatalf("post-failed-Restore State().PrevHash = %q, want %q (pre-call S0)",
+			s1.PrevHash, s0.PrevHash)
+	}
+
+	wrapped, err := chain.Wrap([]byte(`{"event":"after_failed_restore"}`))
+	if err != nil {
+		t.Fatalf("Wrap after failed Restore: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(wrapped, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	integrity := result["integrity"].(map[string]any)
+	if got := int64(integrity["sequence"].(float64)); got != s0.Sequence+1 {
+		t.Fatalf("post-Restore Wrap sequence = %d, want %d (S0.Sequence+1; allocator advanced by failed Restore)",
+			got, s0.Sequence+1)
+	}
+	if got := integrity["prev_hash"].(string); got != s0.PrevHash {
+		t.Fatalf("post-Restore Wrap prev_hash = %q, want %q (chain advanced by failed Restore)",
+			got, s0.PrevHash)
 	}
 }

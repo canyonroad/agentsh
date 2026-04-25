@@ -20,6 +20,50 @@ type Collector struct {
 	ebpfDropped     atomic.Uint64
 	ebpfAttachFail  atomic.Uint64
 	ebpfUnavailable atomic.Uint64
+
+	// WTP series
+	wtpEventsAppended      atomic.Uint64
+	wtpEventsAcked         atomic.Uint64
+	wtpBatchesSent         atomic.Uint64
+	wtpBytesSent           atomic.Uint64
+	wtpTransportLoss       atomic.Uint64
+	wtpReconnectsByReason  sync.Map
+	wtpSessionState        atomic.Int64
+	wtpWALSegments         atomic.Int64
+	wtpWALBytes            atomic.Int64
+	wtpAckHighWatermark    atomic.Int64
+	wtpWALCorruption       atomic.Uint64
+
+	// Task 22a sink-failure additions. Populated by AppendEvent
+	// (Task 23) for the unlabeled per-record drops, and by the
+	// transport / receiver layers (Phases 8-10) for the labeled
+	// peer-protocol families. wtpDroppedMissingChain (Task 3) was
+	// removed in Task 22a Step 3.5 — the missing-chain class is
+	// now propagated as a wrapped error from AppendEvent rather
+	// than counted, since it indicates a composite-store
+	// regression operators must surface loudly.
+	wtpDroppedInvalidUTF8              atomic.Uint64
+	wtpDroppedSequenceOverflow         atomic.Uint64
+	wtpDroppedInvalidMapper            atomic.Uint64
+	wtpDroppedInvalidTimestamp         atomic.Uint64
+	wtpDroppedMapperFailure            atomic.Uint64
+	wtpDroppedInvalidFrameByReason     sync.Map
+	wtpSessionInitFailuresByReason     sync.Map
+	wtpSessionRotationFailuresByReason sync.Map
+
+	// Task 22 cursor-feedback metrics. The Transport's
+	// applyServerAckTuple helper increments these on the three non-
+	// Adopted dispatch outcomes; AppendEvent and the recv-multiplexer
+	// share the same accessors.
+	wtpAnomalousAckByReason  sync.Map // map[string]*atomic.Uint64
+	wtpResendNeeded          atomic.Uint64
+	wtpAckRegressionLoss     atomic.Uint64
+	wtpWALQuarantineByReason sync.Map // Task 22a: WAL identity-mismatch quarantines
+
+	wtpLatencyMu      sync.Mutex
+	wtpLatencyBuckets [14]uint64 // 13 buckets + +Inf; index aligned with wtpLatencyBucketsSeconds
+	wtpLatencyCount   uint64
+	wtpLatencySum     float64
 }
 
 func New() *Collector {
@@ -99,6 +143,8 @@ func (c *Collector) Handler(opts HandlerOptions) http.Handler {
 				fmt.Fprintf(w, "agentsh_events_by_type_total{type=%q} %d\n", escapeLabelValue(t), n)
 			}
 		}
+
+		c.emitWTPMetrics(w)
 
 		if opts.SessionCount != nil {
 			fmt.Fprint(w, "# HELP agentsh_sessions_active Active sessions.\n")

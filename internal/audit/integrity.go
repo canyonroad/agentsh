@@ -31,14 +31,24 @@ type IntegrityMetadata struct {
 	EntryHash     string `json:"entry_hash"`
 }
 
-// IntegrityChain maintains HMAC chain state for tamper-proof audit logging.
-// Each entry's hash depends on the previous entry, forming a verifiable chain.
+// IntegrityChain is the legacy single-sink composer of SequenceAllocator +
+// SinkChain. New code should use those two types directly via the composite
+// store's allocator and per-sink chains. Wrap/State/Restore are preserved
+// at the source level for existing callers.
+//
+// Concurrency: Wrap, State, and Restore are serialized by an internal
+// mutex so the wrapper preserves the legacy single-mutex atomicity contract:
+// concurrent Wrap calls do not race against each other, State returns a
+// consistent (sequence, prev_hash) snapshot, and Restore is all-or-nothing
+// (a failed Restore leaves the wrapper in its pre-call state).
+//
+// KeyFingerprint, VerifyHash, and VerifyWrapped do NOT take the wrapper
+// mutex — they read immutable key/algorithm via the underlying SinkChain's
+// own mutex and have no need for wrapper-level serialization.
 type IntegrityChain struct {
-	mu        sync.Mutex
-	key       []byte
-	algorithm string
-	sequence  int64
-	prevHash  string
+	mu    sync.Mutex
+	alloc *SequenceAllocator
+	chain *SinkChain
 }
 
 // MinKeyLength is the minimum recommended key length for HMAC-SHA256.
@@ -70,23 +80,13 @@ func NewIntegrityChain(key []byte) (*IntegrityChain, error) {
 // Supported algorithms: "hmac-sha256", "hmac-sha512".
 // Returns an error if the key is shorter than MinKeyLength bytes or algorithm is unsupported.
 func NewIntegrityChainWithAlgorithm(key []byte, algorithm string) (*IntegrityChain, error) {
-	if len(key) < MinKeyLength {
-		return nil, fmt.Errorf("key too short: got %d bytes, need at least %d", len(key), MinKeyLength)
-	}
-	if algorithm == "" {
-		algorithm = "hmac-sha256"
-	}
-	switch algorithm {
-	case "hmac-sha256", "hmac-sha512":
-		// valid
-	default:
-		return nil, fmt.Errorf("unsupported algorithm %q: use hmac-sha256 or hmac-sha512", algorithm)
+	chain, err := NewSinkChain(key, algorithm)
+	if err != nil {
+		return nil, err
 	}
 	return &IntegrityChain{
-		key:       key,
-		algorithm: algorithm,
-		sequence:  -1,
-		prevHash:  "",
+		alloc: NewSequenceAllocator(),
+		chain: chain,
 	}, nil
 }
 
@@ -202,72 +202,89 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Parse existing payload
 	data, err := parseIntegrityPayloadUseNumber(payload)
 	if err != nil {
 		return nil, err
 	}
-
-	// Use canonical JSON (re-marshaled) for HMAC to ensure verifiability.
-	// Go's json.Marshal produces deterministic output with sorted keys.
 	canonicalPayload, err := marshalCanonicalPayload(data)
 	if err != nil {
 		return nil, err
 	}
 
-	if c.sequence == math.MaxInt64 {
-		return nil, ErrSequenceOverflow
-	}
-	nextSequence := c.sequence + 1
-
-	// Compute HMAC of: format_version || sequence || prev_hash || canonical_payload
-	entryHash, err := c.computeHash(IntegrityFormatVersion, nextSequence, c.prevHash, canonicalPayload)
+	seq, gen, err := c.alloc.Next()
 	if err != nil {
 		return nil, err
 	}
 
-	// Create integrity metadata
-	meta := IntegrityMetadata{
-		FormatVersion: IntegrityFormatVersion,
-		Sequence:      nextSequence,
-		PrevHash:      c.prevHash,
-		EntryHash:     entryHash,
+	result, err := c.chain.Compute(IntegrityFormatVersion, seq, gen, canonicalPayload)
+	if err != nil {
+		return nil, err
 	}
 
-	// Add integrity field to payload
-	data["integrity"] = meta
+	data["integrity"] = IntegrityMetadata{
+		FormatVersion: IntegrityFormatVersion,
+		Sequence:      seq,
+		PrevHash:      result.PrevHash(),
+		EntryHash:     result.EntryHash(),
+	}
 
-	// Marshal the result
-	result, err := json.Marshal(data)
+	wrapped, err := json.Marshal(data)
 	if err != nil {
 		return nil, fmt.Errorf("marshal wrapped payload: %w", err)
 	}
 
-	// Record the most recent wrapped entry. State() reflects the last durable
-	// entry once callers persist or explicitly Restore after a failed write.
-	c.sequence = nextSequence
-	c.prevHash = entryHash
-
-	return result, nil
+	if err := c.chain.Commit(result); err != nil {
+		return nil, err
+	}
+	return wrapped, nil
 }
 
 // State returns the last written chain state for persistence.
 func (c *IntegrityChain) State() ChainState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	allocState := c.alloc.State()
+	chainState := c.chain.State()
 	return ChainState{
-		Sequence: c.sequence,
-		PrevHash: c.prevHash,
+		Sequence: allocState.Sequence,
+		PrevHash: chainState.PrevHash,
 	}
 }
 
 // Restore restores the chain state after a restart.
 // The sequence must be the last written entry so the next Wrap continues at sequence+1.
-func (c *IntegrityChain) Restore(sequence int64, prevHash string) {
+//
+// Aggregates errors from the underlying allocator and sink chain restores —
+// SequenceAllocator.Restore rejects sequence < -1, and SinkChain.Restore
+// rejects malformed prev_hash (non-hex or wrong length for the algorithm).
+//
+// Restore is all-or-nothing: if either component rejects its input, the
+// IntegrityChain is left in its pre-call state. The implementation
+// snapshots the allocator before mutating and rolls it back if the chain
+// restore is rejected. The wrapper mutex serializes Restore against
+// concurrent Wrap and State calls.
+func (c *IntegrityChain) Restore(sequence int64, prevHash string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.sequence = sequence
-	c.prevHash = prevHash
+
+	// Snapshot allocator state for rollback so Restore is all-or-nothing:
+	// if chain restoration fails, the allocator must not be observed as
+	// partially restored. SequenceAllocator.Restore validates Sequence >= -1
+	// before mutating; SinkChain.Restore validates prevHash format before
+	// mutating. We attempt allocator first; if chain restore rejects the
+	// prevHash, we restore the allocator to the pre-call snapshot.
+	prevAlloc := c.alloc.State()
+
+	if err := c.alloc.Restore(AllocatorState{Sequence: sequence, Generation: 0}); err != nil {
+		return fmt.Errorf("restore allocator: %w", err)
+	}
+	if err := c.chain.Restore(0, prevHash, false); err != nil {
+		// Roll back allocator. prevAlloc came from State() so it satisfies
+		// the Sequence >= -1 invariant; this rollback cannot fail.
+		_ = c.alloc.Restore(prevAlloc)
+		return fmt.Errorf("restore chain: %w", err)
+	}
+	return nil
 }
 
 // KeyFingerprint returns a stable SHA-256 fingerprint prefix for an HMAC key.
@@ -278,17 +295,20 @@ func KeyFingerprint(key []byte) string {
 
 // KeyFingerprint returns a stable SHA-256 fingerprint prefix for the chain key.
 func (c *IntegrityChain) KeyFingerprint() string {
-	return KeyFingerprint(c.key)
+	key, _ := c.chain.keyAndAlgorithm()
+	return KeyFingerprint(key)
 }
 
 // VerifyHash recomputes the canonical payload hash using the chain key and format version.
 func (c *IntegrityChain) VerifyHash(formatVersion int, sequence int64, prevHash string, payload []byte, expectedHash string) (bool, error) {
-	return VerifyHash(c.key, c.algorithm, formatVersion, sequence, prevHash, payload, expectedHash)
+	key, alg := c.chain.keyAndAlgorithm()
+	return VerifyHash(key, alg, formatVersion, sequence, prevHash, payload, expectedHash)
 }
 
 // VerifyWrapped verifies a wrapped payload, including integrity metadata.
 func (c *IntegrityChain) VerifyWrapped(wrapped []byte) (bool, error) {
-	return VerifyWrapped(c.key, c.algorithm, wrapped)
+	key, alg := c.chain.keyAndAlgorithm()
+	return VerifyWrapped(key, alg, wrapped)
 }
 
 // VerifyHash recomputes an entry hash using canonical JSON payload encoding.
@@ -331,11 +351,6 @@ func VerifyWrapped(key []byte, algorithm string, wrapped []byte) (bool, error) {
 		return false, err
 	}
 	return hmac.Equal([]byte(actualHash), []byte(meta.EntryHash)), nil
-}
-
-// computeHash computes the HMAC of: format_version || sequence || prev_hash || payload
-func (c *IntegrityChain) computeHash(formatVersion int, sequence int64, prevHash string, payload []byte) (string, error) {
-	return computeIntegrityHash(c.key, c.algorithm, formatVersion, sequence, prevHash, payload)
 }
 
 func parseIntegrityPayloadUseNumber(payload []byte) (map[string]any, error) {

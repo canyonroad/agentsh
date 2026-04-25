@@ -324,7 +324,9 @@ func (s *IntegrityStore) resumeFromSidecar(sidecar audit.SidecarState, lastFile 
 		if !ok {
 			return fmt.Errorf("audit integrity chain mismatch: invalid last entry in %s", lastFile.Path)
 		}
-		s.chain.Restore(sidecar.Sequence, sidecar.PrevHash)
+		if err := s.chain.Restore(sidecar.Sequence, sidecar.PrevHash); err != nil {
+			return fmt.Errorf("restore integrity chain: %w", err)
+		}
 		return nil
 	}
 
@@ -434,7 +436,9 @@ func (s *IntegrityStore) recoverFromSidecarGap(sidecar audit.SidecarState, lastF
 		return false, nil
 	}
 
-	s.chain.Restore(lastVerified.Integrity.Sequence, lastVerified.Integrity.EntryHash)
+	if err := s.chain.Restore(lastVerified.Integrity.Sequence, lastVerified.Integrity.EntryHash); err != nil {
+		return false, fmt.Errorf("restore integrity chain: %w", err)
+	}
 	slog.Warn("audit integrity: sidecar behind, advancing after crash recovery",
 		"sidecar_seq", sidecar.Sequence,
 		"log_seq", lastVerified.Integrity.Sequence,
@@ -493,7 +497,9 @@ func (s *IntegrityStore) bootstrapWithoutSidecar(files []audit.LogFile, lastFile
 			if err := s.validateVisibleChain(files); err != nil {
 				return err
 			}
-			s.chain.Restore(entry.Integrity.Sequence, entry.Integrity.EntryHash)
+			if err := s.chain.Restore(entry.Integrity.Sequence, entry.Integrity.EntryHash); err != nil {
+				return fmt.Errorf("restore integrity chain: %w", err)
+			}
 			return audit.WriteSidecar(s.sidecarPath, audit.SidecarState{
 				Sequence:       entry.Integrity.Sequence,
 				PrevHash:       entry.Integrity.EntryHash,
@@ -602,7 +608,9 @@ func (s *IntegrityStore) AppendEvent(ctx context.Context, ev types.Event) error 
 			return &FatalIntegrityError{Op: "write audit log", Err: err}
 		}
 		// Clean failure: no bytes hit disk, safe to roll back chain state.
-		s.chain.Restore(prevState.Sequence, prevState.PrevHash)
+		if restoreErr := s.chain.Restore(prevState.Sequence, prevState.PrevHash); restoreErr != nil {
+			return fmt.Errorf("restore integrity chain after write failure: %w", restoreErr)
+		}
 		return err
 	}
 

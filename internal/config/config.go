@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -155,6 +156,9 @@ type AuditConfig struct {
 
 	// OTEL configures OpenTelemetry event export.
 	OTEL AuditOTELConfig `yaml:"otel"`
+
+	// Watchtower configures the WTP (Watchtower Transport Protocol) sink.
+	Watchtower AuditWatchtowerConfig `yaml:"watchtower"`
 }
 
 type AuditStorageConfig struct {
@@ -835,6 +839,391 @@ type DevelopmentPProfConfig struct {
 	Addr    string `yaml:"addr"`
 }
 
+// AuditWatchtowerConfig configures the WTP (Watchtower Transport Protocol) sink.
+// Spec: docs/superpowers/specs/2026-04-18-wtp-client-design.md §"Configuration & Wiring".
+type AuditWatchtowerConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	Endpoint      string `yaml:"endpoint"`        // host:port
+	SessionID     string `yaml:"session_id"`      // optional; auto-generated ULID if empty
+	StateDir      string `yaml:"state_dir"`       // default GetUserStateDir() + "/wtp"; per-OS path differs (XDG_STATE_HOME on Linux, LOCALAPPDATA on Windows). See defaultWatchtowerStateDir.
+	EphemeralMode bool   `yaml:"ephemeral_mode"`
+
+	TLS       WatchtowerTLSConfig       `yaml:"tls"`
+	Auth      WatchtowerAuthConfig      `yaml:"auth"`
+	Chain     WatchtowerChainConfig     `yaml:"chain"`
+	Batch     WatchtowerBatchConfig     `yaml:"batch"`
+	WAL       WatchtowerWALConfig       `yaml:"wal"`
+	Heartbeat WatchtowerHeartbeatConfig `yaml:"heartbeat"`
+	Backoff   WatchtowerBackoffConfig   `yaml:"backoff"`
+	Filter    WatchtowerFilterConfig    `yaml:"filter"`
+}
+
+type WatchtowerTLSConfig struct {
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
+	CACertFile         string `yaml:"ca_cert_file"`
+	ClientCertFile     string `yaml:"client_cert_file"`
+	ClientKeyFile      string `yaml:"client_key_file"`
+}
+
+type WatchtowerAuthConfig struct {
+	TokenFile      string `yaml:"token_file"`
+	TokenEnv       string `yaml:"token_env"`
+	ClientCertAuth bool   `yaml:"client_cert_auth"`
+}
+
+// WatchtowerChainConfig configures the WTP per-sink hash chain HMAC key.
+// Mirrors the key-source shape from AuditIntegrityConfig so the daemon (Task 27)
+// can reuse the existing kms package plumbing in internal/audit/kms/provider.go.
+type WatchtowerChainConfig struct {
+	Algorithm string `yaml:"algorithm"` // hmac-sha256 (default) | hmac-sha512
+
+	// KeySource selects exactly one of: file, env, aws_kms, azure_keyvault,
+	// hashicorp_vault, gcp_kms. When empty, the source is inferred from
+	// whichever single sub-config below is populated.
+	KeySource string `yaml:"key_source"`
+
+	// File/Env source (legacy, still supported).
+	KeyFile string `yaml:"key_file"`
+	KeyEnv  string `yaml:"key_env"`
+
+	// AWS KMS configuration.
+	AWSKMS AWSKMSConfig `yaml:"aws_kms"`
+
+	// Azure Key Vault configuration.
+	AzureKeyVault AzureKeyVaultConfig `yaml:"azure_keyvault"`
+
+	// HashiCorp Vault configuration.
+	HashiCorpVault HashiCorpVaultConfig `yaml:"hashicorp_vault"`
+
+	// GCP Cloud KMS configuration.
+	GCPKMS GCPKMSConfig `yaml:"gcp_kms"`
+}
+
+type WatchtowerBatchConfig struct {
+	MaxEvents     int           `yaml:"max_events"`
+	MaxBytes      int           `yaml:"max_bytes"`
+	MaxTimespan   time.Duration `yaml:"max_timespan"`
+	FlushInterval time.Duration `yaml:"flush_interval"`
+	Compression   string        `yaml:"compression"` // zstd (default) | gzip | none
+	ZstdLevel     int           `yaml:"zstd_level"`
+}
+
+type WatchtowerWALConfig struct {
+	SegmentSize   int64         `yaml:"segment_size"`
+	MaxTotalBytes int64         `yaml:"max_total_bytes"`
+	SyncMode      string        `yaml:"sync_mode"` // immediate (only mode currently implemented; "deferred" is reserved for the periodic-sync timer hook and rejected by validation until that lands)
+	SyncInterval  time.Duration `yaml:"sync_interval"`
+}
+
+type WatchtowerHeartbeatConfig struct {
+	Interval             time.Duration `yaml:"interval"`
+	ReconnectAfterMisses int           `yaml:"reconnect_after_misses"`
+}
+
+type WatchtowerBackoffConfig struct {
+	Base time.Duration `yaml:"base"`
+	Max  time.Duration `yaml:"max"`
+}
+
+type WatchtowerFilterConfig struct {
+	IncludeTypes      []string `yaml:"include_types"`
+	ExcludeTypes      []string `yaml:"exclude_types"`
+	IncludeCategories []string `yaml:"include_categories"`
+	ExcludeCategories []string `yaml:"exclude_categories"`
+	MinRiskLevel      string   `yaml:"min_risk_level"`
+}
+
+func (w *AuditWatchtowerConfig) applyDefaults() {
+	standard := func() {
+		if w.Batch.MaxEvents == 0 {
+			w.Batch.MaxEvents = 256
+		}
+		if w.Batch.MaxBytes == 0 {
+			w.Batch.MaxBytes = 256 * 1024
+		}
+		if w.Batch.MaxTimespan == 0 {
+			w.Batch.MaxTimespan = 5 * time.Second
+		}
+		if w.Batch.FlushInterval == 0 {
+			w.Batch.FlushInterval = 1 * time.Second
+		}
+		if w.Batch.Compression == "" {
+			w.Batch.Compression = "zstd"
+		}
+		if w.Batch.ZstdLevel == 0 {
+			w.Batch.ZstdLevel = 3
+		}
+		if w.WAL.SegmentSize == 0 {
+			w.WAL.SegmentSize = 16 * 1024 * 1024
+		}
+		if w.WAL.MaxTotalBytes == 0 {
+			w.WAL.MaxTotalBytes = 1024 * 1024 * 1024
+		}
+		if w.WAL.SyncMode == "" {
+			w.WAL.SyncMode = "immediate"
+		}
+		if w.WAL.SyncInterval == 0 {
+			w.WAL.SyncInterval = 100 * time.Millisecond
+		}
+		if w.Heartbeat.Interval == 0 {
+			w.Heartbeat.Interval = 30 * time.Second
+		}
+		if w.Heartbeat.ReconnectAfterMisses == 0 {
+			w.Heartbeat.ReconnectAfterMisses = 2
+		}
+		if w.Backoff.Base == 0 {
+			w.Backoff.Base = 500 * time.Millisecond
+		}
+		if w.Backoff.Max == 0 {
+			w.Backoff.Max = 30 * time.Second
+		}
+		if w.Chain.Algorithm == "" {
+			w.Chain.Algorithm = "hmac-sha256"
+		}
+		if w.StateDir == "" {
+			w.StateDir = defaultWatchtowerStateDir()
+		}
+	}
+	if w.EphemeralMode {
+		// Apply ephemeral overrides ONLY for zero fields. Operator-set
+		// values still win.
+		if w.Batch.MaxEvents == 0 {
+			w.Batch.MaxEvents = 64
+		}
+		if w.Batch.MaxBytes == 0 {
+			w.Batch.MaxBytes = 64 * 1024
+		}
+		if w.Batch.MaxTimespan == 0 {
+			w.Batch.MaxTimespan = 1 * time.Second
+		}
+		if w.Batch.FlushInterval == 0 {
+			w.Batch.FlushInterval = 200 * time.Millisecond
+		}
+		if w.WAL.SegmentSize == 0 {
+			w.WAL.SegmentSize = 4 * 1024 * 1024
+		}
+		if w.WAL.MaxTotalBytes == 0 {
+			w.WAL.MaxTotalBytes = 64 * 1024 * 1024
+		}
+		if w.Heartbeat.Interval == 0 {
+			w.Heartbeat.Interval = 10 * time.Second
+		}
+	}
+	standard()
+}
+
+// defaultWatchtowerStateDir returns the default state directory for WTP.
+// Uses GetUserStateDir() and falls back to the OS temp dir if a user state
+// directory cannot be determined. See GetUserStateDir() for the per-OS
+// contract — on Windows the state directory is intentionally non-roaming
+// (LOCALAPPDATA), distinct from GetUserDataDir which roams via APPDATA.
+// Cross-platform: uses filepath.Join.
+func defaultWatchtowerStateDir() string {
+	base := GetUserStateDir()
+	if base == "" {
+		base = filepath.Join(os.TempDir(), "agentsh")
+	}
+	return filepath.Join(base, "wtp")
+}
+
+func (w *AuditWatchtowerConfig) validate() error {
+	if !w.Enabled {
+		return nil
+	}
+	if w.Endpoint == "" {
+		return fmt.Errorf("audit.watchtower.endpoint is required when enabled")
+	}
+	if _, _, err := net.SplitHostPort(w.Endpoint); err != nil {
+		return fmt.Errorf("audit.watchtower.endpoint %q: %w", w.Endpoint, err)
+	}
+
+	// Auth: exactly one source.
+	authSources := 0
+	if w.Auth.TokenFile != "" {
+		authSources++
+	}
+	if w.Auth.TokenEnv != "" {
+		authSources++
+	}
+	if w.Auth.ClientCertAuth {
+		authSources++
+	}
+	if authSources != 1 {
+		return fmt.Errorf("audit.watchtower.auth: exactly one of token_file, token_env, client_cert_auth must be set (got %d)", authSources)
+	}
+
+	// mTLS pairing: when client_cert_auth is true, both cert + key are required.
+	if w.Auth.ClientCertAuth {
+		if w.TLS.ClientCertFile == "" || w.TLS.ClientKeyFile == "" {
+			return fmt.Errorf("audit.watchtower.auth.client_cert_auth requires both tls.client_cert_file and tls.client_key_file")
+		}
+	}
+	// Partial TLS client-auth pair is invalid even without client_cert_auth.
+	if (w.TLS.ClientCertFile != "") != (w.TLS.ClientKeyFile != "") {
+		return fmt.Errorf("audit.watchtower.tls: client_cert_file and client_key_file must be set together")
+	}
+
+	// TLS file existence AND readability. We open + close instead of just
+	// stat-ing so unreadable files (perm-denied) are caught at load time.
+	for _, f := range []struct {
+		field string
+		path  string
+	}{
+		{"tls.ca_cert_file", w.TLS.CACertFile},
+		{"tls.client_cert_file", w.TLS.ClientCertFile},
+		{"tls.client_key_file", w.TLS.ClientKeyFile},
+	} {
+		if f.path == "" {
+			continue
+		}
+		fh, err := os.Open(f.path)
+		if err != nil {
+			return fmt.Errorf("audit.watchtower.%s %q: %w", f.field, f.path, err)
+		}
+		_ = fh.Close()
+	}
+
+	// Chain: validate exactly one key source AND that key_source (if set)
+	// matches the populated source block. This must mirror the field
+	// semantics in internal/audit/integrity.go:NewKMSProvider so the daemon
+	// (Task 27) doesn't silently build the wrong provider.
+	chainSources := []struct {
+		name      string
+		populated bool
+	}{
+		{"file", w.Chain.KeyFile != ""},
+		{"env", w.Chain.KeyEnv != ""},
+		{"aws_kms", w.Chain.AWSKMS.KeyID != ""},
+		{"azure_keyvault", w.Chain.AzureKeyVault.VaultURL != ""},
+		{"hashicorp_vault", w.Chain.HashiCorpVault.Address != ""},
+		{"gcp_kms", w.Chain.GCPKMS.KeyName != ""},
+	}
+	populated := []string{}
+	for _, s := range chainSources {
+		if s.populated {
+			populated = append(populated, s.name)
+		}
+	}
+	if len(populated) != 1 {
+		return fmt.Errorf("audit.watchtower.chain: exactly one key source must be set "+
+			"(key_file, key_env, aws_kms, azure_keyvault, hashicorp_vault, gcp_kms) (got %d)", len(populated))
+	}
+	inferred := populated[0]
+	switch w.Chain.KeySource {
+	case "":
+		// fine; inferred from populated block
+	case "file", "env", "aws_kms", "azure_keyvault", "hashicorp_vault", "gcp_kms":
+		if w.Chain.KeySource != inferred {
+			return fmt.Errorf("audit.watchtower.chain.key_source %q does not match populated source %q", w.Chain.KeySource, inferred)
+		}
+	default:
+		return fmt.Errorf("audit.watchtower.chain.key_source %q: must be one of file, env, aws_kms, azure_keyvault, hashicorp_vault, gcp_kms", w.Chain.KeySource)
+	}
+
+	// Per-provider minimum required fields. Mirror the kms package
+	// constructors in internal/audit/kms/{aws,azure,vault,gcp}.go so a config
+	// that passes load-time validation cannot fail later at provider
+	// construction.
+	switch inferred {
+	case "aws_kms":
+		if w.Chain.AWSKMS.KeyID == "" {
+			return fmt.Errorf("audit.watchtower.chain.aws_kms.key_id is required")
+		}
+	case "azure_keyvault":
+		if w.Chain.AzureKeyVault.VaultURL == "" {
+			return fmt.Errorf("audit.watchtower.chain.azure_keyvault.vault_url is required")
+		}
+		if w.Chain.AzureKeyVault.KeyName == "" {
+			return fmt.Errorf("audit.watchtower.chain.azure_keyvault.key_name is required")
+		}
+	case "hashicorp_vault":
+		if w.Chain.HashiCorpVault.Address == "" {
+			return fmt.Errorf("audit.watchtower.chain.hashicorp_vault.address is required")
+		}
+		if w.Chain.HashiCorpVault.SecretPath == "" {
+			return fmt.Errorf("audit.watchtower.chain.hashicorp_vault.secret_path is required")
+		}
+	case "gcp_kms":
+		if w.Chain.GCPKMS.KeyName == "" {
+			return fmt.Errorf("audit.watchtower.chain.gcp_kms.key_name is required")
+		}
+	}
+
+	switch w.Chain.Algorithm {
+	case "hmac-sha256", "hmac-sha512":
+	default:
+		return fmt.Errorf("audit.watchtower.chain.algorithm %q: must be hmac-sha256 or hmac-sha512", w.Chain.Algorithm)
+	}
+	if w.Batch.MaxBytes < 4*1024 {
+		return fmt.Errorf("audit.watchtower.batch.max_bytes %d: must be >= 4096", w.Batch.MaxBytes)
+	}
+	if w.WAL.SegmentSize > w.WAL.MaxTotalBytes/2 {
+		return fmt.Errorf("audit.watchtower.wal.segment_size %d > max_total_bytes/2 (%d)", w.WAL.SegmentSize, w.WAL.MaxTotalBytes/2)
+	}
+	switch w.Batch.Compression {
+	case "zstd", "gzip", "none":
+	default:
+		return fmt.Errorf("audit.watchtower.batch.compression %q: must be zstd, gzip, or none", w.Batch.Compression)
+	}
+	switch w.WAL.SyncMode {
+	case "immediate":
+	case "deferred":
+		// SyncDeferred is forward-compatible in the WAL layer but the
+		// periodic-sync timer hook is not yet wired (plan task tracks
+		// the work). WAL.Open rejects it at runtime; reject it at
+		// config validation too so a config that turns the mode on
+		// fails fast — otherwise the daemon would only fail when the
+		// audit pipeline tries to open the WAL, after the rest of the
+		// config has been accepted as valid.
+		return fmt.Errorf("audit.watchtower.wal.sync_mode %q: deferred mode requires the periodic-sync timer hook (not yet implemented); use \"immediate\"", w.WAL.SyncMode)
+	default:
+		return fmt.Errorf("audit.watchtower.wal.sync_mode %q: must be immediate", w.WAL.SyncMode)
+	}
+
+	// Filter: min_risk_level enum (matches OTEL filter).
+	switch w.Filter.MinRiskLevel {
+	case "", "low", "medium", "high", "critical":
+	default:
+		return fmt.Errorf("audit.watchtower.filter.min_risk_level %q: must be one of low, medium, high, critical (or empty)", w.Filter.MinRiskLevel)
+	}
+
+	// state_dir: ensure parent is creatable and writable. We track whether
+	// the directory pre-existed so we can clean up if the dependency-ordering
+	// gate below rejects the config (validation should be side-effect free
+	// against rejected configs).
+	stateDirExisted := false
+	if w.StateDir != "" {
+		if info, err := os.Stat(w.StateDir); err == nil && info.IsDir() {
+			stateDirExisted = true
+		}
+		if err := os.MkdirAll(w.StateDir, 0o700); err != nil {
+			return fmt.Errorf("audit.watchtower.state_dir %q: not writable: %w", w.StateDir, err)
+		}
+		probe, err := os.CreateTemp(w.StateDir, ".wtp-probe-*")
+		if err != nil {
+			if !stateDirExisted {
+				_ = os.RemoveAll(w.StateDir)
+			}
+			return fmt.Errorf("audit.watchtower.state_dir %q: not writable: %w", w.StateDir, err)
+		}
+		probePath := probe.Name()
+		_ = probe.Close()
+		_ = os.Remove(probePath)
+	}
+
+	// Dependency-ordering gate: the WTP sink wiring lands in plan Task 27.
+	// Until then, a config that turns the feature on must be rejected so
+	// operators don't think setting `enabled: true` actually does anything.
+	// MUST be the last check so all schema errors above propagate first.
+	// TODO(task-27): remove this gate once the daemon wires the WTP sink.
+	if w.StateDir != "" && !stateDirExisted {
+		// Roll back the directory we created above so a rejected config
+		// leaves no filesystem artifacts behind.
+		_ = os.RemoveAll(w.StateDir)
+	}
+	return fmt.Errorf("audit.watchtower.enabled: WTP sink is not yet wired into the daemon (will be enabled in a later task)")
+}
+
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -1455,6 +1844,9 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.PolicySocket.TeamID == "" {
 		cfg.PolicySocket.TeamID = "WCKWMMKJ35"
 	}
+
+	// WTP (Watchtower Transport Protocol) defaults
+	cfg.Audit.Watchtower.applyDefaults()
 }
 
 // applyDefaults wraps applyDefaultsWithSource for backward compatibility.
@@ -1751,6 +2143,10 @@ func validateConfig(cfg *Config) error {
 				"is true: agent processes cannot reach the agentsh proxy without " +
 				"outbound TCP. Either set landlock.network.allow_connect_tcp to true, " +
 				"or set sandbox.network.enabled to false")
+	}
+	// Validate WTP (Watchtower Transport Protocol) config
+	if err := cfg.Audit.Watchtower.validate(); err != nil {
+		return err
 	}
 	return nil
 }

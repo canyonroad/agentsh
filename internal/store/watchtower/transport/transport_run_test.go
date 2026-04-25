@@ -1,0 +1,264 @@
+package transport_test
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
+	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
+	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+)
+
+// TestRun_ExitsOnContextCancellationDuringConnecting verifies that the
+// Run loop returns ctx.Err() promptly when the parent context is
+// cancelled while the state machine is backing off between failed dial
+// attempts. The dialer returns an error on every attempt, forcing the
+// loop into the backoff branch; the ctx cancel MUST unblock the sleep
+// and surface context.Canceled within a short grace window.
+//
+// This is the smoke test for the Run loop's ctx-honour contract. It
+// does not assert anything about which state the loop was in when it
+// returned — only that it returned context.Canceled in bounded time
+// and that rdrFactory was never invoked (i.e. replay/live were not
+// reached under a dial-refused path).
+func TestRun_ExitsOnContextCancellationDuringConnecting(t *testing.T) {
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return nil, errors.New("dial refused")
+	})
+
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
+		t.Fatal("rdrFactory called; Run should not reach Replaying/Live")
+		return nil, nil
+	}
+	go func() {
+		done <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
+			Batcher: transport.BatcherOptions{
+				MaxRecords: 100,
+				MaxBytes:   1 << 16,
+				MaxAge:     50 * time.Millisecond,
+			},
+			MaxInflight:    8,
+			HeartbeatEvery: time.Second,
+		})
+	}()
+
+	// Let the first dial attempt fail and enter the backoff sleep.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of cancel")
+	}
+}
+
+// TestRun_ReturnsTerminalErrorOnSessionRejection verifies the
+// terminal-vs-retriable error contract: when runConnecting reports
+// (StateShutdown, err) — e.g. server SessionAck rejection — Run MUST
+// surface the error immediately rather than backing off and retrying.
+// The opposite behavior would make a misconfiguration or server-side
+// reject loop forever.
+func TestRun_ReturnsTerminalErrorOnSessionRejection(t *testing.T) {
+	conn := newFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return conn, nil
+	})
+
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
+		t.Fatal("rdrFactory called; rejection should fire before Replaying/Live")
+		return nil, nil
+	}
+	go func() {
+		done <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
+			Batcher: transport.BatcherOptions{
+				MaxRecords: 100,
+				MaxBytes:   1 << 16,
+				MaxAge:     50 * time.Millisecond,
+			},
+			MaxInflight:    8,
+			HeartbeatEvery: time.Second,
+		})
+	}()
+
+	// Drain the SessionInit; respond with a rejection.
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no SessionInit sent")
+	}
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{
+				Accepted:     false,
+				RejectReason: "go away",
+			},
+		},
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run returned nil, want non-nil terminal error")
+		}
+		if !strings.Contains(err.Error(), "go away") {
+			t.Fatalf("Run error %q does not mention reject reason", err.Error())
+		}
+		// Verify we did not retry: only one SessionInit was sent (the
+		// initial one we already drained). A subsequent dial+Init
+		// would deposit another frame on conn.sendCh.
+		select {
+		case extra := <-conn.sendCh:
+			t.Fatalf("Run retried after rejection; saw extra %T", extra.Msg)
+		default:
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of rejection")
+	}
+}
+
+// TestRun_RetriesTransientDialFailureUntilSuccess verifies that
+// transient dial failures back off (do NOT terminate) and that a
+// subsequent successful dial advances the loop into Replaying. Then
+// it forces Replaying to fail (rdrFactory error) and asserts the loop
+// regresses to StateConnecting and re-dials — i.e. the full
+// dial-fail → dial-ok → replay-fail → re-dial cycle is exercised, not
+// just "any number of dials >= 2".
+//
+// Sequence:
+//   attempt 1: dial returns error    → backoff, retry
+//   attempt 2: dial returns conn,    → SessionInit + accepted SessionAck
+//                                       → StateReplaying
+//                                     → rdrFactory fails               → StateConnecting
+//   attempt 3: dial returns conn,    → SessionInit observed; cancel
+//
+// Without this end-to-end shape, a regression where Replaying-failure
+// fails to regress to Connecting (or fails to re-dial) would still
+// pass a "dials >= 2" assertion.
+func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
+	var attempts atomic.Int32
+	conn := newFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		n := attempts.Add(1)
+		if n == 1 {
+			return nil, errors.New("transient dial fail")
+		}
+		// Hand back the same fakeConn for attempts 2 and 3. The conn
+		// stays open across the replay-failure regress because runReplaying
+		// is not reached (rdrFactory errors before NewReplayer); the
+		// state regress goes through the Run loop's stage-error branch
+		// without runReplaying tearing the conn down. The next dial
+		// reuses this conn (it has not been Close'd).
+		return conn, nil
+	})
+
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rdrAttempts := make(chan struct{}, 4)
+	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
+		select {
+		case rdrAttempts <- struct{}{}:
+		default:
+		}
+		return nil, errors.New("rdrFactory deliberately failing to abort replay")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
+			Batcher: transport.BatcherOptions{
+				MaxRecords: 100,
+				MaxBytes:   1 << 16,
+				MaxAge:     50 * time.Millisecond,
+			},
+			MaxInflight:    8,
+			HeartbeatEvery: time.Second,
+		})
+	}()
+
+	// === attempt 2: drain SessionInit, ack accepted, drive into Replaying.
+	select {
+	case <-conn.sendCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no SessionInit on second attempt within 2s")
+	}
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{
+				Accepted:            true,
+				AckHighWatermarkSeq: 0,
+				Generation:          0,
+			},
+		},
+	}
+	select {
+	case <-rdrAttempts:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rdrFactory was not invoked; Run did not reach Replaying")
+	}
+
+	// === attempt 3: replay failure should regress to Connecting and
+	// re-dial. Observe a third SessionInit on the conn — proves the
+	// replay-failure → reconnect cycle, not just "loop ran twice."
+	select {
+	case <-conn.sendCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("no SessionInit on third attempt; replay-failure did not regress to Connecting (dial attempts=%d)", attempts.Load())
+	}
+	if got := attempts.Load(); got < 3 {
+		t.Fatalf("dial attempts: got %d, want >= 3 (transient + success + post-replay-failure re-dial)", got)
+	}
+
+	cancel()
+	// fakeConn.Recv does not honor ctx; close the conn so the third
+	// attempt's Recv unblocks and the Run loop sees ctx.Done() on the
+	// next iteration.
+	_ = conn.Close()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancel")
+	}
+}

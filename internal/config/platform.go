@@ -188,3 +188,37 @@ func GetUserDataDir() string {
 		return home + "/.local/share/agentsh"
 	}
 }
+
+// GetUserStateDir returns the user-specific state directory used for ephemeral
+// runtime artifacts (e.g., WTP WAL/cursor/replay store).
+//
+// Linux: honors XDG_STATE_HOME with a fallback to ~/.local/state, per the
+// XDG Base Directory Specification.
+//
+// macOS: there is no canonical state directory; we reuse the same path as
+// GetUserDataDir (~/Library/Application Support/agentsh).
+//
+// Windows: state lives under LOCALAPPDATA (non-roaming), NOT APPDATA. This
+// is a deliberate divergence from GetUserDataDir, which uses APPDATA
+// (roaming). Per-machine WAL segments, cursor positions, and replay-store
+// shards must not be roamed across hosts: they are tightly coupled to the
+// node's seq counter and would corrupt the chain if synced. State here is
+// machine-local by design; user-facing data (settings, history) stays in
+// APPDATA where roaming is appropriate.
+func GetUserStateDir() string {
+	home, _ := os.UserHomeDir()
+	switch runtime.GOOS {
+	case "windows":
+		if appdata := os.Getenv("LOCALAPPDATA"); appdata != "" {
+			return appdata + `\agentsh`
+		}
+		return home + `\AppData\Local\agentsh`
+	case "darwin":
+		return home + "/Library/Application Support/agentsh"
+	default:
+		if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
+			return xdg + "/agentsh"
+		}
+		return home + "/.local/state/agentsh"
+	}
+}

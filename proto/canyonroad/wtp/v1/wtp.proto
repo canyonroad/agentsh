@@ -1,0 +1,184 @@
+syntax = "proto3";
+
+package canyonroad.wtp.v1;
+
+option go_package = "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1;wtpv1";
+
+// Bidi stream: client opens, sends ClientMessage frames, receives ServerMessage frames.
+service Watchtower {
+  rpc Stream(stream ClientMessage) returns (stream ServerMessage);
+}
+
+message ClientMessage {
+  oneof msg {
+    SessionInit    session_init    = 1;
+    SessionUpdate  session_update  = 2;
+    EventBatch     event_batch     = 3;
+    Heartbeat      heartbeat       = 4;
+    TransportLoss  transport_loss  = 5;
+    ClientShutdown shutdown        = 6;
+  }
+}
+
+// ServerMessage frames sent from server to client. Semantics:
+//   * SessionAck       — sent exactly once after SessionInit; accepted=false
+//                        terminates the session (client must disconnect).
+//   * BatchAck         — sent per-batch progress ack; advances the client's
+//                        ack high-watermark and unblocks WAL GC.
+//   * ServerHeartbeat  — periodic; carries the server's current
+//                        ack_high_watermark_seq so an idle client still
+//                        learns about catch-up after replay completes.
+//   * Goaway           — server requesting reconnect; carries an enum code.
+//   * server_update    — server-issued SessionUpdate (key/generation
+//                        rotation initiated by the server).
+message ServerMessage {
+  oneof msg {
+    SessionAck       session_ack        = 1;
+    BatchAck         batch_ack          = 2;
+    ServerHeartbeat  server_heartbeat   = 3;
+    Goaway           goaway             = 4;
+    SessionUpdate    server_update      = 5;
+  }
+}
+
+// SessionInit (§7.1)
+message SessionInit {
+  string         session_id              = 1;
+  string         ocsf_version            = 2;
+  uint32         format_version          = 3;
+  HashAlgorithm  algorithm               = 4;
+  string         key_fingerprint         = 5;
+  string         context_digest          = 6;   // hex-encoded SHA-256
+  uint64         wal_high_watermark_seq  = 7;
+  uint32         generation              = 8;
+  string         agent_id                = 9;
+  string         agent_version           = 10;
+  uint64         total_chained           = 11;  // count of records sink has chained
+}
+
+enum HashAlgorithm {
+  HASH_ALGORITHM_UNSPECIFIED = 0;   // wire-incompatible — receivers MUST reject.
+  HASH_ALGORITHM_HMAC_SHA256 = 1;
+  HASH_ALGORITHM_HMAC_SHA512 = 2;
+}
+
+message SessionAck {
+  uint64 ack_high_watermark_seq = 1;
+  uint32 generation             = 2;
+  bool   accepted               = 3;
+  string reject_reason          = 4;     // empty when accepted=true
+}
+
+// SessionUpdate (§7.2): generation roll, key rotation, context change.
+message SessionUpdate {
+  uint32 new_generation         = 1;
+  string new_key_fingerprint    = 2;
+  string new_context_digest     = 3;
+  uint64 boundary_sequence      = 4;     // last seq of prior generation
+}
+
+// EventBatch (§7.3) — the unit of in-flight work between client and server.
+//
+// The batch body is mutually exclusive: a sender MUST populate exactly one
+// of `uncompressed` (when compression == COMPRESSION_NONE) or
+// `compressed_payload` (when compression is COMPRESSION_ZSTD or
+// COMPRESSION_GZIP). Receivers MUST reject batches where the oneof case
+// disagrees with the compression field, where compression is
+// COMPRESSION_UNSPECIFIED, or where the body oneof is unset.
+message EventBatch {
+  uint64 from_sequence = 1;
+  uint64 to_sequence   = 2;
+  uint32 generation    = 3;
+  Compression compression = 4;
+  oneof body {
+    UncompressedEvents uncompressed       = 5;
+    bytes              compressed_payload = 6;
+  }
+}
+
+// UncompressedEvents wraps the repeated CompactEvent so it can sit inside
+// the EventBatch.body oneof (proto3 forbids `repeated` directly in oneofs).
+message UncompressedEvents {
+  repeated CompactEvent events = 1;
+}
+
+enum Compression {
+  COMPRESSION_UNSPECIFIED = 0;
+  COMPRESSION_NONE        = 1;
+  COMPRESSION_ZSTD        = 2;
+  COMPRESSION_GZIP        = 3;
+}
+
+// CompactEvent (§6.3)
+message CompactEvent {
+  uint64  sequence              = 1;
+  uint32  generation            = 2;
+  uint64  timestamp_unix_nanos  = 3;
+  uint32  ocsf_class_uid        = 4;
+  uint32  ocsf_activity_id      = 5;
+  bytes   payload               = 6;     // protobuf-encoded class-specific payload
+  IntegrityRecord integrity     = 7;
+}
+
+message IntegrityRecord {
+  uint32  format_version        = 1;
+  uint64  sequence              = 2;
+  uint32  generation            = 3;
+  string  prev_hash             = 4;
+  string  event_hash            = 5;
+  string  context_digest        = 6;
+  string  key_fingerprint       = 7;
+}
+
+message Heartbeat {
+  uint64 wal_high_watermark_seq = 1;
+  uint32 generation             = 2;
+}
+
+message ServerHeartbeat {
+  uint64 ack_high_watermark_seq = 1;
+}
+
+message BatchAck {
+  uint64 ack_high_watermark_seq = 1;
+  uint32 generation             = 2;
+}
+
+// TransportLoss (§7.5) — emitted on WAL overflow or CRC corruption.
+message TransportLoss {
+  uint64               from_sequence = 1;
+  uint64               to_sequence   = 2;
+  uint32               generation    = 3;
+  TransportLossReason  reason        = 4;
+}
+
+enum TransportLossReason {
+  TRANSPORT_LOSS_REASON_UNSPECIFIED   = 0;   // wire-incompatible — receivers MUST reject.
+  TRANSPORT_LOSS_REASON_OVERFLOW      = 1;   // WAL hit max_total_bytes; oldest segments dropped.
+  TRANSPORT_LOSS_REASON_CRC_CORRUPTION = 2;  // CRC mismatch encountered during WAL replay.
+}
+
+message Goaway {
+  GoawayCode code             = 1;
+  string     message          = 2;
+  bool       retry_immediately = 3;
+}
+
+enum GoawayCode {
+  GOAWAY_CODE_UNSPECIFIED = 0;   // unknown; clients MUST treat as transient and reconnect.
+  GOAWAY_CODE_DRAINING    = 1;   // graceful shutdown; reconnect to a different instance.
+  GOAWAY_CODE_OVERLOAD    = 2;   // server overloaded; reconnect with backoff.
+  GOAWAY_CODE_UPGRADE     = 3;   // server upgrade in progress; reconnect after delay.
+  GOAWAY_CODE_AUTH        = 4;   // authentication/authorization failed; do not auto-retry.
+}
+
+message ClientShutdown {
+  ClientShutdownReason reason = 1;
+}
+
+enum ClientShutdownReason {
+  CLIENT_SHUTDOWN_REASON_UNSPECIFIED = 0;
+  CLIENT_SHUTDOWN_REASON_NORMAL      = 1;   // clean shutdown of the agent.
+  CLIENT_SHUTDOWN_REASON_RECONFIGURE = 2;   // operator-driven reconfig; expect quick reconnect.
+  CLIENT_SHUTDOWN_REASON_FATAL       = 3;   // unrecoverable error; do not expect reconnect.
+}

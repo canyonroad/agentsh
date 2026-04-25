@@ -32,7 +32,8 @@ proto:
 	protoc -I proto \
 	  --go_out=. --go_opt=module=github.com/agentsh/agentsh \
 	  --go-grpc_out=. --go-grpc_opt=module=github.com/agentsh/agentsh \
-	  proto/agentsh/v1/pty.proto
+	  proto/agentsh/v1/pty.proto \
+	  proto/canyonroad/wtp/v1/wtp.proto
 
 test:
 	mkdir -p $(GOCACHE) $(GOMODCACHE) $(GOPATH)

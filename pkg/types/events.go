@@ -56,6 +56,17 @@ type Event struct {
 	EffectiveAction string `json:"effective_action,omitempty"`
 
 	Fields map[string]any `json:"fields,omitempty"`
+
+	// Chain is the shared (sequence, generation) allocated by the composite
+	// store before fanout. Used by chained sinks to produce sink-local
+	// integrity hashes. Nil until composite stamps it.
+	//
+	// json:"-" is load-bearing: this field must never appear in any
+	// user-visible serialization. Tested by TestEvent_ChainFieldNotMarshaled.
+	//
+	// Sinks MUST treat the pointed-to ChainState as read-only — see the
+	// ChainState type comment for the per-sink-copy contract.
+	Chain *ChainState `json:"-"`
 }
 
 type EventQuery struct {
@@ -74,4 +85,23 @@ type EventQuery struct {
 	Limit  int
 	Offset int
 	Asc    bool
+}
+
+// ChainState is the shared (sequence, generation) tuple that the composite
+// store will stamp on each event before fanout to chained sinks. See
+// docs/superpowers/specs/2026-04-18-phase-0-shared-sequence-contract.md.
+//
+// Contract for consumers: ChainState MUST be treated as read-only. Sinks
+// must never mutate the fields of a *ChainState they receive on
+// types.Event.Chain.
+//
+// Lifecycle: this type and the Event.Chain field exist now so downstream
+// tasks can build against a stable type, but no caller writes to Chain
+// yet. Task 5 of the Phase 0 plan will land the composite-store wiring
+// that allocates a (sequence, generation) tuple via
+// audit.SequenceAllocator and stamps a separate *ChainState per
+// fanned-out sink (so the pointer is never aliased across sinks).
+type ChainState struct {
+	Sequence   uint64
+	Generation uint32
 }
