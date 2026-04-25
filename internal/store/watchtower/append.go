@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 
 	"github.com/agentsh/agentsh/internal/audit"
@@ -221,4 +222,23 @@ func (s *Store) latchFatal(err error) {
 			s.fatalErr.Store(err)
 		}
 	}
+}
+
+// recordSequenceOverflow increments wtp_dropped_sequence_overflow_total
+// and emits a structured WARN. Called from AppendEvent's
+// ev.Chain.Sequence > math.MaxInt64 branch BEFORE the existing error
+// return so the counter increments exactly once per drop and the WARN
+// gives operators triage context (which (gen, seq) was rejected).
+//
+// No underlying err is logged because this is our own range check, not
+// a wrapped sentinel — the message is deterministic from event_seq.
+func (s *Store) recordSequenceOverflow(ev types.Event) {
+	s.metrics.IncDroppedSequenceOverflow(1)
+	s.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+		"wtp: dropping event before WAL append",
+		slog.String("reason", "sequence_overflow"),
+		slog.Uint64("event_seq", ev.Chain.Sequence),
+		slog.Uint64("event_gen", uint64(ev.Chain.Generation)),
+		slog.String("session_id", s.opts.SessionID),
+		slog.String("agent_id", s.opts.AgentID))
 }
