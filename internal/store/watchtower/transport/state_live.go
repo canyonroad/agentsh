@@ -193,11 +193,19 @@ var encodeBatchMessageFn = encodeBatchMessage
 // encodeBatchMessage is the production EventBatch encoder. It unmarshals
 // each data record's wal.Record.Payload (already the marshaled
 // CompactEvent bytes the Store produced) into a *wtpv1.CompactEvent and
-// wraps the slice in an UncompressedEvents body. Loss markers
-// (wal.RecordLoss) are NOT forwarded inside an UncompressedEvents batch
-// — the transport emits them via a dedicated TransportLoss message flow
-// (Task 13), not inline; skip them here so the batch carries only real
-// events.
+// wraps the slice in an UncompressedEvents body.
+//
+// Loss markers (wal.RecordLoss) MUST NOT be smuggled inside an
+// UncompressedEvents batch — the dedicated TransportLoss message flow
+// (Task 13) is the only safe carrier. Until that path lands, this
+// encoder fails LOUD on RecordLoss rather than silently stripping the
+// marker and emitting a partial batch: a silent strip is an integrity
+// gap (Replayer.NextBatch is documented to surface every loss marker
+// verbatim — see replayer.go), so dropping one would mask WAL overflow
+// / CRC-corruption notices the server relies on. Callers in Live,
+// Replaying, and Shutdown already treat an encoder error as a fatal-
+// for-this-stream condition and regress to Connecting; that loud
+// failure is the right posture until Task 13 wires TransportLoss.
 //
 // from_sequence / to_sequence / generation reflect the first and last
 // data record. Compression is COMPRESSION_NONE because we send raw
@@ -211,6 +219,9 @@ func encodeBatchMessage(records []wal.Record) (*wtpv1.ClientMessage, error) {
 		seenOne bool
 	)
 	for _, rec := range records {
+		if rec.Kind == wal.RecordLoss {
+			return nil, fmt.Errorf("encodeBatchMessage: RecordLoss marker (gen=%d) cannot be encoded into an UncompressedEvents batch; TransportLoss carrier (Task 13) is required", rec.Generation)
+		}
 		if rec.Kind != wal.RecordData {
 			continue
 		}
