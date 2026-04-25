@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
@@ -54,6 +55,19 @@ func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Rea
 			}
 			if !ok {
 				break
+			}
+			if rec.Kind == wal.RecordLoss {
+				// Pre-Task-13 temporary path; see filterDataRecords
+				// (state_replaying.go) for the full rationale.
+				t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+					"wtp: dropping wal.RecordLoss marker pending TransportLoss (Task 13) carrier",
+					slog.String("caller_state", "shutdown"),
+					slog.Uint64("loss_generation", uint64(rec.Generation)),
+					slog.Uint64("loss_from_seq", rec.Loss.FromSequence),
+					slog.Uint64("loss_to_seq", rec.Loss.ToSequence),
+					slog.String("loss_reason", rec.Loss.Reason),
+					slog.String("session_id", t.opts.SessionID))
+				continue
 			}
 			if outBatch := b.Add(rec); outBatch != nil {
 				msg, err := encodeBatchMessageFn(outBatch.Records)
