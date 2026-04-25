@@ -225,7 +225,6 @@ var (
     ErrStaleResult         = errors.New("stale ComputeResult: caller committed against an obsolete chain head; chain latched fatal")
     ErrCrossChainResult    = errors.New("ComputeResult bound to a different SinkChain")
 )
-)
 ```
 
 ### `audit.IntegrityChain.Wrap()` — preserved
@@ -305,7 +304,6 @@ For single-sink callers, durable success is implicit (Wrap returns the bytes; th
 - **`Restore` is all-or-nothing.** If either the allocator or the chain rejects its input, the wrapper is left in its pre-call state. Implementation snapshots the allocator before mutating and rolls it back on chain-restore failure; the rollback restores a value that came from `State()` and therefore satisfies the allocator's `Sequence >= -1` invariant by construction.
 
 `KeyFingerprint`, `VerifyHash`, and `VerifyWrapped` do NOT take the wrapper mutex. They read immutable key/algorithm material via the underlying `SinkChain`'s own mutex (`keyAndAlgorithm()`) and have no need for wrapper-level serialization. Adding the wrapper mutex there would be a lock-ordering risk and serves no purpose.
-
 
 ### `internal/store/composite/composite.go` — allocate + stamp + fanout
 
@@ -469,7 +467,6 @@ When the composite owner rotates the chain key:
 Generation is a property of the *shared allocator*, not of any individual sink. All sinks roll on the same logical event boundary — the first event with the new generation.
 
 **Enforcement.** The "same logical event boundary" guarantee is enforceable, not aspirational, because of the wrapper RWMutex on `composite.Store` (see *Composite Concurrency Model* above): `NextGeneration` takes the write lock and waits for every in-flight `AppendEvent` (each holding the read lock) to complete its fanout before advancing the allocator. After `NextGeneration` returns, every subsequent `AppendEvent` stamps the new generation. Without this lock, a stamped `(seq, oldGen)` event could race against sink rekeying and a sink that had already rotated would observe a backwards-generation event — exactly the failure mode `SinkChain.Commit` is designed to reject.
-
 
 ## TransportLoss Semantics
 
