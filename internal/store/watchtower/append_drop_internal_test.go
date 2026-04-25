@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/metrics"
+	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
 	"github.com/agentsh/agentsh/pkg/types"
 )
@@ -159,6 +160,41 @@ func TestRecordCompactEncodeFailure_ClassifiesMapperFailureCatchAll(t *testing.T
 	entry := findWarnEntry(t, buf)
 	if got := entry["reason"]; got != "mapper_failure" {
 		t.Fatalf("reason = %v, want mapper_failure", got)
+	}
+}
+
+func TestRecordCanonicalFailure_ClassifiesInvalidUTF8(t *testing.T) {
+	s, m, buf := newDropTestStore(t)
+
+	ev := types.Event{
+		Timestamp: time.Unix(1700000000, 0),
+		Chain:     &types.ChainState{Sequence: 4, Generation: 2},
+	}
+	wrapped := fmt.Errorf("chain.EncodeCanonical: %w", chain.ErrInvalidUTF8)
+	s.recordCanonicalFailure(wrapped, ev)
+
+	if got := m.DroppedInvalidUTF8(); got != 1 {
+		t.Fatalf("DroppedInvalidUTF8() = %d, want 1", got)
+	}
+
+	entry := findWarnEntry(t, buf)
+	if got := entry["reason"]; got != "invalid_utf8" {
+		t.Fatalf("reason = %v, want invalid_utf8", got)
+	}
+	if got := entry["event_seq"]; got != float64(4) {
+		t.Fatalf("event_seq = %v, want 4", got)
+	}
+	if got := entry["event_gen"]; got != float64(2) {
+		t.Fatalf("event_gen = %v, want 2", got)
+	}
+	if got := entry["session_id"]; got != "s-test" {
+		t.Fatalf("session_id = %v, want s-test", got)
+	}
+	if got := entry["agent_id"]; got != "a-test" {
+		t.Fatalf("agent_id = %v, want a-test", got)
+	}
+	if got := entry["err"]; got == nil {
+		t.Fatalf("err attr missing, want non-empty string")
 	}
 }
 

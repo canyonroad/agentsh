@@ -282,3 +282,29 @@ func (s *Store) recordCompactEncodeFailure(err error, ev types.Event) {
 		slog.String("session_id", s.opts.SessionID),
 		slog.String("agent_id", s.opts.AgentID))
 }
+
+// recordCanonicalFailure increments wtp_dropped_invalid_utf8_total
+// and emits a structured WARN. Called from AppendEvent's
+// chain.EncodeCanonical error branch BEFORE the existing error
+// return.
+//
+// chain.EncodeCanonical's only error sentinel today is
+// chain.ErrInvalidUTF8 — the function returns that or nil. This
+// helper unconditionally classifies as invalid_utf8 rather than
+// errors.Is-checking, so a future expansion of EncodeCanonical's
+// error surface will fall through here and surface as invalid_utf8
+// until the helper is updated. That posture is deliberate: it keeps
+// the call site one line and matches the today-only contract; if a
+// new sentinel is added, the helper grows a switch like
+// recordCompactEncodeFailure.
+func (s *Store) recordCanonicalFailure(err error, ev types.Event) {
+	s.metrics.IncDroppedInvalidUTF8(1)
+	s.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+		"wtp: dropping event before WAL append",
+		slog.String("reason", "invalid_utf8"),
+		slog.String("err", err.Error()),
+		slog.Uint64("event_seq", ev.Chain.Sequence),
+		slog.Uint64("event_gen", uint64(ev.Chain.Generation)),
+		slog.String("session_id", s.opts.SessionID),
+		slog.String("agent_id", s.opts.AgentID))
+}
