@@ -63,7 +63,14 @@ func TestStore_AppendEvent_DeliversRealEventBatch(t *testing.T) {
 		}
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	// Deadline is generous so Windows GitHub-runner scheduling jitter
+	// (which has flaked the 3s deadline this test originally shipped
+	// with — see post-merge CI on commits c03cc2df and 905db273)
+	// cannot trip the assertion when the underlying transport is
+	// healthy. The test polls every 20ms and breaks on first success,
+	// so a healthy run still completes in tens of milliseconds; the
+	// deadline only fires when the transport is genuinely wedged.
+	deadline := time.Now().Add(15 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		if err := srv.AssertSequenceRange(1, 4); err == nil {
@@ -75,7 +82,7 @@ func TestStore_AppendEvent_DeliversRealEventBatch(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if lastErr != nil {
-		t.Fatalf("did not observe seq=[1..4] within 3s: %v", lastErr)
+		t.Fatalf("did not observe seq=[1..4] within 15s: %v", lastErr)
 	}
 
 	// Drill into the recorded batches: at least one must carry a real
