@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"strings"
@@ -184,6 +185,72 @@ func TestAppendEvent_DropsOnMapperFailure(t *testing.T) {
 	}
 	if got := entry["err"]; got == nil || !strings.Contains(got.(string), "synthetic mapper failure") {
 		t.Fatalf("err attr = %v, want non-empty containing %q", got, "synthetic mapper failure")
+	}
+}
+
+// TestAppendEvent_MapperReturningWrappedSentinelStaysMapperFailure pins
+// the end-to-end roborev #6177/#6180 contract: a Mapper whose Map
+// method returns a wrapped variant of compact.ErrInvalidMapper or
+// compact.ErrInvalidTimestamp MUST be classified as `mapper_failure`,
+// not as the validation-gate counter the inner sentinel would
+// otherwise match. The internal helper test pins this for the
+// classifier in isolation; this test exercises the same invariant
+// through real AppendEvent → compact.Encode → recordCompactEncodeFailure.
+func TestAppendEvent_MapperReturningWrappedSentinelStaysMapperFailure(t *testing.T) {
+	cases := []struct {
+		name  string
+		inner error
+	}{
+		{"inner=ErrInvalidMapper", compact.ErrInvalidMapper},
+		{"inner=ErrInvalidTimestamp", compact.ErrInvalidTimestamp},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Mapper returns a wrapped sentinel — exactly the case where
+			// the classifier could leak into the wrong counter without
+			// the ErrMapperFailure priority guard.
+			mapperErr := fmt.Errorf("mapper logic returned: %w", tc.inner)
+			f := newDropFixture(t, func(opts *watchtower.Options) {
+				// failingMapper is not a StubMapper, so AllowStubMapper does not need to flip.
+				opts.Mapper = failingMapper{err: mapperErr}
+			})
+
+			ev := types.Event{
+				Type:      "exec",
+				SessionID: "s-test",
+				Timestamp: time.Now(),
+				Chain:     &types.ChainState{Sequence: 1, Generation: 1},
+			}
+			err := f.store.AppendEvent(context.Background(), ev)
+			if err == nil {
+				t.Fatal("AppendEvent: expected error, got nil")
+			}
+			// The inner sentinel is reachable via errors.Is (chain
+			// preservation), AND so is the mapper-failure outer
+			// sentinel — both contracts hold simultaneously.
+			if !errors.Is(err, tc.inner) {
+				t.Fatalf("error = %v, want errors.Is(_, %v)", err, tc.inner)
+			}
+			if !errors.Is(err, compact.ErrMapperFailure) {
+				t.Fatalf("error = %v, want errors.Is(_, ErrMapperFailure)", err)
+			}
+
+			wtp := f.collector.WTP()
+			if got := wtp.DroppedMapperFailure(); got != 1 {
+				t.Fatalf("DroppedMapperFailure() = %d, want 1", got)
+			}
+			if got := wtp.DroppedInvalidMapper(); got != 0 {
+				t.Fatalf("DroppedInvalidMapper() = %d, want 0 (inner sentinel must NOT leak past classifier)", got)
+			}
+			if got := wtp.DroppedInvalidTimestamp(); got != 0 {
+				t.Fatalf("DroppedInvalidTimestamp() = %d, want 0 (inner sentinel must NOT leak past classifier)", got)
+			}
+
+			entry := f.findDropWarn(t)
+			if got := entry["reason"]; got != "mapper_failure" {
+				t.Fatalf("reason = %v, want mapper_failure", got)
+			}
+		})
 	}
 }
 

@@ -2,7 +2,6 @@ package compact
 
 import (
 	"errors"
-	"fmt"
 	"reflect"
 
 	"github.com/agentsh/agentsh/pkg/types"
@@ -37,6 +36,35 @@ var ErrInvalidTimestamp = errors.New("compact.Encode: ev.Timestamp must be non-z
 // originated sentinel does not leak into the validation-gate
 // counters; see watchtower.recordCompactEncodeFailure.
 var ErrMapperFailure = errors.New("compact mapper")
+
+// mapperFailureErr is the wrapper Encode returns when m.Map errors.
+// It implements:
+//
+//   - Error() — same wire string as the previous fmt.Errorf form
+//     (`"compact mapper: <inner>"`) so log/diagnostic output is
+//     unchanged.
+//   - Unwrap() error — preserves the LINEAR unwrap contract: callers
+//     using `errors.Unwrap(encodeErr)` get the original mapper error
+//     directly, matching the behavior the encoder shipped before
+//     ErrMapperFailure was introduced (roborev #6180 Low).
+//   - Is(target error) — matches ErrMapperFailure so
+//     errors.Is(err, ErrMapperFailure) returns true. The inner sentinel
+//     (if any) is reachable via Unwrap chain, so errors.Is against
+//     ErrInvalidMapper / ErrInvalidTimestamp also still works.
+//
+// The previous `fmt.Errorf("%w: %w", ErrMapperFailure, err)` form
+// produced an Unwrap() []error multi-wrap whose linear errors.Unwrap
+// returned nil — a silent contract change for any caller that used
+// linear unwrapping. This explicit type pins the contract.
+type mapperFailureErr struct{ inner error }
+
+func (e *mapperFailureErr) Error() string {
+	return ErrMapperFailure.Error() + ": " + e.inner.Error()
+}
+
+func (e *mapperFailureErr) Unwrap() error { return e.inner }
+
+func (e *mapperFailureErr) Is(target error) bool { return target == ErrMapperFailure }
 
 // Encode projects an agentsh event into a wtpv1.CompactEvent, populating
 // everything EXCEPT the IntegrityRecord. The IntegrityRecord is filled in by
@@ -81,7 +109,7 @@ func Encode(m Mapper, ev types.Event) (*wtpv1.CompactEvent, error) {
 	}
 	mapped, err := m.Map(ev)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrMapperFailure, err)
+		return nil, &mapperFailureErr{inner: err}
 	}
 	return &wtpv1.CompactEvent{
 		Sequence:           ev.Chain.Sequence,
