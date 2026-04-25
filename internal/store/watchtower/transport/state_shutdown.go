@@ -75,13 +75,23 @@ func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Rea
 		}
 	}
 	if final := b.Drain(); final != nil {
-		msg, err := encodeBatchMessageFn(final.Records)
-		if err != nil {
-			if errors.Is(err, ErrRecordLossEncountered) && lossErr == nil {
-				lossErr = err
+		// Once ErrRecordLossEncountered has been observed, every record
+		// still buffered in the Batcher sits PAST a WAL gap. Sending
+		// them now (post-sentinel) would let the server commit data
+		// that crosses an integrity boundary the session is supposed
+		// to fail closed at — exactly the leak roborev #6143 (High)
+		// flagged. Skip the encode/Send path; the records remain in
+		// the WAL and a fresh session post-restart will re-replay
+		// them under the Task 13 carrier when it lands.
+		if lossErr == nil {
+			msg, err := encodeBatchMessageFn(final.Records)
+			if err != nil {
+				if errors.Is(err, ErrRecordLossEncountered) {
+					lossErr = err
+				}
+			} else {
+				_ = t.conn.Send(msg)
 			}
-		} else {
-			_ = t.conn.Send(msg)
 		}
 	}
 	_ = t.conn.CloseSend()

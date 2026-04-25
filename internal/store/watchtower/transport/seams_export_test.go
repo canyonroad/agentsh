@@ -259,6 +259,21 @@ func StartRecvForTest(t *Transport, parent context.Context) *RecvSessionHandle {
 // out the field) without touching unexported state.
 func TeardownRecvForTest(t *Transport) { t.teardownRecv() }
 
+// RunShutdownForTest invokes the unexported runShutdown helper directly
+// so external tests can exercise the drain path without driving the
+// full Run loop. Used by the roborev #6143 regression test that
+// verifies post-sentinel buffered records are NOT flushed during
+// shutdown — wiring the leak path through the Run loop would require
+// engineering a precise stopCh / Notify race that drainLoop has to
+// resolve in our favour, so the seam lets the test target runShutdown
+// directly.
+//
+// Caller MUST attach a Conn via SetConnForTest first; runShutdown
+// dereferences t.conn for Send/CloseSend.
+func RunShutdownForTest(t *Transport, b *Batcher, rdr *wal.Reader, drainDeadline time.Duration) error {
+	return t.runShutdown(context.Background(), b, rdr, drainDeadline)
+}
+
 // EnqueueStopAndWaitForTest is the timing-anchored test seam for
 // Task 19's Stop-between-replay-batches test. It calls the same
 // stopWithHooks helper that the public Transport.Stop uses, so the

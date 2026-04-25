@@ -13,6 +13,122 @@ import (
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
+// TestShutdown_NoLeakAfterDrainSentinel pins the roborev #6143 (High)
+// fix: once ErrRecordLossEncountered surfaces inside runShutdown's
+// drainLoop, every record still buffered in the Batcher sits PAST a
+// WAL gap and MUST NOT be sent. The leak path reviewer flagged was:
+//
+//   1. drainLoop's TryNext returns rec1 (data, seq=1) → b.Add returns nil
+//   2. drainLoop's TryNext returns rec2 (loss, seq=0) → b.Add gap-flushes
+//      [rec1] (encode succeeds, send) → pending=[loss]
+//   3. drainLoop's TryNext returns rec3 (data, seq=2) → b.Add gap-flushes
+//      [loss] (encode trips sentinel) → pending=[rec3] → break drainLoop
+//   4. b.Drain() returns [rec3] — without the fix this would encode +
+//      Send rec3 even though the session is supposed to fail closed at
+//      the loss boundary.
+//
+// We construct the WAL with [data1, loss, data2] and call runShutdown
+// directly via the test seam so the test does not depend on the Run-loop
+// stopCh/Notify race resolving in our favour. The fakeConn lets us
+// count Sends; the post-sentinel guarantee is "at most one Send" (the
+// pre-loss [data1] flush), never two.
+func TestShutdown_NoLeakAfterDrainSentinel(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(wal.Options{Dir: dir, SegmentSize: 64 * 1024})
+	if err != nil {
+		t.Fatalf("wal.Open: %v", err)
+	}
+	defer w.Close()
+
+	if _, err := w.Append(1, 1, []byte("data1")); err != nil {
+		t.Fatalf("Append data1: %v", err)
+	}
+	if err := w.AppendLoss(wal.LossRecord{
+		FromSequence: 2,
+		ToSequence:   2,
+		Generation:   1,
+		Reason:       "overflow",
+	}); err != nil {
+		t.Fatalf("AppendLoss: %v", err)
+	}
+	if _, err := w.Append(3, 1, []byte("data2")); err != nil {
+		t.Fatalf("Append data2: %v", err)
+	}
+
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 1})
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer rdr.Close()
+
+	// Stub encoder mirrors production behavior on the loss-marker
+	// contract (RecordLoss → ErrRecordLossEncountered) without
+	// requiring valid CompactEvent payloads on the test's data
+	// records, which let proto.Unmarshal fail before the loss path
+	// fires. RecordLoss alone trips the sentinel; mixed slices the
+	// production encoder rejects too, but the test only constructs
+	// pure data slices and pure loss slices via the gap-flush, so
+	// the simple per-record loop is enough.
+	defer transport.SetEncodeBatchMessageFnForTest(func(records []wal.Record) (*wtpv1.ClientMessage, error) {
+		for _, r := range records {
+			if r.Kind == wal.RecordLoss {
+				return nil, transport.ErrRecordLossEncountered
+			}
+		}
+		return &wtpv1.ClientMessage{}, nil
+	})()
+
+	b := transport.NewBatcher(transport.BatcherOptions{
+		MaxRecords: 100,
+		MaxBytes:   1 << 16,
+		MaxAge:     10 * time.Second,
+	})
+
+	conn := newFakeConn()
+	tr, err := transport.New(transport.Options{
+		Dialer: transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+			return conn, nil
+		}),
+		AgentID:   "a",
+		SessionID: "s",
+		WAL:       w,
+	})
+	if err != nil {
+		t.Fatalf("transport.New: %v", err)
+	}
+	transport.SetConnForTest(tr, conn)
+
+	got := transport.RunShutdownForTest(tr, b, rdr, 500*time.Millisecond)
+	if !errors.Is(got, transport.ErrRecordLossEncountered) {
+		t.Fatalf("runShutdown returned %v; want ErrRecordLossEncountered", got)
+	}
+
+	// Count post-shutdown sends. With the fix, runShutdown emits at most
+	// one EventBatch (the pre-loss [data1] flush). Two or more sends
+	// would mean post-sentinel data leaked through the b.Drain path.
+	sendCount := 0
+drainSends:
+	for {
+		select {
+		case <-conn.sendCh:
+			sendCount++
+		default:
+			break drainSends
+		}
+	}
+	if sendCount > 1 {
+		t.Fatalf("got %d post-shutdown sends; want at most 1 (the pre-loss [data1] flush) — post-sentinel data leaked", sendCount)
+	}
+
+	// CloseSend must still happen — the fail-closed posture cleans up
+	// the conn even when we surface a fatal error.
+	select {
+	case <-conn.closeSendCalled:
+	case <-time.After(time.Second):
+		t.Fatal("CloseSend not called within 1s of runShutdown returning")
+	}
+}
+
 // TestShutdown_RecordLossDuringDrainPropagates pins the roborev #6131
 // Medium contract: when runShutdown's drain encounters a record that
 // trips ErrRecordLossEncountered, the sentinel must propagate out of
