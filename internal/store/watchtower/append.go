@@ -66,14 +66,12 @@ var deterministicMarshal = proto.MarshalOptions{Deterministic: true}
 //   - On terminal Commit failure (stale result, cross-chain,
 //     backwards-generation, latched fatal), the store latches fatal.
 //
-// SCOPE NOTE: this is Task 23's core transactional path. The full
-// spec additionally routes compact.ErrInvalidMapper /
-// ErrInvalidTimestamp / mapper-wrapped / sequence-overflow /
-// chain.ErrInvalidUTF8 through per-class drop counters
-// (wtp_dropped_invalid_*_total) with structured WARN logs. That
-// counter-wiring layer is follow-up work alongside the Task 22a
-// sink-failure counter surface; today those errors propagate to the
-// caller as wrapped errors.
+// Per-class drop counters: every reject path (sequence overflow,
+// compact.Encode classification, chain.EncodeCanonical) increments
+// the matching wtp_dropped_invalid_*_total counter and emits a
+// structured WARN with reason/event_seq/event_gen/session_id/agent_id
+// before the wrapped error is returned. See recordSequenceOverflow,
+// recordCompactEncodeFailure, recordCanonicalFailure below.
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	// Serialise the full Compute → Append → Commit transaction. The
 	// composite store fans events out to sinks under RLock, so two
@@ -102,11 +100,13 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 		return fmt.Errorf("watchtower: ev.Chain is required")
 	}
 	if ev.Chain.Sequence > math.MaxInt64 {
+		s.recordSequenceOverflow(ev)
 		return fmt.Errorf("watchtower: ev.Chain.Sequence %d overflows int64", ev.Chain.Sequence)
 	}
 
 	ce, err := compact.Encode(s.opts.Mapper, ev)
 	if err != nil {
+		s.recordCompactEncodeFailure(err, ev)
 		return fmt.Errorf("compact.Encode: %w", err)
 	}
 
@@ -150,10 +150,7 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	}
 	canonicalIntegrity, err := chain.EncodeCanonical(integrityRec)
 	if err != nil {
-		// chain.ErrInvalidUTF8 propagates here for any peer-derived
-		// field that slipped through upstream validation. Task 23
-		// follow-up wires this into wtp_dropped_invalid_utf8_total;
-		// today it surfaces to the caller.
+		s.recordCanonicalFailure(err, ev)
 		return fmt.Errorf("chain.EncodeCanonical: %w", err)
 	}
 
