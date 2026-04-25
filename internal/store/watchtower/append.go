@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 
 	"github.com/agentsh/agentsh/internal/audit"
@@ -65,14 +66,12 @@ var deterministicMarshal = proto.MarshalOptions{Deterministic: true}
 //   - On terminal Commit failure (stale result, cross-chain,
 //     backwards-generation, latched fatal), the store latches fatal.
 //
-// SCOPE NOTE: this is Task 23's core transactional path. The full
-// spec additionally routes compact.ErrInvalidMapper /
-// ErrInvalidTimestamp / mapper-wrapped / sequence-overflow /
-// chain.ErrInvalidUTF8 through per-class drop counters
-// (wtp_dropped_invalid_*_total) with structured WARN logs. That
-// counter-wiring layer is follow-up work alongside the Task 22a
-// sink-failure counter surface; today those errors propagate to the
-// caller as wrapped errors.
+// Per-class drop counters: every reject path (sequence overflow,
+// compact.Encode classification, chain.EncodeCanonical) increments
+// the matching wtp_dropped_invalid_*_total counter and emits a
+// structured WARN with reason/event_seq/event_gen/session_id/agent_id
+// before the wrapped error is returned. See recordSequenceOverflow,
+// recordCompactEncodeFailure, recordCanonicalFailure below.
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	// Serialise the full Compute → Append → Commit transaction. The
 	// composite store fans events out to sinks under RLock, so two
@@ -101,11 +100,13 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 		return fmt.Errorf("watchtower: ev.Chain is required")
 	}
 	if ev.Chain.Sequence > math.MaxInt64 {
+		s.recordSequenceOverflow(ev)
 		return fmt.Errorf("watchtower: ev.Chain.Sequence %d overflows int64", ev.Chain.Sequence)
 	}
 
 	ce, err := compact.Encode(s.opts.Mapper, ev)
 	if err != nil {
+		s.recordCompactEncodeFailure(err, ev)
 		return fmt.Errorf("compact.Encode: %w", err)
 	}
 
@@ -149,10 +150,7 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	}
 	canonicalIntegrity, err := chain.EncodeCanonical(integrityRec)
 	if err != nil {
-		// chain.ErrInvalidUTF8 propagates here for any peer-derived
-		// field that slipped through upstream validation. Task 23
-		// follow-up wires this into wtp_dropped_invalid_utf8_total;
-		// today it surfaces to the caller.
+		s.recordCanonicalFailure(err, ev)
 		return fmt.Errorf("chain.EncodeCanonical: %w", err)
 	}
 
@@ -221,4 +219,98 @@ func (s *Store) latchFatal(err error) {
 			s.fatalErr.Store(err)
 		}
 	}
+}
+
+// recordSequenceOverflow increments wtp_dropped_sequence_overflow_total
+// and emits a structured WARN. Called from AppendEvent's
+// ev.Chain.Sequence > math.MaxInt64 branch BEFORE the existing error
+// return so the counter increments exactly once per drop and the WARN
+// gives operators triage context (which (gen, seq) was rejected).
+//
+// No underlying err is logged because this is our own range check, not
+// a wrapped sentinel — the message is deterministic from event_seq.
+func (s *Store) recordSequenceOverflow(ev types.Event) {
+	s.metrics.IncDroppedSequenceOverflow(1)
+	s.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+		"wtp: dropping event before WAL append",
+		slog.String("reason", "sequence_overflow"),
+		slog.Uint64("event_seq", ev.Chain.Sequence),
+		slog.Uint64("event_gen", uint64(ev.Chain.Generation)),
+		slog.String("session_id", s.opts.SessionID),
+		slog.String("agent_id", s.opts.AgentID))
+}
+
+// recordCompactEncodeFailure inspects err for the compact.Encode
+// sentinels and routes the drop to the matching counter + WARN.
+// Called from AppendEvent's compact.Encode error branch BEFORE the
+// existing error return.
+//
+// Classification priority (errors.Is order — MUST stay in this order):
+//   - compact.ErrMapperFailure    → IncDroppedMapperFailure / "mapper_failure"
+//   - compact.ErrInvalidMapper    → IncDroppedInvalidMapper / "invalid_mapper"
+//   - compact.ErrInvalidTimestamp → IncDroppedInvalidTimestamp / "invalid_timestamp"
+//   - (fallthrough)               → IncDroppedMapperFailure / "mapper_failure"
+//
+// ErrMapperFailure is checked FIRST because compact.Encode wraps every
+// mapper-side error with it via `fmt.Errorf("%w: %w", ErrMapperFailure,
+// err)`; without that priority, a Mapper that happened to return
+// ErrInvalidMapper or ErrInvalidTimestamp from inside Map would have
+// its drop misclassified as a validation-gate hit (roborev #6177
+// Medium). The fallthrough remains for any future encoder error path
+// that does not wrap with ErrMapperFailure or one of the other
+// sentinels. The compact.ErrMissingChain sentinel is unreachable from
+// AppendEvent because the ev.Chain == nil check earlier in the
+// function bails before compact.Encode runs; if a future change makes
+// it reachable, it falls into the mapper_failure catch-all and
+// surfaces in logs.
+func (s *Store) recordCompactEncodeFailure(err error, ev types.Event) {
+	var reason string
+	switch {
+	case errors.Is(err, compact.ErrMapperFailure):
+		s.metrics.IncDroppedMapperFailure(1)
+		reason = "mapper_failure"
+	case errors.Is(err, compact.ErrInvalidMapper):
+		s.metrics.IncDroppedInvalidMapper(1)
+		reason = "invalid_mapper"
+	case errors.Is(err, compact.ErrInvalidTimestamp):
+		s.metrics.IncDroppedInvalidTimestamp(1)
+		reason = "invalid_timestamp"
+	default:
+		s.metrics.IncDroppedMapperFailure(1)
+		reason = "mapper_failure"
+	}
+	s.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+		"wtp: dropping event before WAL append",
+		slog.String("reason", reason),
+		slog.String("err", err.Error()),
+		slog.Uint64("event_seq", ev.Chain.Sequence),
+		slog.Uint64("event_gen", uint64(ev.Chain.Generation)),
+		slog.String("session_id", s.opts.SessionID),
+		slog.String("agent_id", s.opts.AgentID))
+}
+
+// recordCanonicalFailure increments wtp_dropped_invalid_utf8_total
+// and emits a structured WARN. Called from AppendEvent's
+// chain.EncodeCanonical error branch BEFORE the existing error
+// return.
+//
+// chain.EncodeCanonical's only error sentinel today is
+// chain.ErrInvalidUTF8 — the function returns that or nil. This
+// helper unconditionally classifies as invalid_utf8 rather than
+// errors.Is-checking, so a future expansion of EncodeCanonical's
+// error surface will fall through here and surface as invalid_utf8
+// until the helper is updated. That posture is deliberate: it keeps
+// the call site one line and matches the today-only contract; if a
+// new sentinel is added, the helper grows a switch like
+// recordCompactEncodeFailure.
+func (s *Store) recordCanonicalFailure(err error, ev types.Event) {
+	s.metrics.IncDroppedInvalidUTF8(1)
+	s.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+		"wtp: dropping event before WAL append",
+		slog.String("reason", "invalid_utf8"),
+		slog.String("err", err.Error()),
+		slog.Uint64("event_seq", ev.Chain.Sequence),
+		slog.Uint64("event_gen", uint64(ev.Chain.Generation)),
+		slog.String("session_id", s.opts.SessionID),
+		slog.String("agent_id", s.opts.AgentID))
 }

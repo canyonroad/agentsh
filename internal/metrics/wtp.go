@@ -460,11 +460,11 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 // Wiring status SPLITS into two groups per the table below:
 //
 //	Counter family                              Wired by                                 Status (as of Task 22a R2)
-//	wtp_dropped_invalid_utf8_total              AppendEvent (Task 23)                    NOT YET WIRED — emits zero
-//	wtp_dropped_sequence_overflow_total         AppendEvent (Task 23)                    NOT YET WIRED — emits zero
-//	wtp_dropped_invalid_mapper_total            AppendEvent (Task 23)                    NOT YET WIRED — emits zero
-//	wtp_dropped_invalid_timestamp_total         AppendEvent (Task 23)                    NOT YET WIRED — emits zero
-//	wtp_dropped_mapper_failure_total            AppendEvent (Task 23)                    NOT YET WIRED — emits zero
+//	wtp_dropped_invalid_utf8_total              AppendEvent (Task 23 follow-up)          WIRED — recordCanonicalFailure
+//	wtp_dropped_sequence_overflow_total         AppendEvent (Task 23 follow-up)          WIRED — recordSequenceOverflow
+//	wtp_dropped_invalid_mapper_total            AppendEvent (Task 23 follow-up)          WIRED — recordCompactEncodeFailure (defense-in-depth)
+//	wtp_dropped_invalid_timestamp_total         AppendEvent (Task 23 follow-up)          WIRED — recordCompactEncodeFailure
+//	wtp_dropped_mapper_failure_total            AppendEvent (Task 23 follow-up)          WIRED — recordCompactEncodeFailure (catch-all)
 //	wtp_dropped_invalid_frame_total{reason}     transport receivers (Task 17 Step 4a)    NOT YET WIRED — emits zero
 //	wtp_session_init_failures_total{reason}     transport (Phase 8)                      NOT YET WIRED — emits zero
 //	wtp_session_rotation_failures_total{reason} transport (Phase 8)                      NOT YET WIRED — emits zero

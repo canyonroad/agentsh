@@ -2,7 +2,6 @@ package compact
 
 import (
 	"errors"
-	"fmt"
 	"reflect"
 
 	"github.com/agentsh/agentsh/pkg/types"
@@ -24,6 +23,48 @@ var ErrMissingChain = errors.New("compact.Encode: ev.Chain is nil; composite did
 // represents an instant before the Unix epoch. Both cases would silently wrap
 // when cast to uint64 nanoseconds, masking caller bugs in the hot path.
 var ErrInvalidTimestamp = errors.New("compact.Encode: ev.Timestamp must be non-zero and ≥ Unix epoch")
+
+// ErrMapperFailure is the OUTER sentinel that wraps every error
+// returned from a Mapper's Map method. It distinguishes "Encode's own
+// validation gates fired" (bare ErrInvalidMapper / ErrInvalidTimestamp
+// returned from Encode's pre-call checks) from "the Mapper rejected
+// the event" (the call into m.Map returned an error). Without this
+// outer sentinel, a Mapper that happens to return ErrInvalidMapper or
+// ErrInvalidTimestamp would be misclassified by downstream consumers
+// using errors.Is to route drop-class metrics. Callers that classify
+// the encoder's error MUST check ErrMapperFailure FIRST so a mapper-
+// originated sentinel does not leak into the validation-gate
+// counters; see watchtower.recordCompactEncodeFailure.
+var ErrMapperFailure = errors.New("compact mapper")
+
+// mapperFailureErr is the wrapper Encode returns when m.Map errors.
+// It implements:
+//
+//   - Error() — same wire string as the previous fmt.Errorf form
+//     (`"compact mapper: <inner>"`) so log/diagnostic output is
+//     unchanged.
+//   - Unwrap() error — preserves the LINEAR unwrap contract: callers
+//     using `errors.Unwrap(encodeErr)` get the original mapper error
+//     directly, matching the behavior the encoder shipped before
+//     ErrMapperFailure was introduced (roborev #6180 Low).
+//   - Is(target error) — matches ErrMapperFailure so
+//     errors.Is(err, ErrMapperFailure) returns true. The inner sentinel
+//     (if any) is reachable via Unwrap chain, so errors.Is against
+//     ErrInvalidMapper / ErrInvalidTimestamp also still works.
+//
+// The previous `fmt.Errorf("%w: %w", ErrMapperFailure, err)` form
+// produced an Unwrap() []error multi-wrap whose linear errors.Unwrap
+// returned nil — a silent contract change for any caller that used
+// linear unwrapping. This explicit type pins the contract.
+type mapperFailureErr struct{ inner error }
+
+func (e *mapperFailureErr) Error() string {
+	return ErrMapperFailure.Error() + ": " + e.inner.Error()
+}
+
+func (e *mapperFailureErr) Unwrap() error { return e.inner }
+
+func (e *mapperFailureErr) Is(target error) bool { return target == ErrMapperFailure }
 
 // Encode projects an agentsh event into a wtpv1.CompactEvent, populating
 // everything EXCEPT the IntegrityRecord. The IntegrityRecord is filled in by
@@ -68,7 +109,7 @@ func Encode(m Mapper, ev types.Event) (*wtpv1.CompactEvent, error) {
 	}
 	mapped, err := m.Map(ev)
 	if err != nil {
-		return nil, fmt.Errorf("compact mapper: %w", err)
+		return nil, &mapperFailureErr{inner: err}
 	}
 	return &wtpv1.CompactEvent{
 		Sequence:           ev.Chain.Sequence,
