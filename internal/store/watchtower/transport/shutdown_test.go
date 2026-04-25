@@ -69,7 +69,18 @@ func TestShutdown_NoLeakAfterDrainSentinel(t *testing.T) {
 	// production encoder rejects too, but the test only constructs
 	// pure data slices and pure loss slices via the gap-flush, so
 	// the simple per-record loop is enough.
+	//
+	// encoded captures every batch the encoder was asked to encode so
+	// the test can assert EXACTLY which records were sent — the
+	// "exactly one Send" check below is too weak on its own (a
+	// regression that drops the pre-loss [data1] flush would also
+	// pass with sendCount==0).
+	var encoded [][]wal.Record
 	defer transport.SetEncodeBatchMessageFnForTest(func(records []wal.Record) (*wtpv1.ClientMessage, error) {
+		// Copy the slice so subsequent Batcher reuse cannot mutate
+		// what we recorded.
+		snapshot := append([]wal.Record(nil), records...)
+		encoded = append(encoded, snapshot)
 		for _, r := range records {
 			if r.Kind == wal.RecordLoss {
 				return nil, transport.ErrRecordLossEncountered
@@ -106,6 +117,11 @@ func TestShutdown_NoLeakAfterDrainSentinel(t *testing.T) {
 	// Count post-shutdown sends. With the fix, runShutdown emits at most
 	// one EventBatch (the pre-loss [data1] flush). Two or more sends
 	// would mean post-sentinel data leaked through the b.Drain path.
+	// Count post-shutdown sends. With the fix, runShutdown emits exactly
+	// one EventBatch (the pre-loss [data1] flush). Zero would mean the
+	// fix regressed and the gap-flush legitimately needed pre-loss data
+	// is being dropped too; two or more would mean post-sentinel data
+	// leaked through the b.Drain path.
 	sendCount := 0
 drainSends:
 	for {
@@ -116,8 +132,24 @@ drainSends:
 			break drainSends
 		}
 	}
-	if sendCount > 1 {
-		t.Fatalf("got %d post-shutdown sends; want at most 1 (the pre-loss [data1] flush) — post-sentinel data leaked", sendCount)
+	if sendCount != 1 {
+		t.Fatalf("got %d post-shutdown sends; want exactly 1 (the pre-loss [data1] flush)", sendCount)
+	}
+
+	// Verify the encoder saw the pre-loss [data1] batch AND a [loss]
+	// batch (which trips the sentinel) — and crucially NOT a third
+	// post-sentinel encode call. Without the fix, encoded would have
+	// 3 entries (data1, loss, data2) and the third would have crossed
+	// the wire; with the fix it has exactly 2 (data1, loss) and only
+	// the first reaches Send.
+	if len(encoded) != 2 {
+		t.Fatalf("encoder saw %d batches; want exactly 2 (pre-loss [data1] flush + [loss] sentinel)", len(encoded))
+	}
+	if got := encoded[0]; len(got) != 1 || got[0].Kind != wal.RecordData || got[0].Sequence != 1 {
+		t.Fatalf("encoded[0] = %+v; want one RecordData seq=1", got)
+	}
+	if got := encoded[1]; len(got) != 1 || got[1-1].Kind != wal.RecordLoss {
+		t.Fatalf("encoded[1] = %+v; want one RecordLoss", got)
 	}
 
 	// CloseSend must still happen — the fail-closed posture cleans up
