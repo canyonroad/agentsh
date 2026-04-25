@@ -3,12 +3,10 @@ package transport
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
-	"google.golang.org/protobuf/proto"
 )
 
 // LiveOptions configures the Live state's batcher and inflight window.
@@ -145,21 +143,6 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 				if !ok {
 					break
 				}
-				if rec.Kind == wal.RecordLoss {
-					// Pre-Task-13 temporary path: log + drop. See
-					// filterDataRecords (state_replaying.go) for the full
-					// rationale; the encoder fail-loud contract requires
-					// callers to keep loss markers out of EventBatch.
-					t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
-						"wtp: dropping wal.RecordLoss marker pending TransportLoss (Task 13) carrier",
-						slog.String("caller_state", "live"),
-						slog.Uint64("loss_generation", uint64(rec.Generation)),
-						slog.Uint64("loss_from_seq", rec.Loss.FromSequence),
-						slog.Uint64("loss_to_seq", rec.Loss.ToSequence),
-						slog.String("loss_reason", rec.Loss.Reason),
-						slog.String("session_id", t.opts.SessionID))
-					continue
-				}
 				if outBatch := b.Add(rec); outBatch != nil {
 					msg, err := encodeBatchMessageFn(outBatch.Records)
 					if err != nil {
@@ -206,63 +189,24 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 // produce real marshaled CompactEvent bytes.
 var encodeBatchMessageFn = encodeBatchMessage
 
-// encodeBatchMessage is the production EventBatch encoder. It unmarshals
-// each data record's wal.Record.Payload (already the marshaled
-// CompactEvent bytes the Store produced) into a *wtpv1.CompactEvent and
-// wraps the slice in an UncompressedEvents body.
+// encodeBatchMessage is a STUB. The production EventBatch encoder is
+// deferred to a follow-up that lands together with:
 //
-// Loss markers (wal.RecordLoss) MUST NOT be smuggled inside an
-// UncompressedEvents batch — the dedicated TransportLoss message flow
-// (Task 13) is the only safe carrier. Until that path lands, this
-// encoder fails LOUD on RecordLoss rather than silently stripping the
-// marker and emitting a partial batch: a silent strip is an integrity
-// gap (Replayer.NextBatch is documented to surface every loss marker
-// verbatim — see replayer.go), so dropping one would mask WAL overflow
-// / CRC-corruption notices the server relies on. Callers in Live,
-// Replaying, and Shutdown already treat an encoder error as a fatal-
-// for-this-stream condition and regress to Connecting; that loud
-// failure is the right posture until Task 13 wires TransportLoss.
+//   - Task 13 — TransportLoss carrier (so wal.RecordLoss markers can
+//     reach the server instead of being smuggled into UncompressedEvents
+//     or silently dropped)
+//   - Task 17/18 — recv multiplexer wiring (so BatchAck / heartbeat
+//     drive cursor advance and reconnect actually happens on a stream
+//     drop; see the SCAFFOLDING ONLY header on Transport.Run)
 //
-// from_sequence / to_sequence / generation reflect the first and last
-// data record. Compression is COMPRESSION_NONE because we send raw
-// CompactEvents; zstd/gzip is a post-MVP enhancement.
-func encodeBatchMessage(records []wal.Record) (*wtpv1.ClientMessage, error) {
-	events := make([]*wtpv1.CompactEvent, 0, len(records))
-	var (
-		fromSeq uint64
-		toSeq   uint64
-		gen     uint32
-		seenOne bool
-	)
-	for _, rec := range records {
-		if rec.Kind == wal.RecordLoss {
-			return nil, fmt.Errorf("encodeBatchMessage: RecordLoss marker (gen=%d) cannot be encoded into an UncompressedEvents batch; TransportLoss carrier (Task 13) is required", rec.Generation)
-		}
-		if rec.Kind != wal.RecordData {
-			continue
-		}
-		ce := &wtpv1.CompactEvent{}
-		if err := proto.Unmarshal(rec.Payload, ce); err != nil {
-			return nil, fmt.Errorf("encodeBatchMessage: unmarshal record seq=%d: %w", rec.Sequence, err)
-		}
-		events = append(events, ce)
-		if !seenOne {
-			fromSeq = rec.Sequence
-			gen = rec.Generation
-			seenOne = true
-		}
-		toSeq = rec.Sequence
-	}
-	batch := &wtpv1.EventBatch{
-		FromSequence: fromSeq,
-		ToSequence:   toSeq,
-		Generation:   gen,
-		Compression:  wtpv1.Compression_COMPRESSION_NONE,
-		Body: &wtpv1.EventBatch_Uncompressed{
-			Uncompressed: &wtpv1.UncompressedEvents{Events: events},
-		},
-	}
-	return &wtpv1.ClientMessage{
-		Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: batch},
-	}, nil
+// A real encoder that strips RecordLoss is an integrity gap; one that
+// errors on RecordLoss is a poison-pill reconnect loop; one that
+// log+filters smuggles non-contiguous sequences into a single batch
+// (gap-flush invariant violation). All three are sub-Task-13
+// regressions, so until the carrier exists, the production wiring
+// stays a no-op stub. Tests that need a real-shaped EventBatch use
+// SetEncodeBatchMessageFnForTest to swap in their own builder; see
+// shutdown_test.go for examples.
+func encodeBatchMessage(_ []wal.Record) (*wtpv1.ClientMessage, error) {
+	return &wtpv1.ClientMessage{}, nil
 }

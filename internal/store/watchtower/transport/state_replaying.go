@@ -3,9 +3,6 @@ package transport
 import (
 	"context"
 	"fmt"
-	"log/slog"
-
-	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 )
 
 // runReplaying drains the WAL via the supplied Replayer and ships records
@@ -124,20 +121,8 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 			t.conn = nil
 			return StateConnecting, fmt.Errorf("replay batch: %w", err)
 		}
-		// Strip loss markers BEFORE the encoder. The production encoder
-		// fail-loud contract (encodeBatchMessage) refuses to silently
-		// smuggle a wal.RecordLoss into an UncompressedEvents batch;
-		// without filtering here, a persisted loss marker would turn
-		// runReplaying into a permanent reconnect loop because the same
-		// marker would be re-surfaced on every replay open. Until the
-		// dedicated TransportLoss carrier (Task 13) lands, the temporary
-		// path is: emit a structured WARN per marker and let replay
-		// advance past it. Replayer.lastReplayed only tracks RecordData
-		// (replayer.go:231), so dropping the marker does not regress
-		// the cursor.
-		dataRecords := filterDataRecords(batch.Records, t.opts.Logger, "replaying", t.opts.SessionID)
-		if len(dataRecords) > 0 {
-			msg, err := buildEventBatchFn(dataRecords)
+		if len(batch.Records) > 0 {
+			msg, err := buildEventBatchFn(batch.Records)
 			if err != nil {
 				_ = t.conn.Close()
 				t.teardownRecv()
@@ -155,47 +140,6 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 			return StateLive, nil
 		}
 	}
-}
-
-// filterDataRecords returns the input slice with every wal.RecordLoss
-// stripped, emitting a structured WARN per dropped marker. This is the
-// pre-Task-13 temporary path that lets Live, Replaying, and Shutdown
-// advance past loss markers without smuggling them through the
-// UncompressedEvents encoder (which refuses them by contract — see
-// state_live.go encodeBatchMessage). When the TransportLoss carrier
-// (Task 13) lands, replace this filter with a dedicated send path so
-// the markers reach the server instead of being logged-and-dropped.
-//
-// callerState identifies the state-machine handler ("live", "replaying",
-// "shutdown") so log readers can correlate the WARN with the path that
-// surfaced the marker; sessionID is included for cross-stream triage.
-func filterDataRecords(records []wal.Record, logger *slog.Logger, callerState string, sessionID string) []wal.Record {
-	hasLoss := false
-	for _, rec := range records {
-		if rec.Kind == wal.RecordLoss {
-			hasLoss = true
-			break
-		}
-	}
-	if !hasLoss {
-		return records
-	}
-	out := make([]wal.Record, 0, len(records))
-	for _, rec := range records {
-		if rec.Kind == wal.RecordLoss {
-			logger.LogAttrs(context.Background(), slog.LevelWarn,
-				"wtp: dropping wal.RecordLoss marker pending TransportLoss (Task 13) carrier",
-				slog.String("caller_state", callerState),
-				slog.Uint64("loss_generation", uint64(rec.Generation)),
-				slog.Uint64("loss_from_seq", rec.Loss.FromSequence),
-				slog.Uint64("loss_to_seq", rec.Loss.ToSequence),
-				slog.String("loss_reason", rec.Loss.Reason),
-				slog.String("session_id", sessionID))
-			continue
-		}
-		out = append(out, rec)
-	}
-	return out
 }
 
 // buildEventBatchFn is the function variable runReplaying calls to wrap
