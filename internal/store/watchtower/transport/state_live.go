@@ -117,11 +117,21 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			// Then full-tear down the conn + recvSession the same
 			// way ctx-cancellation does so the run loop's
 			// StateShutdown case returns nil with no leaked state.
-			t.runShutdown(ctx, b, rdr, sr.drainDeadline)
+			//
+			// Propagate ErrRecordLossEncountered: a loss marker that
+			// surfaces during drain is the same terminal sentinel
+			// runReplaying / runLive raise above (roborev #6131
+			// Medium). Without surfacing it, Stop would silently
+			// complete and the Store's runDone would receive nil,
+			// hiding the integrity gap behind a clean shutdown.
+			drainErr := t.runShutdown(ctx, b, rdr, sr.drainDeadline)
 			_ = t.conn.Close()
 			t.teardownRecv()
 			t.conn = nil
 			close(sr.done)
+			if drainErr != nil {
+				return StateShutdown, drainErr
+			}
 			return StateShutdown, nil
 		case ev := <-recvEventCh:
 			// Recv-multiplexer arm per sub-step 17.X (plan §"Single

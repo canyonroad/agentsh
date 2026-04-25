@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
@@ -30,16 +31,20 @@ import (
 // the server may see an abort instead of a graceful half-close for
 // frames that were still in flight when CloseSend landed.
 //
-// Send/encode failures during drain are swallowed: a broken conn
-// cannot be fixed at this layer, and shutdown callers cannot act on
-// a partial-flush diagnostic. This is a documented observability gap
-// — callers wanting assured delivery must rely on the ack stream,
-// not on Stop's return.
+// Send/encode failures during drain are otherwise swallowed: a broken
+// conn cannot be fixed at this layer, and shutdown callers cannot act
+// on a partial-flush diagnostic. The ONE EXCEPTION is
+// ErrRecordLossEncountered: a loss marker in the drain set means the
+// session has hit the terminal pre-Task-13 sentinel; runLive must see
+// it so the run loop can latch fatal instead of silently completing
+// Stop with the sentinel hidden behind a CloseSend (roborev #6131
+// Medium). All other errors continue to be swallowed.
 //
 // runShutdown is only called from runLive — runReplaying and
 // runConnecting each have their own exit paths and no buffered batcher
 // to drain.
-func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Reader, drainDeadline time.Duration) {
+func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Reader, drainDeadline time.Duration) error {
+	var lossErr error
 	if drainDeadline > 0 {
 		ctx, cancel := context.WithTimeout(parent, drainDeadline)
 		defer cancel()
@@ -58,6 +63,9 @@ func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Rea
 			if outBatch := b.Add(rec); outBatch != nil {
 				msg, err := encodeBatchMessageFn(outBatch.Records)
 				if err != nil {
+					if errors.Is(err, ErrRecordLossEncountered) {
+						lossErr = err
+					}
 					break drainLoop
 				}
 				if err := t.conn.Send(msg); err != nil {
@@ -67,9 +75,15 @@ func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Rea
 		}
 	}
 	if final := b.Drain(); final != nil {
-		if msg, err := encodeBatchMessageFn(final.Records); err == nil {
+		msg, err := encodeBatchMessageFn(final.Records)
+		if err != nil {
+			if errors.Is(err, ErrRecordLossEncountered) && lossErr == nil {
+				lossErr = err
+			}
+		} else {
 			_ = t.conn.Send(msg)
 		}
 	}
 	_ = t.conn.CloseSend()
+	return lossErr
 }

@@ -13,6 +13,131 @@ import (
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
+// TestShutdown_RecordLossDuringDrainPropagates pins the roborev #6131
+// Medium contract: when runShutdown's drain encounters a record that
+// trips ErrRecordLossEncountered, the sentinel must propagate out of
+// runLive → Run → Store.runDone instead of being swallowed behind a
+// clean CloseSend. Stop signals "drain finished" to the caller, but
+// Run's return value carries the fatal error so the integrity gap is
+// observable instead of silently masked.
+//
+// Test shape — the encoder seam is split (build → Replaying;
+// encode → Live/Shutdown), so:
+//
+//   1. Seed one record so Replaying has something to send. This is
+//      the test's sync point for "runLive has started" (the second
+//      conn.sendCh receive lines up with Replaying having transitioned
+//      to Live; without it, Stop can race the Replaying→Live boundary
+//      and the OUTER stopCh arm in Run preempts runLive's inner
+//      stopCh arm, bypassing runShutdown entirely).
+//   2. Replaying uses buildEventBatchFn → swap to a happy-path stub
+//      so Replaying's send succeeds and the test reaches Live.
+//   3. Live and Shutdown use encodeBatchMessageFn → swap to a failing
+//      stub returning ErrRecordLossEncountered. Live's Notify path
+//      calls b.Add only (no encode at MaxRecords=100), so the failing
+//      encoder fires for the FIRST time inside runShutdown's Drain.
+//   4. Append a post-live record → Stop with positive drainDeadline →
+//      runShutdown's Drain encodes the buffered batch → encoder
+//      errors → drainErr surfaces from runShutdown → runLive returns
+//      (StateShutdown, sentinel) → Run returns sentinel.
+func TestShutdown_RecordLossDuringDrainPropagates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Same scheduling-jitter caveat as TestShutdown_StopDrainsThenCloseSends.
+		t.Skip("Windows: drain-deadline timing flakes under runner-scheduling jitter")
+	}
+
+	dir := t.TempDir()
+	w, err := wal.Open(wal.Options{Dir: dir, SegmentSize: 64 * 1024})
+	if err != nil {
+		t.Fatalf("wal.Open: %v", err)
+	}
+	defer w.Close()
+
+	// Replaying succeeds with the same nonEmptyMsg stub the other
+	// shutdown tests use; the failing path is reserved for the
+	// Live/Shutdown encoder seam so the sentinel only fires during
+	// runShutdown's Drain.
+	defer transport.SetBuildEventBatchFnForTest(nonEmptyMsg)()
+	defer transport.SetEncodeBatchMessageFnForTest(func(_ []wal.Record) (*wtpv1.ClientMessage, error) {
+		return nil, transport.ErrRecordLossEncountered
+	})()
+
+	// Seed one record so Replaying has something to send — the second
+	// conn.sendCh receive is the "runLive has started" sync point.
+	if _, err := w.Append(1, 0, []byte("replay-payload")); err != nil {
+		t.Fatalf("wal.Append(replay): %v", err)
+	}
+
+	conn := newFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return conn, nil
+	})
+
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+		WAL:       w,
+	})
+	if err != nil {
+		t.Fatalf("transport.New: %v", err)
+	}
+
+	rdrFactory := func(gen uint32, start uint64) (*wal.Reader, error) {
+		return w.NewReader(wal.ReaderOptions{Generation: gen, Start: start})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
+			Batcher: transport.BatcherOptions{
+				MaxRecords: 100,
+				MaxBytes:   1 << 16,
+				MaxAge:     10 * time.Second,
+			},
+			MaxInflight:    8,
+			HeartbeatEvery: time.Second,
+		})
+	}()
+
+	// Handshake: SessionInit out, SessionAck in.
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no SessionInit within 1s")
+	}
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{Accepted: true},
+		},
+	}
+	// Replaying sends one EventBatch — sync point for "runLive started".
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no Replaying EventBatch within 1s")
+	}
+
+	// runLive is in its inner select. Append a post-live record so
+	// runShutdown's Drain has something to encode.
+	if _, err := w.Append(2, 0, []byte("live-payload")); err != nil {
+		t.Fatalf("wal.Append(live): %v", err)
+	}
+
+	tr.Stop(500 * time.Millisecond)
+
+	select {
+	case got := <-done:
+		if !errors.Is(got, transport.ErrRecordLossEncountered) {
+			t.Fatalf("Run returned %v; want ErrRecordLossEncountered", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s of Stop")
+	}
+}
+
 // TestShutdown_StopDrainsThenCloseSends verifies the Task 19 contract
 // in StateLive: after Stop is signaled, runShutdown drains the live
 // batcher and CloseSend's the conn before Run returns.
