@@ -25,6 +25,19 @@ var ErrMissingChain = errors.New("compact.Encode: ev.Chain is nil; composite did
 // when cast to uint64 nanoseconds, masking caller bugs in the hot path.
 var ErrInvalidTimestamp = errors.New("compact.Encode: ev.Timestamp must be non-zero and ≥ Unix epoch")
 
+// ErrMapperFailure is the OUTER sentinel that wraps every error
+// returned from a Mapper's Map method. It distinguishes "Encode's own
+// validation gates fired" (bare ErrInvalidMapper / ErrInvalidTimestamp
+// returned from Encode's pre-call checks) from "the Mapper rejected
+// the event" (the call into m.Map returned an error). Without this
+// outer sentinel, a Mapper that happens to return ErrInvalidMapper or
+// ErrInvalidTimestamp would be misclassified by downstream consumers
+// using errors.Is to route drop-class metrics. Callers that classify
+// the encoder's error MUST check ErrMapperFailure FIRST so a mapper-
+// originated sentinel does not leak into the validation-gate
+// counters; see watchtower.recordCompactEncodeFailure.
+var ErrMapperFailure = errors.New("compact mapper")
+
 // Encode projects an agentsh event into a wtpv1.CompactEvent, populating
 // everything EXCEPT the IntegrityRecord. The IntegrityRecord is filled in by
 // the WTP Store in the AppendEvent transactional pattern, AFTER chain.Compute
@@ -68,7 +81,7 @@ func Encode(m Mapper, ev types.Event) (*wtpv1.CompactEvent, error) {
 	}
 	mapped, err := m.Map(ev)
 	if err != nil {
-		return nil, fmt.Errorf("compact mapper: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrMapperFailure, err)
 	}
 	return &wtpv1.CompactEvent{
 		Sequence:           ev.Chain.Sequence,

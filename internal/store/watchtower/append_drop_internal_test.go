@@ -143,8 +143,10 @@ func TestRecordCompactEncodeFailure_ClassifiesMapperFailureCatchAll(t *testing.T
 		Timestamp: time.Unix(1700000000, 0),
 		Chain:     &types.ChainState{Sequence: 3, Generation: 1},
 	}
-	// A mapper-side error wrapped exactly like compact/encoder.go:71 does.
-	wrapped := fmt.Errorf("compact mapper: %w", errors.New("synthetic mapper failure"))
+	// A mapper-side error wrapped exactly the way compact.Encode wraps
+	// every Mapper.Map error post-#6177 fix — via the ErrMapperFailure
+	// sentinel.
+	wrapped := fmt.Errorf("%w: %w", compact.ErrMapperFailure, errors.New("synthetic mapper failure"))
 	s.recordCompactEncodeFailure(wrapped, ev)
 
 	if got := m.DroppedMapperFailure(); got != 1 {
@@ -160,6 +162,53 @@ func TestRecordCompactEncodeFailure_ClassifiesMapperFailureCatchAll(t *testing.T
 	entry := findWarnEntry(t, buf)
 	if got := entry["reason"]; got != "mapper_failure" {
 		t.Fatalf("reason = %v, want mapper_failure", got)
+	}
+}
+
+// TestRecordCompactEncodeFailure_MapperReturningSentinelStaysMapperFailure
+// pins roborev #6177 (Medium): a Mapper that happens to return
+// compact.ErrInvalidMapper or compact.ErrInvalidTimestamp from inside
+// its Map method MUST be classified as `mapper_failure`, not as the
+// validation-gate counter the inner sentinel would otherwise match.
+// compact.Encode wraps every mapper-side error with ErrMapperFailure,
+// so the classifier's priority order (ErrMapperFailure first) keeps
+// the inner sentinel from leaking into the wrong counter.
+func TestRecordCompactEncodeFailure_MapperReturningSentinelStaysMapperFailure(t *testing.T) {
+	cases := []struct {
+		name  string
+		inner error
+	}{
+		{"inner=ErrInvalidMapper", compact.ErrInvalidMapper},
+		{"inner=ErrInvalidTimestamp", compact.ErrInvalidTimestamp},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, m, buf := newDropTestStore(t)
+
+			ev := types.Event{
+				Timestamp: time.Unix(1700000000, 0),
+				Chain:     &types.ChainState{Sequence: 5, Generation: 3},
+			}
+			// Mirror the exact wrap compact.Encode applies in its
+			// `m.Map(ev)` error branch.
+			wrapped := fmt.Errorf("%w: %w", compact.ErrMapperFailure, tc.inner)
+			s.recordCompactEncodeFailure(wrapped, ev)
+
+			if got := m.DroppedMapperFailure(); got != 1 {
+				t.Fatalf("DroppedMapperFailure() = %d, want 1", got)
+			}
+			if got := m.DroppedInvalidMapper(); got != 0 {
+				t.Fatalf("DroppedInvalidMapper() = %d, want 0 (mapper-originated sentinel must NOT leak)", got)
+			}
+			if got := m.DroppedInvalidTimestamp(); got != 0 {
+				t.Fatalf("DroppedInvalidTimestamp() = %d, want 0 (mapper-originated sentinel must NOT leak)", got)
+			}
+
+			entry := findWarnEntry(t, buf)
+			if got := entry["reason"]; got != "mapper_failure" {
+				t.Fatalf("reason = %v, want mapper_failure", got)
+			}
+		})
 	}
 }
 

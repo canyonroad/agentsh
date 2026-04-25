@@ -245,21 +245,30 @@ func (s *Store) recordSequenceOverflow(ev types.Event) {
 // Called from AppendEvent's compact.Encode error branch BEFORE the
 // existing error return.
 //
-// Classification priority (errors.Is order):
+// Classification priority (errors.Is order — MUST stay in this order):
+//   - compact.ErrMapperFailure    → IncDroppedMapperFailure / "mapper_failure"
 //   - compact.ErrInvalidMapper    → IncDroppedInvalidMapper / "invalid_mapper"
 //   - compact.ErrInvalidTimestamp → IncDroppedInvalidTimestamp / "invalid_timestamp"
 //   - (fallthrough)               → IncDroppedMapperFailure / "mapper_failure"
 //
-// The fallthrough catches the mapper-wrapped error returned by
-// compact/encoder.go:71 (`fmt.Errorf("compact mapper: %w", err)`),
-// which intentionally does not preserve a typed sentinel. The
-// compact.ErrMissingChain sentinel is unreachable from AppendEvent
-// because the ev.Chain == nil check earlier in the function bails
-// before compact.Encode runs; if a future change makes it reachable,
-// it falls into the mapper_failure catch-all and surfaces in logs.
+// ErrMapperFailure is checked FIRST because compact.Encode wraps every
+// mapper-side error with it via `fmt.Errorf("%w: %w", ErrMapperFailure,
+// err)`; without that priority, a Mapper that happened to return
+// ErrInvalidMapper or ErrInvalidTimestamp from inside Map would have
+// its drop misclassified as a validation-gate hit (roborev #6177
+// Medium). The fallthrough remains for any future encoder error path
+// that does not wrap with ErrMapperFailure or one of the other
+// sentinels. The compact.ErrMissingChain sentinel is unreachable from
+// AppendEvent because the ev.Chain == nil check earlier in the
+// function bails before compact.Encode runs; if a future change makes
+// it reachable, it falls into the mapper_failure catch-all and
+// surfaces in logs.
 func (s *Store) recordCompactEncodeFailure(err error, ev types.Event) {
 	var reason string
 	switch {
+	case errors.Is(err, compact.ErrMapperFailure):
+		s.metrics.IncDroppedMapperFailure(1)
+		reason = "mapper_failure"
 	case errors.Is(err, compact.ErrInvalidMapper):
 		s.metrics.IncDroppedInvalidMapper(1)
 		reason = "invalid_mapper"
