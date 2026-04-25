@@ -92,6 +92,19 @@ func TestEncode_PropagatesMapperError(t *testing.T) {
 	if !errors.Is(err, errBoom) {
 		t.Errorf("err = %v, want wrapped errBoom", err)
 	}
+	// Pin the linear-unwrap contract preserved by mapperFailureErr
+	// (roborev #6192 Low). errors.Unwrap must return the inner error
+	// directly — a regression to multi-%w wrapping would have
+	// errors.Unwrap return nil and silently break callers using linear
+	// unwrapping.
+	if got := errors.Unwrap(err); got != errBoom {
+		t.Errorf("errors.Unwrap(err) = %v, want %v (linear unwrap broken)", got, errBoom)
+	}
+	// And errors.Is(_, ErrMapperFailure) must hold so drop-class
+	// classifiers can route to the right counter.
+	if !errors.Is(err, ErrMapperFailure) {
+		t.Errorf("err = %v, want errors.Is(_, ErrMapperFailure)", err)
+	}
 }
 
 func TestEncode_RejectsZeroTimestamp(t *testing.T) {
