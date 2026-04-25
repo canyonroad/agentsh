@@ -1035,6 +1035,18 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 				next, err := t.runReplaying(ctx, rep)
 				_ = rdr.Close()
 				if err != nil {
+					if next == StateShutdown {
+						// Terminal-vs-retriable contract mirroring
+						// runConnecting: an inner handler returning
+						// StateShutdown with a non-nil error signals an
+						// unrecoverable session condition (today: the
+						// ErrRecordLossEncountered sentinel — see
+						// state_live.go). Surface immediately so the
+						// Store's runDone receives the error and the
+						// fatal latch trips, instead of looping back to
+						// Connecting and re-hitting the same marker.
+						return err
+					}
 					stageErr = err
 					break stagesLoop
 				}
@@ -1079,6 +1091,14 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 			}
 			next, err := t.runLive(ctx, rdr, liveOpts)
 			if err != nil {
+				if next == StateShutdown {
+					// Terminal-vs-retriable: see the runReplaying
+					// branch above for the full contract. Same
+					// rationale — an unrecoverable encoder error
+					// (ErrRecordLossEncountered) must not be
+					// retried by the Connecting backoff path.
+					return err
+				}
 				st = StateConnecting
 				select {
 				case <-ctx.Done():

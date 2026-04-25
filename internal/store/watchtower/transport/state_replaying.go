@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -127,6 +128,9 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 				_ = t.conn.Close()
 				t.teardownRecv()
 				t.conn = nil
+				if errors.Is(err, ErrRecordLossEncountered) {
+					return StateShutdown, err
+				}
 				return StateConnecting, fmt.Errorf("build EventBatch: %w", err)
 			}
 			if err := t.conn.Send(msg); err != nil {

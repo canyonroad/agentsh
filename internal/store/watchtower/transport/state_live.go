@@ -2,12 +2,33 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+	"google.golang.org/protobuf/proto"
 )
+
+// ErrRecordLossEncountered is the sentinel encodeBatchMessage returns
+// when a wal.RecordLoss is in the input. The dedicated TransportLoss
+// carrier (Task 13) is the only sanctioned route for these markers, and
+// it is not yet built. Until then, runReplaying / runLive / runShutdown
+// classify this sentinel as TERMINAL (StateShutdown) so the session
+// fails closed instead of:
+//
+//   - silently stripping the marker (integrity gap; roborev #6089)
+//   - retrying as a transient error (poison-pill reconnect loop;
+//     roborev #6095)
+//   - logging-and-dropping (still an integrity gap; roborev #6099)
+//
+// Restart is required to recover. The fail-closed posture is
+// acceptable today because loss markers happen on overflow GC / CRC
+// corruption — error conditions where session integrity is already at
+// risk — and the production wiring still has other "SCAFFOLDING ONLY"
+// gaps (recv multiplexer per Tasks 17/18) that bound real-world use.
+var ErrRecordLossEncountered = errors.New("wtp: WAL loss marker encountered before TransportLoss carrier (Task 13) is wired; session must restart")
 
 // LiveOptions configures the Live state's batcher and inflight window.
 type LiveOptions struct {
@@ -149,6 +170,9 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 						_ = t.conn.Close()
 						t.teardownRecv()
 						t.conn = nil
+						if errors.Is(err, ErrRecordLossEncountered) {
+							return StateShutdown, err
+						}
 						return StateConnecting, err
 					}
 					if err := t.conn.Send(msg); err != nil {
@@ -167,6 +191,9 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 					_ = t.conn.Close()
 					t.teardownRecv()
 					t.conn = nil
+					if errors.Is(err, ErrRecordLossEncountered) {
+						return StateShutdown, err
+					}
 					return StateConnecting, err
 				}
 				if err := t.conn.Send(msg); err != nil {
@@ -189,24 +216,60 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 // produce real marshaled CompactEvent bytes.
 var encodeBatchMessageFn = encodeBatchMessage
 
-// encodeBatchMessage is a STUB. The production EventBatch encoder is
-// deferred to a follow-up that lands together with:
+// encodeBatchMessage is the production EventBatch encoder. It unmarshals
+// each data record's wal.Record.Payload (already the marshaled
+// CompactEvent bytes the Store produced) into a *wtpv1.CompactEvent and
+// wraps the slice in an UncompressedEvents body.
 //
-//   - Task 13 — TransportLoss carrier (so wal.RecordLoss markers can
-//     reach the server instead of being smuggled into UncompressedEvents
-//     or silently dropped)
-//   - Task 17/18 — recv multiplexer wiring (so BatchAck / heartbeat
-//     drive cursor advance and reconnect actually happens on a stream
-//     drop; see the SCAFFOLDING ONLY header on Transport.Run)
+// Loss markers (wal.RecordLoss) cause the encoder to return
+// ErrRecordLossEncountered — see that sentinel's docstring for the
+// rationale (the TransportLoss carrier of Task 13 is the only safe
+// route for them, and silent / retry-able / log-only handling each
+// produce a documented regression). All three callers
+// (runLive / runReplaying / runShutdown) translate this sentinel into a
+// StateShutdown transition with the error propagated out of Run, so
+// the Store latches fatal and the session is recovered by restart.
 //
-// A real encoder that strips RecordLoss is an integrity gap; one that
-// errors on RecordLoss is a poison-pill reconnect loop; one that
-// log+filters smuggles non-contiguous sequences into a single batch
-// (gap-flush invariant violation). All three are sub-Task-13
-// regressions, so until the carrier exists, the production wiring
-// stays a no-op stub. Tests that need a real-shaped EventBatch use
-// SetEncodeBatchMessageFnForTest to swap in their own builder; see
-// shutdown_test.go for examples.
-func encodeBatchMessage(_ []wal.Record) (*wtpv1.ClientMessage, error) {
-	return &wtpv1.ClientMessage{}, nil
+// from_sequence / to_sequence / generation reflect the first and last
+// data record. Compression is COMPRESSION_NONE because we send raw
+// CompactEvents; zstd/gzip is a post-MVP enhancement.
+func encodeBatchMessage(records []wal.Record) (*wtpv1.ClientMessage, error) {
+	events := make([]*wtpv1.CompactEvent, 0, len(records))
+	var (
+		fromSeq uint64
+		toSeq   uint64
+		gen     uint32
+		seenOne bool
+	)
+	for _, rec := range records {
+		if rec.Kind == wal.RecordLoss {
+			return nil, ErrRecordLossEncountered
+		}
+		if rec.Kind != wal.RecordData {
+			continue
+		}
+		ce := &wtpv1.CompactEvent{}
+		if err := proto.Unmarshal(rec.Payload, ce); err != nil {
+			return nil, fmt.Errorf("encodeBatchMessage: unmarshal record seq=%d: %w", rec.Sequence, err)
+		}
+		events = append(events, ce)
+		if !seenOne {
+			fromSeq = rec.Sequence
+			gen = rec.Generation
+			seenOne = true
+		}
+		toSeq = rec.Sequence
+	}
+	batch := &wtpv1.EventBatch{
+		FromSequence: fromSeq,
+		ToSequence:   toSeq,
+		Generation:   gen,
+		Compression:  wtpv1.Compression_COMPRESSION_NONE,
+		Body: &wtpv1.EventBatch_Uncompressed{
+			Uncompressed: &wtpv1.UncompressedEvents{Events: events},
+		},
+	}
+	return &wtpv1.ClientMessage{
+		Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: batch},
+	}, nil
 }
