@@ -417,7 +417,13 @@ func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq u
 			t.persistedAckPresent = priorPresent
 			// Server will re-deliver this watermark on the next BatchAck
 			// or ServerHeartbeat. No metric emission on the failure path.
-			return outcome.Kind
+			//
+			// Return NoOp (NOT outcome.Kind == Adopted) so runLive does
+			// NOT decrement inflight on the rolled-back attempt — a
+			// later successful re-delivery of the same watermark would
+			// otherwise decrement again, allowing the client to exceed
+			// MaxInflight (roborev Medium follow-up).
+			return AckOutcomeNoOp
 		}
 		t.metrics.SetAckHighWatermark(int64(t.persistedAck.Sequence))
 	case AckOutcomeResendNeeded:

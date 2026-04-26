@@ -1036,6 +1036,15 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 	for {
 		select {
 		case <-ctx.Done():
+			// If cancellation lands between state transitions
+			// (after runConnecting → StateReplaying or after
+			// runReplaying → StateLive) the prior state handler
+			// has not yet had a chance to teardown — without this
+			// cleanup the transport would exit holding an open
+			// conn and a live recvSession (roborev Medium follow-
+			// up). regressToConnecting is idempotent so it is
+			// also safe when the prior handler already tore down.
+			t.regressToConnecting()
 			return ctx.Err()
 		case sr := <-t.stopCh:
 			// Stop arrived between states (or during a Connecting
