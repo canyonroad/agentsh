@@ -212,5 +212,16 @@ func goldenSampleEvents() []types.Event {
 		{ID: "ev-ptrace-file-1", Type: "ptrace_file", Timestamp: t0, PID: 215, Path: "/etc/shadow"},
 		{ID: "ev-registry-write-1", Type: "registry_write", Timestamp: t0, PID: 216, Path: "HKLM\\Software\\Foo"},
 		{ID: "ev-registry-error-1", Type: "registry_error", Timestamp: t0, PID: 217, Path: "HKLM\\Software\\Bar"},
+
+		// Network Activity (4001) — Task 18
+		{ID: "ev-net-connect-1", Type: "net_connect", Timestamp: t0, PID: 300, Domain: "example.com", Remote: "93.184.216.34"},
+		{ID: "ev-conn-allowed-1", Type: "connection_allowed", Timestamp: t0, PID: 301, Domain: "ok.example", Remote: "10.0.0.1"},
+		{ID: "ev-connect-redirect-1", Type: "connect_redirect", Timestamp: t0, PID: 302, Domain: "in.example", Fields: map[string]any{"redirect_target": "out.example:443"}},
+		{ID: "ev-ptrace-network-1", Type: "ptrace_network", Timestamp: t0, PID: 303, Domain: "trace.example"},
+		{ID: "ev-unix-sock-1", Type: "unix_socket_op", Timestamp: t0, PID: 304, Path: "/run/agentsh.sock", Abstract: false},
+		{ID: "ev-tnet-failed-1", Type: "transparent_net_failed", Timestamp: t0},
+		{ID: "ev-tnet-ready-1", Type: "transparent_net_ready", Timestamp: t0},
+		{ID: "ev-tnet-setup-1", Type: "transparent_net_setup", Timestamp: t0},
+		{ID: "ev-mcp-net-1", Type: "mcp_network_connection", Timestamp: t0, PID: 305, Domain: "mcp.example", Remote: "10.0.0.5"},
 	}
 }

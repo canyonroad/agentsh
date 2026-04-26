@@ -1,0 +1,18 @@
+{
+  "class_uid":  4001,
+  "activity_id":  2,
+  "category_uid":  4,
+  "type_uid":  400102,
+  "time":  "1777118400000000000",
+  "severity":  "Informational",
+  "metadata":  {
+    "version":  "1.8.0",
+    "product":  {
+      "name":  "agentsh",
+      "vendor_name":  "agentsh"
+    },
+    "logged_time":  "1777118400000000000",
+    "event_code":  "transparent_net_failed",
+    "uid":  "ev-tnet-failed-1"
+  }
+}
