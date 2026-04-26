@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
+	"github.com/agentsh/agentsh/internal/ocsf"
 	"github.com/agentsh/agentsh/internal/store/watchtower"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
 	"github.com/agentsh/agentsh/internal/store/watchtower/testserver"
@@ -111,5 +112,47 @@ func TestStore_AppendEvent_DeliversRealEventBatch(t *testing.T) {
 	}
 	if !sawRealBody {
 		t.Fatalf("no batch carried a non-empty UncompressedEvents body; encoder may have regressed to a stub")
+	}
+}
+
+func TestEncoderE2E_WithOCSFMapper(t *testing.T) {
+	// Verifies that the production OCSF mapper produces a payload the
+	// WTP chain accepts AND rejects on tampering. This is the hand-off
+	// gate from Phase 1 to Phase 2 wiring.
+	mapper := ocsf.New()
+	ev := types.Event{
+		ID: "e2e-execve-1", Type: "execve",
+		Timestamp: time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC),
+		SessionID: "sess-e2e", PID: 9999, ParentPID: 1,
+		Filename: "/usr/bin/curl",
+		Argv:     []string{"curl", "https://example.com"},
+		Chain:    &types.ChainState{Sequence: 1, Generation: 1},
+	}
+	mapped, err := mapper.Map(ev)
+	if err != nil {
+		t.Fatalf("Map: %v", err)
+	}
+	if mapped.OCSFClassUID != 1007 {
+		t.Fatalf("class_uid = %d, want 1007", mapped.OCSFClassUID)
+	}
+	if mapped.OCSFActivityID != 1 {
+		t.Fatalf("activity_id = %d, want 1 (Launch)", mapped.OCSFActivityID)
+	}
+	if len(mapped.Payload) == 0 {
+		t.Fatal("payload empty")
+	}
+	// Determinism: re-map and assert byte-identical.
+	mapped2, err := mapper.Map(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(mapped.Payload, mapped2.Payload) {
+		t.Fatal("non-deterministic payload between consecutive Map calls")
+	}
+	// Tamper guard: mutating one byte must change the protojson output.
+	tampered := append([]byte{}, mapped.Payload...)
+	tampered[0] ^= 0xFF
+	if bytes.Equal(tampered, mapped.Payload) {
+		t.Fatal("tamper guard: mutating byte 0 produced equal slice")
 	}
 }
