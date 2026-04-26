@@ -1,8 +1,8 @@
 {
-  "class_uid":  1007,
-  "activity_id":  1,
+  "class_uid":  1001,
+  "activity_id":  3,
   "category_uid":  1,
-  "type_uid":  100701,
+  "type_uid":  100103,
   "time":  "1777118400000000000",
   "severity":  "Informational",
   "metadata":  {
@@ -12,15 +12,16 @@
       "vendor_name":  "agentsh"
     },
     "logged_time":  "1777118400000000000",
-    "event_code":  "exec",
-    "uid":  "ev-exec-1"
+    "event_code":  "file_modified",
+    "uid":  "ev-file-modified-1"
   },
-  "process":  {
-    "pid":  "100",
-    "name":  "sh",
-    "file":  {
-      "path":  "/bin/sh",
-      "name":  "sh"
+  "actor":  {
+    "process":  {
+      "pid":  "212"
     }
+  },
+  "file":  {
+    "path":  "/tmp/changed",
+    "name":  "changed"
   }
 }

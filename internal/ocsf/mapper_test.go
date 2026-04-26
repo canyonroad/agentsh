@@ -192,5 +192,25 @@ func goldenSampleEvents() []types.Event {
 		{ID: "ev-cmd-redirect-1", Type: "command_redirect", Timestamp: t0, PID: 121},
 		{ID: "ev-process-start-1", Type: "process_start", Timestamp: t0, PID: 130},
 		{ID: "ev-exit-1", Type: "exit", Timestamp: t0, PID: 140},
+
+		// File System Activity (1001) — Task 17
+		{ID: "ev-file-open-1", Type: "file_open", Timestamp: t0, PID: 200, Path: "/etc/hosts", Operation: "open"},
+		{ID: "ev-file-read-1", Type: "file_read", Timestamp: t0, PID: 201, Path: "/etc/passwd", Operation: "read"},
+		{ID: "ev-file-write-1", Type: "file_write", Timestamp: t0, PID: 202, Path: "/tmp/out", Operation: "write"},
+		{ID: "ev-file-create-1", Type: "file_create", Timestamp: t0, PID: 203, Path: "/tmp/new"},
+		{ID: "ev-file-created-1", Type: "file_created", Timestamp: t0, PID: 204, Path: "/tmp/done"},
+		{ID: "ev-file-delete-1", Type: "file_delete", Timestamp: t0, PID: 205, Path: "/tmp/old"},
+		{ID: "ev-file-deleted-1", Type: "file_deleted", Timestamp: t0, PID: 206, Path: "/tmp/removed"},
+		{ID: "ev-file-chmod-1", Type: "file_chmod", Timestamp: t0, PID: 207, Path: "/tmp/perm"},
+		{ID: "ev-file-mkdir-1", Type: "file_mkdir", Timestamp: t0, PID: 208, Path: "/tmp/dir"},
+		{ID: "ev-file-rmdir-1", Type: "file_rmdir", Timestamp: t0, PID: 209, Path: "/tmp/dir"},
+		{ID: "ev-file-rename-1", Type: "file_rename", Timestamp: t0, PID: 210, Path: "/tmp/new", Fields: map[string]any{"from_path": "/tmp/old"}},
+		{ID: "ev-file-renamed-1", Type: "file_renamed", Timestamp: t0, PID: 211, Path: "/tmp/dest", Fields: map[string]any{"from_path": "/tmp/src"}},
+		{ID: "ev-file-modified-1", Type: "file_modified", Timestamp: t0, PID: 212, Path: "/tmp/changed"},
+		{ID: "ev-file-soft-deleted-1", Type: "file_soft_deleted", Timestamp: t0, PID: 213, Path: "/tmp/soft"},
+		{ID: "ev-file-unknown-1", Type: "file_unknown", Timestamp: t0, PID: 214, Path: "/tmp/unknown"},
+		{ID: "ev-ptrace-file-1", Type: "ptrace_file", Timestamp: t0, PID: 215, Path: "/etc/shadow"},
+		{ID: "ev-registry-write-1", Type: "registry_write", Timestamp: t0, PID: 216, Path: "HKLM\\Software\\Foo"},
+		{ID: "ev-registry-error-1", Type: "registry_error", Timestamp: t0, PID: 217, Path: "HKLM\\Software\\Bar"},
 	}
 }

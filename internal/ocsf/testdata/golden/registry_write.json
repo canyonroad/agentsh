@@ -1,8 +1,8 @@
 {
-  "class_uid":  1007,
+  "class_uid":  1001,
   "activity_id":  3,
   "category_uid":  1,
-  "type_uid":  100703,
+  "type_uid":  100103,
   "time":  "1777118400000000000",
   "severity":  "Informational",
   "metadata":  {
@@ -12,10 +12,16 @@
       "vendor_name":  "agentsh"
     },
     "logged_time":  "1777118400000000000",
-    "event_code":  "command_redirect",
-    "uid":  "ev-cmd-redirect-1"
+    "event_code":  "registry_write",
+    "uid":  "ev-registry-write-1"
   },
-  "process":  {
-    "pid":  "121"
+  "actor":  {
+    "process":  {
+      "pid":  "216"
+    }
+  },
+  "file":  {
+    "path":  "HKLM\\Software\\Foo",
+    "name":  "HKLM\\Software\\Foo"
   }
 }

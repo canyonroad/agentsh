@@ -1,8 +1,8 @@
 {
-  "class_uid":  1007,
+  "class_uid":  1001,
   "activity_id":  2,
   "category_uid":  1,
-  "type_uid":  100702,
+  "type_uid":  100102,
   "time":  "1777118400000000000",
   "severity":  "Informational",
   "metadata":  {
@@ -12,10 +12,17 @@
       "vendor_name":  "agentsh"
     },
     "logged_time":  "1777118400000000000",
-    "event_code":  "exit",
-    "uid":  "ev-exit-1"
+    "event_code":  "file_open",
+    "uid":  "ev-file-open-1"
   },
-  "process":  {
-    "pid":  "140"
-  }
+  "actor":  {
+    "process":  {
+      "pid":  "200"
+    }
+  },
+  "file":  {
+    "path":  "/etc/hosts",
+    "name":  "hosts"
+  },
+  "operation":  "open"
 }
