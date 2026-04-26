@@ -67,13 +67,13 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 	}
 
 	t.ackSessionAck(ack)
-	// Start the per-connection recv goroutine. runReplaying and
-	// runLive consume from t.recv.eventCh / t.recv.errCh; without
-	// this call those select arms remain dormant via Go's nil-
-	// channel semantics. The goroutine is torn down on every conn-
-	// close exit path in runReplaying / runLive (paired with
-	// t.teardownRecv()).
-	t.startRecv(ctx)
+	// NOTE: starting the recv goroutine has been moved to the Run
+	// loop so RunOnce(StateConnecting) — used by transport-level
+	// tests that drive a single state transition — does NOT leave a
+	// live recvSession with no owner to call teardownRecv. Run owns
+	// the lifecycle: it calls startRecv after runConnecting returns
+	// successfully, and runReplaying / runLive own the matching
+	// teardown. Per roborev Medium round-3.
 	return StateReplaying, nil
 }
 
