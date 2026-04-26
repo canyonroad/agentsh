@@ -23,38 +23,20 @@ import (
 // the same as any other replay failure: conn is torn down, state regresses
 // to Connecting, and the run loop owns whether to retry or shut down.
 //
-// PRODUCTION-BLOCKED — recv multiplexer not yet wired. The spec at
-// docs/superpowers/specs/2026-04-18-wtp-client-design.md:565 requires
-// stateReplaying to process inbound BatchAck, ServerHeartbeat,
-// SessionUpdate, and Goaway concurrently with replay completion. This
-// implementation only loops over NextBatch and Send — it has NO recv
-// branch, so any inbound control frame that arrives during a long replay
-// would be dropped (or, depending on the gRPC stream's buffer, would
-// stall the receive side). Task 17 (Live state Batcher) and Task 18
-// (heartbeat) introduce the shared recv goroutine + multiplexer that
-// runReplaying will plug into. Until then, runReplaying MUST NOT be
-// wired into the production run loop.
-//
-// The unexport of runReplaying is an EXTERNAL-CALL-SITE GUARD, not a
-// compile-time guarantee:
-//   - Callers OUTSIDE the internal/store/watchtower/transport package
-//     CANNOT reach runReplaying without going through a future RunOnce
-//     dispatch table that Task 22 will add (and which will gate
-//     Replaying behind the recv loop landing in Task 17/18).
-//   - Callers INSIDE the transport package CAN still call runReplaying
-//     directly — Go's package-level visibility does not prevent this.
-//     Production wiring inside the transport package (Task 22's Run
-//     loop) MUST gate the call behind the recv-multiplexer plumbing
-//     that Tasks 17/18 introduce. See the updated Task 22 Run-loop
-//     snippet in docs/superpowers/plans/2026-04-18-wtp-client.md
-//     "Task 16 — Deferred to Task 17/18", which makes that dependency
-//     structural (the snippet visibly cannot work without Task 17/18
-//     landing first).
+// PRODUCTION-CONSUMABLE — the recv-multiplexer plumbing is wired.
+// runConnecting (state_connecting.go) calls startRecv on accepted
+// SessionAck so runReplaying's recvEventCh / recvErrCh select arms
+// observe inbound BatchAck, ServerHeartbeat, Goaway, and stream-error
+// events concurrently with NextBatch + Send. Per the spec at
+// docs/superpowers/specs/2026-04-18-wtp-client-design.md:565 this
+// satisfies the "process inbound frames concurrently with replay"
+// contract.
 //
 // The exported test seam RunReplayingForTest lives in
 // state_replaying_internal_test.go (compiled out of the production
 // binary) so external transport_test callers can still drive the
-// per-state handler in isolation.
+// per-state handler in isolation; tests that pre-date the production
+// recv wiring use StartRecvForTest to inject a recvSession manually.
 func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error) {
 	// Per-connection recv channel handles, captured once per loop entry.
 	// Nil-channel semantics make the drain arms dormant when t.recv is

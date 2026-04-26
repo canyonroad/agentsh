@@ -262,3 +262,87 @@ func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
 		t.Fatal("Run did not return within 3s of cancel")
 	}
 }
+
+// TestRun_StartsRecvGoroutineAfterAcceptedSessionAck closes SCAFFOLDING
+// item #1: "Run never calls newRecvSession / runRecv after a successful
+// dial, so runLive's recv arms remain dormant via Go nil-channel
+// semantics." After the SessionAck-accepted handshake completes, the
+// recv goroutine MUST be running so that runReplaying / runLive can
+// observe BatchAck, ServerHeartbeat, Goaway, and stream errors.
+//
+// This is the load-bearing prerequisite for every component test that
+// exercises server-initiated stream behaviour (Tasks 25, 26).
+func TestRun_StartsRecvGoroutineAfterAcceptedSessionAck(t *testing.T) {
+	conn := newFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return conn, nil
+	})
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Pre-condition: no recv goroutine before Run starts.
+	if rsh := transport.RecvSessionForTest(tr); rsh != nil {
+		t.Fatalf("RecvSessionForTest pre-Run = %v, want nil", rsh)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
+		// Returning an error sends runReplaying back to Connecting,
+		// which exits the test cleanly via ctx cancel below.
+		return nil, errors.New("test: no replay reader")
+	}
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
+			Batcher: transport.BatcherOptions{
+				MaxRecords: 100,
+				MaxBytes:   1 << 16,
+				MaxAge:     50 * time.Millisecond,
+			},
+			MaxInflight:    8,
+			HeartbeatEvery: time.Second,
+		})
+	}()
+
+	// Drain SessionInit, accept the session.
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no SessionInit sent")
+	}
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{Accepted: true},
+		},
+	}
+
+	// Poll briefly for the recv goroutine to be wired up. The exact
+	// moment runConnecting transitions to Replaying is not directly
+	// observable, so we tolerate scheduling latency.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	var rsh *transport.RecvSessionHandle
+	for time.Now().Before(deadline) {
+		rsh = transport.RecvSessionForTest(tr)
+		if rsh != nil {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if rsh == nil {
+		t.Fatal("recv goroutine never started after accepted SessionAck (SCAFFOLDING ONLY item #1 still open)")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancel")
+	}
+}
