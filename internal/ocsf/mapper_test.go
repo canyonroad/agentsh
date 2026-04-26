@@ -241,5 +241,20 @@ func goldenSampleEvents() []types.Event {
 			Fields: map[string]any{"rrtype": 1, "rrtype_name": "A"}},
 		{ID: "ev-dns-redirect-1", Type: "dns_redirect", Timestamp: t0, PID: 501, Domain: "in.example",
 			Fields: map[string]any{"rrtype_name": "A", "redirect_target": "127.0.0.1"}},
+
+		// Detection Finding (2004) — Task 21
+		{ID: "ev-cmd-policy-1", Type: "command_policy", Timestamp: t0, PID: 600,
+			Policy: &types.PolicyInfo{Decision: "deny", Rule: "no-curl", Message: "curl is blocked"}},
+		{ID: "ev-seccomp-1", Type: "seccomp_blocked", Timestamp: t0, PID: 601,
+			Policy: &types.PolicyInfo{Decision: "deny", Rule: "syscall-block"}},
+		{ID: "ev-agent-detect-1", Type: "agent_detected", Timestamp: t0, PID: 602,
+			Policy: &types.PolicyInfo{Decision: "warn", Message: "self-detection succeeded"}},
+		{ID: "ev-taint-created-1", Type: "taint_created", Timestamp: t0, PID: 603},
+		{ID: "ev-taint-prop-1", Type: "taint_propagated", Timestamp: t0, PID: 604},
+		{ID: "ev-taint-removed-1", Type: "taint_removed", Timestamp: t0, PID: 605},
+		{ID: "ev-mcp-cross-1", Type: "mcp_cross_server_blocked", Timestamp: t0, PID: 606,
+			Policy: &types.PolicyInfo{Decision: "deny", Rule: "no-cross-server"}},
+		{ID: "ev-mcp-tool-int-1", Type: "mcp_tool_call_intercepted", Timestamp: t0, PID: 607,
+			Policy: &types.PolicyInfo{Decision: "deny", Rule: "tool-block"}},
 	}
 }
