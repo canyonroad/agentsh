@@ -676,6 +676,30 @@ func TestRecvMultiplexer_BatchAckReturnsOutcomeKind(t *testing.T) {
 			t.Fatalf("Duplicate ack: got outcome %v, want AckOutcomeNoOp", got)
 		}
 	})
+
+	t.Run("MarkAcked_failure_does_not_report_Adopted", func(t *testing.T) {
+		// Pins the roborev Medium follow-up: when walMarkAckedFn fails,
+		// applyAckFromRecv rolls the cursors back and MUST NOT report
+		// AckOutcomeAdopted to the caller — runLive uses Adopted as
+		// the gate for decrementing inflight. Reporting Adopted here
+		// would let a server re-delivery of the same watermark
+		// decrement inflight twice (once on the rolled-back attempt,
+		// again on the eventual successful retry), reopening send
+		// capacity past MaxInflight without a newly persisted batch.
+		env := newClampTestEnv(t, Options{
+			InitialAckTuple: &AckTuple{Sequence: 50, Generation: 7, Present: true},
+		})
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		appendDataInGen(t, env.w, 1, 7, 200)
+		SetWALMarkAckedFnForTest(env.tr, func(_ uint32, _ uint64) error {
+			return errors.New("disk full")
+		})
+
+		got := env.tr.applyAckFromRecv("batch_ack", 7, 100)
+		if got == AckOutcomeAdopted {
+			t.Fatalf("rolled-back ack: got outcome %v, want non-Adopted (rollback path must not gate inflight--)", got)
+		}
+	})
 }
 
 // silence unused import warnings for wal package; the wal package is needed
