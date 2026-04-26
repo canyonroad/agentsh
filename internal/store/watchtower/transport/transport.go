@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/metrics"
@@ -204,6 +205,14 @@ func validate(opts Options) error {
 	return nil
 }
 
+// ErrTransportSingleUse is returned by Run when invoked a second
+// time on the same Transport. Transport is single-use per run-loop
+// lifetime — callers MUST construct a fresh Transport via New() to
+// reconnect. Per Task 27c: making Transport explicitly single-use
+// avoids the close-of-closed-channel panic that would otherwise
+// fire at `defer close(t.runDone)`.
+var ErrTransportSingleUse = errors.New("transport: Run already invoked; Transport is single-use")
+
 // Transport runs the four-state WTP client state machine. It is owned by
 // a single goroutine — callers interact via channels.
 type Transport struct {
@@ -268,6 +277,12 @@ type Transport struct {
 	// without it, Stop's <-r.done wait would deadlock because no
 	// consumer is left to service stopReq. Per Task 27c.
 	runDone chan struct{}
+
+	// runStarted guards Run's single-use contract. Set true on the
+	// first Run invocation; subsequent calls return
+	// ErrTransportSingleUse rather than panicking on
+	// `close(t.runDone)`. Per Task 27c.
+	runStarted atomic.Bool
 
 	// recv holds the per-connection recv-multiplexer state per round-22
 	// plan §"Per-connection recv state". A new recvSession is created on
@@ -482,15 +497,26 @@ func (t *Transport) stopWithHooks(drainDeadline time.Duration, preEnqueue, postE
 		preEnqueue()
 	}
 	r := stopReq{drainDeadline: drainDeadline, done: make(chan struct{})}
-	// Enqueue, but bail if Run has already exited — a send into stopCh
-	// would still succeed (cap-1 buffer) and then <-r.done would
-	// deadlock because no consumer is left. Per Task 27c.
+	// Fast-path: if Run has already exited, bail BEFORE the enqueue
+	// select. A plain `select { case stopCh <- r: case <-runDone: }`
+	// is racy when stopCh has buffer slack and runDone is closed —
+	// Go picks randomly among ready arms, so the send sometimes
+	// wins and postEnqueue fires for a request nobody will service.
+	// Per Task 27c.
+	select {
+	case <-t.runDone:
+		return
+	default:
+	}
+	// Enqueue, still racing runDone in case Run exits between the
+	// fast-path check and now.
+	//
+	// postEnqueue is documented to fire AFTER a successful send to
+	// stopCh; on the runDone bail-out below the send did NOT happen,
+	// so postEnqueue is intentionally NOT invoked.
 	select {
 	case t.stopCh <- r:
 	case <-t.runDone:
-		if postEnqueue != nil {
-			postEnqueue()
-		}
 		return
 	}
 	if postEnqueue != nil {
@@ -973,6 +999,12 @@ func (t *Transport) handleOuterStop(sr stopReq) {
 // nil) at the top of StateLive so a subsequent Live entry after a
 // reconnect picks up the fresh value (or nil if no replay ran).
 func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start uint64) (*wal.Reader, error), liveOpts LiveOptions) error {
+	// Single-use guard: Run owns the close of t.runDone, so a second
+	// invocation would panic on close-of-closed-channel. Reject the
+	// second call cleanly. Per Task 27c.
+	if !t.runStarted.CompareAndSwap(false, true) {
+		return ErrTransportSingleUse
+	}
 	// Signal Stop callers that the run loop has exited regardless of
 	// which return path is taken (ctx cancel, Stop request, terminal
 	// error). Stop selects on t.runDone so a Stop arriving AFTER the
