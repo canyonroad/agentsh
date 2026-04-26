@@ -133,10 +133,3 @@ func register(t string, m Mapping) {
 	delete(pendingTypes, t)
 }
 
-// skiplist is populated in skiplist.go (Task 12). Declared here as an
-// empty map so this skeleton commit compiles standalone.
-//
-// Task 12 will replace this declaration with one in skiplist.go that
-// populates the map literal. The empty placeholder here will then be
-// a duplicate-symbol compile error and must be removed in Task 12.
-var skiplist = map[string]string{}
