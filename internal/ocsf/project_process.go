@@ -1,7 +1,6 @@
 package ocsf
 
 import (
-	"path/filepath"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -66,10 +65,10 @@ func buildProcess(ev types.Event) *ocsfpb.Process {
 		p.ParentPid = u64p(uint64(ev.ParentPID))
 	}
 	if ev.Filename != "" {
-		p.Name = strp(filepath.Base(ev.Filename))
+		p.Name = strp(basename(ev.Filename))
 		p.File = &ocsfpb.File{
 			Path:    strp(ev.Filename),
-			Name:    strp(filepath.Base(ev.Filename)),
+			Name:    strp(basename(ev.Filename)),
 			RawPath: strpOrNil(ev.RawFilename),
 		}
 	}
@@ -129,6 +128,28 @@ func strpOrNil(v string) *string {
 		return nil
 	}
 	return &v
+}
+
+// basename returns the last component of p, splitting on BOTH '/' and
+// '\\' regardless of OS. This keeps the OCSF payload deterministic
+// across Linux/macOS/Windows, which is load-bearing for the chain hash.
+//
+// Unlike filepath.Base, the result is the same on every platform —
+// critical for paths that contain backslashes from Windows registry
+// hives (e.g., "HKLM\\Software\\Foo") or Windows file paths
+// (e.g., "C:\\Windows\\system32\\foo.exe") regardless of where the
+// agent runs.
+//
+// For inputs with no separator, returns the input unchanged. For an
+// empty string, returns "".
+func basename(p string) string {
+	last := -1
+	for i := 0; i < len(p); i++ {
+		if p[i] == '/' || p[i] == '\\' {
+			last = i
+		}
+	}
+	return p[last+1:]
 }
 
 func init() {

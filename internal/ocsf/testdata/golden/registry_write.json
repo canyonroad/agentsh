@@ -22,6 +22,6 @@
   },
   "file": {
     "path": "HKLM\\Software\\Foo",
-    "name": "HKLM\\Software\\Foo"
+    "name": "Foo"
   }
 }

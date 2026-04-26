@@ -1,8 +1,6 @@
 package ocsf
 
 import (
-	"path/filepath"
-
 	"google.golang.org/protobuf/proto"
 
 	"github.com/agentsh/agentsh/pkg/types"
@@ -27,7 +25,7 @@ func fileProjector(activity uint32) Projector {
 			if old, ok := allowed["from_path"].(string); ok && old != "" {
 				msg.FileDiff = &ocsfpb.File{
 					Path: strp(old),
-					Name: strp(filepath.Base(old)),
+					Name: strp(basename(old)),
 				}
 			}
 		}
@@ -73,7 +71,7 @@ func buildFile(ev types.Event) *ocsfpb.File {
 	}
 	return &ocsfpb.File{
 		Path:       strp(path),
-		Name:       strp(filepath.Base(path)),
+		Name:       strp(basename(path)),
 		RawPath:    strpOrNil(ev.RawFilename),
 		IsAbstract: boolPtrIfTrue(ev.Abstract),
 	}
