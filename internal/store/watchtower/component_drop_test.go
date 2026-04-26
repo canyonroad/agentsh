@@ -29,30 +29,13 @@ import (
 // test is verifying is only that no sequence is PERMANENTLY missing,
 // not that exactly one copy of each was observed.
 func TestStore_DropsMidBatchTriggersReplay(t *testing.T) {
-	// SKIPPED until the recv-goroutine startup gap documented in
-	// transport.Run (internal/store/watchtower/transport/transport.go,
-	// "SCAFFOLDING ONLY" header at the Run() docstring) is closed.
-	//
-	// The contract this test exercises is "server drops Stream#1 mid-
-	// transmission → client must reconnect and re-send every record
-	// past the remote ack cursor." Today that loop deterministically
-	// stalls because Run never calls newRecvSession / runRecv after a
-	// successful dial:
-	//   - runLive's recvErrCh / recvEventCh arms are dormant (nil-
-	//     channel semantics), so a server-side stream close is invisible
-	//     to the state machine.
-	//   - The replay-side drains the WAL faster than gRPC propagates the
-	//     server close, so all post-drop conn.Send calls succeed locally,
-	//     runReplaying returns StateLive, and runLive then blocks
-	//     forever on a half-dead conn.
-	// The test passes only when the producer/replayer timing happens to
-	// surface a Send EOF before the WAL drain finishes — racy by
-	// construction, deterministically failing under -cpu=1.
-	//
-	// Re-enable as part of Task 17/18 (recv multiplexer wiring) +
-	// Task 22/27 (Run-loop recv-goroutine startup hook) per the plan
-	// at docs/superpowers/plans/2026-04-18-wtp-client.md.
-	t.Skip("blocked on Task 17/18 + 22/27 recv-goroutine startup; see transport.Run scaffolding header")
+	// Unskipped: the recv-goroutine startup gap, the inflight
+	// increment-only bug, and the wire-encoding stub — the three
+	// blockers documented in the original transport.Run "SCAFFOLDING
+	// ONLY" header — are all closed (see Run's updated docstring).
+	// runLive's recvErrCh / recvEventCh arms are now alive, server-
+	// side stream closes are visible, and BatchAck releases inflight
+	// slots so the send path no longer stalls at MaxInflight.
 
 	srv := testserver.New(testserver.Options{
 		DropAfterBatchN:     2,

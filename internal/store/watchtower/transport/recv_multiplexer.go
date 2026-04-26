@@ -136,6 +136,24 @@ func (t *Transport) teardownRecv() {
 	<-rs.done
 }
 
+// startRecv constructs a recvSession bound to the given parent context
+// and starts the runRecv goroutine. Called by runConnecting on a
+// successful (accepted) SessionAck so that runReplaying / runLive can
+// consume BatchAck, ServerHeartbeat, Goaway, and stream-error events
+// via the recvSession channels. Paired one-to-one with teardownRecv on
+// every conn-close exit path.
+//
+// Preconditions: t.conn is set; t.recv is nil. The latter is enforced
+// by the run-loop lifecycle — every state-handler exit path that
+// closes the conn calls teardownRecv (which sets t.recv = nil) before
+// the loop re-enters runConnecting, so a clean entry to runConnecting
+// always sees t.recv == nil.
+func (t *Transport) startRecv(parent context.Context) {
+	rs := newRecvSession(parent)
+	t.recv = rs
+	go t.runRecv(rs)
+}
+
 // runRecv is the recv-goroutine loop. It calls t.conn.Recv() repeatedly,
 // demuxes the inbound *wtpv1.ServerMessage frame into a tagged-union
 // recvAckEvent, and pushes the event onto rs.eventCh in strict wire
@@ -330,7 +348,14 @@ func (t *Transport) runRecv(rs *recvSession) {
 // the gauge; ResendNeeded logs INFO and regresses remoteReplayCursor
 // only; Anomaly logs WARN and leaves both cursors unchanged; NoOp
 // is silent.
-func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq uint64) {
+//
+// Returns the AckOutcomeKind so callers (runLive) can release a slot
+// in the inflight window only when the ack actually advanced the
+// acknowledged watermark (AckOutcomeAdopted). Decrementing on
+// Anomaly / ResendNeeded / NoOp would let duplicate or stale acks
+// reopen send capacity without a newly acknowledged batch and so
+// allow the client to exceed MaxInflight (roborev Medium).
+func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq uint64) AckOutcomeKind {
 	// Snapshot BOTH cursors before the helper mutates — required for
 	// rollback on Adopted-then-MarkAcked-failure per Task 15.1 Step 1b.5.
 	priorPersisted := t.persistedAck
@@ -392,7 +417,13 @@ func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq u
 			t.persistedAckPresent = priorPresent
 			// Server will re-deliver this watermark on the next BatchAck
 			// or ServerHeartbeat. No metric emission on the failure path.
-			return
+			//
+			// Return NoOp (NOT outcome.Kind == Adopted) so runLive does
+			// NOT decrement inflight on the rolled-back attempt — a
+			// later successful re-delivery of the same watermark would
+			// otherwise decrement again, allowing the client to exceed
+			// MaxInflight (roborev Medium follow-up).
+			return AckOutcomeNoOp
 		}
 		t.metrics.SetAckHighWatermark(int64(t.persistedAck.Sequence))
 	case AckOutcomeResendNeeded:
@@ -418,6 +449,7 @@ func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq u
 	case AckOutcomeNoOp:
 		// No cursor moved; nothing to do.
 	}
+	return outcome.Kind
 }
 
 const (

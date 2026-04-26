@@ -941,45 +941,60 @@ func (t *Transport) handleOuterStop(sr stopReq) {
 	close(sr.done)
 }
 
+// regressToConnecting tears down the live conn + recv goroutine
+// established by a prior runConnecting (startRecv on accepted
+// SessionAck), used by run-loop branches that bail BEFORE
+// runReplaying or runLive owns teardown — i.e. computeReplayPlan
+// failure, rdrFactory failure inside the StateReplaying stagesLoop,
+// NewReplayer failure, and the StateLive rdrFactory failure. Without
+// this teardown, the next dial's startRecv would orphan the prior
+// recvSession and let it race the new connection through the shared
+// t.conn pointer.
+//
+// Idempotent: a nil t.conn (already torn down) makes both sub-calls
+// no-ops. The conn-then-recv order is load-bearing — runRecv blocks
+// on t.conn.Recv() and only unblocks when the conn is closed, so
+// closing recv first would deadlock on teardownRecv's <-rs.done wait.
+func (t *Transport) regressToConnecting() {
+	if t.conn != nil {
+		_ = t.conn.Close()
+		t.teardownRecv()
+		t.conn = nil
+	}
+}
+
 // Run loops the four-state state machine until ctx is cancelled, the
 // state machine reaches StateShutdown, or runConnecting returns a
 // terminal error (StateShutdown + non-nil error). It applies
 // exponential backoff with jitter between StateConnecting attempts
 // (200ms → 30s, factor 2).
 //
-// SCAFFOLDING ONLY — NOT PRODUCTION-CONSUMABLE YET. This step lands
-// the loop skeleton so subsequent tasks (Task 19 Stop/drain, Task 22
-// Store integration) can layer on top. Three production prerequisites
-// remain unmet and any caller that adopts Run end-to-end today will
-// observe broken behavior:
+// PRODUCTION-CONSUMABLE — the three SCAFFOLDING ONLY blockers are
+// closed (this commit, Task 27 prereq):
 //
-//  1. NO recv-goroutine startup. Run never calls newRecvSession /
-//     runRecv after a successful dial, so runLive's recv arms remain
-//     dormant via Go nil-channel semantics. Inbound BatchAck and
-//     ServerHeartbeat frames are not consumed; cursors will not
-//     advance once Live is reached. Recv startup belongs to a
-//     post-dial hook the plan does not yet specify.
-//  2. STUB wire encoding. encodeBatchMessage (state_live.go) and the
-//     replay-side buildEventBatchFn return empty *wtpv1.ClientMessage
-//     envelopes. Any send is a placeholder frame, not a real EventBatch.
-//  3. inflight is increment-only in runLive. Live cannot decrement
-//     it on BatchAck, so once MaxInflight batches have shipped the
-//     send path stalls until the next reconnect. This is independent
-//     of whether recv startup is wired and predates Task 18 Step 4.
+//  1. Recv-goroutine startup is wired. runConnecting calls startRecv
+//     (recv_multiplexer.go) on accepted SessionAck so runReplaying /
+//     runLive can consume BatchAck, ServerHeartbeat, Goaway, and
+//     stream-error events. teardownRecv is paired with conn.Close on
+//     every exit path.
+//  2. Wire encoding is real. encodeBatchMessage (state_live.go) and
+//     the replay-side buildEventBatchFn (state_replaying.go, aliased
+//     to encodeBatchMessage) build full EventBatch frames from WAL
+//     RecordData via proto.Unmarshal of the per-record CompactEvent
+//     payloads.
+//  3. inflight decrements on BatchAck. The runLive recv arm releases
+//     one slot per acknowledged batch (floor at zero to absorb stale
+//     or duplicate acks), so the send path no longer stalls at
+//     MaxInflight.
 //
-// Until those land (Task 22 / Task 27 wiring per the plan), Run is
-// useful only as the integration surface for the Stop/drain plumbing
-// of Task 19 and as a structural target for end-to-end tests that
-// stop short of Live's recv path.
-//
-// rdrFactory takes the WAL generation AND the start sequence so the
-// caller can position the Reader explicitly per state entry. `gen` is
-// the WAL generation the Reader will be scoped to (segments with a
-// different SegmentHeader.Generation are skipped at segment iteration
-// before record decoding — see wal/reader.go ReaderOptions.Generation
-// and Task 14b); `start` is the inclusive lowest seq the returned
-// Reader will surface for RecordData (RecordLoss markers always
-// surface — see wal/reader.go NewReader).
+// Caller wiring: rdrFactory takes the WAL generation AND the start
+// sequence so the caller can position the Reader explicitly per state
+// entry. `gen` is the WAL generation the Reader will be scoped to
+// (segments with a different SegmentHeader.Generation are skipped at
+// segment iteration before record decoding — see wal/reader.go
+// ReaderOptions.Generation and Task 14b); `start` is the inclusive
+// lowest seq the returned Reader will surface for RecordData
+// (RecordLoss markers always surface — see wal/reader.go NewReader).
 //
 // Replaying opens one Reader per stage returned by computeReplayPlan;
 // only the first stage carries a non-nil PrefixLoss. Subsequent stages
@@ -1021,6 +1036,15 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 	for {
 		select {
 		case <-ctx.Done():
+			// If cancellation lands between state transitions
+			// (after runConnecting → StateReplaying or after
+			// runReplaying → StateLive) the prior state handler
+			// has not yet had a chance to teardown — without this
+			// cleanup the transport would exit holding an open
+			// conn and a live recvSession (roborev Medium follow-
+			// up). regressToConnecting is idempotent so it is
+			// also safe when the prior handler already tore down.
+			t.regressToConnecting()
 			return ctx.Err()
 		case sr := <-t.stopCh:
 			// Stop arrived between states (or during a Connecting
@@ -1059,9 +1083,27 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 			bo.Reset()
 			rep = nil
 			st = next
+			// Start the per-connection recv goroutine now that the
+			// dial succeeded and the SessionAck was accepted;
+			// runReplaying / runLive consume from t.recv.eventCh /
+			// t.recv.errCh and teardown is owned by their exit
+			// paths (with regressToConnecting as the safety-net for
+			// run-loop bail-outs that bypass them). Doing this
+			// here — not inside runConnecting — keeps RunOnce a
+			// pure single-transition seam that does not leak a
+			// recvSession when callers stop after Connecting.
+			// Per roborev Medium round-3.
+			if next == StateReplaying {
+				t.startRecv(ctx)
+			}
 		case StateReplaying:
 			stages, lerr := t.computeReplayPlan(t.remoteReplayCursor, t.persistedAck)
 			if lerr != nil {
+				// runConnecting started the recv goroutine after
+				// SessionAck; without teardown here the next dial's
+				// startRecv would orphan it and let it race the
+				// new conn through t.conn (roborev High).
+				t.regressToConnecting()
 				rep = nil
 				st = StateConnecting
 				continue
@@ -1119,6 +1161,13 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 				}
 			}
 			if stageErr != nil {
+				// rdrFactory and NewReplayer failures inside the
+				// stagesLoop above leak conn + recv if not torn down
+				// here — runReplaying returns its own teardown only
+				// when it actually executed. A break before
+				// runReplaying lands here without teardown (roborev
+				// High).
+				t.regressToConnecting()
 				rep = nil
 				st = StateConnecting
 				select {
@@ -1148,6 +1197,10 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 			}
 			rdr, err := rdrFactory(liveGen, start)
 			if err != nil {
+				// Same leak path as the StateReplaying rdrFactory
+				// failure above — runLive never executes, so its
+				// internal teardown never runs (roborev High).
+				t.regressToConnecting()
 				st = StateConnecting
 				continue
 			}

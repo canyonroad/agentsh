@@ -167,19 +167,21 @@ func TestRun_ReturnsTerminalErrorOnSessionRejection(t *testing.T) {
 // pass a "dials >= 2" assertion.
 func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
 	var attempts atomic.Int32
-	conn := newFakeConn()
+	conn2 := newFakeConn()
+	conn3 := newFakeConn()
 	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
 		n := attempts.Add(1)
 		if n == 1 {
 			return nil, errors.New("transient dial fail")
 		}
-		// Hand back the same fakeConn for attempts 2 and 3. The conn
-		// stays open across the replay-failure regress because runReplaying
-		// is not reached (rdrFactory errors before NewReplayer); the
-		// state regress goes through the Run loop's stage-error branch
-		// without runReplaying tearing the conn down. The next dial
-		// reuses this conn (it has not been Close'd).
-		return conn, nil
+		if n == 2 {
+			return conn2, nil
+		}
+		// Run-loop now closes the held conn on rdrFactory failure
+		// (regressToConnecting helper) to avoid leaking conn + recv;
+		// the third dial therefore needs a fresh conn rather than
+		// reusing conn2 (which would have been Close'd).
+		return conn3, nil
 	})
 
 	tr, err := transport.New(transport.Options{
@@ -217,11 +219,11 @@ func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
 
 	// === attempt 2: drain SessionInit, ack accepted, drive into Replaying.
 	select {
-	case <-conn.sendCh:
+	case <-conn2.sendCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("no SessionInit on second attempt within 2s")
 	}
-	conn.recvCh <- &wtpv1.ServerMessage{
+	conn2.recvCh <- &wtpv1.ServerMessage{
 		Msg: &wtpv1.ServerMessage_SessionAck{
 			SessionAck: &wtpv1.SessionAck{
 				Accepted:            true,
@@ -237,10 +239,10 @@ func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
 	}
 
 	// === attempt 3: replay failure should regress to Connecting and
-	// re-dial. Observe a third SessionInit on the conn — proves the
-	// replay-failure → reconnect cycle, not just "loop ran twice."
+	// re-dial. Observe a third SessionInit on the FRESH conn — proves
+	// the replay-failure → reconnect cycle, not just "loop ran twice."
 	select {
-	case <-conn.sendCh:
+	case <-conn3.sendCh:
 	case <-time.After(3 * time.Second):
 		t.Fatalf("no SessionInit on third attempt; replay-failure did not regress to Connecting (dial attempts=%d)", attempts.Load())
 	}
@@ -249,10 +251,10 @@ func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
 	}
 
 	cancel()
-	// fakeConn.Recv does not honor ctx; close the conn so the third
-	// attempt's Recv unblocks and the Run loop sees ctx.Done() on the
-	// next iteration.
-	_ = conn.Close()
+	// fakeConn.Recv does not honor ctx; close the third conn so the
+	// runConnecting Recv unblocks and the Run loop sees ctx.Done() on
+	// the next iteration.
+	_ = conn3.Close()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
@@ -260,5 +262,389 @@ func TestRun_RetriesTransientDialFailureUntilSuccess(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not return within 3s of cancel")
+	}
+}
+
+// TestRun_StartsRecvGoroutineAfterAcceptedSessionAck closes SCAFFOLDING
+// item #1: "Run never calls newRecvSession / runRecv after a successful
+// dial, so runLive's recv arms remain dormant via Go nil-channel
+// semantics." After the SessionAck-accepted handshake completes, the
+// recv goroutine MUST be running so that runReplaying / runLive can
+// observe BatchAck, ServerHeartbeat, Goaway, and stream errors.
+//
+// This is the load-bearing prerequisite for every component test that
+// exercises server-initiated stream behaviour (Tasks 25, 26).
+func TestRun_StartsRecvGoroutineAfterAcceptedSessionAck(t *testing.T) {
+	conn := newFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return conn, nil
+	})
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Pre-condition: no recv goroutine before Run starts.
+	if rsh := transport.RecvSessionForTest(tr); rsh != nil {
+		t.Fatalf("RecvSessionForTest pre-Run = %v, want nil", rsh)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Block rdrFactory so the recv goroutine state is observable
+	// BEFORE the test could regress through StateLive's failure path
+	// and tear it down.
+	rdrFactoryEntered := make(chan struct{}, 1)
+	rdrFactoryRelease := make(chan struct{})
+	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
+		select {
+		case rdrFactoryEntered <- struct{}{}:
+		default:
+		}
+		<-rdrFactoryRelease
+		return nil, errors.New("test: no replay reader")
+	}
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
+			Batcher: transport.BatcherOptions{
+				MaxRecords: 100,
+				MaxBytes:   1 << 16,
+				MaxAge:     50 * time.Millisecond,
+			},
+			MaxInflight:    8,
+			HeartbeatEvery: time.Second,
+		})
+	}()
+
+	// Drain SessionInit, accept the session.
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no SessionInit sent")
+	}
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{Accepted: true},
+		},
+	}
+
+	// Wait for rdrFactory to be entered. At this point the run loop
+	// has crossed runConnecting → StateReplaying → StateLive and is
+	// blocked inside our gated rdrFactory; the recv goroutine started
+	// in runConnecting MUST be alive.
+	select {
+	case <-rdrFactoryEntered:
+	case <-time.After(1 * time.Second):
+		t.Fatal("rdrFactory was not entered within 1s of SessionAck")
+	}
+
+	if rsh := transport.RecvSessionForTest(tr); rsh == nil {
+		t.Fatal("recv goroutine never started after accepted SessionAck (SCAFFOLDING ONLY item #1 still open)")
+	}
+
+	close(rdrFactoryRelease)
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancel")
+	}
+}
+
+// TestRun_NoRecvLeakOnReaderFactoryFailure pins the roborev High
+// finding: if a post-SessionAck path regresses to StateConnecting
+// without runReplaying / runLive taking ownership, the recv goroutine
+// started in runConnecting must be torn down — otherwise the next
+// dial's startRecv overwrites t.recv and the orphaned goroutine
+// races the new connection through the shared t.conn pointer.
+//
+// We block rdrFactory until the test has observed the recv goroutine,
+// then unblock with an error to drive StateLive → StateConnecting.
+// rsh.Done() must close before the next dial, proving teardown ran.
+func TestRun_NoRecvLeakOnReaderFactoryFailure(t *testing.T) {
+	conn := newFakeConn()
+	dialAttempts := 0
+	gateSecondDial := make(chan struct{})
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		dialAttempts++
+		if dialAttempts == 1 {
+			return conn, nil
+		}
+		// Block the second dial so the first recv-session lifecycle
+		// is observable before the next iteration races us.
+		<-gateSecondDial
+		return nil, errors.New("dial gate released")
+	})
+
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rdrFactoryEntered := make(chan struct{}, 1)
+	rdrFactoryRelease := make(chan struct{})
+	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
+		// Signal entry; test inspects recv state, then releases.
+		select {
+		case rdrFactoryEntered <- struct{}{}:
+		default:
+		}
+		<-rdrFactoryRelease
+		return nil, errors.New("test: rdrFactory always fails")
+	}
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
+			Batcher: transport.BatcherOptions{
+				MaxRecords: 100,
+				MaxBytes:   1 << 16,
+				MaxAge:     50 * time.Millisecond,
+			},
+			MaxInflight:    8,
+			HeartbeatEvery: time.Second,
+		})
+	}()
+
+	// SessionInit + accept.
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no SessionInit sent")
+	}
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{Accepted: true},
+		},
+	}
+
+	// Wait for rdrFactory to be entered — at this point startRecv has
+	// run AND we are still inside the StateLive setup before regress.
+	select {
+	case <-rdrFactoryEntered:
+	case <-time.After(1 * time.Second):
+		t.Fatal("rdrFactory was not entered within 1s of SessionAck")
+	}
+
+	rsh := transport.RecvSessionForTest(tr)
+	if rsh == nil {
+		t.Fatal("recv goroutine not running at rdrFactory entry; startRecv did not fire")
+	}
+
+	// Release rdrFactory (which returns an error → regressToConnecting).
+	close(rdrFactoryRelease)
+
+	// rsh.Done() closes when runRecv exits via teardown's
+	// cancel + close(rs.done) sequence. Without the fix, teardown
+	// is skipped on this leak path and the goroutine is orphaned.
+	select {
+	case <-rsh.Done():
+	case <-time.After(1 * time.Second):
+		t.Fatal("recv goroutine still running after rdrFactory failure; teardown leaked the recvSession")
+	}
+
+	close(gateSecondDial)
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancel")
+	}
+}
+
+// TestRun_NoRecvLeakOnOuterCtxCancel pins the roborev Medium round-3
+// finding by exercising specifically the outer Run-loop top-of-iteration
+// ctx.Done() branch — NOT the rdrFactory regress path.
+//
+// Determinism trick (round-4 follow-up): cancel ctx BEFORE sending
+// SessionAck. fakeConn.Recv does not honor ctx, so the run loop is
+// blocked in conn.Recv() inside runConnecting and does not observe
+// the cancel. When SessionAck arrives, runConnecting completes,
+// startRecv runs, and the StateConnecting case sets st = StateReplaying
+// and falls through. The NEXT iteration's top-of-loop select then
+// sees ctx.Done() — and ONLY the outer ctx.Done branch teardown can
+// fire here (rdrFactory was never called). Removing the outer
+// regressToConnecting() call from that branch would leave the recv
+// goroutine alive, failing this test.
+func TestRun_NoRecvLeakOnOuterCtxCancel(t *testing.T) {
+	conn := newFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return conn, nil
+	})
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rdrFactoryCalled := make(chan struct{}, 1)
+	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
+		select {
+		case rdrFactoryCalled <- struct{}{}:
+		default:
+		}
+		return nil, errors.New("rdrFactory should not be reached")
+	}
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
+			Batcher: transport.BatcherOptions{
+				MaxRecords: 100,
+				MaxBytes:   1 << 16,
+				MaxAge:     50 * time.Millisecond,
+			},
+			MaxInflight:    8,
+			HeartbeatEvery: time.Second,
+		})
+	}()
+
+	// Drain SessionInit (run loop is now in conn.Recv waiting for ack).
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no SessionInit sent")
+	}
+
+	// Cancel ctx BEFORE the ack arrives. fakeConn.Recv ignores ctx so
+	// the run loop continues to wait on conn.recvCh.
+	cancel()
+
+	// Now deliver the ack. Run loop unblocks, ackSessionAck runs,
+	// startRecv runs, st = StateReplaying, continue → next iteration's
+	// select sees ctx.Done() and the OUTER teardown fires.
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{Accepted: true},
+		},
+	}
+
+	// Run must return ctx.Canceled with no leaked goroutine. If the
+	// outer ctx.Done branch were missing the regressToConnecting call,
+	// runRecv would still be alive after Run returns — we detect this
+	// by asserting Run returns AND no rdrFactory call ever happened
+	// (proving we did not pass through StateLive's regress path).
+	select {
+	case got := <-runDone:
+		if !errors.Is(got, context.Canceled) {
+			t.Fatalf("Run returned %v, want context.Canceled", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of cancel")
+	}
+
+	select {
+	case <-rdrFactoryCalled:
+		t.Fatal("rdrFactory was reached; test no longer isolates the outer ctx.Done teardown path")
+	default:
+	}
+
+	// After Run returns, t.recv MUST be nil. This is the load-bearing
+	// assertion: the outer ctx.Done branch is the ONLY teardown path
+	// reachable in this test, so a nil t.recv proves the branch fired
+	// regressToConnecting (which sets t.recv = nil via teardownRecv).
+	if rsh := transport.RecvSessionForTest(tr); rsh != nil {
+		t.Fatal("recv goroutine still attached after Run returned; outer ctx.Done branch leaked")
+	}
+
+	// AND the conn must have been closed. regressToConnecting closes
+	// t.conn; without that call the accepted stream would survive.
+	// fakeConn.Close closes the `closed` channel, so observing the
+	// closed channel proves Close was called (roborev Low round-6).
+	select {
+	case <-conn.closed:
+	default:
+		t.Fatal("conn still open after Run returned; outer ctx.Done branch leaked the accepted stream")
+	}
+}
+
+// TestRunOnce_DoesNotStartRecvGoroutine pins the roborev Medium
+// round-3 finding: RunOnce(StateConnecting) is a single-transition
+// seam used by transport-level tests; it MUST NOT leave a live
+// recvSession with no owner. Run owns the recv lifecycle (calling
+// startRecv after a successful runConnecting), so RunOnce by design
+// does NOT start one.
+//
+// Round-5 follow-up: the seam must also not leave the accepted
+// stream open for callers to inherit — RunOnce is now self-
+// contained and closes t.conn on a successful transition. The test
+// asserts both contracts.
+func TestRunOnce_DoesNotStartRecvGoroutine(t *testing.T) {
+	conn := newFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return conn, nil
+	})
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type res struct {
+		st  transport.State
+		err error
+	}
+	done := make(chan res, 1)
+	go func() {
+		st, e := tr.RunOnce(ctx, transport.StateConnecting)
+		done <- res{st, e}
+	}()
+
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no SessionInit sent")
+	}
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{Accepted: true},
+		},
+	}
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("RunOnce returned err: %v", r.err)
+		}
+		if r.st != transport.StateReplaying {
+			t.Fatalf("RunOnce next state: got %v, want StateReplaying", r.st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunOnce did not return within 2s of SessionAck")
+	}
+
+	// CRITICAL #1: RunOnce must not have started the recv goroutine.
+	// Run owns that lifecycle so a single-transition seam does not
+	// leak a recvSession with no teardown owner.
+	if rsh := transport.RecvSessionForTest(tr); rsh != nil {
+		t.Fatal("RunOnce(StateConnecting) leaked a recvSession; Run should own startRecv, not runConnecting")
+	}
+
+	// CRITICAL #2: RunOnce must close the accepted conn before
+	// returning — otherwise callers inherit a live stream with no
+	// teardown owner. fakeConn.Close closes the `closed` channel.
+	select {
+	case <-conn.closed:
+	default:
+		t.Fatal("RunOnce(StateConnecting) did not close the accepted conn; caller would inherit a live stream")
 	}
 }

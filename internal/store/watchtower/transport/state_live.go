@@ -66,7 +66,12 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 	tick := time.NewTicker(opts.Batcher.MaxAge / 2)
 	defer tick.Stop()
 
-	inflight := 0
+	// Track outstanding batch boundaries by (gen, seq) so a single
+	// coalesced BatchAck releases every covered batch — a counter
+	// that decrements by one per ack would stall the send path
+	// against any conforming server that batches acknowledgements
+	// (roborev Medium round-3).
+	var inflight inflightTracker
 
 	flush := func() error {
 		batch := b.Drain()
@@ -80,7 +85,8 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 		if err := t.conn.Send(msg); err != nil {
 			return fmt.Errorf("send EventBatch: %w", err)
 		}
-		inflight++
+		last := batch.Records[len(batch.Records)-1]
+		inflight.Push(last.Generation, last.Sequence)
 		return nil
 	}
 
@@ -144,13 +150,34 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			// this select arm dormant in that case.
 			switch ev.kind {
 			case recvAckEventBatchAck:
-				t.applyAckFromRecv("batch_ack", ev.gen, ev.seq)
+				outcome := t.applyAckFromRecv("batch_ack", ev.gen, ev.seq)
+				// Release every pending batch whose high-watermark is
+				// at or below the adopted ack — a coalesced BatchAck
+				// can cover several Sends, and decrementing by one
+				// would stall the send path. Anomaly / ResendNeeded /
+				// NoOp acks are NOT a release event (cursor did not
+				// advance); the rolled-back-Adopted path also returns
+				// NoOp from applyAckFromRecv so it is correctly
+				// excluded here.
+				if outcome == AckOutcomeAdopted {
+					inflight.Release(ev.gen, ev.seq)
+				}
 			case recvAckEventHeartbeat:
 				// Heartbeat carries no gen on the wire; FIFO order on
 				// eventCh guarantees any earlier BatchAck has already
 				// advanced t.persistedAck.Generation, so substituting
 				// here is safe (round-22 Finding 1 invariant).
-				t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, ev.seq)
+				//
+				// Heartbeats use the SAME ack clamp as BatchAck and
+				// may carry an ack advance when a BatchAck was
+				// missed (per spec). Release every covered batch on
+				// an Adopted heartbeat — otherwise the sender would
+				// wedge at MaxInflight until reconnect (roborev
+				// Medium round-4).
+				outcome := t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, ev.seq)
+				if outcome == AckOutcomeAdopted {
+					inflight.Release(t.persistedAck.Generation, ev.seq)
+				}
 			}
 		case err := <-recvErrCh:
 			// Recv goroutine surfaced a fatal stream error OR a fail-
@@ -163,7 +190,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			return StateConnecting, fmt.Errorf("recv: %w", err)
 		case <-rdr.Notify():
 			// Pull as many records as the window and batcher allow.
-			for inflight < opts.MaxInflight {
+			for inflight.Len() < opts.MaxInflight {
 				rec, ok, err := rdr.TryNext()
 				if err != nil {
 					_ = t.conn.Close()
@@ -191,11 +218,30 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 						t.conn = nil
 						return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
 					}
-					inflight++
+					last := outBatch.Records[len(outBatch.Records)-1]
+					inflight.Push(last.Generation, last.Sequence)
 				}
 			}
 		case now := <-tick.C:
-			if outBatch := b.Tick(now); outBatch != nil {
+			// Gate the tick-driven flush on available inflight
+			// capacity. Without this gate the tick path would send
+			// an aged batch even when inflight.Len() ==
+			// opts.MaxInflight, allowing one extra unacked batch
+			// onto the wire. The Notify path's overshoot scenario:
+			// b.Add(rec) flushes a full batch (inflight.Push), but
+			// the same Add buffers `rec` as the start of a new
+			// batch in b.pending; if the window now equals
+			// MaxInflight, the next tick.C arm would still flush
+			// that fresh batch (roborev Medium round-6).
+			//
+			// Records stay in b.pending across ticks until the
+			// window opens (a BatchAck releases capacity); the
+			// next tick after release flushes them. b.Tick is
+			// idempotent on full pending — calling it later with
+			// the same MaxAge boundary already crossed still
+			// returns the buffered batch.
+			if inflight.Len() < opts.MaxInflight {
+				if outBatch := b.Tick(now); outBatch != nil {
 				msg, err := encodeBatchMessageFn(outBatch.Records)
 				if err != nil {
 					_ = t.conn.Close()
@@ -212,7 +258,9 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 					t.conn = nil
 					return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
 				}
-				inflight++
+				last := outBatch.Records[len(outBatch.Records)-1]
+				inflight.Push(last.Generation, last.Sequence)
+				}
 			}
 		}
 		_ = flush // explicit lint reference; called from Drain path
