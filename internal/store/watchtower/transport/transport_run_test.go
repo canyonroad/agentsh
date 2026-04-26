@@ -462,12 +462,20 @@ func TestRun_NoRecvLeakOnReaderFactoryFailure(t *testing.T) {
 	}
 }
 
-// TestRun_NoRecvLeakOnOuterCtxCancel pins the roborev Medium follow-up:
-// the outer Run-loop's ctx.Done branch returned ctx.Err() without
-// tearing down conn or recv, so a cancellation landing between state
-// transitions (after runConnecting -> StateReplaying, or after
-// runReplaying -> StateLive) would leave both leaked. With the fix,
-// the ctx.Done branch routes through regressToConnecting first.
+// TestRun_NoRecvLeakOnOuterCtxCancel pins the roborev Medium round-3
+// finding by exercising specifically the outer Run-loop top-of-iteration
+// ctx.Done() branch — NOT the rdrFactory regress path.
+//
+// Determinism trick (round-4 follow-up): cancel ctx BEFORE sending
+// SessionAck. fakeConn.Recv does not honor ctx, so the run loop is
+// blocked in conn.Recv() inside runConnecting and does not observe
+// the cancel. When SessionAck arrives, runConnecting completes,
+// startRecv runs, and the StateConnecting case sets st = StateReplaying
+// and falls through. The NEXT iteration's top-of-loop select then
+// sees ctx.Done() — and ONLY the outer ctx.Done branch teardown can
+// fire here (rdrFactory was never called). Removing the outer
+// regressToConnecting() call from that branch would leave the recv
+// goroutine alive, failing this test.
 func TestRun_NoRecvLeakOnOuterCtxCancel(t *testing.T) {
 	conn := newFakeConn()
 	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
@@ -483,15 +491,13 @@ func TestRun_NoRecvLeakOnOuterCtxCancel(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	rdrFactoryEntered := make(chan struct{}, 1)
-	rdrFactoryRelease := make(chan struct{})
+	rdrFactoryCalled := make(chan struct{}, 1)
 	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
 		select {
-		case rdrFactoryEntered <- struct{}{}:
+		case rdrFactoryCalled <- struct{}{}:
 		default:
 		}
-		<-rdrFactoryRelease
-		return nil, errors.New("test: rdrFactory release")
+		return nil, errors.New("rdrFactory should not be reached")
 	}
 	runDone := make(chan error, 1)
 	go func() {
@@ -506,51 +512,52 @@ func TestRun_NoRecvLeakOnOuterCtxCancel(t *testing.T) {
 		})
 	}()
 
-	// SessionInit + accept.
+	// Drain SessionInit (run loop is now in conn.Recv waiting for ack).
 	select {
 	case <-conn.sendCh:
 	case <-time.After(1 * time.Second):
 		t.Fatal("no SessionInit sent")
 	}
+
+	// Cancel ctx BEFORE the ack arrives. fakeConn.Recv ignores ctx so
+	// the run loop continues to wait on conn.recvCh.
+	cancel()
+
+	// Now deliver the ack. Run loop unblocks, ackSessionAck runs,
+	// startRecv runs, st = StateReplaying, continue → next iteration's
+	// select sees ctx.Done() and the OUTER teardown fires.
 	conn.recvCh <- &wtpv1.ServerMessage{
 		Msg: &wtpv1.ServerMessage_SessionAck{
 			SessionAck: &wtpv1.SessionAck{Accepted: true},
 		},
 	}
 
-	// Wait until rdrFactory blocks — a state where conn is held and
-	// recv goroutine is alive.
+	// Run must return ctx.Canceled with no leaked goroutine. If the
+	// outer ctx.Done branch were missing the regressToConnecting call,
+	// runRecv would still be alive after Run returns — we detect this
+	// by asserting Run returns AND no rdrFactory call ever happened
+	// (proving we did not pass through StateLive's regress path).
 	select {
-	case <-rdrFactoryEntered:
-	case <-time.After(1 * time.Second):
-		t.Fatal("rdrFactory was not entered within 1s of SessionAck")
-	}
-
-	rsh := transport.RecvSessionForTest(tr)
-	if rsh == nil {
-		t.Fatal("recv goroutine not running at rdrFactory entry")
-	}
-
-	// Cancel ctx WHILE rdrFactory is blocked. The rdrFactory return
-	// path eventually triggers regressToConnecting, but we want to
-	// also exercise the OUTER ctx.Done branch — release rdrFactory
-	// AFTER ctx is cancelled so the run-loop's top-of-loop select
-	// sees ctx.Done first on a subsequent iteration. Either way, the
-	// recv goroutine must be torn down before Run returns; rsh.Done()
-	// closes once teardown completes.
-	cancel()
-	close(rdrFactoryRelease)
-
-	select {
-	case <-rsh.Done():
-	case <-time.After(1 * time.Second):
-		t.Fatal("recv goroutine still running after ctx cancel; outer ctx.Done branch leaked")
+	case got := <-runDone:
+		if !errors.Is(got, context.Canceled) {
+			t.Fatalf("Run returned %v, want context.Canceled", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of cancel")
 	}
 
 	select {
-	case <-runDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Run did not return within 3s of cancel")
+	case <-rdrFactoryCalled:
+		t.Fatal("rdrFactory was reached; test no longer isolates the outer ctx.Done teardown path")
+	default:
+	}
+
+	// After Run returns, t.recv MUST be nil. This is the load-bearing
+	// assertion: the outer ctx.Done branch is the ONLY teardown path
+	// reachable in this test, so a nil t.recv proves the branch fired
+	// regressToConnecting (which sets t.recv = nil via teardownRecv).
+	if rsh := transport.RecvSessionForTest(tr); rsh != nil {
+		t.Fatal("recv goroutine still attached after Run returned; outer ctx.Done branch leaked")
 	}
 }
 

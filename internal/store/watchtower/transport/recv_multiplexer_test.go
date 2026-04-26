@@ -700,6 +700,22 @@ func TestRecvMultiplexer_BatchAckReturnsOutcomeKind(t *testing.T) {
 			t.Fatalf("rolled-back ack: got outcome %v, want non-Adopted (rollback path must not gate inflight--)", got)
 		}
 	})
+
+	t.Run("Heartbeat_advancing_returns_Adopted", func(t *testing.T) {
+		// Pins the roborev Medium round-4 finding: ServerHeartbeat
+		// uses the same ack clamp as BatchAck and may carry an ack
+		// advance when a BatchAck was missed. runLive MUST be able
+		// to release inflight slots from a heartbeat-driven advance
+		// or the sender wedges at MaxInflight until reconnect.
+		env := newClampTestEnv(t, Options{})
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		appendDataInGen(t, env.w, 1, 1, 100)
+
+		got := env.tr.applyAckFromRecv("server_heartbeat", 1, 50)
+		if got != AckOutcomeAdopted {
+			t.Fatalf("Adopted heartbeat ack: got outcome %v, want AckOutcomeAdopted", got)
+		}
+	})
 }
 
 // silence unused import warnings for wal package; the wal package is needed
