@@ -1,0 +1,40 @@
+syntax = "proto3";
+package canyonroad.wtp.v1.ocsf;
+option go_package = "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1/ocsf;ocsfpb";
+import "canyonroad/wtp/v1/ocsf/common.proto";
+
+// HTTPActivity (class_uid 4002). OCSF v1.8.0 subset.
+//
+// Activities used:
+//   1 = Request
+//   2 = Response
+//   6 = Traffic
+message HTTPActivity {
+  optional uint32   class_uid     = 1; // 4002
+  optional uint32   activity_id   = 2;
+  optional uint32   category_uid  = 3; // 4
+  optional uint32   type_uid      = 4;
+  optional uint64   time          = 5;
+  optional string   severity      = 6;
+  optional Metadata metadata      = 7;
+  optional Actor    actor         = 8;
+  optional Endpoint src_endpoint  = 9;
+  optional Endpoint dst_endpoint  = 10;
+  optional HTTPRequest  http_request  = 11;
+  optional HTTPResponse http_response = 12;
+  optional string   policy_decision = 13;
+  optional string   policy_rule     = 14;
+}
+
+message HTTPRequest {
+  optional string http_method = 1; // ev.Fields["method"]
+  optional string url         = 2; // ev.Fields["url"]
+  optional string user_agent  = 3; // ev.Fields["user_agent"]
+  optional string version     = 4; // ev.Fields["http_version"]
+  optional string host        = 5; // ev.Fields["host"]
+}
+
+message HTTPResponse {
+  optional uint32 status_code = 1; // ev.Fields["status_code"]
+  optional uint64 length      = 2; // ev.Fields["response_bytes"]
+}
