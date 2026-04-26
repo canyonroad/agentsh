@@ -567,6 +567,11 @@ func TestRun_NoRecvLeakOnOuterCtxCancel(t *testing.T) {
 // recvSession with no owner. Run owns the recv lifecycle (calling
 // startRecv after a successful runConnecting), so RunOnce by design
 // does NOT start one.
+//
+// Round-5 follow-up: the seam must also not leave the accepted
+// stream open for callers to inherit — RunOnce is now self-
+// contained and closes t.conn on a successful transition. The test
+// asserts both contracts.
 func TestRunOnce_DoesNotStartRecvGoroutine(t *testing.T) {
 	conn := newFakeConn()
 	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
@@ -617,10 +622,19 @@ func TestRunOnce_DoesNotStartRecvGoroutine(t *testing.T) {
 		t.Fatal("RunOnce did not return within 2s of SessionAck")
 	}
 
-	// CRITICAL: RunOnce must not have started the recv goroutine.
+	// CRITICAL #1: RunOnce must not have started the recv goroutine.
 	// Run owns that lifecycle so a single-transition seam does not
 	// leak a recvSession with no teardown owner.
 	if rsh := transport.RecvSessionForTest(tr); rsh != nil {
 		t.Fatal("RunOnce(StateConnecting) leaked a recvSession; Run should own startRecv, not runConnecting")
+	}
+
+	// CRITICAL #2: RunOnce must close the accepted conn before
+	// returning — otherwise callers inherit a live stream with no
+	// teardown owner. fakeConn.Close closes the `closed` channel.
+	select {
+	case <-conn.closed:
+	default:
+		t.Fatal("RunOnce(StateConnecting) did not close the accepted conn; caller would inherit a live stream")
 	}
 }

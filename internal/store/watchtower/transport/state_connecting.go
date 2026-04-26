@@ -154,10 +154,22 @@ func (t *Transport) ackSessionAck(ack *wtpv1.SessionAck) {
 // RunOnce runs a single state transition for testing. Production code
 // should use Run, which loops until Shutdown. The error mirrors whatever
 // the per-state handler surfaced so tests can assert on failure modes.
+//
+// Self-contained teardown: a successful runConnecting transition leaves
+// t.conn set for the next state handler to consume; the production Run
+// loop hands off ownership to runReplaying / runLive which own
+// teardown. As a single-transition seam, RunOnce closes the conn (and
+// tears down any in-flight recv session, though startRecv now runs in
+// Run, not in runConnecting) before returning so callers do not
+// inherit live resources with no owner. Per roborev Medium round-5.
 func (t *Transport) RunOnce(ctx context.Context, st State) (State, error) {
 	switch st {
 	case StateConnecting:
-		return t.runConnecting(ctx)
+		next, err := t.runConnecting(ctx)
+		if next == StateReplaying {
+			t.regressToConnecting()
+		}
+		return next, err
 	default:
 		return StateShutdown, nil
 	}
