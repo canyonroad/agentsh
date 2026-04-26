@@ -167,7 +167,17 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 				// eventCh guarantees any earlier BatchAck has already
 				// advanced t.persistedAck.Generation, so substituting
 				// here is safe (round-22 Finding 1 invariant).
-				t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, ev.seq)
+				//
+				// Heartbeats use the SAME ack clamp as BatchAck and
+				// may carry an ack advance when a BatchAck was
+				// missed (per spec). Release every covered batch on
+				// an Adopted heartbeat — otherwise the sender would
+				// wedge at MaxInflight until reconnect (roborev
+				// Medium round-4).
+				outcome := t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, ev.seq)
+				if outcome == AckOutcomeAdopted {
+					inflight.Release(t.persistedAck.Generation, ev.seq)
+				}
 			}
 		case err := <-recvErrCh:
 			// Recv goroutine surfaced a fatal stream error OR a fail-
