@@ -1,0 +1,23 @@
+{
+  "class_uid": 6005,
+  "activity_id": 153,
+  "category_uid": 6,
+  "type_uid": 600653,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "mcp_tool_changed",
+    "uid": "ev-mcp-changed-1"
+  },
+  "app_name": "agentsh",
+  "agent_internal": false,
+  "enrichments": {
+    "tool_name": "search"
+  }
+}

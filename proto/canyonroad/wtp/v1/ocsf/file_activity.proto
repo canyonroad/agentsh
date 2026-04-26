@@ -1,0 +1,32 @@
+syntax = "proto3";
+package canyonroad.wtp.v1.ocsf;
+option go_package = "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1/ocsf;ocsfpb";
+import "canyonroad/wtp/v1/ocsf/common.proto";
+
+// FileSystemActivity (class_uid 1001). OCSF v1.8.0 subset.
+//
+// Activities used:
+//   1 = Create
+//   2 = Read
+//   3 = Update    (write)
+//   4 = Delete
+//   5 = Rename
+//   6 = Set Attributes (chmod)
+//   7 = Set Security
+//   8 = Get Attributes
+message FileSystemActivity {
+  optional uint32   class_uid     = 1; // 1001
+  optional uint32   activity_id   = 2;
+  optional uint32   category_uid  = 3; // 1 = System Activity
+  optional uint32   type_uid      = 4;
+  optional uint64   time          = 5;
+  optional string   severity      = 6;
+  optional Metadata metadata      = 7;
+  optional Actor    actor         = 8;
+  optional File     file          = 9;
+  optional File     file_diff     = 10; // for rename: source file is `file_diff`, dest is `file`
+  optional string   operation     = 11; // ev.Operation
+  optional string   policy_decision = 12;
+  optional string   policy_rule     = 13;
+  optional bool     soft_deleted    = 14;
+}

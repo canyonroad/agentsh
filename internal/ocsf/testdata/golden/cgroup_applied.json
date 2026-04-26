@@ -1,0 +1,20 @@
+{
+  "class_uid": 6005,
+  "activity_id": 102,
+  "category_uid": 6,
+  "type_uid": 600602,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "cgroup_applied",
+    "uid": "ev-cgroup-applied-1"
+  },
+  "app_name": "agentsh",
+  "agent_internal": true
+}

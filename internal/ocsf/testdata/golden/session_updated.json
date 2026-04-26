@@ -1,0 +1,25 @@
+{
+  "class_uid": 6005,
+  "activity_id": 133,
+  "category_uid": 6,
+  "type_uid": 600633,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "session_updated",
+    "uid": "ev-sess-updated-1"
+  },
+  "actor": {
+    "process": {
+      "session_uid": "sess-x"
+    }
+  },
+  "app_name": "agentsh",
+  "agent_internal": true
+}

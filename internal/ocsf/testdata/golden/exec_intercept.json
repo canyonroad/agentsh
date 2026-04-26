@@ -1,0 +1,28 @@
+{
+  "class_uid": 1007,
+  "activity_id": 3,
+  "category_uid": 1,
+  "type_uid": 100703,
+  "time": "1777118400000000000",
+  "severity": "Medium",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "exec_intercept",
+    "uid": "ev-exec-intercept-1"
+  },
+  "process": {
+    "pid": "101",
+    "name": "dangerous",
+    "file": {
+      "path": "/bin/dangerous",
+      "name": "dangerous"
+    }
+  },
+  "policy_decision": "deny",
+  "policy_rule": "no-fork"
+}

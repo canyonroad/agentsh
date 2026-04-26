@@ -1,0 +1,32 @@
+syntax = "proto3";
+package canyonroad.wtp.v1.ocsf;
+option go_package = "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1/ocsf;ocsfpb";
+import "canyonroad/wtp/v1/ocsf/common.proto";
+
+// DNSActivity (class_uid 4003). OCSF v1.8.0 subset.
+//
+// Activities used:
+//   1 = Query
+//   2 = Response
+//   6 = Traffic
+message DNSActivity {
+  optional uint32   class_uid     = 1; // 4003
+  optional uint32   activity_id   = 2;
+  optional uint32   category_uid  = 3; // 4
+  optional uint32   type_uid      = 4;
+  optional uint64   time          = 5;
+  optional string   severity      = 6;
+  optional Metadata metadata      = 7;
+  optional Actor    actor         = 8;
+  optional DNSQuery query         = 9;
+  optional string   redirect_target = 10;
+  optional string   policy_decision = 11;
+  optional string   policy_rule     = 12;
+}
+
+message DNSQuery {
+  optional string hostname  = 1; // ev.Domain or ev.Fields["hostname"]
+  optional uint32 type      = 2; // dns rrtype number when known
+  optional string type_name = 3; // "A" | "AAAA" | "TXT" | …
+  optional string class     = 4; // "IN"
+}

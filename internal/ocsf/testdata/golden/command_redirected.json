@@ -1,0 +1,23 @@
+{
+  "class_uid": 1007,
+  "activity_id": 3,
+  "category_uid": 1,
+  "type_uid": 100703,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "command_redirected",
+    "uid": "ev-cmd-redirected-1"
+  },
+  "process": {
+    "pid": "120"
+  },
+  "unwrapped_from": "sudo",
+  "payload_command": "/usr/bin/find"
+}

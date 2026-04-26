@@ -1,0 +1,38 @@
+// proto/canyonroad/wtp/v1/ocsf/process_activity.proto
+
+syntax = "proto3";
+
+package canyonroad.wtp.v1.ocsf;
+
+option go_package = "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1/ocsf;ocsfpb";
+
+import "canyonroad/wtp/v1/ocsf/common.proto";
+
+// ProcessActivity (class_uid 1007). OCSF v1.8.0 subset.
+//
+// Activities used by agentsh:
+//   1 = Launch
+//   2 = Terminate
+//   3 = Open      (used for exec_intercept)
+//   4 = Inject    (reserved; not currently emitted)
+//
+// Sources mapping to this class: execve, exec, exec_intercept, exec.start,
+// ptrace_execve, command_started, command_executed, command_finished,
+// command_killed, command_redirected, command_redirect, process_start, exit.
+message ProcessActivity {
+  optional uint32   class_uid        = 1;  // 1007
+  optional uint32   activity_id      = 2;
+  optional uint32   category_uid     = 3;  // 1 = System Activity
+  optional uint32   type_uid         = 4;  // class_uid * 100 + activity_id
+  optional uint64   time             = 5;  // ev.Timestamp.UTC().UnixNano()
+  optional string   severity         = 6;  // "Informational" | "Low" | …
+  optional Metadata metadata         = 7;
+  optional Actor    actor            = 8;  // parent process
+  optional Process  process          = 9;  // child / target process
+  optional uint32   exit_code        = 10;
+  optional string   policy_decision  = 11; // ev.Policy.Decision when present
+  optional string   policy_rule      = 12;
+  optional string   unwrapped_from   = 13;
+  optional string   payload_command  = 14;
+  optional bool     truncated        = 15;
+}

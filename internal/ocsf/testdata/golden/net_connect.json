@@ -1,0 +1,32 @@
+{
+  "class_uid": 4001,
+  "activity_id": 1,
+  "category_uid": 4,
+  "type_uid": 400101,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "net_connect",
+    "uid": "ev-net-connect-1"
+  },
+  "actor": {
+    "process": {
+      "pid": "300"
+    }
+  },
+  "dst_endpoint": {
+    "ip": "93.184.216.34",
+    "hostname": "example.com",
+    "domain": "example.com"
+  },
+  "connection_info": {
+    "protocol_name": "tcp",
+    "direction": "Outbound"
+  }
+}

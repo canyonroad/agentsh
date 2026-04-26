@@ -1,0 +1,28 @@
+{
+  "class_uid": 2004,
+  "activity_id": 1,
+  "category_uid": 2,
+  "type_uid": 200401,
+  "time": "1777118400000000000",
+  "severity": "Medium",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "taint_propagated",
+    "uid": "ev-taint-prop-1"
+  },
+  "actor": {
+    "process": {
+      "pid": "604"
+    }
+  },
+  "finding_info": {
+    "title": "taint_propagated",
+    "finding_uid": "ev-taint-prop-1",
+    "types": "taint"
+  }
+}

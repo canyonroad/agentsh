@@ -1,0 +1,23 @@
+{
+  "class_uid": 6005,
+  "activity_id": 103,
+  "category_uid": 6,
+  "type_uid": 600603,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "llm_proxy_started",
+    "uid": "ev-llm-started-1"
+  },
+  "app_name": "agentsh",
+  "agent_internal": false,
+  "enrichments": {
+    "provider": "anthropic"
+  }
+}

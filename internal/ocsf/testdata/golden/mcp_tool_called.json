@@ -1,0 +1,29 @@
+{
+  "class_uid": 6005,
+  "activity_id": 105,
+  "category_uid": 6,
+  "type_uid": 600605,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "mcp_tool_called",
+    "uid": "ev-mcp-called-1"
+  },
+  "actor": {
+    "process": {
+      "pid": "700"
+    }
+  },
+  "app_name": "agentsh",
+  "agent_internal": false,
+  "enrichments": {
+    "server_name": "tools-1",
+    "tool_name": "search"
+  }
+}
