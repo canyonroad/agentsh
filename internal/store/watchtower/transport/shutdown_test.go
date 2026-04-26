@@ -702,3 +702,86 @@ func TestShutdown_StopBeforeLiveExits(t *testing.T) {
 		t.Fatal("Run did not return within 2s of Stop")
 	}
 }
+
+// TestStop_AfterRunAlreadyExited is the Task 27c acceptance test: once
+// the Run loop has terminated (e.g. via SessionAck rejection), a
+// subsequent Transport.Stop call MUST return without blocking on a
+// never-closed stopReq.done channel. Without the RunDone signal,
+// Stop's send to t.stopCh succeeds (cap-1 buffer) but its <-r.done
+// wait deadlocks because no consumer ever services the request.
+//
+// The test drives Run to terminal exit via SessionAck rejection,
+// waits for Run to actually return, THEN calls Stop and asserts it
+// returns within a tight bound.
+func TestStop_AfterRunAlreadyExited(t *testing.T) {
+	conn := newFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return conn, nil
+	})
+
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
+		t.Fatal("rdrFactory called; rejection should fire before Replaying/Live")
+		return nil, nil
+	}
+	go func() {
+		runDone <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
+			Batcher: transport.BatcherOptions{
+				MaxRecords: 100,
+				MaxBytes:   1 << 16,
+				MaxAge:     50 * time.Millisecond,
+			},
+			MaxInflight:    8,
+			HeartbeatEvery: time.Second,
+		})
+	}()
+
+	// Drain the SessionInit; respond with a rejection.
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no SessionInit sent")
+	}
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{
+				Accepted:     false,
+				RejectReason: "go away",
+			},
+		},
+	}
+
+	// Wait for Run to return — the precondition for the test is "Run
+	// has already exited when Stop is called". Without this wait we
+	// would race against the run loop and might hit the
+	// stopCh-still-being-consumed path instead.
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of rejection")
+	}
+
+	// Now Stop. Per Task 27c, this MUST return promptly because the
+	// RunDone signal lets Stop observe that no consumer is left.
+	stopReturned := make(chan struct{})
+	go func() {
+		tr.Stop(0)
+		close(stopReturned)
+	}()
+	select {
+	case <-stopReturned:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop did not return within 500ms after Run exit; RunDone signal missing")
+	}
+}

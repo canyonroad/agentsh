@@ -261,6 +261,14 @@ type Transport struct {
 	// drains it on the next pass. See Stop / runShutdown.
 	stopCh chan stopReq
 
+	// runDone is closed by Run's defer when the run loop returns
+	// (any path: ctx cancel, Stop, or terminal error such as
+	// SessionAck rejection). Stop selects on this channel so it
+	// returns promptly when called AFTER Run has already exited —
+	// without it, Stop's <-r.done wait would deadlock because no
+	// consumer is left to service stopReq. Per Task 27c.
+	runDone chan struct{}
+
 	// recv holds the per-connection recv-multiplexer state per round-22
 	// plan §"Per-connection recv state". A new recvSession is created on
 	// each successful dial and discarded on every tear-down; the field
@@ -307,6 +315,7 @@ func New(opts Options) (*Transport, error) {
 		metrics:           opts.Metrics,
 		ackAnomalyLimiter: rate.NewLimiter(rate.Every(time.Minute), 1),
 		stopCh:            make(chan stopReq, 1),
+		runDone:           make(chan struct{}),
 	}
 	if opts.InitialAckTuple != nil && opts.InitialAckTuple.Present {
 		seed := AckCursor{
@@ -473,11 +482,26 @@ func (t *Transport) stopWithHooks(drainDeadline time.Duration, preEnqueue, postE
 		preEnqueue()
 	}
 	r := stopReq{drainDeadline: drainDeadline, done: make(chan struct{})}
-	t.stopCh <- r
+	// Enqueue, but bail if Run has already exited — a send into stopCh
+	// would still succeed (cap-1 buffer) and then <-r.done would
+	// deadlock because no consumer is left. Per Task 27c.
+	select {
+	case t.stopCh <- r:
+	case <-t.runDone:
+		if postEnqueue != nil {
+			postEnqueue()
+		}
+		return
+	}
 	if postEnqueue != nil {
 		postEnqueue()
 	}
-	<-r.done
+	// Wait for the run loop to service the request OR for it to have
+	// exited via another path between enqueue and now.
+	select {
+	case <-r.done:
+	case <-t.runDone:
+	}
 }
 
 // sessionInit returns the SessionInit message for the current connection.
@@ -949,6 +973,12 @@ func (t *Transport) handleOuterStop(sr stopReq) {
 // nil) at the top of StateLive so a subsequent Live entry after a
 // reconnect picks up the fresh value (or nil if no replay ran).
 func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start uint64) (*wal.Reader, error), liveOpts LiveOptions) error {
+	// Signal Stop callers that the run loop has exited regardless of
+	// which return path is taken (ctx cancel, Stop request, terminal
+	// error). Stop selects on t.runDone so a Stop arriving AFTER the
+	// loop has already returned does not deadlock on stopReq.done.
+	// Per Task 27c.
+	defer close(t.runDone)
 	bo := NewBackoff(BackoffOptions{
 		Initial: 200 * time.Millisecond,
 		Max:     30 * time.Second,
