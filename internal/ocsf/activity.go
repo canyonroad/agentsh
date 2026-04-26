@@ -81,7 +81,6 @@ const (
 	AppActivityIntegrityChainRotated    uint32 = 110
 	AppActivityWrapInit                 uint32 = 111
 	AppActivityFSEventsError            uint32 = 112
-	AppActivityTransparentNetSetup      uint32 = 113
 	AppActivityPolicyCreated            uint32 = 120
 	AppActivityPolicyUpdated            uint32 = 121
 	AppActivityPolicyDeleted            uint32 = 122
@@ -100,10 +99,6 @@ const (
 	AppActivityEBPFUnavailable          uint32 = 148
 	AppActivityLLMProxyFailed           uint32 = 149
 	AppActivityNetProxyFailed           uint32 = 150
-	AppActivityTransparentNetReady      uint32 = 151
-	AppActivityTransparentNetFailed     uint32 = 152
 	AppActivityMCPToolChanged           uint32 = 153
-	AppActivityMCPCrossServerBlocked    uint32 = 154
 	AppActivitySecretAccess             uint32 = 155
-	AppActivityMCPNetworkConnection     uint32 = 156
 )
