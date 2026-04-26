@@ -26,7 +26,6 @@ import "canyonroad/wtp/v1/ocsf/common.proto";
 //   110 = Integrity Chain Rotated
 //   111 = Wrap Init
 //   112 = FSEvents Error
-//   113 = Transparent Net Setup
 //   120 = Policy Created
 //   121 = Policy Updated
 //   122 = Policy Deleted
@@ -45,8 +44,6 @@ import "canyonroad/wtp/v1/ocsf/common.proto";
 //   148 = EBPF Unavailable
 //   149 = LLM Proxy Failed
 //   150 = Net Proxy Failed
-//   151 = Transparent Net Ready
-//   152 = Transparent Net Failed
 //   153 = MCP Tool Changed
 message ApplicationActivity {
   optional uint32   class_uid     = 1; // 6005
