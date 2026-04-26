@@ -1,0 +1,70 @@
+// proto/canyonroad/wtp/v1/ocsf/common.proto
+//
+// Shared OCSF v1.8.0 object types. Each class's .proto imports this file
+// and reuses these messages. Field names are snake_case matching OCSF
+// JSON keys verbatim. All fields use proto3 explicit-presence (`optional`)
+// so absence is distinguishable from zero-value.
+
+syntax = "proto3";
+
+package canyonroad.wtp.v1.ocsf;
+
+option go_package = "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1/ocsf;ocsfpb";
+
+// Metadata is OCSF's per-record metadata object. Every class message
+// embeds a Metadata.
+message Metadata {
+  optional string version       = 1; // OCSF schema version, e.g. "1.8.0"
+  optional Product product      = 2;
+  optional uint64 logged_time   = 3; // unix nanos
+  optional string event_code    = 4; // agentsh ev.Type for cross-reference
+  optional string uid           = 5; // ev.ID
+}
+
+message Product {
+  optional string name          = 1; // "agentsh"
+  optional string vendor_name   = 2; // "agentsh"
+  optional string version       = 3; // agent version when known
+}
+
+// Process represents an OCSF Process Object — used by Process, File,
+// Network, HTTP, DNS, and DetectionFinding classes.
+message Process {
+  optional uint64 pid           = 1;
+  optional uint64 parent_pid    = 2;
+  optional string name          = 3; // basename of the executable
+  optional string cmd_line      = 4; // joined argv (space-separated, shell-safe-quoted)
+  optional File   file          = 5; // executable file
+  optional uint32 depth         = 6; // agentsh extension: nesting depth
+  optional string session_uid   = 7; // ev.SessionID
+  optional string command_uid   = 8; // ev.CommandID
+}
+
+// File is an OCSF File Object.
+message File {
+  optional string path          = 1; // ev.Path / ev.Filename canonical path
+  optional string name          = 2; // basename
+  optional string raw_path      = 3; // ev.RawFilename pre-resolution
+  optional bool   is_abstract   = 4; // ev.Abstract (Unix abstract socket etc.)
+}
+
+// Endpoint is an OCSF Endpoint Object — used for source/destination of
+// Network/HTTP/DNS activity.
+message Endpoint {
+  optional string ip            = 1;
+  optional uint32 port          = 2;
+  optional string hostname      = 3;
+  optional string domain        = 4; // ev.Domain
+  optional string instance_uid  = 5;
+}
+
+// Actor is an OCSF Actor Object — typically the process performing the action.
+message Actor {
+  optional Process process      = 1;
+  optional User    user         = 2;
+}
+
+message User {
+  optional string name          = 1;
+  optional uint32 uid           = 2;
+}

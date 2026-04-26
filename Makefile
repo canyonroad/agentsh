@@ -33,7 +33,15 @@ proto:
 	  --go_out=. --go_opt=module=github.com/agentsh/agentsh \
 	  --go-grpc_out=. --go-grpc_opt=module=github.com/agentsh/agentsh \
 	  proto/agentsh/v1/pty.proto \
-	  proto/canyonroad/wtp/v1/wtp.proto
+	  proto/canyonroad/wtp/v1/wtp.proto \
+	  proto/canyonroad/wtp/v1/ocsf/common.proto \
+	  proto/canyonroad/wtp/v1/ocsf/process_activity.proto \
+	  proto/canyonroad/wtp/v1/ocsf/file_activity.proto \
+	  proto/canyonroad/wtp/v1/ocsf/network_activity.proto \
+	  proto/canyonroad/wtp/v1/ocsf/http_activity.proto \
+	  proto/canyonroad/wtp/v1/ocsf/dns_activity.proto \
+	  proto/canyonroad/wtp/v1/ocsf/detection_finding.proto \
+	  proto/canyonroad/wtp/v1/ocsf/application_activity.proto
 
 test:
 	mkdir -p $(GOCACHE) $(GOMODCACHE) $(GOPATH)
