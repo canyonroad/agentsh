@@ -1,0 +1,67 @@
+syntax = "proto3";
+package canyonroad.wtp.v1.ocsf;
+option go_package = "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1/ocsf;ocsfpb";
+import "canyonroad/wtp/v1/ocsf/common.proto";
+
+// ApplicationActivity (class_uid 6005). OCSF v1.8.0 subset, with agentsh
+// extensions for infrastructure events tagged via agent_internal.
+//
+// OCSF activities used (1..7):
+//   1 = Open
+//   2 = Close
+//   3 = Update
+//   6 = Other (used for misc agent actions like secret_access)
+//
+// agentsh-internal activities (>=100, see AppActivity enum):
+//   100 = EBPF Attached
+//   101 = FUSE Mounted
+//   102 = Cgroup Applied
+//   103 = LLM Proxy Started
+//   104 = Net Proxy Started
+//   105 = MCP Tool Called
+//   106 = MCP Tool Seen
+//   107 = MCP Tools List Changed
+//   108 = MCP Sampling Request
+//   109 = MCP Tool Result Inspected
+//   110 = Integrity Chain Rotated
+//   111 = Wrap Init
+//   112 = FSEvents Error
+//   113 = Transparent Net Setup
+//   120 = Policy Created
+//   121 = Policy Updated
+//   122 = Policy Deleted
+//   130 = Session Created
+//   131 = Session Destroyed
+//   132 = Session Expired
+//   133 = Session Updated
+//   140 = Cgroup Apply Failed
+//   141 = Cgroup Cleanup Failed
+//   142 = FUSE Mount Failed
+//   143 = EBPF Attach Failed
+//   144 = EBPF Collector Failed
+//   145 = EBPF Enforce Disabled
+//   146 = EBPF Enforce Non-Strict
+//   147 = EBPF Enforce Refresh Failed
+//   148 = EBPF Unavailable
+//   149 = LLM Proxy Failed
+//   150 = Net Proxy Failed
+//   151 = Transparent Net Ready
+//   152 = Transparent Net Failed
+//   153 = MCP Tool Changed
+message ApplicationActivity {
+  optional uint32   class_uid     = 1; // 6005
+  optional uint32   activity_id   = 2;
+  optional uint32   category_uid  = 3; // 6 = Application Activity
+  optional uint32   type_uid      = 4;
+  optional uint64   time          = 5;
+  optional string   severity      = 6;
+  optional Metadata metadata      = 7;
+  optional Actor    actor         = 8;
+  optional string   app_name      = 9;
+  optional string   resource_uid  = 10; // generic per-event identifier (tool name, secret name, …)
+  optional bool     agent_internal = 50; // load-bearing — server-side filter signal
+  // Generic enrichments slot for class 6005 only — values projected from
+  // ev.Fields by the per-Type allowlist. The map's key set is bounded by
+  // the registry; values are pre-stringified by the projector.
+  map<string, string> enrichments = 51;
+}
