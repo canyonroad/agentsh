@@ -67,6 +67,13 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 	}
 
 	t.ackSessionAck(ack)
+	// Start the per-connection recv goroutine. runReplaying and
+	// runLive consume from t.recv.eventCh / t.recv.errCh; without
+	// this call those select arms remain dormant via Go's nil-
+	// channel semantics. The goroutine is torn down on every conn-
+	// close exit path in runReplaying / runLive (paired with
+	// t.teardownRecv()).
+	t.startRecv(ctx)
 	return StateReplaying, nil
 }
 

@@ -136,6 +136,24 @@ func (t *Transport) teardownRecv() {
 	<-rs.done
 }
 
+// startRecv constructs a recvSession bound to the given parent context
+// and starts the runRecv goroutine. Called by runConnecting on a
+// successful (accepted) SessionAck so that runReplaying / runLive can
+// consume BatchAck, ServerHeartbeat, Goaway, and stream-error events
+// via the recvSession channels. Paired one-to-one with teardownRecv on
+// every conn-close exit path.
+//
+// Preconditions: t.conn is set; t.recv is nil. The latter is enforced
+// by the run-loop lifecycle — every state-handler exit path that
+// closes the conn calls teardownRecv (which sets t.recv = nil) before
+// the loop re-enters runConnecting, so a clean entry to runConnecting
+// always sees t.recv == nil.
+func (t *Transport) startRecv(parent context.Context) {
+	rs := newRecvSession(parent)
+	t.recv = rs
+	go t.runRecv(rs)
+}
+
 // runRecv is the recv-goroutine loop. It calls t.conn.Recv() repeatedly,
 // demuxes the inbound *wtpv1.ServerMessage frame into a tagged-union
 // recvAckEvent, and pushes the event onto rs.eventCh in strict wire

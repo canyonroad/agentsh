@@ -947,39 +947,32 @@ func (t *Transport) handleOuterStop(sr stopReq) {
 // exponential backoff with jitter between StateConnecting attempts
 // (200ms → 30s, factor 2).
 //
-// SCAFFOLDING ONLY — NOT PRODUCTION-CONSUMABLE YET. This step lands
-// the loop skeleton so subsequent tasks (Task 19 Stop/drain, Task 22
-// Store integration) can layer on top. Three production prerequisites
-// remain unmet and any caller that adopts Run end-to-end today will
-// observe broken behavior:
+// PRODUCTION-CONSUMABLE — the three SCAFFOLDING ONLY blockers are
+// closed (this commit, Task 27 prereq):
 //
-//  1. NO recv-goroutine startup. Run never calls newRecvSession /
-//     runRecv after a successful dial, so runLive's recv arms remain
-//     dormant via Go nil-channel semantics. Inbound BatchAck and
-//     ServerHeartbeat frames are not consumed; cursors will not
-//     advance once Live is reached. Recv startup belongs to a
-//     post-dial hook the plan does not yet specify.
-//  2. STUB wire encoding. encodeBatchMessage (state_live.go) and the
-//     replay-side buildEventBatchFn return empty *wtpv1.ClientMessage
-//     envelopes. Any send is a placeholder frame, not a real EventBatch.
-//  3. inflight is increment-only in runLive. Live cannot decrement
-//     it on BatchAck, so once MaxInflight batches have shipped the
-//     send path stalls until the next reconnect. This is independent
-//     of whether recv startup is wired and predates Task 18 Step 4.
+//  1. Recv-goroutine startup is wired. runConnecting calls startRecv
+//     (recv_multiplexer.go) on accepted SessionAck so runReplaying /
+//     runLive can consume BatchAck, ServerHeartbeat, Goaway, and
+//     stream-error events. teardownRecv is paired with conn.Close on
+//     every exit path.
+//  2. Wire encoding is real. encodeBatchMessage (state_live.go) and
+//     the replay-side buildEventBatchFn (state_replaying.go, aliased
+//     to encodeBatchMessage) build full EventBatch frames from WAL
+//     RecordData via proto.Unmarshal of the per-record CompactEvent
+//     payloads.
+//  3. inflight decrements on BatchAck. The runLive recv arm releases
+//     one slot per acknowledged batch (floor at zero to absorb stale
+//     or duplicate acks), so the send path no longer stalls at
+//     MaxInflight.
 //
-// Until those land (Task 22 / Task 27 wiring per the plan), Run is
-// useful only as the integration surface for the Stop/drain plumbing
-// of Task 19 and as a structural target for end-to-end tests that
-// stop short of Live's recv path.
-//
-// rdrFactory takes the WAL generation AND the start sequence so the
-// caller can position the Reader explicitly per state entry. `gen` is
-// the WAL generation the Reader will be scoped to (segments with a
-// different SegmentHeader.Generation are skipped at segment iteration
-// before record decoding — see wal/reader.go ReaderOptions.Generation
-// and Task 14b); `start` is the inclusive lowest seq the returned
-// Reader will surface for RecordData (RecordLoss markers always
-// surface — see wal/reader.go NewReader).
+// Caller wiring: rdrFactory takes the WAL generation AND the start
+// sequence so the caller can position the Reader explicitly per state
+// entry. `gen` is the WAL generation the Reader will be scoped to
+// (segments with a different SegmentHeader.Generation are skipped at
+// segment iteration before record decoding — see wal/reader.go
+// ReaderOptions.Generation and Task 14b); `start` is the inclusive
+// lowest seq the returned Reader will surface for RecordData
+// (RecordLoss markers always surface — see wal/reader.go NewReader).
 //
 // Replaying opens one Reader per stage returned by computeReplayPlan;
 // only the first stage carries a non-nil PrefixLoss. Subsequent stages

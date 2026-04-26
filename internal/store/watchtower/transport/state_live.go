@@ -145,6 +145,16 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			switch ev.kind {
 			case recvAckEventBatchAck:
 				t.applyAckFromRecv("batch_ack", ev.gen, ev.seq)
+				// One batch has been fully acknowledged; release a
+				// slot in the inflight window so the next NextBatch
+				// loop iteration is not gated by stale capacity.
+				// Closes SCAFFOLDING ONLY item #3 (inflight was
+				// previously increment-only, stalling the send path
+				// at MaxInflight). Floor at zero to defend against
+				// duplicate or out-of-order BatchAcks.
+				if inflight > 0 {
+					inflight--
+				}
 			case recvAckEventHeartbeat:
 				// Heartbeat carries no gen on the wire; FIFO order on
 				// eventCh guarantees any earlier BatchAck has already
