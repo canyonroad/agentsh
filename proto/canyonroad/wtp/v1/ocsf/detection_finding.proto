@@ -1,0 +1,34 @@
+syntax = "proto3";
+package canyonroad.wtp.v1.ocsf;
+option go_package = "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1/ocsf;ocsfpb";
+import "canyonroad/wtp/v1/ocsf/common.proto";
+
+// DetectionFinding (class_uid 2004). OCSF v1.8.0 subset.
+//
+// Activities used:
+//   1 = Create
+//   2 = Update
+//   3 = Close
+message DetectionFinding {
+  optional uint32   class_uid     = 1; // 2004
+  optional uint32   activity_id   = 2;
+  optional uint32   category_uid  = 3; // 2 = Findings
+  optional uint32   type_uid      = 4;
+  optional uint64   time          = 5;
+  optional string   severity      = 6;
+  optional Metadata metadata      = 7;
+  optional Actor    actor         = 8;
+  optional FindingInfo finding_info = 9;
+  optional string   policy_decision = 10;
+  optional string   policy_rule     = 11;
+  optional string   threat_feed     = 12;
+  optional string   threat_match    = 13;
+  optional string   threat_action   = 14;
+}
+
+message FindingInfo {
+  optional string title       = 1; // human-readable summary
+  optional string desc        = 2; // ev.Policy.Message when present
+  optional string finding_uid = 3; // ev.ID
+  optional string types       = 4; // "policy_decision" | "threat" | "agent_self_detected" | …
+}
