@@ -21,6 +21,8 @@
     }
   },
   "dst_endpoint": {
+    "ip": "10.1.2.3",
+    "port": 443,
     "hostname": "in.example",
     "domain": "in.example"
   },

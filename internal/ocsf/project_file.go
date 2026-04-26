@@ -22,10 +22,27 @@ func fileProjector(activity uint32) Projector {
 			Operation:   strpOrNil(ev.Operation),
 		}
 		if ev.Type == "file_rename" || ev.Type == "file_renamed" {
-			if old, ok := allowed["from_path"].(string); ok && old != "" {
-				msg.FileDiff = &ocsfpb.File{
-					Path: strp(old),
-					Name: strp(basename(old)),
+			// OCSF rename semantics: file = destination, file_diff = source.
+			// ev.Path holds the source (from) path as emitted by fuse.go.
+			// Fields["to_path"] (or "path2" on darwin ESF) holds the destination.
+			dest := ""
+			if v, ok := allowed["to_path"].(string); ok && v != "" {
+				dest = v
+			} else if v, ok := allowed["path2"].(string); ok && v != "" {
+				dest = v
+			}
+			if dest != "" {
+				// Destination goes into file (overrides the default ev.Path-based File).
+				msg.File = &ocsfpb.File{
+					Path: strp(dest),
+					Name: strp(basename(dest)),
+				}
+				// Source goes into file_diff.
+				if ev.Path != "" {
+					msg.FileDiff = &ocsfpb.File{
+						Path: strp(ev.Path),
+						Name: strp(basename(ev.Path)),
+					}
 				}
 			}
 		}
@@ -104,10 +121,23 @@ func init() {
 		"ptrace_file":       FileActivityRead,
 		"registry_write":    FileActivityUpdate,
 		"registry_error":    FileActivityUpdate,
+		// Dynamically-emitted types (helper-based; not caught by AST walker).
+		// See exhaustiveness_test.go comment for context.
+		"dir_list":      FileActivityRead,
+		"dir_create":    FileActivityCreate,
+		"dir_delete":    FileActivityDelete,
+		"file_stat":     FileActivityRead,
+		"symlink_create": FileActivityCreate,
+		"symlink_read":  FileActivityRead,
 	}
-	renameAllowlist := []FieldRule{{
-		Key: "from_path", Required: false, Transform: AsString, DestPath: "file_diff.path",
-	}}
+	// renameAllowlist carries the destination path and the optional
+	// cross_mount flag from fuse rename events. to_path is the move
+	// destination; ev.Path is the source (from, used for file_diff).
+	// Darwin ESF emitters use path2 for the same destination field.
+	renameAllowlist := []FieldRule{
+		{Key: "to_path", Required: false, Transform: AsString, DestPath: "file.path"},
+		{Key: "path2", Required: false, Transform: AsString, DestPath: "file.path"},
+	}
 	for t, activity := range fileMappings {
 		var allow []FieldRule
 		if t == "file_rename" || t == "file_renamed" {

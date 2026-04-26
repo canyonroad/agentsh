@@ -204,25 +204,35 @@ func goldenSampleEvents() []types.Event {
 		{ID: "ev-file-chmod-1", Type: "file_chmod", Timestamp: t0, PID: 207, Path: "/tmp/perm"},
 		{ID: "ev-file-mkdir-1", Type: "file_mkdir", Timestamp: t0, PID: 208, Path: "/tmp/dir"},
 		{ID: "ev-file-rmdir-1", Type: "file_rmdir", Timestamp: t0, PID: 209, Path: "/tmp/dir"},
-		{ID: "ev-file-rename-1", Type: "file_rename", Timestamp: t0, PID: 210, Path: "/tmp/new", Fields: map[string]any{"from_path": "/tmp/old"}},
-		{ID: "ev-file-renamed-1", Type: "file_renamed", Timestamp: t0, PID: 211, Path: "/tmp/dest", Fields: map[string]any{"from_path": "/tmp/src"}},
+		{ID: "ev-file-rename-1", Type: "file_rename", Timestamp: t0, PID: 210, Path: "/tmp/old", Fields: map[string]any{"to_path": "/tmp/new"}},
+		{ID: "ev-file-renamed-1", Type: "file_renamed", Timestamp: t0, PID: 211, Path: "/tmp/src", Fields: map[string]any{"to_path": "/tmp/dest"}},
 		{ID: "ev-file-modified-1", Type: "file_modified", Timestamp: t0, PID: 212, Path: "/tmp/changed"},
 		{ID: "ev-file-soft-deleted-1", Type: "file_soft_deleted", Timestamp: t0, PID: 213, Path: "/tmp/soft"},
 		{ID: "ev-file-unknown-1", Type: "file_unknown", Timestamp: t0, PID: 214, Path: "/tmp/unknown"},
 		{ID: "ev-ptrace-file-1", Type: "ptrace_file", Timestamp: t0, PID: 215, Path: "/etc/shadow"},
 		{ID: "ev-registry-write-1", Type: "registry_write", Timestamp: t0, PID: 216, Path: "HKLM\\Software\\Foo"},
 		{ID: "ev-registry-error-1", Type: "registry_error", Timestamp: t0, PID: 217, Path: "HKLM\\Software\\Bar"},
+		// Dynamically-emitted via emitFileEvent helper (not caught by AST walker).
+		{ID: "ev-dir-list-1", Type: "dir_list", Timestamp: t0, PID: 220, Path: "/home/agent"},
+		{ID: "ev-dir-create-1", Type: "dir_create", Timestamp: t0, PID: 221, Path: "/home/agent/newdir"},
+		{ID: "ev-dir-delete-1", Type: "dir_delete", Timestamp: t0, PID: 222, Path: "/home/agent/olddir"},
+		{ID: "ev-file-stat-1", Type: "file_stat", Timestamp: t0, PID: 223, Path: "/etc/hosts"},
+		{ID: "ev-symlink-create-1", Type: "symlink_create", Timestamp: t0, PID: 224, Path: "/home/agent/link"},
+		{ID: "ev-symlink-read-1", Type: "symlink_read", Timestamp: t0, PID: 225, Path: "/home/agent/link"},
 
 		// Network Activity (4001) — Task 18
-		{ID: "ev-net-connect-1", Type: "net_connect", Timestamp: t0, PID: 300, Domain: "example.com", Remote: "93.184.216.34"},
+		{ID: "ev-net-connect-1", Type: "net_connect", Timestamp: t0, PID: 300, Domain: "example.com", Remote: "93.184.216.34:443"},
 		{ID: "ev-conn-allowed-1", Type: "connection_allowed", Timestamp: t0, PID: 301, Domain: "ok.example", Remote: "10.0.0.1"},
-		{ID: "ev-connect-redirect-1", Type: "connect_redirect", Timestamp: t0, PID: 302, Domain: "in.example", Fields: map[string]any{"redirect_target": "out.example:443"}},
+		{ID: "ev-connect-redirect-1", Type: "connect_redirect", Timestamp: t0, PID: 302, Domain: "in.example", Remote: "10.1.2.3:443", Fields: map[string]any{"redirect_to": "out.example:443"}},
 		{ID: "ev-ptrace-network-1", Type: "ptrace_network", Timestamp: t0, PID: 303, Domain: "trace.example"},
 		{ID: "ev-unix-sock-1", Type: "unix_socket_op", Timestamp: t0, PID: 304, Path: "/run/agentsh.sock", Abstract: false},
 		{ID: "ev-tnet-failed-1", Type: "transparent_net_failed", Timestamp: t0},
 		{ID: "ev-tnet-ready-1", Type: "transparent_net_ready", Timestamp: t0},
 		{ID: "ev-tnet-setup-1", Type: "transparent_net_setup", Timestamp: t0},
 		{ID: "ev-mcp-net-1", Type: "mcp_network_connection", Timestamp: t0, PID: 305, Domain: "mcp.example", Remote: "10.0.0.5"},
+		// net_close is dynamically emitted via emitNetEvent helper.
+		{ID: "ev-net-close-1", Type: "net_close", Timestamp: t0, PID: 306, Domain: "example.com", Remote: "93.184.216.34:443",
+			Fields: map[string]any{"bytes_sent": uint64(1024), "bytes_received": uint64(4096)}},
 
 		// HTTP Activity (4002) — Task 19
 		{ID: "ev-http-1", Type: "http", Timestamp: t0, PID: 400, Domain: "api.example", Fields: map[string]any{
@@ -230,8 +240,8 @@ func goldenSampleEvents() []types.Event {
 			"user_agent": "agentsh/1.0", "http_version": "1.1",
 			"status_code": 200, "response_bytes": 1024,
 		}},
-		{ID: "ev-net-http-req-1", Type: "net_http_request", Timestamp: t0, PID: 401, Domain: "raw.example",
-			Fields: map[string]any{"method": "GET", "url": "https://raw.example/file"}},
+		{ID: "ev-net-http-req-1", Type: "net_http_request", Timestamp: t0, PID: 401, Domain: "raw.example", Remote: "1.2.3.4:80",
+			Fields: map[string]any{"method": "GET", "path": "/file"}},
 		{ID: "ev-http-svc-denied-1", Type: "http_service_denied_direct", Timestamp: t0, PID: 402, Domain: "blocked.example",
 			Fields: map[string]any{"method": "POST", "url": "https://blocked.example/api"},
 			Policy: &types.PolicyInfo{Decision: "deny", EffectiveDecision: "deny", Rule: "no-direct"}},
@@ -240,7 +250,7 @@ func goldenSampleEvents() []types.Event {
 		{ID: "ev-dns-query-1", Type: "dns_query", Timestamp: t0, PID: 500, Domain: "lookup.example",
 			Fields: map[string]any{"rrtype": 1, "rrtype_name": "A"}},
 		{ID: "ev-dns-redirect-1", Type: "dns_redirect", Timestamp: t0, PID: 501, Domain: "in.example",
-			Fields: map[string]any{"rrtype_name": "A", "redirect_target": "127.0.0.1"}},
+			Fields: map[string]any{"rrtype_name": "A", "resolved_to": "127.0.0.1"}},
 
 		// Detection Finding (2004) — Task 21
 		{ID: "ev-cmd-policy-1", Type: "command_policy", Timestamp: t0, PID: 600,

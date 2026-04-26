@@ -1,0 +1,27 @@
+{
+  "class_uid": 1001,
+  "activity_id": 1,
+  "category_uid": 1,
+  "type_uid": 100101,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "dir_create",
+    "uid": "ev-dir-create-1"
+  },
+  "actor": {
+    "process": {
+      "pid": "221"
+    }
+  },
+  "file": {
+    "path": "/home/agent/newdir",
+    "name": "newdir"
+  }
+}

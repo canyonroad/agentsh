@@ -32,7 +32,7 @@ func dnsProjector(activity uint32) Projector {
 			q.Type = u32p(v)
 		}
 		msg.Query = q
-		if rt, ok := allowed["redirect_target"].(string); ok && rt != "" {
+		if rt, ok := allowed["resolved_to"].(string); ok && rt != "" {
 			msg.RedirectTarget = strp(rt)
 		}
 		if ev.Policy != nil {
@@ -52,7 +52,8 @@ func init() {
 		{Key: "hostname", Transform: AsString, DestPath: "query.hostname"},
 		{Key: "rrtype", Transform: AsUint32, DestPath: "query.type"},
 		{Key: "rrtype_name", Transform: AsString, DestPath: "query.type_name"},
-		{Key: "redirect_target", Transform: AsString, DestPath: "redirect_target"},
+		// dns_redirect emitter uses "resolved_to" (not "redirect_target"); allowlist the real key.
+		{Key: "resolved_to", Transform: AsString, DestPath: "redirect_target"},
 	}
 	register("dns_query", Mapping{
 		ClassUID: ClassDNSActivity, ActivityID: DNSActivityQuery,
