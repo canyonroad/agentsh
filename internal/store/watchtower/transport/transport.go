@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/metrics"
@@ -204,6 +205,14 @@ func validate(opts Options) error {
 	return nil
 }
 
+// ErrTransportSingleUse is returned by Run when invoked a second
+// time on the same Transport. Transport is single-use per run-loop
+// lifetime — callers MUST construct a fresh Transport via New() to
+// reconnect. Per Task 27c: making Transport explicitly single-use
+// avoids the close-of-closed-channel panic that would otherwise
+// fire at `defer close(t.runDone)`.
+var ErrTransportSingleUse = errors.New("transport: Run already invoked; Transport is single-use")
+
 // Transport runs the four-state WTP client state machine. It is owned by
 // a single goroutine — callers interact via channels.
 type Transport struct {
@@ -261,6 +270,20 @@ type Transport struct {
 	// drains it on the next pass. See Stop / runShutdown.
 	stopCh chan stopReq
 
+	// runDone is closed by Run's defer when the run loop returns
+	// (any path: ctx cancel, Stop, or terminal error such as
+	// SessionAck rejection). Stop selects on this channel so it
+	// returns promptly when called AFTER Run has already exited —
+	// without it, Stop's <-r.done wait would deadlock because no
+	// consumer is left to service stopReq. Per Task 27c.
+	runDone chan struct{}
+
+	// runStarted guards Run's single-use contract. Set true on the
+	// first Run invocation; subsequent calls return
+	// ErrTransportSingleUse rather than panicking on
+	// `close(t.runDone)`. Per Task 27c.
+	runStarted atomic.Bool
+
 	// recv holds the per-connection recv-multiplexer state per round-22
 	// plan §"Per-connection recv state". A new recvSession is created on
 	// each successful dial and discarded on every tear-down; the field
@@ -307,6 +330,7 @@ func New(opts Options) (*Transport, error) {
 		metrics:           opts.Metrics,
 		ackAnomalyLimiter: rate.NewLimiter(rate.Every(time.Minute), 1),
 		stopCh:            make(chan stopReq, 1),
+		runDone:           make(chan struct{}),
 	}
 	if opts.InitialAckTuple != nil && opts.InitialAckTuple.Present {
 		seed := AckCursor{
@@ -473,11 +497,37 @@ func (t *Transport) stopWithHooks(drainDeadline time.Duration, preEnqueue, postE
 		preEnqueue()
 	}
 	r := stopReq{drainDeadline: drainDeadline, done: make(chan struct{})}
-	t.stopCh <- r
+	// Fast-path: if Run has already exited, bail BEFORE the enqueue
+	// select. A plain `select { case stopCh <- r: case <-runDone: }`
+	// is racy when stopCh has buffer slack and runDone is closed —
+	// Go picks randomly among ready arms, so the send sometimes
+	// wins and postEnqueue fires for a request nobody will service.
+	// Per Task 27c.
+	select {
+	case <-t.runDone:
+		return
+	default:
+	}
+	// Enqueue, still racing runDone in case Run exits between the
+	// fast-path check and now.
+	//
+	// postEnqueue is documented to fire AFTER a successful send to
+	// stopCh; on the runDone bail-out below the send did NOT happen,
+	// so postEnqueue is intentionally NOT invoked.
+	select {
+	case t.stopCh <- r:
+	case <-t.runDone:
+		return
+	}
 	if postEnqueue != nil {
 		postEnqueue()
 	}
-	<-r.done
+	// Wait for the run loop to service the request OR for it to have
+	// exited via another path between enqueue and now.
+	select {
+	case <-r.done:
+	case <-t.runDone:
+	}
 }
 
 // sessionInit returns the SessionInit message for the current connection.
@@ -949,6 +999,18 @@ func (t *Transport) handleOuterStop(sr stopReq) {
 // nil) at the top of StateLive so a subsequent Live entry after a
 // reconnect picks up the fresh value (or nil if no replay ran).
 func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start uint64) (*wal.Reader, error), liveOpts LiveOptions) error {
+	// Single-use guard: Run owns the close of t.runDone, so a second
+	// invocation would panic on close-of-closed-channel. Reject the
+	// second call cleanly. Per Task 27c.
+	if !t.runStarted.CompareAndSwap(false, true) {
+		return ErrTransportSingleUse
+	}
+	// Signal Stop callers that the run loop has exited regardless of
+	// which return path is taken (ctx cancel, Stop request, terminal
+	// error). Stop selects on t.runDone so a Stop arriving AFTER the
+	// loop has already returned does not deadlock on stopReq.done.
+	// Per Task 27c.
+	defer close(t.runDone)
 	bo := NewBackoff(BackoffOptions{
 		Initial: 200 * time.Millisecond,
 		Max:     30 * time.Second,

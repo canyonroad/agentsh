@@ -702,3 +702,236 @@ func TestShutdown_StopBeforeLiveExits(t *testing.T) {
 		t.Fatal("Run did not return within 2s of Stop")
 	}
 }
+
+// TestStop_AfterRunAlreadyExited is the Task 27c acceptance test: once
+// the Run loop has terminated (e.g. via SessionAck rejection), a
+// subsequent Transport.Stop call MUST return without blocking on a
+// never-closed stopReq.done channel. Without the RunDone signal,
+// Stop's send to t.stopCh succeeds (cap-1 buffer) but its <-r.done
+// wait deadlocks because no consumer ever services the request.
+//
+// The test drives Run to terminal exit via SessionAck rejection,
+// waits for Run to actually return, THEN calls Stop and asserts it
+// returns within a tight bound.
+func TestStop_AfterRunAlreadyExited(t *testing.T) {
+	conn := newFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return conn, nil
+	})
+
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
+		t.Fatal("rdrFactory called; rejection should fire before Replaying/Live")
+		return nil, nil
+	}
+	go func() {
+		runDone <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
+			Batcher: transport.BatcherOptions{
+				MaxRecords: 100,
+				MaxBytes:   1 << 16,
+				MaxAge:     50 * time.Millisecond,
+			},
+			MaxInflight:    8,
+			HeartbeatEvery: time.Second,
+		})
+	}()
+
+	// Drain the SessionInit; respond with a rejection.
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no SessionInit sent")
+	}
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{
+				Accepted:     false,
+				RejectReason: "go away",
+			},
+		},
+	}
+
+	// Wait for Run to return — the precondition for the test is "Run
+	// has already exited when Stop is called". Without this wait we
+	// would race against the run loop and might hit the
+	// stopCh-still-being-consumed path instead.
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of rejection")
+	}
+
+	// Now Stop. Per Task 27c, this MUST return promptly because the
+	// RunDone signal lets Stop observe that no consumer is left.
+	stopReturned := make(chan struct{})
+	go func() {
+		tr.Stop(0)
+		close(stopReturned)
+	}()
+	select {
+	case <-stopReturned:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop did not return within 500ms after Run exit; RunDone signal missing")
+	}
+}
+
+// TestRun_RejectsSecondInvocation pins the roborev finding that Task
+// 27c's `defer close(t.runDone)` would panic on a second Run call
+// (close-of-closed-channel). Transport is single-use per run-loop
+// lifetime — the contract is now explicit. A second Run MUST return
+// an error rather than panic.
+func TestRun_RejectsSecondInvocation(t *testing.T) {
+	conn := newFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return conn, nil
+	})
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
+		t.Fatal("rdrFactory called; rejection should fire before Replaying/Live")
+		return nil, nil
+	}
+	liveOpts := transport.LiveOptions{
+		Batcher: transport.BatcherOptions{
+			MaxRecords: 100,
+			MaxBytes:   1 << 16,
+			MaxAge:     50 * time.Millisecond,
+		},
+		MaxInflight:    8,
+		HeartbeatEvery: time.Second,
+	}
+
+	// Drive the first Run to terminal exit.
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- tr.Run(ctx, rdrFactory, liveOpts) }()
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no SessionInit sent")
+	}
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{Accepted: false, RejectReason: "go away"},
+		},
+	}
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Run did not return within 2s of rejection")
+	}
+
+	// Second Run MUST return an error, not panic on close-of-closed.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("second Run panicked: %v", r)
+		}
+	}()
+	err = tr.Run(ctx, rdrFactory, liveOpts)
+	if err == nil {
+		t.Fatal("second Run returned nil; want sentinel rejecting reuse")
+	}
+	if !errors.Is(err, transport.ErrTransportSingleUse) {
+		t.Fatalf("second Run returned %v; want errors.Is(...) == ErrTransportSingleUse", err)
+	}
+}
+
+// TestStop_PostEnqueueNotCalledOnRunDoneFastPath pins the roborev
+// finding that the documented seam contract (postEnqueue runs after
+// the stopCh send completes) was being violated on the runDone
+// bail-out path: the bail-out skips the send entirely, so postEnqueue
+// must NOT fire. Tests/seams that rely on "postEnqueue ran => stopCh
+// has the request" would otherwise be misled.
+func TestStop_PostEnqueueNotCalledOnRunDoneFastPath(t *testing.T) {
+	conn := newFakeConn()
+	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
+		return conn, nil
+	})
+	tr, err := transport.New(transport.Options{
+		Dialer:    dialer,
+		AgentID:   "a",
+		SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	rdrFactory := func(uint32, uint64) (*wal.Reader, error) {
+		t.Fatal("rdrFactory called; rejection should fire before Replaying/Live")
+		return nil, nil
+	}
+	go func() {
+		runDone <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
+			Batcher: transport.BatcherOptions{
+				MaxRecords: 100,
+				MaxBytes:   1 << 16,
+				MaxAge:     50 * time.Millisecond,
+			},
+			MaxInflight:    8,
+			HeartbeatEvery: time.Second,
+		})
+	}()
+	select {
+	case <-conn.sendCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("no SessionInit sent")
+	}
+	conn.recvCh <- &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_SessionAck{
+			SessionAck: &wtpv1.SessionAck{Accepted: false, RejectReason: "go away"},
+		},
+	}
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of rejection")
+	}
+
+	var preCalls, postCalls atomic.Int32
+	pre := func() { preCalls.Add(1) }
+	post := func() { postCalls.Add(1) }
+
+	stopReturned := make(chan struct{})
+	go func() {
+		transport.EnqueueStopAndWaitForTest(tr, 0, pre, post)
+		close(stopReturned)
+	}()
+	select {
+	case <-stopReturned:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop did not return within 500ms after Run exit")
+	}
+
+	// preEnqueue is documented to fire BEFORE the send attempt, so it
+	// runs even on the bail-out path — that's correct. postEnqueue is
+	// documented to fire AFTER a successful send, so on the runDone
+	// bail-out (no send) it must NOT fire.
+	if got := preCalls.Load(); got != 1 {
+		t.Errorf("preEnqueue calls = %d; want 1", got)
+	}
+	if got := postCalls.Load(); got != 0 {
+		t.Errorf("postEnqueue calls = %d; want 0 (bail-out path skipped the send)", got)
+	}
+}

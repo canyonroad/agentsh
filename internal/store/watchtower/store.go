@@ -450,11 +450,12 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 // watchtower.Store on the same WAL Dir in the same process is a
 // contract violation.
 //
-// CAVEAT: under racy shutdown (Run exits between the peek and the
-// Stop goroutine launch) the Stop goroutine MAY leak. Until
-// Transport.Stop gains a non-blocking-on-late-call mode, this is the
-// least-bad shutdown shape that satisfies EventStore.Close()'s
-// no-ctx contract while still attempting graceful drain.
+// Per Task 27c, Transport.Stop now selects on transport.runDone, so a
+// Stop arriving AFTER Run has exited returns promptly instead of
+// deadlocking. The pre-Stop peek below is therefore a fast-path /
+// defense-in-depth check rather than a load-bearing dedup; the
+// previously documented "Stop goroutine MAY leak under racy
+// shutdown" caveat no longer applies.
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
 		// Gate new AppendEvent transactions from entering the
