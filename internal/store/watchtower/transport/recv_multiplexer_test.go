@@ -610,6 +610,74 @@ func TestRecvMultiplexer_BatchAckAdoptedDoesNotAdvanceOnMarkAckedFailure(t *test
 	}
 }
 
+// TestRecvMultiplexer_BatchAckReturnsOutcomeKind pins the contract that
+// applyAckFromRecv reports the outcome to its caller so runLive can
+// release a slot in the inflight window ONLY when the ack actually
+// advanced the live acknowledged watermark (AckOutcomeAdopted).
+// Decrementing on Anomaly / ResendNeeded / NoOp would let duplicate or
+// stale BatchAcks reopen send capacity without a newly acknowledged
+// batch and so allow the client to exceed MaxInflight (roborev Medium).
+func TestRecvMultiplexer_BatchAckReturnsOutcomeKind(t *testing.T) {
+	t.Run("Adopted_advancing_ack", func(t *testing.T) {
+		env := newClampTestEnv(t, Options{})
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		appendDataInGen(t, env.w, 1, 1, 100)
+
+		got := env.tr.applyAckFromRecv("batch_ack", 1, 50)
+		if got != AckOutcomeAdopted {
+			t.Fatalf("Adopted ack: got outcome %v, want AckOutcomeAdopted", got)
+		}
+	})
+
+	t.Run("ResendNeeded_lower_seq_same_gen", func(t *testing.T) {
+		env := newClampTestEnv(t, Options{
+			InitialAckTuple: &AckTuple{Sequence: 100, Generation: 7, Present: true},
+		})
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		appendDataInGen(t, env.w, 1, 7, 200)
+		if err := env.w.MarkAcked(7, 100); err != nil {
+			t.Fatalf("MarkAcked seed: %v", err)
+		}
+
+		got := env.tr.applyAckFromRecv("batch_ack", 7, 50)
+		if got != AckOutcomeResendNeeded {
+			t.Fatalf("ResendNeeded ack: got outcome %v, want AckOutcomeResendNeeded", got)
+		}
+	})
+
+	t.Run("Anomaly_lower_generation", func(t *testing.T) {
+		env := newClampTestEnv(t, Options{
+			InitialAckTuple: &AckTuple{Sequence: 100, Generation: 7, Present: true},
+		})
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		appendDataInGen(t, env.w, 1, 7, 200)
+		if err := env.w.MarkAcked(7, 100); err != nil {
+			t.Fatalf("MarkAcked seed: %v", err)
+		}
+
+		got := env.tr.applyAckFromRecv("batch_ack", 5, 50)
+		if got != AckOutcomeAnomaly {
+			t.Fatalf("Anomaly ack: got outcome %v, want AckOutcomeAnomaly", got)
+		}
+	})
+
+	t.Run("NoOp_duplicate_same_tuple", func(t *testing.T) {
+		env := newClampTestEnv(t, Options{
+			InitialAckTuple: &AckTuple{Sequence: 100, Generation: 7, Present: true},
+		})
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		appendDataInGen(t, env.w, 1, 7, 200)
+		if err := env.w.MarkAcked(7, 100); err != nil {
+			t.Fatalf("MarkAcked seed: %v", err)
+		}
+
+		got := env.tr.applyAckFromRecv("batch_ack", 7, 100)
+		if got != AckOutcomeNoOp {
+			t.Fatalf("Duplicate ack: got outcome %v, want AckOutcomeNoOp", got)
+		}
+	})
+}
+
 // silence unused import warnings for wal package; the wal package is needed
 // for clampTestEnv types pulled in transitively in some test rows.
 var _ = wal.LossRecord{}

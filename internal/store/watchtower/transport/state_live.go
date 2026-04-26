@@ -144,15 +144,17 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			// this select arm dormant in that case.
 			switch ev.kind {
 			case recvAckEventBatchAck:
-				t.applyAckFromRecv("batch_ack", ev.gen, ev.seq)
-				// One batch has been fully acknowledged; release a
-				// slot in the inflight window so the next NextBatch
-				// loop iteration is not gated by stale capacity.
-				// Closes SCAFFOLDING ONLY item #3 (inflight was
-				// previously increment-only, stalling the send path
-				// at MaxInflight). Floor at zero to defend against
-				// duplicate or out-of-order BatchAcks.
-				if inflight > 0 {
+				outcome := t.applyAckFromRecv("batch_ack", ev.gen, ev.seq)
+				// Release a slot in the inflight window ONLY when the
+				// ack actually advanced the acknowledged watermark.
+				// Decrementing on Anomaly / ResendNeeded / NoOp would
+				// let duplicate or stale BatchAcks reopen send
+				// capacity without a newly acknowledged batch — the
+				// client could then exceed MaxInflight (roborev
+				// Medium). Closes SCAFFOLDING ONLY item #3 cleanly.
+				// Floor at zero so we cannot underflow even if the
+				// caller's bookkeeping has drifted.
+				if outcome == AckOutcomeAdopted && inflight > 0 {
 					inflight--
 				}
 			case recvAckEventHeartbeat:

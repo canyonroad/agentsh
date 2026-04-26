@@ -348,7 +348,14 @@ func (t *Transport) runRecv(rs *recvSession) {
 // the gauge; ResendNeeded logs INFO and regresses remoteReplayCursor
 // only; Anomaly logs WARN and leaves both cursors unchanged; NoOp
 // is silent.
-func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq uint64) {
+//
+// Returns the AckOutcomeKind so callers (runLive) can release a slot
+// in the inflight window only when the ack actually advanced the
+// acknowledged watermark (AckOutcomeAdopted). Decrementing on
+// Anomaly / ResendNeeded / NoOp would let duplicate or stale acks
+// reopen send capacity without a newly acknowledged batch and so
+// allow the client to exceed MaxInflight (roborev Medium).
+func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq uint64) AckOutcomeKind {
 	// Snapshot BOTH cursors before the helper mutates — required for
 	// rollback on Adopted-then-MarkAcked-failure per Task 15.1 Step 1b.5.
 	priorPersisted := t.persistedAck
@@ -410,7 +417,7 @@ func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq u
 			t.persistedAckPresent = priorPresent
 			// Server will re-deliver this watermark on the next BatchAck
 			// or ServerHeartbeat. No metric emission on the failure path.
-			return
+			return outcome.Kind
 		}
 		t.metrics.SetAckHighWatermark(int64(t.persistedAck.Sequence))
 	case AckOutcomeResendNeeded:
@@ -436,6 +443,7 @@ func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq u
 	case AckOutcomeNoOp:
 		// No cursor moved; nothing to do.
 	}
+	return outcome.Kind
 }
 
 const (
