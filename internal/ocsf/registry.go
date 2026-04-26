@@ -53,6 +53,7 @@ var pendingTypes = map[string]struct{}{
 	"file_renamed":      {},
 	"file_modified":     {},
 	"file_soft_deleted": {},
+	"file_unknown":      {},
 	"ptrace_file":       {},
 	"registry_write":    {},
 	"registry_error":    {},

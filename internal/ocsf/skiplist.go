@@ -55,4 +55,12 @@ var skiplist = map[string]string{
 	"agent_detected_t": "test fixture: agent_detected variant in tests",
 	"stdio":            "test fixture: stdio source classifier",
 	"children":         "test fixture: children placeholder",
+	// False positives: AST walk matches any .Type selector, not only types.Event.Type.
+	// The values below are from cfg.Auth.Type (config struct) in internal/api/*.go.
+	"api_key": "config false-positive: cfg.Auth.Type value, not an event type",
+	"oidc":    "config false-positive: cfg.Auth.Type value, not an event type",
+	"hybrid":  "config false-positive: cfg.Auth.Type value, not an event type",
+	// Explicit test sentinels that don't match the above categories.
+	"definitely_not_in_registry_xyz": "test fixture: explicit unknown-type sentinel in mapper_test.go",
+	"session_started":                "test fixture: unrelated-event placeholder in mcp_bridge_test.go",
 }
