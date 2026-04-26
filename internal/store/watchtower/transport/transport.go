@@ -941,6 +941,28 @@ func (t *Transport) handleOuterStop(sr stopReq) {
 	close(sr.done)
 }
 
+// regressToConnecting tears down the live conn + recv goroutine
+// established by a prior runConnecting (startRecv on accepted
+// SessionAck), used by run-loop branches that bail BEFORE
+// runReplaying or runLive owns teardown — i.e. computeReplayPlan
+// failure, rdrFactory failure inside the StateReplaying stagesLoop,
+// NewReplayer failure, and the StateLive rdrFactory failure. Without
+// this teardown, the next dial's startRecv would orphan the prior
+// recvSession and let it race the new connection through the shared
+// t.conn pointer.
+//
+// Idempotent: a nil t.conn (already torn down) makes both sub-calls
+// no-ops. The conn-then-recv order is load-bearing — runRecv blocks
+// on t.conn.Recv() and only unblocks when the conn is closed, so
+// closing recv first would deadlock on teardownRecv's <-rs.done wait.
+func (t *Transport) regressToConnecting() {
+	if t.conn != nil {
+		_ = t.conn.Close()
+		t.teardownRecv()
+		t.conn = nil
+	}
+}
+
 // Run loops the four-state state machine until ctx is cancelled, the
 // state machine reaches StateShutdown, or runConnecting returns a
 // terminal error (StateShutdown + non-nil error). It applies
@@ -1055,6 +1077,11 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 		case StateReplaying:
 			stages, lerr := t.computeReplayPlan(t.remoteReplayCursor, t.persistedAck)
 			if lerr != nil {
+				// runConnecting started the recv goroutine after
+				// SessionAck; without teardown here the next dial's
+				// startRecv would orphan it and let it race the
+				// new conn through t.conn (roborev High).
+				t.regressToConnecting()
 				rep = nil
 				st = StateConnecting
 				continue
@@ -1112,6 +1139,13 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 				}
 			}
 			if stageErr != nil {
+				// rdrFactory and NewReplayer failures inside the
+				// stagesLoop above leak conn + recv if not torn down
+				// here — runReplaying returns its own teardown only
+				// when it actually executed. A break before
+				// runReplaying lands here without teardown (roborev
+				// High).
+				t.regressToConnecting()
 				rep = nil
 				st = StateConnecting
 				select {
@@ -1141,6 +1175,10 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 			}
 			rdr, err := rdrFactory(liveGen, start)
 			if err != nil {
+				// Same leak path as the StateReplaying rdrFactory
+				// failure above — runLive never executes, so its
+				// internal teardown never runs (roborev High).
+				t.regressToConnecting()
 				st = StateConnecting
 				continue
 			}
