@@ -155,4 +155,25 @@ func TestEncoderE2E_WithOCSFMapper(t *testing.T) {
 	if bytes.Equal(tampered, mapped.Payload) {
 		t.Fatal("tamper guard: mutating byte 0 produced equal slice")
 	}
+
+	// Chain-level tamper detection: feed the clean payload and the tampered
+	// payload through a real SinkChain and assert the EntryHash values differ.
+	// This proves that the OCSF payload bytes are genuinely part of the HMAC
+	// input, satisfying acceptance criterion #4 (chain hash is payload-sensitive).
+	chainKey := bytes.Repeat([]byte{0xAB}, audit.MinKeyLength)
+	chain, err := audit.NewSinkChain(chainKey, "hmac-sha256")
+	if err != nil {
+		t.Fatalf("NewSinkChain: %v", err)
+	}
+	cleanResult, err := chain.Compute(audit.IntegrityFormatVersion, 0, 0, mapped.Payload)
+	if err != nil {
+		t.Fatalf("chain.Compute(clean): %v", err)
+	}
+	tamperedResult, err := chain.Compute(audit.IntegrityFormatVersion, 0, 0, tampered)
+	if err != nil {
+		t.Fatalf("chain.Compute(tampered): %v", err)
+	}
+	if cleanResult.EntryHash() == tamperedResult.EntryHash() {
+		t.Fatal("chain tamper check: clean and tampered payloads produced identical EntryHash — payload bytes are not part of the HMAC input")
+	}
 }
