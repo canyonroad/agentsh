@@ -559,6 +559,16 @@ func TestRun_NoRecvLeakOnOuterCtxCancel(t *testing.T) {
 	if rsh := transport.RecvSessionForTest(tr); rsh != nil {
 		t.Fatal("recv goroutine still attached after Run returned; outer ctx.Done branch leaked")
 	}
+
+	// AND the conn must have been closed. regressToConnecting closes
+	// t.conn; without that call the accepted stream would survive.
+	// fakeConn.Close closes the `closed` channel, so observing the
+	// closed channel proves Close was called (roborev Low round-6).
+	select {
+	case <-conn.closed:
+	default:
+		t.Fatal("conn still open after Run returned; outer ctx.Done branch leaked the accepted stream")
+	}
 }
 
 // TestRunOnce_DoesNotStartRecvGoroutine pins the roborev Medium

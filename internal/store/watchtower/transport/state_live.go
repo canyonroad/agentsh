@@ -223,7 +223,25 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 				}
 			}
 		case now := <-tick.C:
-			if outBatch := b.Tick(now); outBatch != nil {
+			// Gate the tick-driven flush on available inflight
+			// capacity. Without this gate the tick path would send
+			// an aged batch even when inflight.Len() ==
+			// opts.MaxInflight, allowing one extra unacked batch
+			// onto the wire. The Notify path's overshoot scenario:
+			// b.Add(rec) flushes a full batch (inflight.Push), but
+			// the same Add buffers `rec` as the start of a new
+			// batch in b.pending; if the window now equals
+			// MaxInflight, the next tick.C arm would still flush
+			// that fresh batch (roborev Medium round-6).
+			//
+			// Records stay in b.pending across ticks until the
+			// window opens (a BatchAck releases capacity); the
+			// next tick after release flushes them. b.Tick is
+			// idempotent on full pending — calling it later with
+			// the same MaxAge boundary already crossed still
+			// returns the buffered batch.
+			if inflight.Len() < opts.MaxInflight {
+				if outBatch := b.Tick(now); outBatch != nil {
 				msg, err := encodeBatchMessageFn(outBatch.Records)
 				if err != nil {
 					_ = t.conn.Close()
@@ -242,6 +260,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 				}
 				last := outBatch.Records[len(outBatch.Records)-1]
 				inflight.Push(last.Generation, last.Sequence)
+				}
 			}
 		}
 		_ = flush // explicit lint reference; called from Drain path
