@@ -1,8 +1,8 @@
 {
-  "class_uid":  4001,
+  "class_uid":  4003,
   "activity_id":  1,
   "category_uid":  4,
-  "type_uid":  400101,
+  "type_uid":  400301,
   "time":  "1777118400000000000",
   "severity":  "Informational",
   "metadata":  {
@@ -12,20 +12,18 @@
       "vendor_name":  "agentsh"
     },
     "logged_time":  "1777118400000000000",
-    "event_code":  "ptrace_network",
-    "uid":  "ev-ptrace-network-1"
+    "event_code":  "dns_query",
+    "uid":  "ev-dns-query-1"
   },
   "actor":  {
     "process":  {
-      "pid":  "303"
+      "pid":  "500"
     }
   },
-  "dst_endpoint":  {
-    "hostname":  "trace.example",
-    "domain":  "trace.example"
-  },
-  "connection_info":  {
-    "protocol_name":  "tcp",
-    "direction":  "Outbound"
+  "query":  {
+    "hostname":  "lookup.example",
+    "type":  1,
+    "type_name":  "A",
+    "class":  "IN"
   }
 }

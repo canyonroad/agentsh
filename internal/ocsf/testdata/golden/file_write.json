@@ -1,28 +1,28 @@
 {
-  "class_uid": 1001,
-  "activity_id": 3,
-  "category_uid": 1,
-  "type_uid": 100103,
-  "time": "1777118400000000000",
-  "severity": "Informational",
-  "metadata": {
-    "version": "1.8.0",
-    "product": {
-      "name": "agentsh",
-      "vendor_name": "agentsh"
+  "class_uid":  1001,
+  "activity_id":  3,
+  "category_uid":  1,
+  "type_uid":  100103,
+  "time":  "1777118400000000000",
+  "severity":  "Informational",
+  "metadata":  {
+    "version":  "1.8.0",
+    "product":  {
+      "name":  "agentsh",
+      "vendor_name":  "agentsh"
     },
-    "logged_time": "1777118400000000000",
-    "event_code": "file_write",
-    "uid": "ev-file-write-1"
+    "logged_time":  "1777118400000000000",
+    "event_code":  "file_write",
+    "uid":  "ev-file-write-1"
   },
-  "actor": {
-    "process": {
-      "pid": "202"
+  "actor":  {
+    "process":  {
+      "pid":  "202"
     }
   },
-  "file": {
-    "path": "/tmp/out",
-    "name": "out"
+  "file":  {
+    "path":  "/tmp/out",
+    "name":  "out"
   },
-  "operation": "write"
+  "operation":  "write"
 }

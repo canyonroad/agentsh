@@ -1,32 +1,32 @@
 {
-  "class_uid": 4001,
-  "activity_id": 1,
-  "category_uid": 4,
-  "type_uid": 400101,
-  "time": "1777118400000000000",
-  "severity": "Informational",
-  "metadata": {
-    "version": "1.8.0",
-    "product": {
-      "name": "agentsh",
-      "vendor_name": "agentsh"
+  "class_uid":  4001,
+  "activity_id":  1,
+  "category_uid":  4,
+  "type_uid":  400101,
+  "time":  "1777118400000000000",
+  "severity":  "Informational",
+  "metadata":  {
+    "version":  "1.8.0",
+    "product":  {
+      "name":  "agentsh",
+      "vendor_name":  "agentsh"
     },
-    "logged_time": "1777118400000000000",
-    "event_code": "connect_redirect",
-    "uid": "ev-connect-redirect-1"
+    "logged_time":  "1777118400000000000",
+    "event_code":  "connect_redirect",
+    "uid":  "ev-connect-redirect-1"
   },
-  "actor": {
-    "process": {
-      "pid": "302"
+  "actor":  {
+    "process":  {
+      "pid":  "302"
     }
   },
-  "dst_endpoint": {
-    "hostname": "in.example",
-    "domain": "in.example"
+  "dst_endpoint":  {
+    "hostname":  "in.example",
+    "domain":  "in.example"
   },
-  "connection_info": {
-    "protocol_name": "tcp",
-    "direction": "Outbound"
+  "connection_info":  {
+    "protocol_name":  "tcp",
+    "direction":  "Outbound"
   },
-  "redirect_target": "out.example:443"
+  "redirect_target":  "out.example:443"
 }

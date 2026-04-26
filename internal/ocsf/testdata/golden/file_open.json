@@ -1,28 +1,28 @@
 {
-  "class_uid": 1001,
-  "activity_id": 2,
-  "category_uid": 1,
-  "type_uid": 100102,
-  "time": "1777118400000000000",
-  "severity": "Informational",
-  "metadata": {
-    "version": "1.8.0",
-    "product": {
-      "name": "agentsh",
-      "vendor_name": "agentsh"
+  "class_uid":  1001,
+  "activity_id":  2,
+  "category_uid":  1,
+  "type_uid":  100102,
+  "time":  "1777118400000000000",
+  "severity":  "Informational",
+  "metadata":  {
+    "version":  "1.8.0",
+    "product":  {
+      "name":  "agentsh",
+      "vendor_name":  "agentsh"
     },
-    "logged_time": "1777118400000000000",
-    "event_code": "file_open",
-    "uid": "ev-file-open-1"
+    "logged_time":  "1777118400000000000",
+    "event_code":  "file_open",
+    "uid":  "ev-file-open-1"
   },
-  "actor": {
-    "process": {
-      "pid": "200"
+  "actor":  {
+    "process":  {
+      "pid":  "200"
     }
   },
-  "file": {
-    "path": "/etc/hosts",
-    "name": "hosts"
+  "file":  {
+    "path":  "/etc/hosts",
+    "name":  "hosts"
   },
-  "operation": "open"
+  "operation":  "open"
 }

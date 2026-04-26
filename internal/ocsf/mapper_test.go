@@ -235,5 +235,11 @@ func goldenSampleEvents() []types.Event {
 		{ID: "ev-http-svc-denied-1", Type: "http_service_denied_direct", Timestamp: t0, PID: 402, Domain: "blocked.example",
 			Fields: map[string]any{"method": "POST", "url": "https://blocked.example/api"},
 			Policy: &types.PolicyInfo{Decision: "deny", EffectiveDecision: "deny", Rule: "no-direct"}},
+
+		// DNS Activity (4003) — Task 20
+		{ID: "ev-dns-query-1", Type: "dns_query", Timestamp: t0, PID: 500, Domain: "lookup.example",
+			Fields: map[string]any{"rrtype": 1, "rrtype_name": "A"}},
+		{ID: "ev-dns-redirect-1", Type: "dns_redirect", Timestamp: t0, PID: 501, Domain: "in.example",
+			Fields: map[string]any{"rrtype_name": "A", "redirect_target": "127.0.0.1"}},
 	}
 }
