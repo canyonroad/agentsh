@@ -169,5 +169,28 @@ func normalizeJSON(t *testing.T, in []byte) []byte {
 // goldenSampleEvents returns the canonical fixture per registered
 // Type. Each per-class PR appends its fixtures here.
 func goldenSampleEvents() []types.Event {
-	return nil // populated by per-class PRs
+	t0 := time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
+	return []types.Event{
+		// Process Activity (1007) — Task 16
+		{
+			ID: "ev-execve-1", Type: "execve", Timestamp: t0,
+			SessionID: "sess-1", CommandID: "cmd-1",
+			PID: 1234, ParentPID: 1, Depth: 2,
+			Filename: "/usr/bin/curl", RawFilename: "curl",
+			Argv: []string{"curl", "-sS", "https://example.com"},
+		},
+		{ID: "ev-exec-1", Type: "exec", Timestamp: t0, PID: 100, Filename: "/bin/sh"},
+		{ID: "ev-exec-intercept-1", Type: "exec_intercept", Timestamp: t0, PID: 101, Filename: "/bin/dangerous",
+			Policy: &types.PolicyInfo{Decision: "deny", EffectiveDecision: "deny", Rule: "no-fork"}},
+		{ID: "ev-exec-start-1", Type: "exec.start", Timestamp: t0, PID: 102, Filename: "/bin/ls"},
+		{ID: "ev-ptrace-execve-1", Type: "ptrace_execve", Timestamp: t0, PID: 103, Filename: "/bin/ls"},
+		{ID: "ev-cmd-started-1", Type: "command_started", Timestamp: t0, PID: 110, CommandID: "c1"},
+		{ID: "ev-cmd-executed-1", Type: "command_executed", Timestamp: t0, PID: 111, CommandID: "c1"},
+		{ID: "ev-cmd-finished-1", Type: "command_finished", Timestamp: t0, PID: 110, CommandID: "c1"},
+		{ID: "ev-cmd-killed-1", Type: "command_killed", Timestamp: t0, PID: 110, CommandID: "c1"},
+		{ID: "ev-cmd-redirected-1", Type: "command_redirected", Timestamp: t0, PID: 120, UnwrappedFrom: "sudo", PayloadCommand: "/usr/bin/find"},
+		{ID: "ev-cmd-redirect-1", Type: "command_redirect", Timestamp: t0, PID: 121},
+		{ID: "ev-process-start-1", Type: "process_start", Timestamp: t0, PID: 130},
+		{ID: "ev-exit-1", Type: "exit", Timestamp: t0, PID: 140},
+	}
 }
