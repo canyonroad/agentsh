@@ -1,0 +1,25 @@
+{
+  "class_uid": 6005,
+  "activity_id": 130,
+  "category_uid": 6,
+  "type_uid": 600630,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "session_created",
+    "uid": "ev-sess-created-1"
+  },
+  "actor": {
+    "process": {
+      "session_uid": "sess-x"
+    }
+  },
+  "app_name": "agentsh",
+  "agent_internal": true
+}

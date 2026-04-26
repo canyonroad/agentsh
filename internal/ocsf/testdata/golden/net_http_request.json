@@ -1,31 +1,31 @@
 {
-  "class_uid":  4002,
-  "activity_id":  1,
-  "category_uid":  4,
-  "type_uid":  400201,
-  "time":  "1777118400000000000",
-  "severity":  "Informational",
-  "metadata":  {
-    "version":  "1.8.0",
-    "product":  {
-      "name":  "agentsh",
-      "vendor_name":  "agentsh"
+  "class_uid": 4002,
+  "activity_id": 1,
+  "category_uid": 4,
+  "type_uid": 400201,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
     },
-    "logged_time":  "1777118400000000000",
-    "event_code":  "net_http_request",
-    "uid":  "ev-net-http-req-1"
+    "logged_time": "1777118400000000000",
+    "event_code": "net_http_request",
+    "uid": "ev-net-http-req-1"
   },
-  "actor":  {
-    "process":  {
-      "pid":  "401"
+  "actor": {
+    "process": {
+      "pid": "401"
     }
   },
-  "dst_endpoint":  {
-    "hostname":  "raw.example",
-    "domain":  "raw.example"
+  "dst_endpoint": {
+    "hostname": "raw.example",
+    "domain": "raw.example"
   },
-  "http_request":  {
-    "http_method":  "GET",
-    "url":  "https://raw.example/file"
+  "http_request": {
+    "http_method": "GET",
+    "url": "https://raw.example/file"
   }
 }

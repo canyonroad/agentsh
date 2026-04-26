@@ -1,38 +1,38 @@
 {
-  "class_uid":  4002,
-  "activity_id":  1,
-  "category_uid":  4,
-  "type_uid":  400201,
-  "time":  "1777118400000000000",
-  "severity":  "Informational",
-  "metadata":  {
-    "version":  "1.8.0",
-    "product":  {
-      "name":  "agentsh",
-      "vendor_name":  "agentsh"
+  "class_uid": 4002,
+  "activity_id": 1,
+  "category_uid": 4,
+  "type_uid": 400201,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
     },
-    "logged_time":  "1777118400000000000",
-    "event_code":  "http",
-    "uid":  "ev-http-1"
+    "logged_time": "1777118400000000000",
+    "event_code": "http",
+    "uid": "ev-http-1"
   },
-  "actor":  {
-    "process":  {
-      "pid":  "400"
+  "actor": {
+    "process": {
+      "pid": "400"
     }
   },
-  "dst_endpoint":  {
-    "hostname":  "api.example",
-    "domain":  "api.example"
+  "dst_endpoint": {
+    "hostname": "api.example",
+    "domain": "api.example"
   },
-  "http_request":  {
-    "http_method":  "POST",
-    "url":  "https://api.example/v1/x",
-    "user_agent":  "agentsh/1.0",
-    "version":  "1.1",
-    "host":  "api.example"
+  "http_request": {
+    "http_method": "POST",
+    "url": "https://api.example/v1/x",
+    "user_agent": "agentsh/1.0",
+    "version": "1.1",
+    "host": "api.example"
   },
-  "http_response":  {
-    "status_code":  200,
-    "length":  "1024"
+  "http_response": {
+    "status_code": 200,
+    "length": "1024"
   }
 }

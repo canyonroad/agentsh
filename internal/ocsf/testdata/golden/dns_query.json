@@ -1,29 +1,29 @@
 {
-  "class_uid":  4003,
-  "activity_id":  1,
-  "category_uid":  4,
-  "type_uid":  400301,
-  "time":  "1777118400000000000",
-  "severity":  "Informational",
-  "metadata":  {
-    "version":  "1.8.0",
-    "product":  {
-      "name":  "agentsh",
-      "vendor_name":  "agentsh"
+  "class_uid": 4003,
+  "activity_id": 1,
+  "category_uid": 4,
+  "type_uid": 400301,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
     },
-    "logged_time":  "1777118400000000000",
-    "event_code":  "dns_query",
-    "uid":  "ev-dns-query-1"
+    "logged_time": "1777118400000000000",
+    "event_code": "dns_query",
+    "uid": "ev-dns-query-1"
   },
-  "actor":  {
-    "process":  {
-      "pid":  "500"
+  "actor": {
+    "process": {
+      "pid": "500"
     }
   },
-  "query":  {
-    "hostname":  "lookup.example",
-    "type":  1,
-    "type_name":  "A",
-    "class":  "IN"
+  "query": {
+    "hostname": "lookup.example",
+    "type": 1,
+    "type_name": "A",
+    "class": "IN"
   }
 }

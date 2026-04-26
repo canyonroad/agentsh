@@ -1,37 +1,37 @@
 {
-  "class_uid":  1007,
-  "activity_id":  1,
-  "category_uid":  1,
-  "type_uid":  100701,
-  "time":  "1777118400000000000",
-  "severity":  "Informational",
-  "metadata":  {
-    "version":  "1.8.0",
-    "product":  {
-      "name":  "agentsh",
-      "vendor_name":  "agentsh"
+  "class_uid": 1007,
+  "activity_id": 1,
+  "category_uid": 1,
+  "type_uid": 100701,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
     },
-    "logged_time":  "1777118400000000000",
-    "event_code":  "execve",
-    "uid":  "ev-execve-1"
+    "logged_time": "1777118400000000000",
+    "event_code": "execve",
+    "uid": "ev-execve-1"
   },
-  "actor":  {
-    "process":  {
-      "pid":  "1"
+  "actor": {
+    "process": {
+      "pid": "1"
     }
   },
-  "process":  {
-    "pid":  "1234",
-    "parent_pid":  "1",
-    "name":  "curl",
-    "cmd_line":  "curl -sS https://example.com",
-    "file":  {
-      "path":  "/usr/bin/curl",
-      "name":  "curl",
-      "raw_path":  "curl"
+  "process": {
+    "pid": "1234",
+    "parent_pid": "1",
+    "name": "curl",
+    "cmd_line": "curl -sS https://example.com",
+    "file": {
+      "path": "/usr/bin/curl",
+      "name": "curl",
+      "raw_path": "curl"
     },
-    "depth":  2,
-    "session_uid":  "sess-1",
-    "command_uid":  "cmd-1"
+    "depth": 2,
+    "session_uid": "sess-1",
+    "command_uid": "cmd-1"
   }
 }

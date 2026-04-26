@@ -1,27 +1,27 @@
 {
-  "class_uid":  1001,
-  "activity_id":  3,
-  "category_uid":  1,
-  "type_uid":  100103,
-  "time":  "1777118400000000000",
-  "severity":  "Informational",
-  "metadata":  {
-    "version":  "1.8.0",
-    "product":  {
-      "name":  "agentsh",
-      "vendor_name":  "agentsh"
+  "class_uid": 1001,
+  "activity_id": 3,
+  "category_uid": 1,
+  "type_uid": 100103,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
     },
-    "logged_time":  "1777118400000000000",
-    "event_code":  "registry_error",
-    "uid":  "ev-registry-error-1"
+    "logged_time": "1777118400000000000",
+    "event_code": "registry_error",
+    "uid": "ev-registry-error-1"
   },
-  "actor":  {
-    "process":  {
-      "pid":  "217"
+  "actor": {
+    "process": {
+      "pid": "217"
     }
   },
-  "file":  {
-    "path":  "HKLM\\Software\\Bar",
-    "name":  "HKLM\\Software\\Bar"
+  "file": {
+    "path": "HKLM\\Software\\Bar",
+    "name": "HKLM\\Software\\Bar"
   }
 }

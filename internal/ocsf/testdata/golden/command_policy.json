@@ -1,31 +1,31 @@
 {
-  "class_uid":  2004,
-  "activity_id":  1,
-  "category_uid":  2,
-  "type_uid":  200401,
-  "time":  "1777118400000000000",
-  "severity":  "Medium",
-  "metadata":  {
-    "version":  "1.8.0",
-    "product":  {
-      "name":  "agentsh",
-      "vendor_name":  "agentsh"
+  "class_uid": 2004,
+  "activity_id": 1,
+  "category_uid": 2,
+  "type_uid": 200401,
+  "time": "1777118400000000000",
+  "severity": "Medium",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
     },
-    "logged_time":  "1777118400000000000",
-    "event_code":  "command_policy",
-    "uid":  "ev-cmd-policy-1"
+    "logged_time": "1777118400000000000",
+    "event_code": "command_policy",
+    "uid": "ev-cmd-policy-1"
   },
-  "actor":  {
-    "process":  {
-      "pid":  "600"
+  "actor": {
+    "process": {
+      "pid": "600"
     }
   },
-  "finding_info":  {
-    "title":  "command_policy",
-    "desc":  "curl is blocked",
-    "finding_uid":  "ev-cmd-policy-1",
-    "types":  "policy_decision"
+  "finding_info": {
+    "title": "command_policy",
+    "desc": "curl is blocked",
+    "finding_uid": "ev-cmd-policy-1",
+    "types": "policy_decision"
   },
-  "policy_decision":  "deny",
-  "policy_rule":  "no-curl"
+  "policy_decision": "deny",
+  "policy_rule": "no-curl"
 }
