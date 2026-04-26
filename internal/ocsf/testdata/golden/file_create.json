@@ -1,27 +1,27 @@
 {
-  "class_uid":  1001,
-  "activity_id":  1,
-  "category_uid":  1,
-  "type_uid":  100101,
-  "time":  "1777118400000000000",
-  "severity":  "Informational",
-  "metadata":  {
-    "version":  "1.8.0",
-    "product":  {
-      "name":  "agentsh",
-      "vendor_name":  "agentsh"
+  "class_uid": 1001,
+  "activity_id": 1,
+  "category_uid": 1,
+  "type_uid": 100101,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
     },
-    "logged_time":  "1777118400000000000",
-    "event_code":  "file_create",
-    "uid":  "ev-file-create-1"
+    "logged_time": "1777118400000000000",
+    "event_code": "file_create",
+    "uid": "ev-file-create-1"
   },
-  "actor":  {
-    "process":  {
-      "pid":  "203"
+  "actor": {
+    "process": {
+      "pid": "203"
     }
   },
-  "file":  {
-    "path":  "/tmp/new",
-    "name":  "new"
+  "file": {
+    "path": "/tmp/new",
+    "name": "new"
   }
 }

@@ -1,0 +1,33 @@
+{
+  "class_uid": 4002,
+  "activity_id": 1,
+  "category_uid": 4,
+  "type_uid": 400201,
+  "time": "1777118400000000000",
+  "severity": "Medium",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "http_service_denied_direct",
+    "uid": "ev-http-svc-denied-1"
+  },
+  "actor": {
+    "process": {
+      "pid": "402"
+    }
+  },
+  "dst_endpoint": {
+    "hostname": "blocked.example",
+    "domain": "blocked.example"
+  },
+  "http_request": {
+    "http_method": "POST",
+    "url": "https://blocked.example/api"
+  },
+  "policy_decision": "deny",
+  "policy_rule": "no-direct"
+}

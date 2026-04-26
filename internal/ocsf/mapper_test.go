@@ -223,5 +223,17 @@ func goldenSampleEvents() []types.Event {
 		{ID: "ev-tnet-ready-1", Type: "transparent_net_ready", Timestamp: t0},
 		{ID: "ev-tnet-setup-1", Type: "transparent_net_setup", Timestamp: t0},
 		{ID: "ev-mcp-net-1", Type: "mcp_network_connection", Timestamp: t0, PID: 305, Domain: "mcp.example", Remote: "10.0.0.5"},
+
+		// HTTP Activity (4002) — Task 19
+		{ID: "ev-http-1", Type: "http", Timestamp: t0, PID: 400, Domain: "api.example", Fields: map[string]any{
+			"method": "POST", "url": "https://api.example/v1/x", "host": "api.example",
+			"user_agent": "agentsh/1.0", "http_version": "1.1",
+			"status_code": 200, "response_bytes": 1024,
+		}},
+		{ID: "ev-net-http-req-1", Type: "net_http_request", Timestamp: t0, PID: 401, Domain: "raw.example",
+			Fields: map[string]any{"method": "GET", "url": "https://raw.example/file"}},
+		{ID: "ev-http-svc-denied-1", Type: "http_service_denied_direct", Timestamp: t0, PID: 402, Domain: "blocked.example",
+			Fields: map[string]any{"method": "POST", "url": "https://blocked.example/api"},
+			Policy: &types.PolicyInfo{Decision: "deny", EffectiveDecision: "deny", Rule: "no-direct"}},
 	}
 }

@@ -1,21 +1,21 @@
 {
-  "class_uid":  1007,
-  "activity_id":  2,
-  "category_uid":  1,
-  "type_uid":  100702,
-  "time":  "1777118400000000000",
-  "severity":  "Informational",
-  "metadata":  {
-    "version":  "1.8.0",
-    "product":  {
-      "name":  "agentsh",
-      "vendor_name":  "agentsh"
+  "class_uid": 1007,
+  "activity_id": 2,
+  "category_uid": 1,
+  "type_uid": 100702,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
     },
-    "logged_time":  "1777118400000000000",
-    "event_code":  "exit",
-    "uid":  "ev-exit-1"
+    "logged_time": "1777118400000000000",
+    "event_code": "exit",
+    "uid": "ev-exit-1"
   },
-  "process":  {
-    "pid":  "140"
+  "process": {
+    "pid": "140"
   }
 }
