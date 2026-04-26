@@ -66,7 +66,12 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 	tick := time.NewTicker(opts.Batcher.MaxAge / 2)
 	defer tick.Stop()
 
-	inflight := 0
+	// Track outstanding batch boundaries by (gen, seq) so a single
+	// coalesced BatchAck releases every covered batch — a counter
+	// that decrements by one per ack would stall the send path
+	// against any conforming server that batches acknowledgements
+	// (roborev Medium round-3).
+	var inflight inflightTracker
 
 	flush := func() error {
 		batch := b.Drain()
@@ -80,7 +85,8 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 		if err := t.conn.Send(msg); err != nil {
 			return fmt.Errorf("send EventBatch: %w", err)
 		}
-		inflight++
+		last := batch.Records[len(batch.Records)-1]
+		inflight.Push(last.Generation, last.Sequence)
 		return nil
 	}
 
@@ -145,17 +151,16 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			switch ev.kind {
 			case recvAckEventBatchAck:
 				outcome := t.applyAckFromRecv("batch_ack", ev.gen, ev.seq)
-				// Release a slot in the inflight window ONLY when the
-				// ack actually advanced the acknowledged watermark.
-				// Decrementing on Anomaly / ResendNeeded / NoOp would
-				// let duplicate or stale BatchAcks reopen send
-				// capacity without a newly acknowledged batch — the
-				// client could then exceed MaxInflight (roborev
-				// Medium). Closes SCAFFOLDING ONLY item #3 cleanly.
-				// Floor at zero so we cannot underflow even if the
-				// caller's bookkeeping has drifted.
-				if outcome == AckOutcomeAdopted && inflight > 0 {
-					inflight--
+				// Release every pending batch whose high-watermark is
+				// at or below the adopted ack — a coalesced BatchAck
+				// can cover several Sends, and decrementing by one
+				// would stall the send path. Anomaly / ResendNeeded /
+				// NoOp acks are NOT a release event (cursor did not
+				// advance); the rolled-back-Adopted path also returns
+				// NoOp from applyAckFromRecv so it is correctly
+				// excluded here.
+				if outcome == AckOutcomeAdopted {
+					inflight.Release(ev.gen, ev.seq)
 				}
 			case recvAckEventHeartbeat:
 				// Heartbeat carries no gen on the wire; FIFO order on
@@ -175,7 +180,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			return StateConnecting, fmt.Errorf("recv: %w", err)
 		case <-rdr.Notify():
 			// Pull as many records as the window and batcher allow.
-			for inflight < opts.MaxInflight {
+			for inflight.Len() < opts.MaxInflight {
 				rec, ok, err := rdr.TryNext()
 				if err != nil {
 					_ = t.conn.Close()
@@ -203,7 +208,8 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 						t.conn = nil
 						return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
 					}
-					inflight++
+					last := outBatch.Records[len(outBatch.Records)-1]
+					inflight.Push(last.Generation, last.Sequence)
 				}
 			}
 		case now := <-tick.C:
@@ -224,7 +230,8 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 					t.conn = nil
 					return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
 				}
-				inflight++
+				last := outBatch.Records[len(outBatch.Records)-1]
+				inflight.Push(last.Generation, last.Sequence)
 			}
 		}
 		_ = flush // explicit lint reference; called from Drain path

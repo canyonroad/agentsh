@@ -1083,6 +1083,19 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 			bo.Reset()
 			rep = nil
 			st = next
+			// Start the per-connection recv goroutine now that the
+			// dial succeeded and the SessionAck was accepted;
+			// runReplaying / runLive consume from t.recv.eventCh /
+			// t.recv.errCh and teardown is owned by their exit
+			// paths (with regressToConnecting as the safety-net for
+			// run-loop bail-outs that bypass them). Doing this
+			// here — not inside runConnecting — keeps RunOnce a
+			// pure single-transition seam that does not leak a
+			// recvSession when callers stop after Connecting.
+			// Per roborev Medium round-3.
+			if next == StateReplaying {
+				t.startRecv(ctx)
+			}
 		case StateReplaying:
 			stages, lerr := t.computeReplayPlan(t.remoteReplayCursor, t.persistedAck)
 			if lerr != nil {
