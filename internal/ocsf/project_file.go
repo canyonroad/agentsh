@@ -120,7 +120,13 @@ func init() {
 		"file_unknown":      FileActivityUnknown,
 		"ptrace_file":       FileActivityRead,
 		"registry_write":    FileActivityUpdate,
-		"registry_error":    FileActivityUpdate,
+		// registry_error is emitted by the registry monitor's generic error
+		// handler (sendErrorEvent) when the monitoring infrastructure itself
+		// fails — e.g. a WaitForMultipleObjects or key-open error. It is NOT
+		// a failed registry write attempt; it carries no operation context.
+		// FileActivityUnknown (0) is the correct classification for this
+		// catch-all monitoring-layer error event.
+		"registry_error":    FileActivityUnknown,
 		// Dynamically-emitted types (helper-based; not caught by AST walker).
 		// See exhaustiveness_test.go comment for context.
 		"dir_list":      FileActivityRead,
