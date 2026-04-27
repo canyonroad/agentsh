@@ -796,7 +796,7 @@ func (t *Transport) computeReplayStart(remoteReplayCursor AckCursor, persistedAc
 			FromSequence: gapStart,
 			ToSequence:   earliestOnDisk - 1,
 			Generation:   persistedAck.Generation,
-			Reason:       "ack_regression_after_gc",
+			Reason:       wal.LossReasonAckRegressionAfterGC,
 		}
 		readerStart = earliestOnDisk
 	case ok && earliestOnDisk <= gapStart:
@@ -808,7 +808,7 @@ func (t *Transport) computeReplayStart(remoteReplayCursor AckCursor, persistedAc
 			FromSequence: gapStart,
 			ToSequence:   persistedAck.Sequence,
 			Generation:   persistedAck.Generation,
-			Reason:       "ack_regression_after_gc",
+			Reason:       wal.LossReasonAckRegressionAfterGC,
 		}
 		readerStart = gapStart
 	default:
