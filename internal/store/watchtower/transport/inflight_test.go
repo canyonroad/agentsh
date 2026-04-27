@@ -107,3 +107,25 @@ func TestInflightTracker_HigherGenerationAckReleasesAllPriorGenerations(t *testi
 		t.Errorf("Len after generation-skip release: got %d, want 0", got)
 	}
 }
+
+// TestInflightTracker_TransportLossAndEventBatchRetiredTogether pins the
+// symmetric tracking of TransportLoss and EventBatch frames: a BatchAck
+// retiring entries up to (gen, seq) must cover both kinds uniformly.
+// Mixed sequence: EventBatch{to=10}, TransportLoss{to=11}, EventBatch{to=15}.
+// A BatchAck{ack_high=11, gen=1} should retire the first two.
+func TestInflightTracker_TransportLossAndEventBatchRetiredTogether(t *testing.T) {
+	var it inflightTracker
+	it.Push(1, 10) // EventBatch high-watermark
+	it.Push(1, 11) // TransportLoss high-watermark
+	it.Push(1, 15) // EventBatch high-watermark
+	if it.Len() != 3 {
+		t.Fatalf("Len = %d; want 3", it.Len())
+	}
+	released := it.Release(1, 11)
+	if released != 2 {
+		t.Fatalf("Release = %d; want 2 (first two retired)", released)
+	}
+	if it.Len() != 1 {
+		t.Fatalf("Len after Release = %d; want 1", it.Len())
+	}
+}

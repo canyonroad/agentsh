@@ -118,6 +118,7 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 					t.conn = nil
 					return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
 				}
+				t.logEmittedLossIfApplicable(ctx, msg)
 			}
 		}
 		if done {

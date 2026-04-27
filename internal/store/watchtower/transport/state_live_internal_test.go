@@ -1,6 +1,10 @@
 package transport
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/metrics"
@@ -340,3 +344,49 @@ func TestExtractWireHighWatermark_EventBatchAndTransportLoss(t *testing.T) {
 	})
 }
 
+// TestTransport_LogEmittedLossIfApplicable_LogsForTransportLoss verifies
+// that logEmittedLossIfApplicable emits an INFO log with correct attributes
+// when msg is a TransportLoss frame.
+func TestTransport_LogEmittedLossIfApplicable_LogsForTransportLoss(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	tr := &Transport{opts: Options{Logger: logger, SessionID: "sess-1", AgentID: "agent-1"}}
+
+	tlMsg := &wtpv1.ClientMessage{
+		Msg: &wtpv1.ClientMessage_TransportLoss{TransportLoss: &wtpv1.TransportLoss{
+			FromSequence: 5, ToSequence: 5, Generation: 1,
+			Reason: wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_OVERFLOW,
+		}},
+	}
+	tr.logEmittedLossIfApplicable(context.Background(), tlMsg)
+
+	out := buf.String()
+	if !strings.Contains(out, `"msg":"wtp: emitted TransportLoss frame"`) {
+		t.Fatalf("expected INFO log; got %s", out)
+	}
+	if !strings.Contains(out, `"reason":"TRANSPORT_LOSS_REASON_OVERFLOW"`) {
+		t.Fatalf("missing reason attr: %s", out)
+	}
+	if !strings.Contains(out, `"session_id":"sess-1"`) {
+		t.Fatalf("missing session_id: %s", out)
+	}
+}
+
+// TestTransport_LogEmittedLossIfApplicable_NoLogForEventBatch verifies
+// that logEmittedLossIfApplicable is a no-op for EventBatch frames.
+func TestTransport_LogEmittedLossIfApplicable_NoLogForEventBatch(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	tr := &Transport{opts: Options{Logger: logger, SessionID: "sess-1", AgentID: "agent-1"}}
+
+	ebMsg := &wtpv1.ClientMessage{
+		Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: &wtpv1.EventBatch{
+			FromSequence: 1, ToSequence: 1, Generation: 1,
+		}},
+	}
+	tr.logEmittedLossIfApplicable(context.Background(), ebMsg)
+
+	if buf.Len() > 0 {
+		t.Fatalf("expected no log for EventBatch; got %s", buf.String())
+	}
+}

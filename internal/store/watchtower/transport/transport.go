@@ -28,10 +28,10 @@ type Metrics interface {
 
 type noopMetrics struct{}
 
-func (noopMetrics) SetAckHighWatermark(int64)                             {}
-func (noopMetrics) IncAnomalousAck(string)                                {}
-func (noopMetrics) IncResendNeeded()                                      {}
-func (noopMetrics) IncAckRegressionLoss()                                 {}
+func (noopMetrics) SetAckHighWatermark(int64)                            {}
+func (noopMetrics) IncAnomalousAck(string)                               {}
+func (noopMetrics) IncResendNeeded()                                     {}
+func (noopMetrics) IncAckRegressionLoss()                                {}
 func (noopMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {}
 
 // AckTuple is the persisted (gen, seq) ack pair seeded from wal.Meta on
@@ -979,6 +979,29 @@ func (t *Transport) regressToConnecting() {
 		t.teardownRecv()
 		t.conn = nil
 	}
+}
+
+// logEmittedLossIfApplicable emits an INFO log when msg is a
+// TransportLoss ClientMessage. No-op for other frame types. Called
+// after each successful conn.Send in the runLive / runReplaying /
+// runShutdown send loops so the carrier path is observable end-to-end
+// without grepping the wire.
+func (t *Transport) logEmittedLossIfApplicable(ctx context.Context, msg *wtpv1.ClientMessage) {
+	tl, ok := msg.Msg.(*wtpv1.ClientMessage_TransportLoss)
+	if !ok {
+		return
+	}
+	if t.opts.Logger == nil {
+		return
+	}
+	t.opts.Logger.LogAttrs(ctx, slog.LevelInfo,
+		"wtp: emitted TransportLoss frame",
+		slog.String("reason", tl.TransportLoss.Reason.String()),
+		slog.Uint64("from_seq", tl.TransportLoss.FromSequence),
+		slog.Uint64("to_seq", tl.TransportLoss.ToSequence),
+		slog.Uint64("generation", uint64(tl.TransportLoss.Generation)),
+		slog.String("session_id", t.opts.SessionID),
+		slog.String("agent_id", t.opts.AgentID))
 }
 
 // Run loops the four-state state machine until ctx is cancelled, the

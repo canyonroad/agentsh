@@ -1,14 +1,21 @@
 package transport
 
 // inflightTracker tracks the (generation, sequence) high-watermarks of
-// EventBatches that have been Sent but not yet covered by an
-// AckOutcomeAdopted BatchAck. The WTP protocol allows a single
-// BatchAck to coalesce acknowledgements for multiple batches via its
-// AckHighWatermarkSeq + Generation tuple, so a counter that
-// decrements by one per ack would under-release the inflight window
-// against any conforming server that batches acknowledgements
-// (roborev Medium round-3). Release pops every pending entry whose
-// high-watermark is at or below the adopted ack's (gen, seq) tuple.
+// frames that have been Sent but not yet covered by an
+// AckOutcomeAdopted BatchAck. Both EventBatch and TransportLoss frames
+// are tracked symmetrically — the high-watermark is the frame's
+// to_sequence, regardless of frame type. A BatchAck whose
+// ack_high_watermark_seq retires entries up to that sequence covers
+// both kinds uniformly (the WTP server treats TransportLoss as a
+// metadata frame that advances the watermark, just like a data batch).
+//
+// The WTP protocol allows a single BatchAck to coalesce
+// acknowledgements for multiple frames via its AckHighWatermarkSeq +
+// Generation tuple, so a counter that decrements by one per ack would
+// under-release the inflight window against any conforming server that
+// batches acknowledgements (roborev Medium round-3). Release pops every
+// pending entry whose high-watermark is at or below the adopted ack's
+// (gen, seq) tuple.
 //
 // Pending entries are appended in send order; the protocol guarantees
 // (gen, seq) is monotonically non-decreasing across successive Sends

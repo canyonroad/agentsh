@@ -178,6 +178,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 							t.conn = nil
 							return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
 						}
+						t.logEmittedLossIfApplicable(ctx, msg)
 						gen, seq := extractWireHighWatermark(msg)
 						inflight.Push(gen, seq)
 					}
@@ -217,6 +218,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 							t.conn = nil
 							return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
 						}
+						t.logEmittedLossIfApplicable(ctx, msg)
 						gen, seq := extractWireHighWatermark(msg)
 						inflight.Push(gen, seq)
 					}

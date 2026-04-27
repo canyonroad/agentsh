@@ -63,6 +63,7 @@ func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Rea
 					if err := t.conn.Send(msg); err != nil {
 						break drainLoop
 					}
+					t.logEmittedLossIfApplicable(ctx, msg)
 				}
 			}
 		}
@@ -72,6 +73,7 @@ func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Rea
 		if err == nil {
 			for _, msg := range msgs {
 				_ = t.conn.Send(msg)
+				t.logEmittedLossIfApplicable(context.Background(), msg)
 			}
 		}
 	}
