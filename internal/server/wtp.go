@@ -80,6 +80,26 @@ func buildWatchtowerStore(
 		slog.Warn("watchtower: TLS disabled via tls.insecure=true; traffic is plaintext — do not use in production")
 	}
 
+	// Resolve LogGoawayMessage three-state to the transport.Options bool.
+	// Defaulting MUST happen here (NOT in config.go's Validate/applyDefaults)
+	// so that non-daemon CLI subcommands like `agentsh config show` don't
+	// emit operational startup logs.
+	const logGoawayDefault = false // PRD-defined default at this major version (v1)
+	var logGoaway bool
+	switch {
+	case cfg.LogGoawayMessage == nil:
+		logGoaway = logGoawayDefault
+		slog.Default().Info("watchtower: log_goaway_message omitted; using default",
+			"value", logGoawayDefault)
+	case *cfg.LogGoawayMessage:
+		logGoaway = true
+		slog.Default().Warn("watchtower: log_goaway_message=true; goaway_message text will be logged after client-side sanitization, depends on server-side no-secrets contract",
+			"see", "proto/canyonroad/wtp/v1/wtp.proto Goaway.message")
+	default:
+		logGoaway = false
+		// explicit false — no log
+	}
+
 	// Build the eventfilter.Filter from config.
 	var filter *eventfilter.Filter
 	if cfg.Filter.IncludeTypes != nil || cfg.Filter.ExcludeTypes != nil ||
@@ -111,6 +131,7 @@ func buildWatchtowerStore(
 		HeartbeatEvery:  cfg.Heartbeat.Interval,
 		BackoffInitial:  cfg.Backoff.Base,
 		BackoffMax:      cfg.Backoff.Max,
+		LogGoawayMessage: logGoaway,
 		Endpoint:        cfg.Endpoint,
 		TLSEnabled:      tlsEnabled,
 		TLSCACertFile:   cfg.TLS.CACertFile,
@@ -208,6 +229,22 @@ func resolveAuthBearer(auth config.WatchtowerAuthConfig) (string, error) {
 // for white-box tests. Production callers use buildWatchtowerStore.
 func BuildWatchtowerStoreForTest(ctx context.Context, cfg config.AuditWatchtowerConfig, m compact.Mapper) (store.EventStore, error) {
 	return buildWatchtowerStore(ctx, cfg, m)
+}
+
+// ResolveLogGoawayMessageForTest exports the three-state resolution logic
+// for unit tests. Returns the resolved bool and a string describing which
+// case fired ("nil", "explicit_true", "explicit_false").
+// Production code uses this same logic inline in buildWatchtowerStore.
+func ResolveLogGoawayMessageForTest(cfg config.AuditWatchtowerConfig) (resolved bool, caseLabel string) {
+	const logGoawayDefault = false
+	switch {
+	case cfg.LogGoawayMessage == nil:
+		return logGoawayDefault, "nil"
+	case *cfg.LogGoawayMessage:
+		return true, "explicit_true"
+	default:
+		return false, "explicit_false"
+	}
 }
 
 // ResolveAuthBearerForTest is a thin export of resolveAuthBearer for

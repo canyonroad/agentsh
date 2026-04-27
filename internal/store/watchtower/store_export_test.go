@@ -18,3 +18,12 @@ package watchtower
 func (s *Store) PeekPrevHash() string {
 	return s.sink.PeekPrevHash()
 }
+
+// OptsLogGoawayMessageForTest returns the Options.LogGoawayMessage value
+// the Store was constructed with. Used by integration tests to assert
+// that the config-layer three-state resolution is correctly threaded
+// through watchtower.Options → transport.Options.
+func (s *Store) OptsLogGoawayMessageForTest() bool {
+	return s.opts.LogGoawayMessage
+}
+

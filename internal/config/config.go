@@ -848,6 +848,30 @@ type AuditWatchtowerConfig struct {
 	StateDir      string `yaml:"state_dir"`       // default GetUserStateDir() + "/wtp"; per-OS path differs (XDG_STATE_HOME on Linux, LOCALAPPDATA on Windows). See defaultWatchtowerStateDir.
 	EphemeralMode bool   `yaml:"ephemeral_mode"`
 
+	// LogGoawayMessage controls whether the WARN log emitted on GOAWAY
+	// receipt includes the server-supplied message text (after client-
+	// side sanitization). Three-state:
+	//   nil   — field omitted from YAML; resolved to PRD default at
+	//           store-construction time. The store-construction path
+	//           emits a single INFO at startup announcing the resolved
+	//           default so operators can audit a future default-flip.
+	//   false — explicit operator-set; same runtime behavior as nil today.
+	//   true  — opt in to verbatim sanitized goaway_message logging.
+	//           Store-construction emits a single WARN at startup
+	//           reminding the operator that this depends on the server-
+	//           side no-secrets contract documented at
+	//           proto/canyonroad/wtp/v1/wtp.proto Goaway.message.
+	//
+	// This pointer-form is mandatory: a plain bool would collapse "unset"
+	// into "explicit false" before the daemon could distinguish them,
+	// preventing a future schema-major-bump default-flip from being
+	// detectable in audit logs.
+	//
+	// IMPORTANT: Defaulting MUST NOT happen in applyDefaults/applyDefaultsWithSource.
+	// The nil state must survive the config-load pipeline. Defaulting occurs
+	// ONLY at store-construction time (buildWatchtowerStore in internal/server/wtp.go).
+	LogGoawayMessage *bool `yaml:"log_goaway_message,omitempty"`
+
 	TLS       WatchtowerTLSConfig       `yaml:"tls"`
 	Auth      WatchtowerAuthConfig      `yaml:"auth"`
 	Chain     WatchtowerChainConfig     `yaml:"chain"`
