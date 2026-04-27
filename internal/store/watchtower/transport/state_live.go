@@ -59,25 +59,6 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 	// (roborev Medium round-3).
 	var inflight inflightTracker
 
-	flush := func() error {
-		batch := b.Drain()
-		if batch == nil {
-			return nil
-		}
-		msgs, err := encodeBatchMessageFn(batch.Records)
-		if err != nil {
-			return err
-		}
-		for _, msg := range msgs {
-			if err := t.conn.Send(msg); err != nil {
-				return fmt.Errorf("send EventBatch: %w", err)
-			}
-			gen, seq := extractWireHighWatermark(msg)
-			inflight.Push(gen, seq)
-		}
-		return nil
-	}
-
 	// Per-connection recv channel handles. Captured into locals once at
 	// the top of the loop so the select arms are dormant when the
 	// recvSession has not been initialised (e.g. tests that drive
@@ -222,27 +203,26 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			// returns the buffered batch.
 			if inflight.Len() < opts.MaxInflight {
 				if outBatch := b.Tick(now); outBatch != nil {
-				msgs, err := encodeBatchMessageFn(outBatch.Records)
-				if err != nil {
-					_ = t.conn.Close()
-					t.teardownRecv()
-					t.conn = nil
-					return StateConnecting, err
-				}
-				for _, msg := range msgs {
-					if err := t.conn.Send(msg); err != nil {
+					msgs, err := encodeBatchMessageFn(outBatch.Records)
+					if err != nil {
 						_ = t.conn.Close()
 						t.teardownRecv()
 						t.conn = nil
-						return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
+						return StateConnecting, err
 					}
-					gen, seq := extractWireHighWatermark(msg)
-					inflight.Push(gen, seq)
-				}
+					for _, msg := range msgs {
+						if err := t.conn.Send(msg); err != nil {
+							_ = t.conn.Close()
+							t.teardownRecv()
+							t.conn = nil
+							return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
+						}
+						gen, seq := extractWireHighWatermark(msg)
+						inflight.Push(gen, seq)
+					}
 				}
 			}
 		}
-		_ = flush // explicit lint reference; called from Drain path
 	}
 }
 
