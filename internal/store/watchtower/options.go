@@ -70,12 +70,13 @@ type Options struct {
 	BatchMaxAge     time.Duration
 
 	// Transport endpoint (Task 27 wiring).
-	Endpoint    string
-	TLSEnabled  bool
-	TLSCertFile string
-	TLSKeyFile  string
-	TLSInsecure bool
-	AuthBearer  string
+	Endpoint      string
+	TLSEnabled    bool
+	TLSCACertFile string // optional; system roots used when empty
+	TLSCertFile   string
+	TLSKeyFile    string
+	TLSInsecure   bool
+	AuthBearer    string
 
 	// Filter is the optional eventfilter.Filter applied before
 	// AppendEvent reaches the chain/WAL pipeline.

@@ -195,19 +195,21 @@ func TestNew_AcceptsSinkChainOverrideWhenAllowed(t *testing.T) {
 	closeStore(t, s)
 }
 
-// TestNew_RejectsMissingDialer verifies that omitting opts.Dialer is
-// a startup-time error rather than a silently-broken Store. Until
-// Task 27 wires the production gRPC dialer, callers must inject one.
-func TestNew_RejectsMissingDialer(t *testing.T) {
+// TestNew_NilDialerUsesProductionDialer verifies that omitting opts.Dialer
+// causes New to wire the production gRPC dialer (Task 27) rather than
+// returning an error. The store opens successfully — the dialer only fires
+// when Transport's background goroutine tries to connect.
+//
+// (This test replaces the pre-Task-27 TestNew_RejectsMissingDialer that
+// verified the old placeholder-rejection guard.)
+func TestNew_NilDialerUsesProductionDialer(t *testing.T) {
 	opts := validOpts(t.TempDir())
 	opts.Dialer = nil
-	_, err := watchtower.New(context.Background(), opts)
-	if err == nil {
-		t.Fatal("expected New to reject nil Dialer")
+	s, err := watchtower.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("expected New to succeed with nil Dialer (production dialer should be wired): %v", err)
 	}
-	if !strings.Contains(err.Error(), "Dialer is required") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	closeStore(t, s)
 }
 
 // TestNew_RejectsCancelledSetupCtx verifies the ctx-already-cancelled

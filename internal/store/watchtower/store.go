@@ -316,17 +316,12 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		return nil, err
 	}
 
-	// Production-dialer rejection: the placeholder dialer (Task 27
-	// will wire the real one) deliberately fails every Dial. Returning
-	// success from New with that dialer wired would give callers a
-	// half-built Store that infinite-loops in the bg dial-fail backoff
-	// — an opaque failure mode. Until Task 27 lands, production
-	// callers MUST inject a Dialer (testserver.DialerFor for tests,
-	// or a real grpc.Dial wrapper).
+	// When no Dialer is injected, use the production gRPC dialer that
+	// was wired in Task 27. Tests inject testserver.DialerFor; any
+	// non-nil injected Dialer wins (overrides the production dialer).
 	dialer := opts.Dialer
 	if dialer == nil {
-		_ = w.Close()
-		return nil, errors.New("watchtower: Options.Dialer is required (production gRPC dialer wiring lands in Task 27; tests should use testserver.DialerFor)")
+		dialer = newGRPCDialer(opts)
 	}
 
 	// Sanity-check setup ctx: callers passing an already-cancelled
@@ -784,15 +779,8 @@ func readInitialAckTuple(opts Options, w *wal.WAL) (*transport.AckTuple, error) 
 	}
 }
 
-// newGRPCDialer is reserved for the production gRPC wiring landing
-// in Task 27. Until then New rejects an unset Options.Dialer rather
-// than wiring a placeholder that would silently infinite-loop in the
-// bg dial-fail backoff.
-//
-// Kept as a package-private symbol so Task 27 can drop in the real
-// implementation without restructuring New's call site.
-func newGRPCDialer(_ Options) transport.Dialer {
-	return transport.DialerFunc(func(ctx context.Context) (transport.Conn, error) {
-		return nil, fmt.Errorf("watchtower: production dialer not yet wired (Task 27)")
-	})
-}
+// newGRPCDialer returns the production gRPC dialer. When Options.Dialer
+// is nil, New calls this to wire the built-in dialer instead of returning
+// an error. Tests that need a controlled Conn should still inject
+// testserver.DialerFor via Options.Dialer.
+func newGRPCDialer(opts Options) transport.Dialer { return newGRPCDialerProd(opts) }

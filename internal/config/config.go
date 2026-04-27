@@ -1211,17 +1211,7 @@ func (w *AuditWatchtowerConfig) validate() error {
 		_ = os.Remove(probePath)
 	}
 
-	// Dependency-ordering gate: the WTP sink wiring lands in plan Task 27.
-	// Until then, a config that turns the feature on must be rejected so
-	// operators don't think setting `enabled: true` actually does anything.
-	// MUST be the last check so all schema errors above propagate first.
-	// TODO(task-27): remove this gate once the daemon wires the WTP sink.
-	if w.StateDir != "" && !stateDirExisted {
-		// Roll back the directory we created above so a rejected config
-		// leaves no filesystem artifacts behind.
-		_ = os.RemoveAll(w.StateDir)
-	}
-	return fmt.Errorf("audit.watchtower.enabled: WTP sink is not yet wired into the daemon (will be enabled in a later task)")
+	return nil
 }
 
 func Load(path string) (*Config, error) {

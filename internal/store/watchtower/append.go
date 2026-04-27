@@ -314,3 +314,10 @@ func (s *Store) recordCanonicalFailure(err error, ev types.Event) {
 		slog.String("session_id", s.opts.SessionID),
 		slog.String("agent_id", s.opts.AgentID))
 }
+
+// QueryEvents is not supported by the watchtower store. Events are
+// shipped to the remote endpoint and cannot be queried back locally.
+// The method exists to satisfy the store.EventStore interface.
+func (s *Store) QueryEvents(_ context.Context, _ types.EventQuery) ([]types.Event, error) {
+	return nil, fmt.Errorf("watchtower store does not support event queries")
+}

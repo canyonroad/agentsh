@@ -1896,16 +1896,11 @@ func TestAuditWatchtowerConfig_FilterMinRiskLevelEnum(t *testing.T) {
 		t.Run("valid_"+v, func(t *testing.T) {
 			yaml := validWatchtowerYAML(t, true, "    filter:\n      min_risk_level: \""+v+"\"\n")
 			_, err := loadFromString(t, yaml)
-			// The schema-level filter check passes; the WTP-not-wired gate
-			// fires last. So we expect that exact gate error and nothing else.
-			if err == nil {
-				t.Fatalf("expected gating error for valid min_risk_level %q, got nil", v)
-			}
-			if !strings.Contains(err.Error(), "not yet wired") {
-				t.Errorf("err = %v, want WTP-not-wired gating error (filter accepted %q)", err, v)
-			}
-			if strings.Contains(err.Error(), "min_risk_level") {
-				t.Errorf("min_risk_level %q should be accepted but err mentions it: %v", v, err)
+			// Task 27: the WTP-not-wired gate has been removed; valid configs
+			// must now load cleanly. Verify the filter value is accepted and
+			// that no schema error mentions min_risk_level.
+			if err != nil {
+				t.Fatalf("valid min_risk_level %q should load cleanly after Task 27, got: %v", v, err)
 			}
 		})
 	}
@@ -1961,8 +1956,9 @@ func TestAuditWatchtowerConfig_KMSSourcesMutualExclusion(t *testing.T) {
 		}
 	})
 
-	// One of each KMS source individually must pass schema validation
-	// (and only fail on the WTP-not-wired gate).
+	// One of each KMS source individually must pass schema validation.
+	// Task 27: the WTP-not-wired gate has been removed; single-source
+	// configs must now load cleanly.
 	for _, c := range []struct {
 		name  string
 		chain string
@@ -1982,32 +1978,23 @@ func TestAuditWatchtowerConfig_KMSSourcesMutualExclusion(t *testing.T) {
 				"    auth:\n      token_file: \"/t\"\n" +
 				"    chain:\n" + c.chain
 			_, err := loadFromString(t, yaml)
-			if err == nil {
-				t.Fatalf("expected WTP-not-wired gating error for source %q, got nil", c.name)
-			}
-			if strings.Contains(err.Error(), "exactly one") || strings.Contains(err.Error(), "key_source") {
-				t.Errorf("err = %v, single-source %q should pass schema validation", err, c.name)
-			}
-			if !strings.Contains(err.Error(), "not yet wired") {
-				t.Errorf("err = %v, want WTP-not-wired gating error for single source %q", err, c.name)
+			if err != nil {
+				t.Fatalf("single-source %q should load cleanly after Task 27, got: %v", c.name, err)
 			}
 		})
 	}
 }
 
-func TestAuditWatchtowerConfig_EnabledRejectedUntilWired(t *testing.T) {
-	// A fully-valid config with enabled:true must still be rejected by the
-	// dependency-ordering gate until plan Task 27 wires the WTP sink in.
+func TestAuditWatchtowerConfig_EnabledWiredInTask27(t *testing.T) {
+	// Task 27 removed the "not yet wired" gate. A fully-valid config with
+	// enabled:true must now load cleanly (the gate was a temporary measure
+	// to prevent operators from enabling WTP before the daemon wiring landed).
 	yaml := validWatchtowerYAML(t, true, "")
-	_, err := loadFromString(t, yaml)
-	if err == nil {
-		t.Fatal("expected WTP-not-wired gating error, got nil")
-	}
-	if !strings.Contains(err.Error(), "not yet wired") {
-		t.Errorf("err = %v, want WTP-not-wired gating error", err)
+	if _, err := loadFromString(t, yaml); err != nil {
+		t.Fatalf("valid enabled WTP config should load cleanly after Task 27, got: %v", err)
 	}
 
-	// And with enabled:false the same config must load cleanly.
+	// With enabled:false the same config must also load cleanly.
 	yamlOff := validWatchtowerYAML(t, false, "")
 	if _, err := loadFromString(t, yamlOff); err != nil {
 		t.Fatalf("load with enabled:false: %v", err)
@@ -2033,19 +2020,15 @@ func TestAuditWatchtowerConfig_KeySourceSelectorMismatch(t *testing.T) {
 		t.Errorf("err = %v, want mention of key_source", err)
 	}
 
-	// Matching key_source must pass schema validation (and only fail on the
-	// not-yet-wired gate).
+	// Matching key_source must pass schema validation cleanly (Task 27:
+	// the WTP-not-wired gate has been removed).
 	yamlMatch := "audit:\n  watchtower:\n    enabled: true\n" +
 		"    endpoint: \"wtp.example.com:9443\"\n" +
 		"    state_dir: \"" + filepath.ToSlash(filepath.Join(t.TempDir(), "wtp-state")) + "\"\n" +
 		"    auth:\n      token_file: \"/t\"\n" +
 		"    chain:\n      key_source: \"aws_kms\"\n      aws_kms:\n        key_id: \"alias/k\"\n"
-	_, err = loadFromString(t, yamlMatch)
-	if err == nil {
-		t.Fatal("expected WTP-not-wired gating error, got nil")
-	}
-	if !strings.Contains(err.Error(), "not yet wired") {
-		t.Errorf("err = %v, want WTP-not-wired gating error", err)
+	if _, err = loadFromString(t, yamlMatch); err != nil {
+		t.Fatalf("matching key_source should load cleanly after Task 27, got: %v", err)
 	}
 }
 
@@ -2115,11 +2098,10 @@ func TestAuditWatchtowerConfig_TLSFileUnreadable(t *testing.T) {
 	}
 }
 
-func TestAuditWatchtowerConfig_NoFilesystemArtifactsOnGateRejection(t *testing.T) {
-	// validate()'s WTP-not-wired gate fires after state_dir is created. The
-	// gated rejection should not leave a fresh state_dir on disk; otherwise
-	// every dry-run config check pollutes the user's filesystem. (If the
-	// state_dir already existed before validation, we leave it alone.)
+func TestAuditWatchtowerConfig_StateDirCreatedOnValidLoad(t *testing.T) {
+	// Task 27: the WTP-not-wired gate has been removed. A valid config with
+	// a fresh state_dir path must load cleanly AND the state_dir must be
+	// created (or already exist) after successful validation.
 	stateRoot := t.TempDir()
 	stateDir := filepath.ToSlash(filepath.Join(stateRoot, "fresh-wtp-state"))
 	chainKey := writeTempFile(t, "wtp.key")
@@ -2130,13 +2112,12 @@ func TestAuditWatchtowerConfig_NoFilesystemArtifactsOnGateRejection(t *testing.T
 		"    auth:\n      token_file: \"/t\"\n" +
 		"    chain:\n      key_file: \"" + chainKey + "\"\n"
 	_, err := loadFromString(t, yaml)
-	if err == nil || !strings.Contains(err.Error(), "not yet wired") {
-		t.Fatalf("expected WTP-not-wired gating error, got %v", err)
+	if err != nil {
+		t.Fatalf("valid WTP config should load cleanly after Task 27, got: %v", err)
 	}
-	if _, err := os.Stat(stateDir); err == nil {
-		t.Errorf("state_dir %q should not exist after gated rejection", stateDir)
-	} else if !os.IsNotExist(err) {
-		t.Errorf("unexpected stat error: %v", err)
+	// The state_dir writability probe in validate() creates the directory.
+	if _, err := os.Stat(stateDir); err != nil {
+		t.Errorf("state_dir %q should exist after successful validation: %v", stateDir, err)
 	}
 }
 
