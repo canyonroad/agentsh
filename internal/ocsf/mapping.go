@@ -19,12 +19,9 @@ import (
 //     is no global denylist.
 //   - Project builds the class-specific proto.Message. Map() handles
 //     the deterministic marshal at the boundary.
-//
-// AgentInternal is informational (also set inside the projected proto).
 type Mapping struct {
 	ClassUID        uint32
 	ActivityID      uint32
-	AgentInternal   bool
 	FieldsAllowlist []FieldRule
 	Project         Projector
 }

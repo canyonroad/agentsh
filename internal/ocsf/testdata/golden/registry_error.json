@@ -1,8 +1,8 @@
 {
   "class_uid": 1001,
-  "activity_id": 3,
+  "activity_id": 0,
   "category_uid": 1,
-  "type_uid": 100103,
+  "type_uid": 100100,
   "time": "1777118400000000000",
   "severity": "Informational",
   "metadata": {
