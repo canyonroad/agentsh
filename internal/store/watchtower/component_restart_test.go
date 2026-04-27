@@ -18,14 +18,16 @@ import (
 // TestStore_ServerRestart_AcksCatchUp verifies that when the server is
 // closed mid-stream and a new server takes its place, the client
 // reconnects and the new server eventually sees all previously-pending
-// records via replay (because no SessionAck arrived for them).
+// records via replay (because no BatchAck arrived for them).
 func TestStore_ServerRestart_AcksCatchUp(t *testing.T) {
-	// srv1 is configured with a large AckDelay so it never sends
-	// BatchAck within the 150ms observation window. When we close it,
-	// the transport's persisted ack cursor remains at (0,0) — forcing
-	// a full replay to srv2.
+	// srv1 is configured with a large BatchAckDelay so it never sends
+	// BatchAck within the test's observation window. SessionAck is
+	// NOT delayed — the handshake completes normally and EventBatch
+	// sends can flow. When we close srv1 after confirming at least one
+	// batch landed, the transport's persisted ack cursor remains at
+	// (0,0) — forcing a full replay to srv2.
 	srv1 := testserver.New(testserver.Options{
-		AckDelay: 10 * time.Second,
+		BatchAckDelay: 10 * time.Second,
 	})
 	router := testserver.NewRoutingDialer(srv1)
 
@@ -64,8 +66,15 @@ func TestStore_ServerRestart_AcksCatchUp(t *testing.T) {
 		}
 	}
 
-	// Let some records land on srv1 before we pull the plug.
-	time.Sleep(150 * time.Millisecond)
+	// Wait for at least one batch to land on srv1 before pulling the
+	// plug. This confirms the session handshake completed and EventBatch
+	// sends flowed normally — proving we are exercising mid-stream
+	// replay, NOT recovery from an interrupted handshake.
+	// WaitForFirstBatch polls every 5ms; 5s is generous enough for any
+	// scheduler jitter on a loaded CI box.
+	if _, err := srv1.WaitForFirstBatch(5 * time.Second); err != nil {
+		t.Fatalf("srv1 never received a batch: %v", err)
+	}
 	srv1.Close()
 
 	// Stand up a second server and re-point the router so the next
@@ -75,9 +84,9 @@ func TestStore_ServerRestart_AcksCatchUp(t *testing.T) {
 	router.Switch(srv2)
 
 	// Poll until srv2 has observed all 10 sequences via replay.
-	// Because srv1 sent no SessionAck (it was simply closed), the
-	// Transport's persisted ack cursor is still at (0, 0) and the
-	// Replayer re-sends all 10 records from the WAL.
+	// Because srv1 sent no BatchAck (BatchAckDelay=10s outlasted the
+	// srv1 connection), the Transport's persisted ack cursor is still
+	// at (0, 0) and the Replayer re-sends all 10 records from the WAL.
 	//
 	// We use AssertReplayObserved rather than AssertSequenceRange:
 	// some records may arrive as duplicates if they were batched and
