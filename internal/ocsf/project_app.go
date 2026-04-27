@@ -81,7 +81,6 @@ func init() {
 		register(t, Mapping{
 			ClassUID:        ClassApplicationActivity,
 			ActivityID:      activity,
-			AgentInternal:   false,
 			FieldsAllowlist: standardAllow,
 			Project:         appProjector(activity, false),
 		})
@@ -121,7 +120,6 @@ func init() {
 		register(t, Mapping{
 			ClassUID:        ClassApplicationActivity,
 			ActivityID:      activity,
-			AgentInternal:   true,
 			FieldsAllowlist: infraAllow,
 			Project:         appProjector(activity, true),
 		})
