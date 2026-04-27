@@ -27,3 +27,13 @@ func (s *Store) OptsLogGoawayMessageForTest() bool {
 	return s.opts.LogGoawayMessage
 }
 
+// TransportLogGoawayMessageForTest returns the LogGoawayMessage value
+// as resolved by the Transport the Store constructed. This is the
+// load-bearing seam for the wire-through regression test: if store.go
+// ever stops passing opts.LogGoawayMessage into transport.New, the
+// Transport's value will be false (the zero value) regardless of what
+// Options.LogGoawayMessage was set to, causing the assertion to fail.
+func (s *Store) TransportLogGoawayMessageForTest() bool {
+	return s.tr.LogGoawayMessage()
+}
+

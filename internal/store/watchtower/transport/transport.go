@@ -376,6 +376,14 @@ func (t *Transport) RejectReason() string {
 	return t.rejectReason
 }
 
+// LogGoawayMessage returns the LogGoawayMessage option the Transport was
+// constructed with. Used by watchtower.Store's test seam
+// (TransportLogGoawayMessageForTest in store_export_test.go) to assert that
+// store.go correctly wires opts.LogGoawayMessage through to transport.New.
+func (t *Transport) LogGoawayMessage() bool {
+	return t.opts.LogGoawayMessage
+}
+
 // stopReq carries a Stop request through the run loop. The done channel
 // is closed by whichever loop branch services the request, which
 // unblocks the Stop caller. drainDeadline bounds how long runShutdown

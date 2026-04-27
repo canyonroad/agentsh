@@ -4,7 +4,13 @@
 
 **Default:** unset (resolves to `false`).
 
-**What it does.** When `true`, the WARN log emitted on GOAWAY receipt includes the server-supplied `goaway_message` text after client-side sanitization (control-char stripping, truncation to 512 bytes at a UTF-8 rune boundary, invalid-UTF-8 → U+FFFD). When `false` or unset, only `goaway_message_present: bool` is emitted.
+**What it does.** When `true`, the WARN log emitted on GOAWAY receipt includes the server-supplied `goaway_message` text after client-side sanitization via `sanitizeForLog` (transport implementation). The sanitizer applies these rules **in order**:
+
+1. Replace any invalid UTF-8 sequence with U+FFFD.
+2. Replace any control or non-printable rune (including `\t`, `\n`, all C0 controls) with U+FFFD. Only the literal space character and printable Unicode pass through.
+3. Truncate the **sanitized** output to at most 512 bytes at a UTF-8 rune boundary, appending `...[truncated]` **within** that 512-byte budget. When truncation fires, operators see the prefix of the message followed by the `...[truncated]` marker; the total length including the marker is at most 512 bytes.
+
+When `false` or unset, only `goaway_message_present: bool` is emitted.
 
 **Three-state semantics.** YAML omitted, explicit `false`, and explicit `true` are distinct on the wire so a future major-version-bump default flip is auditable in startup logs.
 
