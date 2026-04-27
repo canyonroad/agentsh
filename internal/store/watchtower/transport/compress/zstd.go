@@ -8,9 +8,12 @@ import (
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
-// minZstdLevel and maxZstdLevel bracket the levels exposed by
-// klauspost/compress/zstd. NewEncoder rejects values outside this
-// range; config.validate enforces the same bounds upstream.
+// minZstdLevel and maxZstdLevel mirror the canonical zstd CLI's
+// supported range. klauspost/compress collapses these into four
+// SpeedFastest..SpeedBestCompression buckets internally and does not
+// itself reject out-of-range integers; we enforce the bounds here so
+// that operator-facing config rejects nonsense values rather than
+// silently snapping them to the best-compression bucket.
 const (
 	minZstdLevel = 1
 	maxZstdLevel = 22
