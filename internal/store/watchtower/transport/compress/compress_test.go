@@ -1,7 +1,6 @@
 package compress
 
 import (
-	"bytes"
 	"testing"
 
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
@@ -19,5 +18,4 @@ func TestNoneEncoder_AlgoAndPassthroughError(t *testing.T) {
 	if _, err := enc.Encode([]byte{1, 2, 3}); err == nil {
 		t.Fatal("noneEncoder.Encode: want error, got nil")
 	}
-	_ = bytes.Equal // prevent unused-import nag if test changes
 }
