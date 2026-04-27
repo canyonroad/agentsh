@@ -51,6 +51,10 @@ type Collector struct {
 	wtpSessionInitFailuresByReason     sync.Map
 	wtpSessionRotationFailuresByReason sync.Map
 
+	// Task 3: wtp_loss_unknown_reason_total. Incremented by the encoder
+	// when a wal.LossRecord.Reason string has no wire enum mapping.
+	wtpLossUnknownReason atomic.Uint64
+
 	// Task 22 cursor-feedback metrics. The Transport's
 	// applyServerAckTuple helper increments these on the three non-
 	// Adopted dispatch outcomes; AppendEvent and the recv-multiplexer

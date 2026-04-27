@@ -59,6 +59,25 @@ func TestWTPMetrics_NilSafe(t *testing.T) {
 	w.AddBytesSent(99)
 }
 
+func TestWTPMetrics_LossUnknownReasonExposed(t *testing.T) {
+	c := New()
+	c.WTP().IncWTPLossUnknownReason(3)
+
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	out := rr.Body.String()
+
+	if !strings.Contains(out, "# HELP wtp_loss_unknown_reason_total") {
+		t.Fatalf("HELP missing for wtp_loss_unknown_reason_total:\n%s", out)
+	}
+	if !strings.Contains(out, "# TYPE wtp_loss_unknown_reason_total counter") {
+		t.Fatalf("TYPE missing for wtp_loss_unknown_reason_total:\n%s", out)
+	}
+	if !strings.Contains(out, "wtp_loss_unknown_reason_total 3") {
+		t.Fatalf("counter line wrong:\n%s", out)
+	}
+}
+
 func TestWTPMetrics_HistogramBucketBoundaries(t *testing.T) {
 	c := New()
 	w := c.WTP()
