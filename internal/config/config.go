@@ -880,6 +880,21 @@ type AuditWatchtowerConfig struct {
 	Heartbeat WatchtowerHeartbeatConfig `yaml:"heartbeat"`
 	Backoff   WatchtowerBackoffConfig   `yaml:"backoff"`
 	Filter    WatchtowerFilterConfig    `yaml:"filter"`
+
+	// EmitExtendedLossReasons controls whether the WTP client emits
+	// TransportLoss frames with the six reason values added in the
+	// 2026-04-27 spec: MAPPER_FAILURE, INVALID_MAPPER, INVALID_TIMESTAMP,
+	// INVALID_UTF8, SEQUENCE_OVERFLOW, ACK_REGRESSION_AFTER_GC.
+	//
+	// Default false. Strict-enum receivers reject unknown enum values
+	// per the TRANSPORT_LOSS_REASON_UNSPECIFIED contract (Goaway on
+	// unknown). Operators flip this to true once their receiving
+	// Watchtower instance has been upgraded.
+	//
+	// OVERFLOW and CRC_CORRUPTION are always emitted (they predate this
+	// spec and are part of the original wire schema) — those reasons
+	// are not gated by this flag.
+	EmitExtendedLossReasons bool `yaml:"emit_extended_loss_reasons"`
 }
 
 type WatchtowerTLSConfig struct {

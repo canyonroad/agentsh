@@ -1654,6 +1654,47 @@ audit:
 	}
 }
 
+func TestAuditWatchtowerConfig_EmitExtendedLossReasons_DefaultsFalse(t *testing.T) {
+	yamlIn := `
+audit:
+  watchtower:
+    enabled: false
+    endpoint: "wtp.example.com:9443"
+    auth:
+      token_file: "/etc/agentsh/wtp.token"
+    chain:
+      key_file: "/etc/agentsh/wtp.key"
+`
+	cfg, err := loadFromString(t, yamlIn)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Audit.Watchtower.EmitExtendedLossReasons {
+		t.Fatalf("EmitExtendedLossReasons default should be false; got true")
+	}
+}
+
+func TestAuditWatchtowerConfig_EmitExtendedLossReasons_ExplicitTrue(t *testing.T) {
+	yamlIn := `
+audit:
+  watchtower:
+    enabled: false
+    endpoint: "wtp.example.com:9443"
+    auth:
+      token_file: "/etc/agentsh/wtp.token"
+    chain:
+      key_file: "/etc/agentsh/wtp.key"
+    emit_extended_loss_reasons: true
+`
+	cfg, err := loadFromString(t, yamlIn)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Audit.Watchtower.EmitExtendedLossReasons {
+		t.Fatalf("EmitExtendedLossReasons should be true after explicit set")
+	}
+}
+
 func TestAuditWatchtowerConfig_EphemeralOverridesDefaults(t *testing.T) {
 	// See note in TestAuditWatchtowerConfig_DefaultsExpand: enabled=false
 	// avoids the WTP-not-wired gate while still exercising applyDefaults.
