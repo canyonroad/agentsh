@@ -51,7 +51,25 @@ type Options struct {
 	// AckDelay introduces an artificial delay before each ACK
 	// (SessionAck and BatchAck) is sent. Used to exercise the
 	// Transport's behavior when the server is slow. Zero = no delay.
+	//
+	// BatchAckDelay overrides this field for BatchAck specifically
+	// when both are set. Use BatchAckDelay alone when the test needs
+	// the SessionAck to arrive promptly (so EventBatch sends can flow)
+	// while still holding back per-batch acknowledgements.
 	AckDelay time.Duration
+
+	// BatchAckDelay introduces an artificial delay before each
+	// BatchAck is sent. When non-zero, it takes precedence over
+	// AckDelay for the BatchAck path only; AckDelay continues to
+	// govern SessionAck timing. Zero = fall back to AckDelay (which
+	// may itself be zero = no delay).
+	//
+	// Use this field when a test needs the session handshake to
+	// complete normally (so EventBatch sends can flow) but wants to
+	// keep the ack cursor unmoved for a bounded window — e.g. a
+	// server-restart test that must confirm at least one batch landed
+	// before pulling the plug.
+	BatchAckDelay time.Duration
 
 	// DropAfterBatchN closes the stream (returns an error from the
 	// server Stream handler) after observing N EventBatch messages on

@@ -380,11 +380,19 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 					lastGen = last.GetGeneration()
 				}
 			}
-			if h.s.opts.AckDelay > 0 {
+			// BatchAckDelay overrides AckDelay for the per-batch ack
+			// path when set. This lets tests keep the session
+			// handshake fast (so EventBatch sends can flow) while
+			// still holding back per-batch acknowledgements.
+			batchDelay := h.s.opts.BatchAckDelay
+			if batchDelay == 0 {
+				batchDelay = h.s.opts.AckDelay
+			}
+			if batchDelay > 0 {
 				select {
 				case <-stream.Context().Done():
 					return stream.Context().Err()
-				case <-time.After(h.s.opts.AckDelay):
+				case <-time.After(batchDelay):
 				}
 			}
 			if err := stream.Send(&wtpv1.ServerMessage{
