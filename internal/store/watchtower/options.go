@@ -70,12 +70,28 @@ type Options struct {
 	BatchMaxAge     time.Duration
 
 	// Transport endpoint (Task 27 wiring).
-	Endpoint    string
-	TLSEnabled  bool
-	TLSCertFile string
-	TLSKeyFile  string
-	TLSInsecure bool
-	AuthBearer  string
+	Endpoint      string
+	TLSEnabled    bool
+	TLSCACertFile string // optional; system roots used when empty
+	TLSCertFile   string
+	TLSKeyFile    string
+	TLSInsecure   bool
+	AuthBearer    string
+
+	// HeartbeatEvery controls how often the transport sends a ClientHeartbeat
+	// to the server. Zero means "use the spec default" (5 s). The config layer
+	// (audit.watchtower.heartbeat.interval) wires the operator-configured value
+	// here; see buildWatchtowerStore in internal/server/wtp.go.
+	HeartbeatEvery time.Duration
+
+	// BackoffInitial and BackoffMax configure the exponential back-off
+	// between reconnect attempts. Zero means "use the spec default"
+	// (200 ms initial, 30 s max). The config layer
+	// (audit.watchtower.backoff.base / backoff.max) wires the
+	// operator-configured values here; see buildWatchtowerStore in
+	// internal/server/wtp.go.
+	BackoffInitial time.Duration
+	BackoffMax     time.Duration
 
 	// Filter is the optional eventfilter.Filter applied before
 	// AppendEvent reaches the chain/WAL pipeline.
@@ -145,6 +161,15 @@ func (o *Options) applyDefaults() {
 	}
 	if o.DrainDeadline == 0 {
 		o.DrainDeadline = 2 * time.Second
+	}
+	if o.HeartbeatEvery == 0 {
+		o.HeartbeatEvery = 5 * time.Second
+	}
+	if o.BackoffInitial == 0 {
+		o.BackoffInitial = 200 * time.Millisecond
+	}
+	if o.BackoffMax == 0 {
+		o.BackoffMax = 30 * time.Second
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()

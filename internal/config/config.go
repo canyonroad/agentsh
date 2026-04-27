@@ -859,6 +859,11 @@ type AuditWatchtowerConfig struct {
 }
 
 type WatchtowerTLSConfig struct {
+	// Insecure disables TLS entirely and dials plaintext gRPC. This is a
+	// load-bearing security choice — the daemon logs a WARN at startup when
+	// this is true. Only set this for local test servers or development
+	// environments where TLS is not available. Default: false (TLS on).
+	Insecure           bool   `yaml:"insecure"`
 	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
 	CACertFile         string `yaml:"ca_cert_file"`
 	ClientCertFile     string `yaml:"client_cert_file"`
@@ -948,7 +953,7 @@ func (w *AuditWatchtowerConfig) applyDefaults() {
 			w.Batch.FlushInterval = 1 * time.Second
 		}
 		if w.Batch.Compression == "" {
-			w.Batch.Compression = "zstd"
+			w.Batch.Compression = "none"
 		}
 		if w.Batch.ZstdLevel == 0 {
 			w.Batch.ZstdLevel = 3
@@ -1161,7 +1166,14 @@ func (w *AuditWatchtowerConfig) validate() error {
 		return fmt.Errorf("audit.watchtower.wal.segment_size %d > max_total_bytes/2 (%d)", w.WAL.SegmentSize, w.WAL.MaxTotalBytes/2)
 	}
 	switch w.Batch.Compression {
-	case "zstd", "gzip", "none":
+	case "none":
+		// Supported: transport always sends COMPRESSION_NONE today.
+	case "zstd", "gzip":
+		// These compression algorithms are validated in the schema but not yet
+		// implemented in the transport (batches are always sent as
+		// COMPRESSION_NONE). Reject them at config validation time so operators
+		// see a clear error rather than silently having compression ignored.
+		return fmt.Errorf("audit.watchtower.batch.compression %q: only \"none\" is supported until batch compression is implemented in the transport", w.Batch.Compression)
 	default:
 		return fmt.Errorf("audit.watchtower.batch.compression %q: must be zstd, gzip, or none", w.Batch.Compression)
 	}
@@ -1211,17 +1223,7 @@ func (w *AuditWatchtowerConfig) validate() error {
 		_ = os.Remove(probePath)
 	}
 
-	// Dependency-ordering gate: the WTP sink wiring lands in plan Task 27.
-	// Until then, a config that turns the feature on must be rejected so
-	// operators don't think setting `enabled: true` actually does anything.
-	// MUST be the last check so all schema errors above propagate first.
-	// TODO(task-27): remove this gate once the daemon wires the WTP sink.
-	if w.StateDir != "" && !stateDirExisted {
-		// Roll back the directory we created above so a rejected config
-		// leaves no filesystem artifacts behind.
-		_ = os.RemoveAll(w.StateDir)
-	}
-	return fmt.Errorf("audit.watchtower.enabled: WTP sink is not yet wired into the daemon (will be enabled in a later task)")
+	return nil
 }
 
 func Load(path string) (*Config, error) {

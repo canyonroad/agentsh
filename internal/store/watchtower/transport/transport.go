@@ -188,6 +188,16 @@ type Options struct {
 	// AuditWatchtowerConfig or daemon-facing config; Task 27b owns
 	// the config-surface expansion.
 	LogGoawayMessage bool
+
+	// BackoffInitial is the starting duration for the exponential back-off
+	// between reconnect attempts. Zero means "use the default" (200 ms),
+	// which applyBackoffDefaults fills in before Run starts. Supplied by
+	// the watchtower.Options threading path in store.go.
+	BackoffInitial time.Duration
+	// BackoffMax is the ceiling for the exponential back-off. Zero means
+	// "use the default" (30 s). Supplied by the watchtower.Options threading
+	// path in store.go.
+	BackoffMax time.Duration
 }
 
 // validate enforces the construction-time invariants documented on
@@ -1026,9 +1036,17 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 	// loop has already returned does not deadlock on stopReq.done.
 	// Per Task 27c.
 	defer close(t.runDone)
+	boInitial := t.opts.BackoffInitial
+	if boInitial <= 0 {
+		boInitial = 200 * time.Millisecond
+	}
+	boMax := t.opts.BackoffMax
+	if boMax <= 0 {
+		boMax = 30 * time.Second
+	}
 	bo := NewBackoff(BackoffOptions{
-		Initial: 200 * time.Millisecond,
-		Max:     30 * time.Second,
+		Initial: boInitial,
+		Max:     boMax,
 		Factor:  2.0,
 	})
 	st := StateConnecting

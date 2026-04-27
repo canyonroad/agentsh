@@ -29,6 +29,7 @@ import (
 	limitspkg "github.com/agentsh/agentsh/internal/limits"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/metrics"
+	"github.com/agentsh/agentsh/internal/ocsf"
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
@@ -352,6 +353,15 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 	if otelStore != nil {
 		eventStores = append(eventStores, otelStore)
+	}
+	if cfg.Audit.Watchtower.Enabled {
+		wtpStore, err := buildWatchtowerStore(context.Background(), cfg.Audit.Watchtower, ocsf.New())
+		if err != nil {
+			return nil, fmt.Errorf("build watchtower store: %w", err)
+		}
+		if wtpStore != nil {
+			eventStores = append(eventStores, wtpStore)
+		}
 	}
 	var primary storepkg.EventStore
 	var output storepkg.OutputStore
