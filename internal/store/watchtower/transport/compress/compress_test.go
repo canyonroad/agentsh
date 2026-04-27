@@ -2,7 +2,9 @@ package compress
 
 import (
 	"bytes"
+	"compress/gzip"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -93,4 +95,59 @@ func zstdDecodeForTest(b []byte) ([]byte, error) {
 	}
 	defer r.Close()
 	return r.DecodeAll(b, nil)
+}
+
+func TestGzipEncoder_RoundTripDefaultLevel(t *testing.T) {
+	enc, err := NewEncoder("gzip", 0, 6)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if got := enc.Algo(); got != wtpv1.Compression_COMPRESSION_GZIP {
+		t.Fatalf("Algo() = %v, want COMPRESSION_GZIP", got)
+	}
+	in := bytes.Repeat([]byte("agentsh-wtp-gzip-roundtrip-"), 256)
+	out, err := enc.Encode(in)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if len(out) >= len(in) {
+		t.Fatalf("Encode produced %d bytes from %d-byte input; expected compression", len(out), len(in))
+	}
+	dec, err := gzipDecodeForTest(out)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !bytes.Equal(dec, in) {
+		t.Fatalf("round-trip mismatch")
+	}
+}
+
+func TestGzipEncoder_LevelBounds(t *testing.T) {
+	cases := []struct {
+		level   int
+		wantErr bool
+	}{
+		{0, true}, {1, false}, {6, false}, {9, false}, {10, true}, {-1, true},
+	}
+	for _, tc := range cases {
+		_, err := NewEncoder("gzip", 0, tc.level)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("level=%d err=%v wantErr=%v", tc.level, err, tc.wantErr)
+		}
+	}
+}
+
+func TestNewEncoder_UnsupportedAlgo(t *testing.T) {
+	if _, err := NewEncoder("snappy", 0, 0); err == nil {
+		t.Fatal("NewEncoder(\"snappy\"): want error, got nil")
+	}
+}
+
+func gzipDecodeForTest(b []byte) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
 }
