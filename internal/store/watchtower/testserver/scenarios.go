@@ -111,6 +111,13 @@ type Options struct {
 	RejectSession bool
 	RejectReason  string
 
+	// TransportLossAckDelay introduces an artificial delay before the
+	// BatchAck for a TransportLoss frame is sent. When non-zero, the
+	// server holds the ack for this duration before sending it. This
+	// lets tests verify that the in-flight slot is held by the loss
+	// frame's to_sequence until the ack arrives. Zero = no delay.
+	TransportLossAckDelay time.Duration
+
 	// Metrics, if non-nil, receives counter increments for inbound
 	// EventBatch / SessionInit validation failures via
 	// transport.ClassifyAndIncInvalidFrame. Validation itself is

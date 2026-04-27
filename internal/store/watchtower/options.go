@@ -101,6 +101,25 @@ type Options struct {
 	// the full semantics and the server-side no-secrets contract reference.
 	LogGoawayMessage bool
 
+	// EmitExtendedLossReasons toggles wire emission of the six
+	// TransportLossReason values added in the 2026-04-27 spec
+	// (MAPPER_FAILURE, INVALID_MAPPER, INVALID_TIMESTAMP, INVALID_UTF8,
+	// SEQUENCE_OVERFLOW, ACK_REGRESSION_AFTER_GC). When false:
+	//   - in-flight drop sites (recordSequenceOverflow, etc.) skip
+	//     wal.AppendLoss entirely; the drop is counter-only.
+	//   - the encoder drops ACK_REGRESSION_AFTER_GC PrefixLoss markers
+	//     and any other extended-reason markers it might encounter
+	//     instead of emitting them.
+	// OVERFLOW and CRC_CORRUPTION are unaffected — they're part of the
+	// original wire schema.
+	EmitExtendedLossReasons bool
+
+	// MaxInflight overrides the default in-flight window (8) for tests
+	// that need fine-grained back-pressure control. Zero means "use the
+	// default". Production callers leave this zero; tests set it to 1
+	// to verify that the inflight slot is held and released correctly.
+	MaxInflight int
+
 	// Filter is the optional eventfilter.Filter applied before
 	// AppendEvent reaches the chain/WAL pipeline.
 	Filter *eventfilter.Filter

@@ -1821,7 +1821,7 @@ func (w *WAL) dropOldestLocked() (loss LossRecord, dropped bool, hasUserRange bo
 	w.prunePerGenMapsLocked()
 	// hasUserRange == !first: we observed at least one real record.
 	hasUserRange = !first
-	return LossRecord{FromSequence: fromSeq, ToSequence: toSeq, Generation: hdr.Generation, Reason: "overflow"}, true, hasUserRange, nil
+	return LossRecord{FromSequence: fromSeq, ToSequence: toSeq, Generation: hdr.Generation, Reason: LossReasonOverflow}, true, hasUserRange, nil
 }
 
 // segmentFullyAckedLocked reports whether the segment described by

@@ -28,10 +28,10 @@ type Metrics interface {
 
 type noopMetrics struct{}
 
-func (noopMetrics) SetAckHighWatermark(int64)                             {}
-func (noopMetrics) IncAnomalousAck(string)                                {}
-func (noopMetrics) IncResendNeeded()                                      {}
-func (noopMetrics) IncAckRegressionLoss()                                 {}
+func (noopMetrics) SetAckHighWatermark(int64)                            {}
+func (noopMetrics) IncAnomalousAck(string)                               {}
+func (noopMetrics) IncResendNeeded()                                     {}
+func (noopMetrics) IncAckRegressionLoss()                                {}
 func (noopMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {}
 
 // AckTuple is the persisted (gen, seq) ack pair seeded from wal.Meta on
@@ -198,6 +198,22 @@ type Options struct {
 	// "use the default" (30 s). Supplied by the watchtower.Options threading
 	// path in store.go.
 	BackoffMax time.Duration
+
+	// EmitExtendedLossReasons controls whether the encoder emits
+	// TransportLoss frames for the six extended reasons added in the
+	// 2026-04-27 spec (MAPPER_FAILURE, INVALID_MAPPER, INVALID_TIMESTAMP,
+	// INVALID_UTF8, SEQUENCE_OVERFLOW, ACK_REGRESSION_AFTER_GC). When
+	// false, extended-reason WAL loss markers are silently dropped by the
+	// encoder rather than emitted on the wire.
+	//
+	// This field replaces the old package-level SetEncoderEmitExtendedReasons
+	// function — each Transport instance now carries its own flag so
+	// concurrent tests with different flag values do not race.
+	//
+	// Threaded from watchtower.Options.EmitExtendedLossReasons via store.go;
+	// production callers leave this false until the feature is enabled
+	// (internal/server/wtp.go buildWatchtowerStore).
+	EmitExtendedLossReasons bool
 }
 
 // validate enforces the construction-time invariants documented on
@@ -312,6 +328,14 @@ type Transport struct {
 	// ctx alone is insufficient because state-local errors must be
 	// able to drop a connection without shutting down the transport.
 	recv *recvSession
+
+	// emitExtendedLossReasons is a per-Transport copy of
+	// Options.EmitExtendedLossReasons captured at New() time. The encoder
+	// reads this field (via the closure in runLive / runReplaying /
+	// runShutdown) rather than a package-level bool so concurrent test
+	// binaries that run multiple Stores with different flag values do not
+	// race on a shared global.
+	emitExtendedLossReasons bool
 }
 
 // New constructs a Transport. It does not dial; call Run to start.
@@ -335,12 +359,13 @@ func New(opts Options) (*Transport, error) {
 		opts.Metrics = noopMetrics{}
 	}
 	t := &Transport{
-		opts:              opts,
-		wal:               opts.WAL,
-		metrics:           opts.Metrics,
-		ackAnomalyLimiter: rate.NewLimiter(rate.Every(time.Minute), 1),
-		stopCh:            make(chan stopReq, 1),
-		runDone:           make(chan struct{}),
+		opts:                    opts,
+		wal:                     opts.WAL,
+		metrics:                 opts.Metrics,
+		ackAnomalyLimiter:       rate.NewLimiter(rate.Every(time.Minute), 1),
+		stopCh:                  make(chan stopReq, 1),
+		runDone:                 make(chan struct{}),
+		emitExtendedLossReasons: opts.EmitExtendedLossReasons,
 	}
 	if opts.InitialAckTuple != nil && opts.InitialAckTuple.Present {
 		seed := AckCursor{
@@ -796,7 +821,7 @@ func (t *Transport) computeReplayStart(remoteReplayCursor AckCursor, persistedAc
 			FromSequence: gapStart,
 			ToSequence:   earliestOnDisk - 1,
 			Generation:   persistedAck.Generation,
-			Reason:       "ack_regression_after_gc",
+			Reason:       wal.LossReasonAckRegressionAfterGC,
 		}
 		readerStart = earliestOnDisk
 	case ok && earliestOnDisk <= gapStart:
@@ -808,7 +833,7 @@ func (t *Transport) computeReplayStart(remoteReplayCursor AckCursor, persistedAc
 			FromSequence: gapStart,
 			ToSequence:   persistedAck.Sequence,
 			Generation:   persistedAck.Generation,
-			Reason:       "ack_regression_after_gc",
+			Reason:       wal.LossReasonAckRegressionAfterGC,
 		}
 		readerStart = gapStart
 	default:
@@ -979,6 +1004,29 @@ func (t *Transport) regressToConnecting() {
 		t.teardownRecv()
 		t.conn = nil
 	}
+}
+
+// logEmittedLossIfApplicable emits an INFO log when msg is a
+// TransportLoss ClientMessage. No-op for other frame types. Called
+// after each successful conn.Send in the runLive / runReplaying /
+// runShutdown send loops so the carrier path is observable end-to-end
+// without grepping the wire.
+func (t *Transport) logEmittedLossIfApplicable(ctx context.Context, msg *wtpv1.ClientMessage) {
+	tl, ok := msg.Msg.(*wtpv1.ClientMessage_TransportLoss)
+	if !ok {
+		return
+	}
+	if t.opts.Logger == nil {
+		return
+	}
+	t.opts.Logger.LogAttrs(ctx, slog.LevelInfo,
+		"wtp: emitted TransportLoss frame",
+		slog.String("reason", tl.TransportLoss.Reason.String()),
+		slog.Uint64("from_seq", tl.TransportLoss.FromSequence),
+		slog.Uint64("to_seq", tl.TransportLoss.ToSequence),
+		slog.Uint64("generation", uint64(tl.TransportLoss.Generation)),
+		slog.String("session_id", t.opts.SessionID),
+		slog.String("agent_id", t.opts.AgentID))
 }
 
 // Run loops the four-state state machine until ctx is cancelled, the
@@ -1169,12 +1217,11 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 						// Terminal-vs-retriable contract mirroring
 						// runConnecting: an inner handler returning
 						// StateShutdown with a non-nil error signals an
-						// unrecoverable session condition (today: the
-						// ErrRecordLossEncountered sentinel — see
-						// state_live.go). Surface immediately so the
-						// Store's runDone receives the error and the
-						// fatal latch trips, instead of looping back to
-						// Connecting and re-hitting the same marker.
+						// unrecoverable session condition. Surface
+						// immediately so the Store's runDone receives the
+						// error and the fatal latch trips, instead of
+						// looping back to Connecting and re-hitting the
+						// same condition.
 						return err
 					}
 					stageErr = err
@@ -1235,9 +1282,8 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 				if next == StateShutdown {
 					// Terminal-vs-retriable: see the runReplaying
 					// branch above for the full contract. Same
-					// rationale — an unrecoverable encoder error
-					// (ErrRecordLossEncountered) must not be
-					// retried by the Connecting backoff path.
+					// rationale — an unrecoverable error must not
+					// be retried by the Connecting backoff path.
 					return err
 				}
 				st = StateConnecting

@@ -41,6 +41,16 @@ type Server struct {
 	// waiters will surface via the WaitForFirstSessionInit deadline).
 	sessionInitReady chan struct{}
 
+	// transportLosses captures every ClientMessage_TransportLoss the
+	// server receives, in arrival order. Tests assert against this slice
+	// to verify the carrier emitted the expected TransportLoss frames.
+	transportLosses []*wtpv1.TransportLoss
+
+	// sessionInits counts the number of SessionInit frames the server has
+	// accepted. Useful for asserting that a scenario did NOT cause the
+	// client to reconnect (count stays at 1 after the first handshake).
+	sessionInits int
+
 	// dropOnceFired is set by the DropAfterBatchNOnce path when the
 	// first drop has already been served. Subsequent streams consult
 	// it to skip the drop and ack normally — required for Phase 11
@@ -200,6 +210,76 @@ func (s *Server) WaitForFirstSessionInit(timeout time.Duration) (*wtpv1.SessionI
 	}
 }
 
+// TransportLosses returns a deep-copy of every TransportLoss frame the
+// server has received since New(). Safe to call concurrently with the
+// stream handler.
+func (s *Server) TransportLosses() []*wtpv1.TransportLoss {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*wtpv1.TransportLoss, len(s.transportLosses))
+	for i, tl := range s.transportLosses {
+		// Deep copy so callers can't mutate server state.
+		cp := *tl
+		out[i] = &cp
+	}
+	return out
+}
+
+// SessionInits returns the count of SessionInit handshakes the server
+// has accepted. Useful for "no reconnect happened" assertions.
+func (s *Server) SessionInits() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionInits
+}
+
+// WaitForSessionInits blocks until the server has accepted at least
+// `want` SessionInit handshakes OR the deadline elapses. Returns the
+// observed count and any deadline error.
+func (s *Server) WaitForSessionInits(want int, deadline time.Duration) (int, error) {
+	t := time.NewTimer(deadline)
+	defer t.Stop()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		s.mu.Lock()
+		got := s.sessionInits
+		s.mu.Unlock()
+		if got >= want {
+			return got, nil
+		}
+		select {
+		case <-t.C:
+			return got, fmt.Errorf("WaitForSessionInits: want %d, got %d after %v", want, got, deadline)
+		case <-tick.C:
+		}
+	}
+}
+
+// WaitForTransportLoss blocks until at least one TransportLoss frame
+// has arrived OR the deadline elapses. Returns the first frame and
+// any error.
+func (s *Server) WaitForTransportLoss(deadline time.Duration) (*wtpv1.TransportLoss, error) {
+	t := time.NewTimer(deadline)
+	defer t.Stop()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		s.mu.Lock()
+		if len(s.transportLosses) > 0 {
+			cp := *s.transportLosses[0]
+			s.mu.Unlock()
+			return &cp, nil
+		}
+		s.mu.Unlock()
+		select {
+		case <-t.C:
+			return nil, fmt.Errorf("WaitForTransportLoss: deadline %v elapsed", deadline)
+		case <-tick.C:
+		}
+	}
+}
+
 // classifierMetrics returns the metrics sink the frame-validation
 // classifier should stamp counters into. Defaults to a noop sink when
 // opts.Metrics is nil so validation runs unconditionally (spec
@@ -289,6 +369,7 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 				h.s.firstSessionInit = proto.Clone(x.SessionInit).(*wtpv1.SessionInit)
 				close(h.s.sessionInitReady)
 			}
+			h.s.sessionInits++
 			h.s.mu.Unlock()
 			if h.s.opts.AckDelay > 0 {
 				select {
@@ -407,6 +488,33 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 			}
 		case *wtpv1.ClientMessage_Heartbeat:
 			// Transport's liveness probe; no ack required.
+		case *wtpv1.ClientMessage_TransportLoss:
+			h.s.mu.Lock()
+			h.s.transportLosses = append(h.s.transportLosses, x.TransportLoss)
+			h.s.mu.Unlock()
+			// Apply TransportLossAckDelay before sending the BatchAck so
+			// tests can hold the inflight slot open and verify it is
+			// released when the ack finally arrives.
+			if h.s.opts.TransportLossAckDelay > 0 {
+				select {
+				case <-stream.Context().Done():
+					return stream.Context().Err()
+				case <-time.After(h.s.opts.TransportLossAckDelay):
+				}
+			}
+			// Send a BatchAck for this loss frame's to_sequence — symmetric
+			// with EventBatch handling per the spec. The server treats the
+			// gap as authoritative.
+			if err := stream.Send(&wtpv1.ServerMessage{
+				Msg: &wtpv1.ServerMessage_BatchAck{
+					BatchAck: &wtpv1.BatchAck{
+						AckHighWatermarkSeq: x.TransportLoss.ToSequence,
+						Generation:          x.TransportLoss.Generation,
+					},
+				},
+			}); err != nil {
+				return err
+			}
 		}
 	}
 }

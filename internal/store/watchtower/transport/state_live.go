@@ -2,33 +2,47 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"google.golang.org/protobuf/proto"
 )
 
-// ErrRecordLossEncountered is the sentinel encodeBatchMessage returns
-// when a wal.RecordLoss is in the input. The dedicated TransportLoss
-// carrier (Task 13) is the only sanctioned route for these markers, and
-// it is not yet built. Until then, runReplaying / runLive / runShutdown
-// classify this sentinel as TERMINAL (StateShutdown) so the session
-// fails closed instead of:
+// encoderMetrics is the metrics collector the encoder uses to record
+// loss-marker bookkeeping (currently: wtp_loss_unknown_reason_total).
+// Test seam — production wiring sets this from transport.New.
+var encoderMetrics *metrics.WTPMetrics
+
+// SetEncoderEmitExtendedReasons is a retained no-op kept for binary
+// compatibility with test code that was written against the old
+// package-level flag. The encoder now reads EmitExtendedLossReasons from
+// transport.Options (per-Transport) so the package-level bool is no
+// longer consulted. Callers that previously relied on this setter to
+// control encoder behavior must set transport.Options.EmitExtendedLossReasons
+// instead (threaded via watchtower.Options.EmitExtendedLossReasons).
 //
-//   - silently stripping the marker (integrity gap; roborev #6089)
-//   - retrying as a transient error (poison-pill reconnect loop;
-//     roborev #6095)
-//   - logging-and-dropping (still an integrity gap; roborev #6099)
-//
-// Restart is required to recover. The fail-closed posture is
-// acceptable today because loss markers happen on overflow GC / CRC
-// corruption — error conditions where session integrity is already at
-// risk — and the production wiring still has other "SCAFFOLDING ONLY"
-// gaps (recv multiplexer per Tasks 17/18) that bound real-world use.
-var ErrRecordLossEncountered = errors.New("wtp: WAL loss marker encountered before TransportLoss carrier (Task 13) is wired; session must restart")
+// Deprecated: use transport.Options.EmitExtendedLossReasons.
+func SetEncoderEmitExtendedReasons(_ bool) {}
+
+// isExtendedReason reports whether the wire enum is one of the six
+// reasons added in the 2026-04-27 spec. OVERFLOW and CRC_CORRUPTION
+// return false — they're always emitted regardless of the flag.
+func isExtendedReason(r wtpv1.TransportLossReason) bool {
+	switch r {
+	case wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_MAPPER_FAILURE,
+		wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_INVALID_MAPPER,
+		wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_INVALID_TIMESTAMP,
+		wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_INVALID_UTF8,
+		wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_SEQUENCE_OVERFLOW,
+		wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC:
+		return true
+	default:
+		return false
+	}
+}
 
 // LiveOptions configures the Live state's batcher and inflight window.
 type LiveOptions struct {
@@ -73,23 +87,6 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 	// (roborev Medium round-3).
 	var inflight inflightTracker
 
-	flush := func() error {
-		batch := b.Drain()
-		if batch == nil {
-			return nil
-		}
-		msg, err := encodeBatchMessageFn(batch.Records)
-		if err != nil {
-			return err
-		}
-		if err := t.conn.Send(msg); err != nil {
-			return fmt.Errorf("send EventBatch: %w", err)
-		}
-		last := batch.Records[len(batch.Records)-1]
-		inflight.Push(last.Generation, last.Sequence)
-		return nil
-	}
-
 	// Per-connection recv channel handles. Captured into locals once at
 	// the top of the loop so the select arms are dormant when the
 	// recvSession has not been initialised (e.g. tests that drive
@@ -123,13 +120,6 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			// Then full-tear down the conn + recvSession the same
 			// way ctx-cancellation does so the run loop's
 			// StateShutdown case returns nil with no leaked state.
-			//
-			// Propagate ErrRecordLossEncountered: a loss marker that
-			// surfaces during drain is the same terminal sentinel
-			// runReplaying / runLive raise above (roborev #6131
-			// Medium). Without surfacing it, Stop would silently
-			// complete and the Store's runDone would receive nil,
-			// hiding the integrity gap behind a clean shutdown.
 			drainErr := t.runShutdown(ctx, b, rdr, sr.drainDeadline)
 			_ = t.conn.Close()
 			t.teardownRecv()
@@ -202,24 +192,24 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 					break
 				}
 				if outBatch := b.Add(rec); outBatch != nil {
-					msg, err := encodeBatchMessageFn(outBatch.Records)
+					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons)
 					if err != nil {
 						_ = t.conn.Close()
 						t.teardownRecv()
 						t.conn = nil
-						if errors.Is(err, ErrRecordLossEncountered) {
-							return StateShutdown, err
-						}
 						return StateConnecting, err
 					}
-					if err := t.conn.Send(msg); err != nil {
-						_ = t.conn.Close()
-						t.teardownRecv()
-						t.conn = nil
-						return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
+					for _, msg := range msgs {
+						if err := t.conn.Send(msg); err != nil {
+							_ = t.conn.Close()
+							t.teardownRecv()
+							t.conn = nil
+							return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
+						}
+						t.logEmittedLossIfApplicable(ctx, msg)
+						gen, seq := extractWireHighWatermark(msg)
+						inflight.Push(gen, seq)
 					}
-					last := outBatch.Records[len(outBatch.Records)-1]
-					inflight.Push(last.Generation, last.Sequence)
 				}
 			}
 		case now := <-tick.C:
@@ -242,92 +232,155 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			// returns the buffered batch.
 			if inflight.Len() < opts.MaxInflight {
 				if outBatch := b.Tick(now); outBatch != nil {
-				msg, err := encodeBatchMessageFn(outBatch.Records)
-				if err != nil {
-					_ = t.conn.Close()
-					t.teardownRecv()
-					t.conn = nil
-					if errors.Is(err, ErrRecordLossEncountered) {
-						return StateShutdown, err
+					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons)
+					if err != nil {
+						_ = t.conn.Close()
+						t.teardownRecv()
+						t.conn = nil
+						return StateConnecting, err
 					}
-					return StateConnecting, err
-				}
-				if err := t.conn.Send(msg); err != nil {
-					_ = t.conn.Close()
-					t.teardownRecv()
-					t.conn = nil
-					return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
-				}
-				last := outBatch.Records[len(outBatch.Records)-1]
-				inflight.Push(last.Generation, last.Sequence)
+					for _, msg := range msgs {
+						if err := t.conn.Send(msg); err != nil {
+							_ = t.conn.Close()
+							t.teardownRecv()
+							t.conn = nil
+							return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
+						}
+						t.logEmittedLossIfApplicable(ctx, msg)
+						gen, seq := extractWireHighWatermark(msg)
+						inflight.Push(gen, seq)
+					}
 				}
 			}
 		}
-		_ = flush // explicit lint reference; called from Drain path
 	}
 }
 
-// encodeBatchMessageFn packs WAL records into a wtpv1.EventBatch envelope.
+// encodeBatchMessageFn packs WAL records into wtpv1.ClientMessage slices.
 // Declared as a package-level variable (not a plain function) so tests
 // that drive the Live state with raw non-CompactEvent payloads can
 // swap in a stub via SetEncodeBatchMessageFnForTest without needing to
 // produce real marshaled CompactEvent bytes.
-var encodeBatchMessageFn = encodeBatchMessage
+//
+// The second parameter emitExtended controls whether extended-reason
+// TransportLoss frames are emitted or silently dropped; callers pass
+// their per-Transport flag captured at run-state entry so a global flag
+// mutation in another test goroutine cannot affect an in-progress encode.
+var encodeBatchMessageFn = func(records []wal.Record, emitExtended bool) ([]*wtpv1.ClientMessage, error) {
+	return encodeBatchMessage(records, emitExtended)
+}
 
-// encodeBatchMessage is the production EventBatch encoder. It unmarshals
-// each data record's wal.Record.Payload (already the marshaled
-// CompactEvent bytes the Store produced) into a *wtpv1.CompactEvent and
-// wraps the slice in an UncompressedEvents body.
+// extractWireHighWatermark returns the (generation, to_sequence) of a
+// ClientMessage carrying either an EventBatch or a TransportLoss. The
+// inflight tracker keys both frame types by this tuple — a BatchAck
+// retiring entries up to (gen, ack_high) covers both kinds uniformly.
+func extractWireHighWatermark(msg *wtpv1.ClientMessage) (uint32, uint64) {
+	switch m := msg.Msg.(type) {
+	case *wtpv1.ClientMessage_EventBatch:
+		return m.EventBatch.Generation, m.EventBatch.ToSequence
+	case *wtpv1.ClientMessage_TransportLoss:
+		return m.TransportLoss.Generation, m.TransportLoss.ToSequence
+	default:
+		return 0, 0
+	}
+}
+
+// encodeBatchMessage walks `records` linearly, packing consecutive
+// RecordData into EventBatch ClientMessages and emitting one
+// TransportLoss ClientMessage per RecordLoss. Total wire order is
+// preserved: a records list of [data, data, loss, data] produces three
+// frames in order: EventBatch, TransportLoss, EventBatch.
 //
-// Loss markers (wal.RecordLoss) cause the encoder to return
-// ErrRecordLossEncountered — see that sentinel's docstring for the
-// rationale (the TransportLoss carrier of Task 13 is the only safe
-// route for them, and silent / retry-able / log-only handling each
-// produce a documented regression). All three callers
-// (runLive / runReplaying / runShutdown) translate this sentinel into a
-// StateShutdown transition with the error propagated out of Run, so
-// the Store latches fatal and the session is recovered by restart.
+// emitExtended controls whether extended TransportLoss reasons are
+// emitted or silently dropped. Callers capture this value from the
+// per-Transport EmitExtendedLossReasons field at the start of each run
+// state so a concurrent test mutation of a package-level flag cannot
+// affect an in-progress encode.
 //
-// from_sequence / to_sequence / generation reflect the first and last
-// data record. Compression is COMPRESSION_NONE because we send raw
-// CompactEvents; zstd/gzip is a post-MVP enhancement.
-func encodeBatchMessage(records []wal.Record) (*wtpv1.ClientMessage, error) {
-	events := make([]*wtpv1.CompactEvent, 0, len(records))
+// On encountering a RecordLoss whose Reason has no wire enum mapping
+// (ToWireReason returns ok=false): the marker is DROPPED, an ERROR is
+// logged, and wtp_loss_unknown_reason_total is incremented.
+// UNSPECIFIED is never emitted on the wire (it is wire-incompatible per
+// the proto's TRANSPORT_LOSS_REASON_UNSPECIFIED contract). The
+// exhaustiveness CI test (loss_reason_exhaustiveness_test.go) prevents
+// this from happening for known wal.LossReason* constants; this branch
+// exists for defense in depth.
+//
+// Compression is COMPRESSION_NONE on every EventBatch (zstd/gzip is
+// post-MVP). TransportLoss has no body; just (from, to, gen, reason).
+func encodeBatchMessage(records []wal.Record, emitExtended bool) ([]*wtpv1.ClientMessage, error) {
+	var msgs []*wtpv1.ClientMessage
+
 	var (
-		fromSeq uint64
-		toSeq   uint64
-		gen     uint32
-		seenOne bool
+		curEvents  []*wtpv1.CompactEvent
+		curFromSeq uint64
+		curToSeq   uint64
+		curGen     uint32
+		curSeen    bool
 	)
+
+	flushData := func() {
+		if !curSeen {
+			return
+		}
+		batch := &wtpv1.EventBatch{
+			FromSequence: curFromSeq,
+			ToSequence:   curToSeq,
+			Generation:   curGen,
+			Compression:  wtpv1.Compression_COMPRESSION_NONE,
+			Body: &wtpv1.EventBatch_Uncompressed{
+				Uncompressed: &wtpv1.UncompressedEvents{Events: curEvents},
+			},
+		}
+		msgs = append(msgs, &wtpv1.ClientMessage{
+			Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: batch},
+		})
+		curEvents = nil
+		curSeen = false
+	}
+
 	for _, rec := range records {
-		if rec.Kind == wal.RecordLoss {
-			return nil, ErrRecordLossEncountered
+		switch rec.Kind {
+		case wal.RecordLoss:
+			flushData()
+			wireReason, ok := ToWireReason(rec.Loss.Reason)
+			if !ok {
+				if encoderMetrics != nil {
+					encoderMetrics.IncWTPLossUnknownReason(1)
+				}
+				continue
+			}
+			if !emitExtended && isExtendedReason(wireReason) {
+				// Spec §"Configuration": extended reasons are gated. Drop the
+				// marker; OVERFLOW/CRC_CORRUPTION fall through this branch
+				// because isExtendedReason returns false for them.
+				continue
+			}
+			tl := &wtpv1.TransportLoss{
+				FromSequence: rec.Loss.FromSequence,
+				ToSequence:   rec.Loss.ToSequence,
+				Generation:   rec.Loss.Generation,
+				Reason:       wireReason,
+			}
+			msgs = append(msgs, &wtpv1.ClientMessage{
+				Msg: &wtpv1.ClientMessage_TransportLoss{TransportLoss: tl},
+			})
+		case wal.RecordData:
+			ce := &wtpv1.CompactEvent{}
+			if err := proto.Unmarshal(rec.Payload, ce); err != nil {
+				return nil, fmt.Errorf("encodeBatchMessage: unmarshal record seq=%d: %w", rec.Sequence, err)
+			}
+			curEvents = append(curEvents, ce)
+			if !curSeen {
+				curFromSeq = rec.Sequence
+				curGen = rec.Generation
+				curSeen = true
+			}
+			curToSeq = rec.Sequence
+		default:
+			// Skip unknown record kinds (forward compat).
 		}
-		if rec.Kind != wal.RecordData {
-			continue
-		}
-		ce := &wtpv1.CompactEvent{}
-		if err := proto.Unmarshal(rec.Payload, ce); err != nil {
-			return nil, fmt.Errorf("encodeBatchMessage: unmarshal record seq=%d: %w", rec.Sequence, err)
-		}
-		events = append(events, ce)
-		if !seenOne {
-			fromSeq = rec.Sequence
-			gen = rec.Generation
-			seenOne = true
-		}
-		toSeq = rec.Sequence
 	}
-	batch := &wtpv1.EventBatch{
-		FromSequence: fromSeq,
-		ToSequence:   toSeq,
-		Generation:   gen,
-		Compression:  wtpv1.Compression_COMPRESSION_NONE,
-		Body: &wtpv1.EventBatch_Uncompressed{
-			Uncompressed: &wtpv1.UncompressedEvents{Events: events},
-		},
-	}
-	return &wtpv1.ClientMessage{
-		Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: batch},
-	}, nil
+	flushData()
+	return msgs, nil
 }

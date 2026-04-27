@@ -391,6 +391,10 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 	fmt.Fprint(w, "# TYPE wtp_dropped_mapper_failure_total counter\n")
 	fmt.Fprintf(w, "wtp_dropped_mapper_failure_total %d\n", c.wtpDroppedMapperFailure.Load())
 
+	fmt.Fprint(w, "# HELP wtp_loss_unknown_reason_total Loss markers dropped because the in-WAL Reason string had no wire enum mapping. Non-zero indicates a producer added a new reason without updating ToWireReason — programming bug.\n")
+	fmt.Fprint(w, "# TYPE wtp_loss_unknown_reason_total counter\n")
+	fmt.Fprintf(w, "wtp_loss_unknown_reason_total %d\n", c.wtpLossUnknownReason.Load())
+
 	// Task 22a: labeled families. Always-emit contract — every
 	// enumerated reason appears in the exposition with a (possibly
 	// zero) value on every scrape, so dashboards never see "no data"
@@ -788,6 +792,26 @@ func (w *WTPMetrics) DroppedMapperFailure() uint64 {
 		return 0
 	}
 	return w.c.wtpDroppedMapperFailure.Load()
+}
+
+// IncWTPLossUnknownReason increments wtp_loss_unknown_reason_total by n.
+// Called by transport.encodeBatchMessage when ToWireReason returns
+// ok=false — i.e., a producer added a new wal.LossReason* string without
+// updating ToWireReason. The marker is dropped (not emitted as
+// UNSPECIFIED) to preserve wire-format conformance. Non-zero values
+// indicate a programming bug.
+func (w *WTPMetrics) IncWTPLossUnknownReason(n uint64) {
+	if w == nil || w.c == nil {
+		return
+	}
+	w.c.wtpLossUnknownReason.Add(n)
+}
+
+func (w *WTPMetrics) WTPLossUnknownReason() uint64 {
+	if w == nil || w.c == nil {
+		return 0
+	}
+	return w.c.wtpLossUnknownReason.Load()
 }
 
 // IncDroppedInvalidFrame increments wtp_dropped_invalid_frame_total

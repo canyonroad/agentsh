@@ -238,6 +238,7 @@ func (s *Store) recordSequenceOverflow(ev types.Event) {
 		slog.Uint64("event_gen", uint64(ev.Chain.Generation)),
 		slog.String("session_id", s.opts.SessionID),
 		slog.String("agent_id", s.opts.AgentID))
+	s.emitInFlightLoss(ev, wal.LossReasonSequenceOverflow)
 }
 
 // recordCompactEncodeFailure inspects err for the compact.Encode
@@ -264,20 +265,24 @@ func (s *Store) recordSequenceOverflow(ev types.Event) {
 // it reachable, it falls into the mapper_failure catch-all and
 // surfaces in logs.
 func (s *Store) recordCompactEncodeFailure(err error, ev types.Event) {
-	var reason string
+	var reason, lossReason string
 	switch {
 	case errors.Is(err, compact.ErrMapperFailure):
 		s.metrics.IncDroppedMapperFailure(1)
 		reason = "mapper_failure"
+		lossReason = wal.LossReasonMapperFailure
 	case errors.Is(err, compact.ErrInvalidMapper):
 		s.metrics.IncDroppedInvalidMapper(1)
 		reason = "invalid_mapper"
+		lossReason = wal.LossReasonInvalidMapper
 	case errors.Is(err, compact.ErrInvalidTimestamp):
 		s.metrics.IncDroppedInvalidTimestamp(1)
 		reason = "invalid_timestamp"
+		lossReason = wal.LossReasonInvalidTimestamp
 	default:
 		s.metrics.IncDroppedMapperFailure(1)
 		reason = "mapper_failure"
+		lossReason = wal.LossReasonMapperFailure
 	}
 	s.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
 		"wtp: dropping event before WAL append",
@@ -287,6 +292,7 @@ func (s *Store) recordCompactEncodeFailure(err error, ev types.Event) {
 		slog.Uint64("event_gen", uint64(ev.Chain.Generation)),
 		slog.String("session_id", s.opts.SessionID),
 		slog.String("agent_id", s.opts.AgentID))
+	s.emitInFlightLoss(ev, lossReason)
 }
 
 // recordCanonicalFailure increments wtp_dropped_invalid_utf8_total
@@ -313,6 +319,49 @@ func (s *Store) recordCanonicalFailure(err error, ev types.Event) {
 		slog.Uint64("event_gen", uint64(ev.Chain.Generation)),
 		slog.String("session_id", s.opts.SessionID),
 		slog.String("agent_id", s.opts.AgentID))
+	s.emitInFlightLoss(ev, wal.LossReasonInvalidUTF8)
+}
+
+// emitInFlightLoss writes a single-record TransportLoss marker into the
+// WAL so the carrier surfaces the gap on the wire. Called from each
+// in-flight drop site after the counter increment + WARN log, gated by
+// s.opts.EmitExtendedLossReasons.
+//
+// Failure handling:
+//   - flag off: skip AppendLoss entirely; the drop is counter-only.
+//   - flag on, AppendLoss clean error (closed/fatal): ERROR log, no
+//     fatal latch. The event is already lost; the marker is also lost.
+//     No worse than the pre-spec behavior.
+//   - flag on, AppendLoss ambiguous error: latch BOTH the audit chain
+//     and the Store fatal (mirrors regular Append ambiguous handling).
+func (s *Store) emitInFlightLoss(ev types.Event, reason string) {
+	if !s.opts.EmitExtendedLossReasons {
+		return
+	}
+	if s.appendLossFn == nil {
+		return
+	}
+	loss := wal.LossRecord{
+		FromSequence: ev.Chain.Sequence,
+		ToSequence:   ev.Chain.Sequence,
+		Generation:   ev.Chain.Generation,
+		Reason:       reason,
+	}
+	if err := s.appendLossFn(loss); err != nil {
+		if wal.IsAmbiguous(err) {
+			s.sink.Fatal(err)
+			s.latchFatal(err)
+			return
+		}
+		s.opts.Logger.LogAttrs(context.Background(), slog.LevelError,
+			"wtp: in-flight loss marker not persisted; counter-only",
+			slog.String("reason", reason),
+			slog.String("err", err.Error()),
+			slog.Uint64("event_seq", ev.Chain.Sequence),
+			slog.Uint64("event_gen", uint64(ev.Chain.Generation)),
+			slog.String("session_id", s.opts.SessionID),
+			slog.String("agent_id", s.opts.AgentID))
+	}
 }
 
 // QueryEvents is not supported by the watchtower store. Events are

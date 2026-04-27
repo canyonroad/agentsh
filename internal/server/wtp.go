@@ -16,6 +16,7 @@ import (
 	"github.com/agentsh/agentsh/internal/store/eventfilter"
 	"github.com/agentsh/agentsh/internal/store/watchtower"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
 )
 
 // resolveLogGoawayMessage applies the three-state (nil / false / true)
@@ -129,32 +130,34 @@ func buildWatchtowerStore(
 	}
 
 	opts := watchtower.Options{
-		WALDir:          cfg.StateDir,
-		WALSegmentSize:  cfg.WAL.SegmentSize,
-		WALMaxTotalSize: cfg.WAL.MaxTotalBytes,
-		Mapper:          mapper,
-		Allocator:       audit.NewSequenceAllocator(),
-		AgentID:         agentID,
-		SessionID:       sessionID,
-		HMACKeyID:       hmacKeyID,
-		HMACSecret:      hmacKey,
-		HMACAlgorithm:   cfg.Chain.Algorithm,
-		BatchMaxRecords: cfg.Batch.MaxEvents,
-		BatchMaxBytes:   cfg.Batch.MaxBytes,
-		BatchMaxAge:     cfg.Batch.MaxTimespan,
-		HeartbeatEvery:  cfg.Heartbeat.Interval,
-		BackoffInitial:  cfg.Backoff.Base,
-		BackoffMax:      cfg.Backoff.Max,
-		LogGoawayMessage: logGoaway,
-		Endpoint:        cfg.Endpoint,
-		TLSEnabled:      tlsEnabled,
-		TLSCACertFile:   cfg.TLS.CACertFile,
-		TLSCertFile:     cfg.TLS.ClientCertFile,
-		TLSKeyFile:      cfg.TLS.ClientKeyFile,
-		TLSInsecure:     cfg.TLS.InsecureSkipVerify,
-		AuthBearer:      authBearer,
-		Filter:          filter,
+		WALDir:                  cfg.StateDir,
+		WALSegmentSize:          cfg.WAL.SegmentSize,
+		WALMaxTotalSize:         cfg.WAL.MaxTotalBytes,
+		Mapper:                  mapper,
+		Allocator:               audit.NewSequenceAllocator(),
+		AgentID:                 agentID,
+		SessionID:               sessionID,
+		HMACKeyID:               hmacKeyID,
+		HMACSecret:              hmacKey,
+		HMACAlgorithm:           cfg.Chain.Algorithm,
+		BatchMaxRecords:         cfg.Batch.MaxEvents,
+		BatchMaxBytes:           cfg.Batch.MaxBytes,
+		BatchMaxAge:             cfg.Batch.MaxTimespan,
+		HeartbeatEvery:          cfg.Heartbeat.Interval,
+		BackoffInitial:          cfg.Backoff.Base,
+		BackoffMax:              cfg.Backoff.Max,
+		LogGoawayMessage:        logGoaway,
+		Endpoint:                cfg.Endpoint,
+		TLSEnabled:              tlsEnabled,
+		TLSCACertFile:           cfg.TLS.CACertFile,
+		TLSCertFile:             cfg.TLS.ClientCertFile,
+		TLSKeyFile:              cfg.TLS.ClientKeyFile,
+		TLSInsecure:             cfg.TLS.InsecureSkipVerify,
+		AuthBearer:              authBearer,
+		Filter:                  filter,
+		EmitExtendedLossReasons: cfg.EmitExtendedLossReasons,
 	}
+	transport.SetEncoderEmitExtendedReasons(opts.EmitExtendedLossReasons)
 
 	s, err := watchtower.New(ctx, opts)
 	if err != nil {

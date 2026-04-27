@@ -153,9 +153,19 @@ message TransportLoss {
 }
 
 enum TransportLossReason {
-  TRANSPORT_LOSS_REASON_UNSPECIFIED   = 0;   // wire-incompatible — receivers MUST reject.
-  TRANSPORT_LOSS_REASON_OVERFLOW      = 1;   // WAL hit max_total_bytes; oldest segments dropped.
-  TRANSPORT_LOSS_REASON_CRC_CORRUPTION = 2;  // CRC mismatch encountered during WAL replay.
+  TRANSPORT_LOSS_REASON_UNSPECIFIED       = 0;   // wire-incompatible — receivers MUST reject.
+  TRANSPORT_LOSS_REASON_OVERFLOW          = 1;   // WAL hit max_total_bytes; oldest segments dropped.
+  TRANSPORT_LOSS_REASON_CRC_CORRUPTION    = 2;   // CRC mismatch encountered during WAL replay.
+
+  // Extended (2026-04-27 spec) — gated by client-side
+  // output.wtp.emit_extended_loss_reasons. Strict-enum receivers reject
+  // unknown values per the UNSPECIFIED contract.
+  TRANSPORT_LOSS_REASON_MAPPER_FAILURE          = 3;  // compact.Encode wrapped a mapper-side error.
+  TRANSPORT_LOSS_REASON_INVALID_MAPPER          = 4;  // defense-in-depth: typed-nil mapper escaped validation.
+  TRANSPORT_LOSS_REASON_INVALID_TIMESTAMP       = 5;  // ev.Timestamp zero or pre-epoch.
+  TRANSPORT_LOSS_REASON_INVALID_UTF8            = 6;  // chain.EncodeCanonical reported invalid UTF-8.
+  TRANSPORT_LOSS_REASON_SEQUENCE_OVERFLOW       = 7;  // ev.Chain.Sequence > math.MaxInt64.
+  TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC = 8;  // computeReplayStart synthesized prefix gap.
 }
 
 message Goaway {

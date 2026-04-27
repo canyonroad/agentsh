@@ -37,13 +37,15 @@ func newReplayingTransport(t *testing.T, conn transport.Conn) *transport.Transpo
 // to assert send-path invariants without relying on the empty-message
 // stub default. Returns a unique ClientMessage per call so a sequence
 // of records produces distinguishable wire frames.
-func nonEmptyMsg(_ []wal.Record) (*wtpv1.ClientMessage, error) {
-	return &wtpv1.ClientMessage{
-		Msg: &wtpv1.ClientMessage_EventBatch{
-			EventBatch: &wtpv1.EventBatch{
-				FromSequence: 1,
-				ToSequence:   1,
-				Generation:   0,
+func nonEmptyMsg(_ []wal.Record) ([]*wtpv1.ClientMessage, error) {
+	return []*wtpv1.ClientMessage{
+		{
+			Msg: &wtpv1.ClientMessage_EventBatch{
+				EventBatch: &wtpv1.EventBatch{
+					FromSequence: 1,
+					ToSequence:   1,
+					Generation:   0,
+				},
 			},
 		},
 	}, nil

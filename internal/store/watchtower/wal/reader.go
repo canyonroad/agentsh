@@ -473,7 +473,7 @@ func (r *Reader) nextLocked() (Record, bool, error) {
 					FromSequence: from,
 					ToSequence:   to,
 					Generation:   r.curHdr.Generation,
-					Reason:       "crc_corruption",
+					Reason:       LossReasonCRCCorruption,
 				},
 			}, true, nil
 		}
