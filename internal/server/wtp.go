@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -16,6 +17,33 @@ import (
 	"github.com/agentsh/agentsh/internal/store/watchtower"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
 )
+
+// resolveLogGoawayMessage applies the three-state (nil / false / true)
+// semantics to the AuditWatchtowerConfig.LogGoawayMessage field and
+// emits the appropriate startup log. It is the single source of truth
+// for the resolution logic used by both the production
+// buildWatchtowerStore path and the test helper
+// ResolveLogGoawayMessageForTest — keeping them in sync so a drift in
+// production cannot leave tests green while operators see different
+// behavior.
+//
+// PRD-defined default at this major version (v1) is false.
+func resolveLogGoawayMessage(cfgVal *bool, logger *slog.Logger) bool {
+	const defaultV = false
+	switch {
+	case cfgVal == nil:
+		logger.Info("watchtower: log_goaway_message omitted; using default",
+			"value", defaultV)
+		return defaultV
+	case *cfgVal:
+		logger.Warn("watchtower: log_goaway_message=true; goaway_message text will be logged after client-side sanitization, depends on server-side no-secrets contract",
+			"see", "proto/canyonroad/wtp/v1/wtp.proto Goaway.message")
+		return true
+	default:
+		// explicit false — no log
+		return false
+	}
+}
 
 // buildWatchtowerStore constructs a watchtower.Store from the daemon
 // AuditWatchtowerConfig. Returns (nil, nil) when disabled.
@@ -80,6 +108,12 @@ func buildWatchtowerStore(
 		slog.Warn("watchtower: TLS disabled via tls.insecure=true; traffic is plaintext — do not use in production")
 	}
 
+	// Resolve LogGoawayMessage three-state to the transport.Options bool.
+	// Defaulting MUST happen here (NOT in config.go's Validate/applyDefaults)
+	// so that non-daemon CLI subcommands like `agentsh config show` don't
+	// emit operational startup logs.
+	logGoaway := resolveLogGoawayMessage(cfg.LogGoawayMessage, slog.Default())
+
 	// Build the eventfilter.Filter from config.
 	var filter *eventfilter.Filter
 	if cfg.Filter.IncludeTypes != nil || cfg.Filter.ExcludeTypes != nil ||
@@ -111,6 +145,7 @@ func buildWatchtowerStore(
 		HeartbeatEvery:  cfg.Heartbeat.Interval,
 		BackoffInitial:  cfg.Backoff.Base,
 		BackoffMax:      cfg.Backoff.Max,
+		LogGoawayMessage: logGoaway,
 		Endpoint:        cfg.Endpoint,
 		TLSEnabled:      tlsEnabled,
 		TLSCACertFile:   cfg.TLS.CACertFile,
@@ -208,6 +243,30 @@ func resolveAuthBearer(auth config.WatchtowerAuthConfig) (string, error) {
 // for white-box tests. Production callers use buildWatchtowerStore.
 func BuildWatchtowerStoreForTest(ctx context.Context, cfg config.AuditWatchtowerConfig, m compact.Mapper) (store.EventStore, error) {
 	return buildWatchtowerStore(ctx, cfg, m)
+}
+
+// ResolveLogGoawayMessageForTest exports the three-state resolution logic
+// for unit tests. Returns the resolved bool and a string describing which
+// case fired ("nil", "explicit_true", "explicit_false").
+// Production code uses resolveLogGoawayMessage (the shared helper) inline in
+// buildWatchtowerStore — this export is a thin pass-through so tests exercise
+// the same code path production uses. The caseLabel return is test-only
+// bookkeeping; production does not need it.
+func ResolveLogGoawayMessageForTest(cfg config.AuditWatchtowerConfig) (resolved bool, caseLabel string) {
+	// Derive the label WITHOUT duplicating the resolution logic: call the
+	// shared helper first (with a discard logger so tests stay silent),
+	// then classify the pointer state to produce the stable test label.
+	discardLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	resolved = resolveLogGoawayMessage(cfg.LogGoawayMessage, discardLogger)
+	switch {
+	case cfg.LogGoawayMessage == nil:
+		caseLabel = "nil"
+	case *cfg.LogGoawayMessage:
+		caseLabel = "explicit_true"
+	default:
+		caseLabel = "explicit_false"
+	}
+	return resolved, caseLabel
 }
 
 // ResolveAuthBearerForTest is a thin export of resolveAuthBearer for

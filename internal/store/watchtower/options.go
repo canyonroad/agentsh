@@ -93,6 +93,14 @@ type Options struct {
 	BackoffInitial time.Duration
 	BackoffMax     time.Duration
 
+	// LogGoawayMessage controls whether the WARN log emitted on GOAWAY
+	// receipt includes the server-supplied message text verbatim (after
+	// client-side sanitization). Threaded from AuditWatchtowerConfig
+	// (config layer) through buildWatchtowerStore (store-construction)
+	// into transport.Options.LogGoawayMessage. See transport.Options for
+	// the full semantics and the server-side no-secrets contract reference.
+	LogGoawayMessage bool
+
 	// Filter is the optional eventfilter.Filter applied before
 	// AppendEvent reaches the chain/WAL pipeline.
 	Filter *eventfilter.Filter

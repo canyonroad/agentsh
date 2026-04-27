@@ -160,7 +160,19 @@ enum TransportLossReason {
 
 message Goaway {
   GoawayCode code             = 1;
+
+  // Human-readable diagnostic message describing the reason for the
+  // GOAWAY. The Watchtower server-side contract REQUIRES that this
+  // string MUST NOT contain credentials, secrets, or PII — clients
+  // may log it (per the client's LogGoawayMessage config flag) after
+  // applying client-side sanitization (control-char stripping +
+  // truncation to 512 bytes at a UTF-8 rune boundary + invalid-UTF-8
+  // replacement with U+FFFD). Server operators MUST produce only
+  // operator-facing diagnostic text here; the server is the
+  // authoritative owner of the no-secrets contract. Client-side
+  // redaction beyond the sanitization described above is out of scope.
   string     message          = 2;
+
   bool       retry_immediately = 3;
 }
 

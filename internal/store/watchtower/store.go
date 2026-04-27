@@ -364,6 +364,7 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		Metrics:         mw,
 		BackoffInitial:  opts.BackoffInitial,
 		BackoffMax:      opts.BackoffMax,
+		LogGoawayMessage: opts.LogGoawayMessage,
 		// Handshake metadata: the SessionInit frame MUST advertise the
 		// SAME algorithm / key fingerprint / context digest that the
 		// WAL records are chained with; otherwise the receiver sees a
