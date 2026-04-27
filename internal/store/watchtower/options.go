@@ -114,6 +114,12 @@ type Options struct {
 	// original wire schema.
 	EmitExtendedLossReasons bool
 
+	// MaxInflight overrides the default in-flight window (8) for tests
+	// that need fine-grained back-pressure control. Zero means "use the
+	// default". Production callers leave this zero; tests set it to 1
+	// to verify that the inflight slot is held and released correctly.
+	MaxInflight int
+
 	// Filter is the optional eventfilter.Filter applied before
 	// AppendEvent reaches the chain/WAL pipeline.
 	Filter *eventfilter.Filter

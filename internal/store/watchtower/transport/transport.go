@@ -198,6 +198,22 @@ type Options struct {
 	// "use the default" (30 s). Supplied by the watchtower.Options threading
 	// path in store.go.
 	BackoffMax time.Duration
+
+	// EmitExtendedLossReasons controls whether the encoder emits
+	// TransportLoss frames for the six extended reasons added in the
+	// 2026-04-27 spec (MAPPER_FAILURE, INVALID_MAPPER, INVALID_TIMESTAMP,
+	// INVALID_UTF8, SEQUENCE_OVERFLOW, ACK_REGRESSION_AFTER_GC). When
+	// false, extended-reason WAL loss markers are silently dropped by the
+	// encoder rather than emitted on the wire.
+	//
+	// This field replaces the old package-level SetEncoderEmitExtendedReasons
+	// function — each Transport instance now carries its own flag so
+	// concurrent tests with different flag values do not race.
+	//
+	// Threaded from watchtower.Options.EmitExtendedLossReasons via store.go;
+	// production callers leave this false until the feature is enabled
+	// (internal/server/wtp.go buildWatchtowerStore).
+	EmitExtendedLossReasons bool
 }
 
 // validate enforces the construction-time invariants documented on
@@ -312,6 +328,14 @@ type Transport struct {
 	// ctx alone is insufficient because state-local errors must be
 	// able to drop a connection without shutting down the transport.
 	recv *recvSession
+
+	// emitExtendedLossReasons is a per-Transport copy of
+	// Options.EmitExtendedLossReasons captured at New() time. The encoder
+	// reads this field (via the closure in runLive / runReplaying /
+	// runShutdown) rather than a package-level bool so concurrent test
+	// binaries that run multiple Stores with different flag values do not
+	// race on a shared global.
+	emitExtendedLossReasons bool
 }
 
 // New constructs a Transport. It does not dial; call Run to start.
@@ -335,12 +359,13 @@ func New(opts Options) (*Transport, error) {
 		opts.Metrics = noopMetrics{}
 	}
 	t := &Transport{
-		opts:              opts,
-		wal:               opts.WAL,
-		metrics:           opts.Metrics,
-		ackAnomalyLimiter: rate.NewLimiter(rate.Every(time.Minute), 1),
-		stopCh:            make(chan stopReq, 1),
-		runDone:           make(chan struct{}),
+		opts:                    opts,
+		wal:                     opts.WAL,
+		metrics:                 opts.Metrics,
+		ackAnomalyLimiter:       rate.NewLimiter(rate.Every(time.Minute), 1),
+		stopCh:                  make(chan stopReq, 1),
+		runDone:                 make(chan struct{}),
+		emitExtendedLossReasons: opts.EmitExtendedLossReasons,
 	}
 	if opts.InitialAckTuple != nil && opts.InitialAckTuple.Present {
 		seed := AckCursor{

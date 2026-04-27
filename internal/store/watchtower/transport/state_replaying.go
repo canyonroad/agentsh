@@ -3,6 +3,9 @@ package transport
 import (
 	"context"
 	"fmt"
+
+	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
+	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
 // runReplaying drains the WAL via the supplied Replayer and ships records
@@ -104,7 +107,7 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 			return StateConnecting, fmt.Errorf("replay batch: %w", err)
 		}
 		if len(batch.Records) > 0 {
-			msgs, err := buildEventBatchFn(batch.Records)
+			msgs, err := buildEventBatchFn(batch.Records, t.emitExtendedLossReasons)
 			if err != nil {
 				_ = t.conn.Close()
 				t.teardownRecv()
@@ -135,7 +138,12 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 // to_sequence, generation) metadata, and emit TransportLoss frames for
 // loss markers.
 //
+// The second parameter emitExtended controls extended-reason gating;
+// callers pass t.emitExtendedLossReasons captured at run-state entry.
+//
 // Tests that need to assert against a custom wire shape can override
 // via setBuildEventBatchFnForTest (see state_replaying_internal_test.go).
 // Production code MUST NOT mutate this variable.
-var buildEventBatchFn = encodeBatchMessage
+var buildEventBatchFn = func(records []wal.Record, emitExtended bool) ([]*wtpv1.ClientMessage, error) {
+	return encodeBatchMessage(records, emitExtended)
+}

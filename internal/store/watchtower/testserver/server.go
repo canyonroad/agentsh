@@ -492,6 +492,16 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 			h.s.mu.Lock()
 			h.s.transportLosses = append(h.s.transportLosses, x.TransportLoss)
 			h.s.mu.Unlock()
+			// Apply TransportLossAckDelay before sending the BatchAck so
+			// tests can hold the inflight slot open and verify it is
+			// released when the ack finally arrives.
+			if h.s.opts.TransportLossAckDelay > 0 {
+				select {
+				case <-stream.Context().Done():
+					return stream.Context().Err()
+				case <-time.After(h.s.opts.TransportLossAckDelay):
+				}
+			}
 			// Send a BatchAck for this loss frame's to_sequence — symmetric
 			// with EventBatch handling per the spec. The server treats the
 			// gap as authoritative.

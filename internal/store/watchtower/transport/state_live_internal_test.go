@@ -54,7 +54,7 @@ func TestEncodeBatchMessage_HappyPathDataRecords(t *testing.T) {
 		{Kind: wal.RecordData, Sequence: 12, Generation: 3, Payload: pay2},
 		{Kind: wal.RecordData, Sequence: 13, Generation: 3, Payload: pay3},
 	}
-	msgs, err := encodeBatchMessage(records)
+	msgs, err := encodeBatchMessage(records, true)
 	if err != nil {
 		t.Fatalf("encodeBatchMessage(data-only): %v", err)
 	}
@@ -99,7 +99,7 @@ func TestEncodeBatchMessage_DataOnly_OneFrame(t *testing.T) {
 		{Kind: wal.RecordData, Sequence: 10, Generation: 1, Payload: marshalCompactEvent(t, 10)},
 		{Kind: wal.RecordData, Sequence: 11, Generation: 1, Payload: marshalCompactEvent(t, 11)},
 	}
-	msgs, err := encodeBatchMessage(records)
+	msgs, err := encodeBatchMessage(records, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestEncodeBatchMessage_LossOnly_OneFrame(t *testing.T) {
 			Reason:       wal.LossReasonOverflow,
 		}},
 	}
-	msgs, err := encodeBatchMessage(records)
+	msgs, err := encodeBatchMessage(records, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestEncodeBatchMessage_DataLossData_ThreeFrames(t *testing.T) {
 		}},
 		{Kind: wal.RecordData, Sequence: 12, Generation: 1, Payload: marshalCompactEvent(t, 12)},
 	}
-	msgs, err := encodeBatchMessage(records)
+	msgs, err := encodeBatchMessage(records, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestEncodeBatchMessage_LeadingLoss_TwoFrames(t *testing.T) {
 		}},
 		{Kind: wal.RecordData, Sequence: 6, Generation: 1, Payload: marshalCompactEvent(t, 6)},
 	}
-	msgs, err := encodeBatchMessage(records)
+	msgs, err := encodeBatchMessage(records, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestEncodeBatchMessage_TrailingLoss_TwoFrames(t *testing.T) {
 			FromSequence: 7, ToSequence: 7, Generation: 1, Reason: wal.LossReasonOverflow,
 		}},
 	}
-	msgs, err := encodeBatchMessage(records)
+	msgs, err := encodeBatchMessage(records, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestEncodeBatchMessage_ConsecutiveLosses_SeparateFrames(t *testing.T) {
 			FromSequence: 6, ToSequence: 6, Generation: 1, Reason: wal.LossReasonCRCCorruption,
 		}},
 	}
-	msgs, err := encodeBatchMessage(records)
+	msgs, err := encodeBatchMessage(records, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestEncodeBatchMessage_UnknownReason_DropsMarkerIncrementsCounter(t *testin
 			FromSequence: 1, ToSequence: 1, Generation: 1, Reason: "garbage",
 		}},
 	}
-	msgs, err := encodeBatchMessage(records)
+	msgs, err := encodeBatchMessage(records, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

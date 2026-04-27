@@ -378,10 +378,11 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		// WAL records are chained with; otherwise the receiver sees a
 		// handshake that doesn't match the integrity chain it's about
 		// to verify. (roborev #5945 High)
-		FormatVersion:  uint32(audit.IntegrityFormatVersion),
-		Algorithm:      tpAlgo,
-		KeyFingerprint: opts.KeyFingerprint,
-		ContextDigest:  ctxDigest,
+		FormatVersion:           uint32(audit.IntegrityFormatVersion),
+		Algorithm:               tpAlgo,
+		KeyFingerprint:          opts.KeyFingerprint,
+		ContextDigest:           ctxDigest,
+		EmitExtendedLossReasons: opts.EmitExtendedLossReasons,
 	})
 	if err != nil {
 		_ = w.Close()
@@ -414,7 +415,7 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 				MaxBytes:   opts.BatchMaxBytes,
 				MaxAge:     opts.BatchMaxAge,
 			},
-			MaxInflight:    8,
+			MaxInflight:    maxInflightForOpts(opts),
 			HeartbeatEvery: opts.HeartbeatEvery,
 		})
 	}()
@@ -796,3 +797,14 @@ func readInitialAckTuple(opts Options, w *wal.WAL) (*transport.AckTuple, error) 
 // an error. Tests that need a controlled Conn should still inject
 // testserver.DialerFor via Options.Dialer.
 func newGRPCDialer(opts Options) transport.Dialer { return newGRPCDialerProd(opts) }
+
+// maxInflightForOpts returns the in-flight window for LiveOptions.
+// opts.MaxInflight overrides the default (8) when > 0. The default
+// matches the original hard-coded value and the spec's recommendation.
+// Tests set this to 1 to exercise slot-retirement behaviour.
+func maxInflightForOpts(opts Options) int {
+	if opts.MaxInflight > 0 {
+		return opts.MaxInflight
+	}
+	return 8
+}

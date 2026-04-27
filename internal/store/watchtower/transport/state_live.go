@@ -16,28 +16,16 @@ import (
 // Test seam — production wiring sets this from transport.New.
 var encoderMetrics *metrics.WTPMetrics
 
-// encoderEmitExtendedReasons controls whether the encoder emits
-// TransportLoss frames for extended reasons (MAPPER_FAILURE,
-// INVALID_MAPPER, INVALID_TIMESTAMP, INVALID_UTF8, SEQUENCE_OVERFLOW,
-// ACK_REGRESSION_AFTER_GC). When false:
-//   - the encoder drops extended-reason markers (logged INFO) instead
-//     of emitting them.
-//   - in-flight reasons (mapper_failure, invalid_utf8, etc.) cannot
-//     reach the encoder because the drop sites skip wal.AppendLoss
-//     when the flag is off.
-//   - OVERFLOW and CRC_CORRUPTION emit unconditionally (part of the
-//     original wire schema).
+// SetEncoderEmitExtendedReasons is a retained no-op kept for binary
+// compatibility with test code that was written against the old
+// package-level flag. The encoder now reads EmitExtendedLossReasons from
+// transport.Options (per-Transport) so the package-level bool is no
+// longer consulted. Callers that previously relied on this setter to
+// control encoder behavior must set transport.Options.EmitExtendedLossReasons
+// instead (threaded via watchtower.Options.EmitExtendedLossReasons).
 //
-// Set from watchtower.Store construction via
-// SetEncoderEmitExtendedReasons.
-var encoderEmitExtendedReasons bool
-
-// SetEncoderEmitExtendedReasons sets the package-level flag controlling
-// emission of extended TransportLoss reasons. Called from
-// watchtower.Store / internal/server.buildWatchtowerStore at startup.
-func SetEncoderEmitExtendedReasons(b bool) {
-	encoderEmitExtendedReasons = b
-}
+// Deprecated: use transport.Options.EmitExtendedLossReasons.
+func SetEncoderEmitExtendedReasons(_ bool) {}
 
 // isExtendedReason reports whether the wire enum is one of the six
 // reasons added in the 2026-04-27 spec. OVERFLOW and CRC_CORRUPTION
@@ -204,7 +192,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 					break
 				}
 				if outBatch := b.Add(rec); outBatch != nil {
-					msgs, err := encodeBatchMessageFn(outBatch.Records)
+					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons)
 					if err != nil {
 						_ = t.conn.Close()
 						t.teardownRecv()
@@ -244,7 +232,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			// returns the buffered batch.
 			if inflight.Len() < opts.MaxInflight {
 				if outBatch := b.Tick(now); outBatch != nil {
-					msgs, err := encodeBatchMessageFn(outBatch.Records)
+					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons)
 					if err != nil {
 						_ = t.conn.Close()
 						t.teardownRecv()
@@ -273,7 +261,14 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 // that drive the Live state with raw non-CompactEvent payloads can
 // swap in a stub via SetEncodeBatchMessageFnForTest without needing to
 // produce real marshaled CompactEvent bytes.
-var encodeBatchMessageFn = encodeBatchMessage
+//
+// The second parameter emitExtended controls whether extended-reason
+// TransportLoss frames are emitted or silently dropped; callers pass
+// their per-Transport flag captured at run-state entry so a global flag
+// mutation in another test goroutine cannot affect an in-progress encode.
+var encodeBatchMessageFn = func(records []wal.Record, emitExtended bool) ([]*wtpv1.ClientMessage, error) {
+	return encodeBatchMessage(records, emitExtended)
+}
 
 // extractWireHighWatermark returns the (generation, to_sequence) of a
 // ClientMessage carrying either an EventBatch or a TransportLoss. The
@@ -296,6 +291,12 @@ func extractWireHighWatermark(msg *wtpv1.ClientMessage) (uint32, uint64) {
 // preserved: a records list of [data, data, loss, data] produces three
 // frames in order: EventBatch, TransportLoss, EventBatch.
 //
+// emitExtended controls whether extended TransportLoss reasons are
+// emitted or silently dropped. Callers capture this value from the
+// per-Transport EmitExtendedLossReasons field at the start of each run
+// state so a concurrent test mutation of a package-level flag cannot
+// affect an in-progress encode.
+//
 // On encountering a RecordLoss whose Reason has no wire enum mapping
 // (ToWireReason returns ok=false): the marker is DROPPED, an ERROR is
 // logged, and wtp_loss_unknown_reason_total is incremented.
@@ -307,7 +308,7 @@ func extractWireHighWatermark(msg *wtpv1.ClientMessage) (uint32, uint64) {
 //
 // Compression is COMPRESSION_NONE on every EventBatch (zstd/gzip is
 // post-MVP). TransportLoss has no body; just (from, to, gen, reason).
-func encodeBatchMessage(records []wal.Record) ([]*wtpv1.ClientMessage, error) {
+func encodeBatchMessage(records []wal.Record, emitExtended bool) ([]*wtpv1.ClientMessage, error) {
 	var msgs []*wtpv1.ClientMessage
 
 	var (
@@ -349,7 +350,7 @@ func encodeBatchMessage(records []wal.Record) ([]*wtpv1.ClientMessage, error) {
 				}
 				continue
 			}
-			if !encoderEmitExtendedReasons && isExtendedReason(wireReason) {
+			if !emitExtended && isExtendedReason(wireReason) {
 				// Spec §"Configuration": extended reasons are gated. Drop the
 				// marker; OVERFLOW/CRC_CORRUPTION fall through this branch
 				// because isExtendedReason returns false for them.

@@ -41,12 +41,21 @@ func (t *Transport) RunReplayingForTest(ctx context.Context, r *Replayer) (State
 // restore, leaking a test override into another test would corrupt the
 // global function variable.
 //
+// The supplied fn receives only the WAL records; the emitExtended bool is
+// ignored by test stubs that return a fixed ClientMessage regardless of
+// reason gating. Production tests that need to verify reason-gating
+// behavior should use the full store-level component tests
+// (component_inflight_loss_test.go) instead of this low-level seam.
+//
 // Internal-only seam: keeps the production var unexported so callers
 // outside the transport package cannot mutate it without going through
 // this guarded helper.
 func setBuildEventBatchFnForTest(fn func([]wal.Record) ([]*wtpv1.ClientMessage, error)) func() {
+	wrapped := func(records []wal.Record, _ bool) ([]*wtpv1.ClientMessage, error) {
+		return fn(records)
+	}
 	prev := buildEventBatchFn
-	buildEventBatchFn = fn
+	buildEventBatchFn = wrapped
 	return func() { buildEventBatchFn = prev }
 }
 
@@ -68,16 +77,22 @@ func SetBuildEventBatchFnForTest(fn func([]wal.Record) ([]*wtpv1.ClientMessage, 
 // proto.Unmarshal failures in the production encoder. Returns a restore
 // func the caller MUST defer so the global var reverts after the test.
 //
+// The supplied fn receives only the WAL records; the emitExtended bool is
+// discarded — test stubs that need to exercise reason-gating should use
+// the store-level component tests instead.
+//
 // Internal-only seam mirroring SetBuildEventBatchFnForTest; both exist
 // because the Live and Replaying states historically diverged on
 // encoder plumbing and keeping two knobs is less invasive than
 // unifying them in a test-driven refactor.
 func SetEncodeBatchMessageFnForTest(fn func([]wal.Record) ([]*wtpv1.ClientMessage, error)) func() {
+	wrapped := func(records []wal.Record, _ bool) ([]*wtpv1.ClientMessage, error) {
+		return fn(records)
+	}
 	prev := encodeBatchMessageFn
-	encodeBatchMessageFn = fn
+	encodeBatchMessageFn = wrapped
 	return func() { encodeBatchMessageFn = prev }
 }
-
 
 // SetConnForTest attaches a Conn to the Transport so external tests can
 // drive per-state handlers (RunReplayingForTest, future RunLive) without
@@ -98,4 +113,3 @@ func SetConnForTest(t *Transport, c Conn) {
 func HasConnForTest(t *Transport) bool {
 	return t.conn != nil
 }
-
