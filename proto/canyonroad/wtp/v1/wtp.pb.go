@@ -128,6 +128,15 @@ const (
 	TransportLossReason_TRANSPORT_LOSS_REASON_UNSPECIFIED    TransportLossReason = 0 // wire-incompatible — receivers MUST reject.
 	TransportLossReason_TRANSPORT_LOSS_REASON_OVERFLOW       TransportLossReason = 1 // WAL hit max_total_bytes; oldest segments dropped.
 	TransportLossReason_TRANSPORT_LOSS_REASON_CRC_CORRUPTION TransportLossReason = 2 // CRC mismatch encountered during WAL replay.
+	// Extended (2026-04-27 spec) — gated by client-side
+	// output.wtp.emit_extended_loss_reasons. Strict-enum receivers reject
+	// unknown values per the UNSPECIFIED contract.
+	TransportLossReason_TRANSPORT_LOSS_REASON_MAPPER_FAILURE          TransportLossReason = 3 // compact.Encode wrapped a mapper-side error.
+	TransportLossReason_TRANSPORT_LOSS_REASON_INVALID_MAPPER          TransportLossReason = 4 // defense-in-depth: typed-nil mapper escaped validation.
+	TransportLossReason_TRANSPORT_LOSS_REASON_INVALID_TIMESTAMP       TransportLossReason = 5 // ev.Timestamp zero or pre-epoch.
+	TransportLossReason_TRANSPORT_LOSS_REASON_INVALID_UTF8            TransportLossReason = 6 // chain.EncodeCanonical reported invalid UTF-8.
+	TransportLossReason_TRANSPORT_LOSS_REASON_SEQUENCE_OVERFLOW       TransportLossReason = 7 // ev.Chain.Sequence > math.MaxInt64.
+	TransportLossReason_TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC TransportLossReason = 8 // computeReplayStart synthesized prefix gap.
 )
 
 // Enum value maps for TransportLossReason.
@@ -136,11 +145,23 @@ var (
 		0: "TRANSPORT_LOSS_REASON_UNSPECIFIED",
 		1: "TRANSPORT_LOSS_REASON_OVERFLOW",
 		2: "TRANSPORT_LOSS_REASON_CRC_CORRUPTION",
+		3: "TRANSPORT_LOSS_REASON_MAPPER_FAILURE",
+		4: "TRANSPORT_LOSS_REASON_INVALID_MAPPER",
+		5: "TRANSPORT_LOSS_REASON_INVALID_TIMESTAMP",
+		6: "TRANSPORT_LOSS_REASON_INVALID_UTF8",
+		7: "TRANSPORT_LOSS_REASON_SEQUENCE_OVERFLOW",
+		8: "TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC",
 	}
 	TransportLossReason_value = map[string]int32{
-		"TRANSPORT_LOSS_REASON_UNSPECIFIED":    0,
-		"TRANSPORT_LOSS_REASON_OVERFLOW":       1,
-		"TRANSPORT_LOSS_REASON_CRC_CORRUPTION": 2,
+		"TRANSPORT_LOSS_REASON_UNSPECIFIED":             0,
+		"TRANSPORT_LOSS_REASON_OVERFLOW":                1,
+		"TRANSPORT_LOSS_REASON_CRC_CORRUPTION":          2,
+		"TRANSPORT_LOSS_REASON_MAPPER_FAILURE":          3,
+		"TRANSPORT_LOSS_REASON_INVALID_MAPPER":          4,
+		"TRANSPORT_LOSS_REASON_INVALID_TIMESTAMP":       5,
+		"TRANSPORT_LOSS_REASON_INVALID_UTF8":            6,
+		"TRANSPORT_LOSS_REASON_SEQUENCE_OVERFLOW":       7,
+		"TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC": 8,
 	}
 )
 
@@ -1398,10 +1419,20 @@ func (x *TransportLoss) GetReason() TransportLossReason {
 }
 
 type Goaway struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	Code             GoawayCode             `protobuf:"varint,1,opt,name=code,proto3,enum=canyonroad.wtp.v1.GoawayCode" json:"code,omitempty"`
-	Message          string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
-	RetryImmediately bool                   `protobuf:"varint,3,opt,name=retry_immediately,json=retryImmediately,proto3" json:"retry_immediately,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Code  GoawayCode             `protobuf:"varint,1,opt,name=code,proto3,enum=canyonroad.wtp.v1.GoawayCode" json:"code,omitempty"`
+	// Human-readable diagnostic message describing the reason for the
+	// GOAWAY. The Watchtower server-side contract REQUIRES that this
+	// string MUST NOT contain credentials, secrets, or PII — clients
+	// may log it (per the client's LogGoawayMessage config flag) after
+	// applying client-side sanitization (control-char stripping +
+	// truncation to 512 bytes at a UTF-8 rune boundary + invalid-UTF-8
+	// replacement with U+FFFD). Server operators MUST produce only
+	// operator-facing diagnostic text here; the server is the
+	// authoritative owner of the no-secrets contract. Client-side
+	// redaction beyond the sanitization described above is out of scope.
+	Message          string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	RetryImmediately bool   `protobuf:"varint,3,opt,name=retry_immediately,json=retryImmediately,proto3" json:"retry_immediately,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -1621,11 +1652,17 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\x17COMPRESSION_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10COMPRESSION_NONE\x10\x01\x12\x14\n" +
 	"\x10COMPRESSION_ZSTD\x10\x02\x12\x14\n" +
-	"\x10COMPRESSION_GZIP\x10\x03*\x8a\x01\n" +
+	"\x10COMPRESSION_GZIP\x10\x03*\x93\x03\n" +
 	"\x13TransportLossReason\x12%\n" +
 	"!TRANSPORT_LOSS_REASON_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eTRANSPORT_LOSS_REASON_OVERFLOW\x10\x01\x12(\n" +
-	"$TRANSPORT_LOSS_REASON_CRC_CORRUPTION\x10\x02*\x8c\x01\n" +
+	"$TRANSPORT_LOSS_REASON_CRC_CORRUPTION\x10\x02\x12(\n" +
+	"$TRANSPORT_LOSS_REASON_MAPPER_FAILURE\x10\x03\x12(\n" +
+	"$TRANSPORT_LOSS_REASON_INVALID_MAPPER\x10\x04\x12+\n" +
+	"'TRANSPORT_LOSS_REASON_INVALID_TIMESTAMP\x10\x05\x12&\n" +
+	"\"TRANSPORT_LOSS_REASON_INVALID_UTF8\x10\x06\x12+\n" +
+	"'TRANSPORT_LOSS_REASON_SEQUENCE_OVERFLOW\x10\a\x121\n" +
+	"-TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC\x10\b*\x8c\x01\n" +
 	"\n" +
 	"GoawayCode\x12\x1b\n" +
 	"\x17GOAWAY_CODE_UNSPECIFIED\x10\x00\x12\x18\n" +
