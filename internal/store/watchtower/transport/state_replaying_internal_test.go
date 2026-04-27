@@ -44,7 +44,7 @@ func (t *Transport) RunReplayingForTest(ctx context.Context, r *Replayer) (State
 // Internal-only seam: keeps the production var unexported so callers
 // outside the transport package cannot mutate it without going through
 // this guarded helper.
-func setBuildEventBatchFnForTest(fn func([]wal.Record) (*wtpv1.ClientMessage, error)) func() {
+func setBuildEventBatchFnForTest(fn func([]wal.Record) ([]*wtpv1.ClientMessage, error)) func() {
 	prev := buildEventBatchFn
 	buildEventBatchFn = fn
 	return func() { buildEventBatchFn = prev }
@@ -58,7 +58,7 @@ func setBuildEventBatchFnForTest(fn func([]wal.Record) (*wtpv1.ClientMessage, er
 //
 // Lives in *_test.go so the helper is compiled out of the production
 // binary.
-func SetBuildEventBatchFnForTest(fn func([]wal.Record) (*wtpv1.ClientMessage, error)) func() {
+func SetBuildEventBatchFnForTest(fn func([]wal.Record) ([]*wtpv1.ClientMessage, error)) func() {
 	return setBuildEventBatchFnForTest(fn)
 }
 
@@ -72,11 +72,12 @@ func SetBuildEventBatchFnForTest(fn func([]wal.Record) (*wtpv1.ClientMessage, er
 // because the Live and Replaying states historically diverged on
 // encoder plumbing and keeping two knobs is less invasive than
 // unifying them in a test-driven refactor.
-func SetEncodeBatchMessageFnForTest(fn func([]wal.Record) (*wtpv1.ClientMessage, error)) func() {
+func SetEncodeBatchMessageFnForTest(fn func([]wal.Record) ([]*wtpv1.ClientMessage, error)) func() {
 	prev := encodeBatchMessageFn
 	encodeBatchMessageFn = fn
 	return func() { encodeBatchMessageFn = prev }
 }
+
 
 // SetConnForTest attaches a Conn to the Transport so external tests can
 // drive per-state handlers (RunReplayingForTest, future RunLive) without

@@ -14,24 +14,16 @@ import (
 )
 
 // TestShutdown_NoLeakAfterDrainSentinel pins the roborev #6143 (High)
-// fix: once ErrRecordLossEncountered surfaces inside runShutdown's
-// drainLoop, every record still buffered in the Batcher sits PAST a
-// WAL gap and MUST NOT be sent. The leak path reviewer flagged was:
-//
-//   1. drainLoop's TryNext returns rec1 (data, seq=1) → b.Add returns nil
-//   2. drainLoop's TryNext returns rec2 (loss, seq=0) → b.Add gap-flushes
-//      [rec1] (encode succeeds, send) → pending=[loss]
-//   3. drainLoop's TryNext returns rec3 (data, seq=2) → b.Add gap-flushes
-//      [loss] (encode trips sentinel) → pending=[rec3] → break drainLoop
-//   4. b.Drain() returns [rec3] — without the fix this would encode +
-//      Send rec3 even though the session is supposed to fail closed at
-//      the loss boundary.
+// context: with the TransportLoss carrier, a loss marker in the drain
+// set now produces a TransportLoss frame on the wire rather than
+// failing closed. The full record sequence [data1, loss, data2] must
+// produce TWO Send calls: one EventBatch for data1 and one
+// TransportLoss for the loss marker. data2 sits past the loss boundary
+// and gets a second EventBatch (three total Sends).
 //
 // We construct the WAL with [data1, loss, data2] and call runShutdown
 // directly via the test seam so the test does not depend on the Run-loop
-// stopCh/Notify race resolving in our favour. The fakeConn lets us
-// count Sends; the post-sentinel guarantee is "at most one Send" (the
-// pre-loss [data1] flush), never two.
+// stopCh/Notify race resolving in our favour.
 func TestShutdown_NoLeakAfterDrainSentinel(t *testing.T) {
 	dir := t.TempDir()
 	w, err := wal.Open(wal.Options{Dir: dir, SegmentSize: 64 * 1024})
@@ -61,32 +53,38 @@ func TestShutdown_NoLeakAfterDrainSentinel(t *testing.T) {
 	}
 	defer rdr.Close()
 
-	// Stub encoder mirrors production behavior on the loss-marker
-	// contract (RecordLoss → ErrRecordLossEncountered) without
-	// requiring valid CompactEvent payloads on the test's data
-	// records, which let proto.Unmarshal fail before the loss path
-	// fires. RecordLoss alone trips the sentinel; mixed slices the
-	// production encoder rejects too, but the test only constructs
-	// pure data slices and pure loss slices via the gap-flush, so
-	// the simple per-record loop is enough.
-	//
-	// encoded captures every batch the encoder was asked to encode so
-	// the test can assert EXACTLY which records were sent — the
-	// "exactly one Send" check below is too weak on its own (a
-	// regression that drops the pre-loss [data1] flush would also
-	// pass with sendCount==0).
-	var encoded [][]wal.Record
-	defer transport.SetEncodeBatchMessageFnForTest(func(records []wal.Record) (*wtpv1.ClientMessage, error) {
-		// Copy the slice so subsequent Batcher reuse cannot mutate
-		// what we recorded.
-		snapshot := append([]wal.Record(nil), records...)
-		encoded = append(encoded, snapshot)
+	// Stub encoder: handles raw (non-proto) payloads by emitting one
+	// EventBatch per data run and one TransportLoss per loss marker,
+	// matching the production encoder's behavior without requiring
+	// valid CompactEvent proto bytes in the test WAL.
+	defer transport.SetEncodeBatchMessageFnForTest(func(records []wal.Record) ([]*wtpv1.ClientMessage, error) {
+		var msgs []*wtpv1.ClientMessage
+		var dataRun bool
 		for _, r := range records {
-			if r.Kind == wal.RecordLoss {
-				return nil, transport.ErrRecordLossEncountered
+			switch r.Kind {
+			case wal.RecordLoss:
+				if dataRun {
+					msgs = append(msgs, &wtpv1.ClientMessage{
+						Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: &wtpv1.EventBatch{}},
+					})
+					dataRun = false
+				}
+				msgs = append(msgs, &wtpv1.ClientMessage{
+					Msg: &wtpv1.ClientMessage_TransportLoss{TransportLoss: &wtpv1.TransportLoss{
+						FromSequence: r.Loss.FromSequence,
+						ToSequence:   r.Loss.ToSequence,
+					}},
+				})
+			case wal.RecordData:
+				dataRun = true
 			}
 		}
-		return &wtpv1.ClientMessage{}, nil
+		if dataRun {
+			msgs = append(msgs, &wtpv1.ClientMessage{
+				Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: &wtpv1.EventBatch{}},
+			})
+		}
+		return msgs, nil
 	})()
 
 	b := transport.NewBatcher(transport.BatcherOptions{
@@ -110,18 +108,14 @@ func TestShutdown_NoLeakAfterDrainSentinel(t *testing.T) {
 	transport.SetConnForTest(tr, conn)
 
 	got := transport.RunShutdownForTest(tr, b, rdr, 500*time.Millisecond)
-	if !errors.Is(got, transport.ErrRecordLossEncountered) {
-		t.Fatalf("runShutdown returned %v; want ErrRecordLossEncountered", got)
+	if got != nil {
+		t.Fatalf("runShutdown returned %v; want nil", got)
 	}
 
-	// Count post-shutdown sends. With the fix, runShutdown emits at most
-	// one EventBatch (the pre-loss [data1] flush). Two or more sends
-	// would mean post-sentinel data leaked through the b.Drain path.
-	// Count post-shutdown sends. With the fix, runShutdown emits exactly
-	// one EventBatch (the pre-loss [data1] flush). Zero would mean the
-	// fix regressed and the gap-flush legitimately needed pre-loss data
-	// is being dropped too; two or more would mean post-sentinel data
-	// leaked through the b.Drain path.
+	// Count post-shutdown sends. With the carrier, runShutdown emits:
+	//   send 1: EventBatch for data1 (gap-flush when loss is added)
+	//   send 2: TransportLoss for the loss marker
+	//   send 3: EventBatch for data2 (final Drain)
 	sendCount := 0
 drainSends:
 	for {
@@ -132,28 +126,11 @@ drainSends:
 			break drainSends
 		}
 	}
-	if sendCount != 1 {
-		t.Fatalf("got %d post-shutdown sends; want exactly 1 (the pre-loss [data1] flush)", sendCount)
+	if sendCount != 3 {
+		t.Fatalf("got %d post-shutdown sends; want exactly 3 (data1 EventBatch + TransportLoss + data2 EventBatch)", sendCount)
 	}
 
-	// Verify the encoder saw the pre-loss [data1] batch AND a [loss]
-	// batch (which trips the sentinel) — and crucially NOT a third
-	// post-sentinel encode call. Without the fix, encoded would have
-	// 3 entries (data1, loss, data2) and the third would have crossed
-	// the wire; with the fix it has exactly 2 (data1, loss) and only
-	// the first reaches Send.
-	if len(encoded) != 2 {
-		t.Fatalf("encoder saw %d batches; want exactly 2 (pre-loss [data1] flush + [loss] sentinel)", len(encoded))
-	}
-	if got := encoded[0]; len(got) != 1 || got[0].Kind != wal.RecordData || got[0].Sequence != 1 {
-		t.Fatalf("encoded[0] = %+v; want one RecordData seq=1", got)
-	}
-	if got := encoded[1]; len(got) != 1 || got[1-1].Kind != wal.RecordLoss {
-		t.Fatalf("encoded[1] = %+v; want one RecordLoss", got)
-	}
-
-	// CloseSend must still happen — the fail-closed posture cleans up
-	// the conn even when we surface a fatal error.
+	// CloseSend must still happen.
 	select {
 	case <-conn.closeSendCalled:
 	case <-time.After(time.Second):
@@ -161,33 +138,27 @@ drainSends:
 	}
 }
 
-// TestShutdown_RecordLossDuringDrainPropagates pins the roborev #6131
-// Medium contract: when runShutdown's drain encounters a record that
-// trips ErrRecordLossEncountered, the sentinel must propagate out of
-// runLive → Run → Store.runDone instead of being swallowed behind a
-// clean CloseSend. Stop signals "drain finished" to the caller, but
-// Run's return value carries the fatal error so the integrity gap is
-// observable instead of silently masked.
+// TestShutdown_RecordLossDuringDrainPropagates pins the carrier contract:
+// when runShutdown's drain encounters a loss marker, a TransportLoss
+// frame is emitted on the wire and the session continues to return nil
+// from Run rather than propagating an error.
 //
 // Test shape — the encoder seam is split (build → Replaying;
 // encode → Live/Shutdown), so:
 //
-//   1. Seed one record so Replaying has something to send. This is
-//      the test's sync point for "runLive has started" (the second
-//      conn.sendCh receive lines up with Replaying having transitioned
-//      to Live; without it, Stop can race the Replaying→Live boundary
-//      and the OUTER stopCh arm in Run preempts runLive's inner
-//      stopCh arm, bypassing runShutdown entirely).
-//   2. Replaying uses buildEventBatchFn → swap to a happy-path stub
-//      so Replaying's send succeeds and the test reaches Live.
-//   3. Live and Shutdown use encodeBatchMessageFn → swap to a failing
-//      stub returning ErrRecordLossEncountered. Live's Notify path
-//      calls b.Add only (no encode at MaxRecords=100), so the failing
-//      encoder fires for the FIRST time inside runShutdown's Drain.
-//   4. Append a post-live record → Stop with positive drainDeadline →
-//      runShutdown's Drain encodes the buffered batch → encoder
-//      errors → drainErr surfaces from runShutdown → runLive returns
-//      (StateShutdown, sentinel) → Run returns sentinel.
+//  1. Seed one record so Replaying has something to send. This is
+//     the test's sync point for "runLive has started" (the second
+//     conn.sendCh receive lines up with Replaying having transitioned
+//     to Live; without it, Stop can race the Replaying→Live boundary
+//     and the OUTER stopCh arm in Run preempts runLive's inner
+//     stopCh arm, bypassing runShutdown entirely).
+//  2. Replaying uses buildEventBatchFn → swap to a happy-path stub
+//     so Replaying's send succeeds and the test reaches Live.
+//  3. Live and Shutdown use encodeBatchMessageFn → production encoder
+//     handles loss markers as TransportLoss frames.
+//  4. Append a post-live record with a loss → Stop with positive drainDeadline →
+//     runShutdown's Drain encodes the buffered batch → TransportLoss
+//     emitted → Run returns nil.
 func TestShutdown_RecordLossDuringDrainPropagates(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		// Same scheduling-jitter caveat as TestShutdown_StopDrainsThenCloseSends.
@@ -202,13 +173,8 @@ func TestShutdown_RecordLossDuringDrainPropagates(t *testing.T) {
 	defer w.Close()
 
 	// Replaying succeeds with the same nonEmptyMsg stub the other
-	// shutdown tests use; the failing path is reserved for the
-	// Live/Shutdown encoder seam so the sentinel only fires during
-	// runShutdown's Drain.
+	// shutdown tests use.
 	defer transport.SetBuildEventBatchFnForTest(nonEmptyMsg)()
-	defer transport.SetEncodeBatchMessageFnForTest(func(_ []wal.Record) (*wtpv1.ClientMessage, error) {
-		return nil, transport.ErrRecordLossEncountered
-	})()
 
 	// Seed one record so Replaying has something to send — the second
 	// conn.sendCh receive is the "runLive has started" sync point.
@@ -268,18 +234,23 @@ func TestShutdown_RecordLossDuringDrainPropagates(t *testing.T) {
 		t.Fatal("no Replaying EventBatch within 1s")
 	}
 
-	// runLive is in its inner select. Append a post-live record so
-	// runShutdown's Drain has something to encode.
-	if _, err := w.Append(2, 0, []byte("live-payload")); err != nil {
-		t.Fatalf("wal.Append(live): %v", err)
+	// runLive is in its inner select. Append a loss record so
+	// runShutdown's Drain produces a TransportLoss frame.
+	if err := w.AppendLoss(wal.LossRecord{
+		FromSequence: 2,
+		ToSequence:   2,
+		Generation:   0,
+		Reason:       "overflow",
+	}); err != nil {
+		t.Fatalf("wal.AppendLoss(live): %v", err)
 	}
 
 	tr.Stop(500 * time.Millisecond)
 
 	select {
 	case got := <-done:
-		if !errors.Is(got, transport.ErrRecordLossEncountered) {
-			t.Fatalf("Run returned %v; want ErrRecordLossEncountered", got)
+		if got != nil {
+			t.Fatalf("Run returned %v; want nil (TransportLoss is emitted, not fatal)", got)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return within 5s of Stop")

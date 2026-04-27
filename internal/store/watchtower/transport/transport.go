@@ -1169,12 +1169,11 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 						// Terminal-vs-retriable contract mirroring
 						// runConnecting: an inner handler returning
 						// StateShutdown with a non-nil error signals an
-						// unrecoverable session condition (today: the
-						// ErrRecordLossEncountered sentinel — see
-						// state_live.go). Surface immediately so the
-						// Store's runDone receives the error and the
-						// fatal latch trips, instead of looping back to
-						// Connecting and re-hitting the same marker.
+						// unrecoverable session condition. Surface
+						// immediately so the Store's runDone receives the
+						// error and the fatal latch trips, instead of
+						// looping back to Connecting and re-hitting the
+						// same condition.
 						return err
 					}
 					stageErr = err
@@ -1235,9 +1234,8 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 				if next == StateShutdown {
 					// Terminal-vs-retriable: see the runReplaying
 					// branch above for the full contract. Same
-					// rationale — an unrecoverable encoder error
-					// (ErrRecordLossEncountered) must not be
-					// retried by the Connecting backoff path.
+					// rationale — an unrecoverable error must not
+					// be retried by the Connecting backoff path.
 					return err
 				}
 				st = StateConnecting

@@ -2,7 +2,6 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"fmt"
 )
 
@@ -105,21 +104,20 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 			return StateConnecting, fmt.Errorf("replay batch: %w", err)
 		}
 		if len(batch.Records) > 0 {
-			msg, err := buildEventBatchFn(batch.Records)
+			msgs, err := buildEventBatchFn(batch.Records)
 			if err != nil {
 				_ = t.conn.Close()
 				t.teardownRecv()
 				t.conn = nil
-				if errors.Is(err, ErrRecordLossEncountered) {
-					return StateShutdown, err
-				}
 				return StateConnecting, fmt.Errorf("build EventBatch: %w", err)
 			}
-			if err := t.conn.Send(msg); err != nil {
-				_ = t.conn.Close()
-				t.teardownRecv()
-				t.conn = nil
-				return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
+			for _, msg := range msgs {
+				if err := t.conn.Send(msg); err != nil {
+					_ = t.conn.Close()
+					t.teardownRecv()
+					t.conn = nil
+					return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
+				}
 			}
 		}
 		if done {
@@ -129,26 +127,12 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 }
 
 // buildEventBatchFn is the function variable runReplaying calls to wrap
-// WAL records into a wtpv1.EventBatch envelope. Defaults to the empty-
-// message stub so the Replaying state machine can be exercised in tests.
-// Task 17 (Live-state Batcher) and Task 22 (Store integration) replace
-// this with the real builder before runReplaying is wired into the
-// production run loop. Until then, in addition to the stub-builder
-// hazard, runReplaying is missing the recv multiplexer required by the
-// spec (see runReplaying header) — both gaps are addressed by Task
-// 17/18, and runReplaying remains unexported so production callers
-// outside the transport package cannot reach it.
-//
-// Tests that need to assert against a non-empty wire format can override
-// via setBuildEventBatchFnForTest (see state_replaying_internal_test.go);
-// production code MUST NOT mutate this variable outside of the
-// initialization performed by Task 22.
-// buildEventBatchFn is the function variable runReplaying calls to wrap
-// WAL records into a wtpv1.EventBatch envelope. Defaults to
+// WAL records into wtpv1.ClientMessage slices. Defaults to
 // encodeBatchMessage so the Live and Replaying states share one
 // implementation — both flows wrap already-marshaled CompactEvents
 // into an UncompressedEvents body with matching (from_sequence,
-// to_sequence, generation) metadata.
+// to_sequence, generation) metadata, and emit TransportLoss frames for
+// loss markers.
 //
 // Tests that need to assert against a custom wire shape can override
 // via setBuildEventBatchFnForTest (see state_replaying_internal_test.go).
