@@ -3,7 +3,10 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/audit/kms"
@@ -61,8 +64,21 @@ func buildWatchtowerStore(
 		agentID = "unknown"
 	}
 
-	// Infer TLS-enabled from presence of TLS configuration fields.
-	tlsEnabled := cfg.TLS.CACertFile != "" || cfg.TLS.ClientCertFile != "" || cfg.TLS.InsecureSkipVerify
+	// Auto-generate SessionID when config field is empty. Config docs say
+	// session_id is optional; an empty value must not cause a startup failure.
+	sessionID := cfg.SessionID
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("%s-%d", agentID, time.Now().UnixNano())
+	}
+
+	// TLS is ON by default. The caller must explicitly set tls.insecure: true
+	// to disable it (e.g. for a local test server). When insecure is true,
+	// a WARN is logged at construction time so operators see the choice in
+	// their startup logs.
+	tlsEnabled := !cfg.TLS.Insecure
+	if cfg.TLS.Insecure {
+		slog.Warn("watchtower: TLS disabled via tls.insecure=true; traffic is plaintext — do not use in production")
+	}
 
 	// Build the eventfilter.Filter from config.
 	var filter *eventfilter.Filter
@@ -85,13 +101,16 @@ func buildWatchtowerStore(
 		Mapper:          mapper,
 		Allocator:       audit.NewSequenceAllocator(),
 		AgentID:         agentID,
-		SessionID:       cfg.SessionID,
+		SessionID:       sessionID,
 		HMACKeyID:       hmacKeyID,
 		HMACSecret:      hmacKey,
 		HMACAlgorithm:   cfg.Chain.Algorithm,
 		BatchMaxRecords: cfg.Batch.MaxEvents,
 		BatchMaxBytes:   cfg.Batch.MaxBytes,
 		BatchMaxAge:     cfg.Batch.MaxTimespan,
+		HeartbeatEvery:  cfg.Heartbeat.Interval,
+		BackoffInitial:  cfg.Backoff.Base,
+		BackoffMax:      cfg.Backoff.Max,
 		Endpoint:        cfg.Endpoint,
 		TLSEnabled:      tlsEnabled,
 		TLSCACertFile:   cfg.TLS.CACertFile,
@@ -160,20 +179,26 @@ func chainConfigToKMS(c config.WatchtowerChainConfig) kms.Config {
 // Exactly one of TokenFile, TokenEnv, or ClientCertAuth must be configured
 // (enforced by config.AuditWatchtowerConfig.validate). ClientCertAuth does
 // not yield a bearer token — the mTLS cert is wired in the TLS config.
+// The returned token is always whitespace-trimmed; trailing newlines from
+// file reads and leading/trailing spaces in env values are stripped.
 func resolveAuthBearer(auth config.WatchtowerAuthConfig) (string, error) {
 	if auth.TokenFile != "" {
 		data, err := os.ReadFile(auth.TokenFile)
 		if err != nil {
 			return "", fmt.Errorf("read token file %q: %w", auth.TokenFile, err)
 		}
-		return string(data), nil
+		token := strings.TrimSpace(string(data))
+		if token == "" {
+			return "", fmt.Errorf("watchtower auth: token file %q is empty after whitespace trim", auth.TokenFile)
+		}
+		return token, nil
 	}
 	if auth.TokenEnv != "" {
-		tok := os.Getenv(auth.TokenEnv)
-		if tok == "" {
-			return "", fmt.Errorf("token env %q is empty or not set", auth.TokenEnv)
+		token := strings.TrimSpace(os.Getenv(auth.TokenEnv))
+		if token == "" {
+			return "", fmt.Errorf("watchtower auth: token env %q is empty or not set", auth.TokenEnv)
 		}
-		return tok, nil
+		return token, nil
 	}
 	// ClientCertAuth: no bearer token; the caller uses TLS client cert.
 	return "", nil
@@ -183,4 +208,10 @@ func resolveAuthBearer(auth config.WatchtowerAuthConfig) (string, error) {
 // for white-box tests. Production callers use buildWatchtowerStore.
 func BuildWatchtowerStoreForTest(ctx context.Context, cfg config.AuditWatchtowerConfig, m compact.Mapper) (store.EventStore, error) {
 	return buildWatchtowerStore(ctx, cfg, m)
+}
+
+// ResolveAuthBearerForTest is a thin export of resolveAuthBearer for
+// unit tests. Production callers use the unexported resolveAuthBearer.
+func ResolveAuthBearerForTest(auth config.WatchtowerAuthConfig) (string, error) {
+	return resolveAuthBearer(auth)
 }

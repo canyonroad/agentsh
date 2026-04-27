@@ -362,6 +362,8 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		Logger:          opts.Logger,
 		WAL:             w,
 		Metrics:         mw,
+		BackoffInitial:  opts.BackoffInitial,
+		BackoffMax:      opts.BackoffMax,
 		// Handshake metadata: the SessionInit frame MUST advertise the
 		// SAME algorithm / key fingerprint / context digest that the
 		// WAL records are chained with; otherwise the receiver sees a
@@ -403,7 +405,7 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 				MaxAge:     opts.BatchMaxAge,
 			},
 			MaxInflight:    8,
-			HeartbeatEvery: 5 * time.Second,
+			HeartbeatEvery: opts.HeartbeatEvery,
 		})
 	}()
 
