@@ -85,6 +85,11 @@ func buildConnInfo(ev types.Event) *ocsfpb.ConnectionInfo {
 		ci.ProtocolName = strp("tcp")
 		ci.Direction = strp("Outbound")
 		populated = true
+	// transparent_net_setup, transparent_net_ready, and transparent_net_failed
+	// are lifecycle events about the transparent-networking subsystem itself
+	// (e.g. tproxy/redirect table setup or teardown), not events for an
+	// individual network connection. They carry no protocol, direction, or
+	// endpoint information, so ConnectionInfo is intentionally omitted (nil).
 	}
 	if !populated {
 		return nil
@@ -100,6 +105,10 @@ func init() {
 		"ptrace_network":         NetworkActivityOpen,
 		"unix_socket_op":         NetworkActivityOpen,
 		"transparent_net_failed": NetworkActivityClose,
+		// transparent_net_ready and transparent_net_setup are lifecycle events
+		// about the transparent-networking subsystem, not individual connections.
+		// They are mapped to NetworkActivityOpen for event-class consistency
+		// but carry no ConnectionInfo (no protocol/direction — see buildConnInfo).
 		"transparent_net_ready":  NetworkActivityOpen,
 		"transparent_net_setup":  NetworkActivityOpen,
 		"mcp_network_connection": NetworkActivityOpen,
