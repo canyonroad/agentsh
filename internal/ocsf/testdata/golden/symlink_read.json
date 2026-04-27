@@ -1,0 +1,27 @@
+{
+  "class_uid": 1001,
+  "activity_id": 2,
+  "category_uid": 1,
+  "type_uid": 100102,
+  "time": "1777118400000000000",
+  "severity": "Informational",
+  "metadata": {
+    "version": "1.8.0",
+    "product": {
+      "name": "agentsh",
+      "vendor_name": "agentsh"
+    },
+    "logged_time": "1777118400000000000",
+    "event_code": "symlink_read",
+    "uid": "ev-symlink-read-1"
+  },
+  "actor": {
+    "process": {
+      "pid": "225"
+    }
+  },
+  "file": {
+    "path": "/home/agent/link",
+    "name": "link"
+  }
+}

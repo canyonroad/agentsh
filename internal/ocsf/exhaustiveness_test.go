@@ -17,6 +17,25 @@ import (
 // .gomodcache/, build/, bin/, dist/, etc.) and collects every string
 // literal passed as the Type field of a types.Event composite literal
 // or assigned to ev.Type.
+//
+// LIMITATION: the AST walker matches only literal `Type: "..."` or
+// `ev.Type = "..."` assignments. Emitters that call a helper function
+// and then assign its return value — for example:
+//
+//	n.emitFileEvent(ctx, "dir_list", ...)
+//
+// are NOT auto-detected because the string literal is an argument to a
+// function call rather than a direct assignment to a Type field. Such
+// types must be registered manually in the appropriate project_*.go
+// file. Known helper-based emit sites (as of roborev #6346):
+//
+//	internal/netmonitor/proxy.go:252          — "net_close"
+//	internal/netmonitor/transparent_tcp.go:141 — "net_close"
+//	internal/fsmonitor/fuse.go:236-325        — "dir_list", "file_stat",
+//	                                            "dir_create", "dir_delete",
+//	                                            "symlink_create", "symlink_read"
+//
+// TODO: extend the walker to follow helper-based emitters using go/types.
 func scanTypeLiterals(t *testing.T, rootDir string) map[string]string {
 	t.Helper()
 	out := map[string]string{}

@@ -28,6 +28,10 @@ func httpProjector(activity uint32) Projector {
 		if v, ok := allowed["url"].(string); ok && v != "" {
 			req.Url = strp(v)
 			anyReq = true
+		} else if v, ok := allowed["path"].(string); ok && v != "" {
+			// net_http_request emitter stores the URL path as "path" (not "url").
+			req.Url = strp(v)
+			anyReq = true
 		}
 		if v, ok := allowed["user_agent"].(string); ok && v != "" {
 			req.UserAgent = strp(v)
@@ -76,6 +80,9 @@ func init() {
 	httpAllow := []FieldRule{
 		{Key: "method", Transform: AsString, DestPath: "http_request.http_method"},
 		{Key: "url", Transform: AsString, DestPath: "http_request.url"},
+		// net_http_request emitter stores the URL as "path" (proxy plain-HTTP path),
+		// not "url". Allowlist both; projector above prefers "url" then falls back to "path".
+		{Key: "path", Transform: AsString, DestPath: "http_request.url"},
 		{Key: "host", Transform: AsString, DestPath: "http_request.host"},
 		{Key: "user_agent", Transform: AsString, DestPath: "http_request.user_agent"},
 		{Key: "http_version", Transform: AsString, DestPath: "http_request.version"},

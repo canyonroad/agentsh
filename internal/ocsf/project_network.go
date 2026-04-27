@@ -1,6 +1,9 @@
 package ocsf
 
 import (
+	"net"
+	"strconv"
+
 	"google.golang.org/protobuf/proto"
 
 	"github.com/agentsh/agentsh/pkg/types"
@@ -21,7 +24,7 @@ func networkProjector(activity uint32) Projector {
 			DstEndpoint:    buildDstEndpoint(ev),
 			ConnectionInfo: buildConnInfo(ev),
 		}
-		if rt, ok := allowed["redirect_target"].(string); ok && rt != "" {
+		if rt, ok := allowed["redirect_to"].(string); ok && rt != "" {
 			msg.RedirectTarget = strp(rt)
 		}
 		if ev.Policy != nil {
@@ -46,7 +49,24 @@ func buildDstEndpoint(ev types.Event) *ocsfpb.Endpoint {
 		e.Hostname = strp(ev.Domain)
 	}
 	if ev.Remote != "" {
-		e.Ip = strp(ev.Remote)
+		// ev.Remote may be "host:port" or a bare IP/hostname.
+		// net.SplitHostPort handles IPv6 brackets correctly.
+		if host, portStr, err := net.SplitHostPort(ev.Remote); err == nil {
+			if p, err := strconv.ParseUint(portStr, 10, 32); err == nil {
+				e.Port = u32p(uint32(p))
+			}
+			// If domain is already set, keep it; only override hostname
+			// if the host part is non-empty and domain was not set.
+			if host != "" {
+				if e.Hostname == nil {
+					e.Hostname = strp(host)
+				}
+				e.Ip = strp(host)
+			}
+		} else {
+			// Bare IP or hostname without port.
+			e.Ip = strp(ev.Remote)
+		}
 	}
 	return e
 }
@@ -83,9 +103,13 @@ func init() {
 		"transparent_net_ready":  NetworkActivityOpen,
 		"transparent_net_setup":  NetworkActivityOpen,
 		"mcp_network_connection": NetworkActivityOpen,
+		// Dynamically-emitted; not caught by AST walker — see exhaustiveness_test.go.
+		"net_close": NetworkActivityClose,
 	}
+	// redirect_to is the real field key used by proxy.go and transparent_tcp.go
+	// emitters (was incorrectly allowlisted as redirect_target in the original code).
 	allow := []FieldRule{{
-		Key: "redirect_target", Required: false, Transform: AsString, DestPath: "redirect_target",
+		Key: "redirect_to", Required: false, Transform: AsString, DestPath: "redirect_target",
 	}}
 	for t, activity := range netMappings {
 		register(t, Mapping{
