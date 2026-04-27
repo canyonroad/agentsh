@@ -38,11 +38,11 @@ import (
 // Store docstring's "Close()" block; this comment exists to keep
 // the constant's local context honest):
 //
-//   Happy path  : DrainDeadline + closeRunCancelGrace + wal.Close
-//   Safety net  : DrainDeadline + closeRunCancelGrace
-//                 (wal.Close is INTENTIONALLY skipped — see
-//                  the IMPORTANT incomplete-cleanup case on the
-//                  Store docstring for why)
+//	Happy path  : DrainDeadline + closeRunCancelGrace + wal.Close
+//	Safety net  : DrainDeadline + closeRunCancelGrace
+//	              (wal.Close is INTENTIONALLY skipped — see
+//	               the IMPORTANT incomplete-cleanup case on the
+//	               Store docstring for why)
 const closeRunCancelGrace = 2 * time.Second
 
 // ErrCloseSafetyNet is the sentinel error returned by Close when the
@@ -74,15 +74,15 @@ var ErrCloseSafetyNet = errors.New("watchtower.Close: shutdown safety net hit; b
 //     shuts the Store down. The shutdown latency budget depends on
 //     which branch fires:
 //
-//       Happy path (cooperative drain succeeds OR runCancel
-//       unblocks the bg loop within closeRunCancelGrace):
-//         DrainDeadline + closeRunCancelGrace + wal.Close
-//         (wal.Close is typically sub-millisecond)
+//     Happy path (cooperative drain succeeds OR runCancel
+//     unblocks the bg loop within closeRunCancelGrace):
+//     DrainDeadline + closeRunCancelGrace + wal.Close
+//     (wal.Close is typically sub-millisecond)
 //
-//       Safety-net path (synthetic timeout fires):
-//         DrainDeadline + closeRunCancelGrace
-//         wal.Close is NOT called on this path — see the
-//         IMPORTANT note below.
+//     Safety-net path (synthetic timeout fires):
+//     DrainDeadline + closeRunCancelGrace
+//     wal.Close is NOT called on this path — see the
+//     IMPORTANT note below.
 //
 //     Idempotent — second and later calls return the same captured
 //     error.
@@ -143,6 +143,14 @@ type Store struct {
 	tr      *transport.Transport
 	sink    chain.SinkChainAPI
 	metrics *metrics.WTPMetrics
+
+	// appendLossFn is the seam emitInFlightLoss calls instead of
+	// s.w.AppendLoss directly. New() wires it to s.w.AppendLoss when
+	// w != nil; tests can override to inject a spy that records the
+	// LossRecord and an injectable error path. Mirrors the
+	// walMarkAckedFn / walWrittenDataHighWaterFn seam pattern in
+	// transport.Transport (round-13 plan §"Drop-site wiring").
+	appendLossFn func(loss wal.LossRecord) error
 
 	// runCancel cancels the internal context the bg run loop watches.
 	// Closed by Close. The internal context is independent of the
@@ -355,15 +363,15 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	}
 
 	tr, err := transport.New(transport.Options{
-		Dialer:          dialer,
-		AgentID:         opts.AgentID,
-		SessionID:       opts.SessionID,
-		InitialAckTuple: initialAck,
-		Logger:          opts.Logger,
-		WAL:             w,
-		Metrics:         mw,
-		BackoffInitial:  opts.BackoffInitial,
-		BackoffMax:      opts.BackoffMax,
+		Dialer:           dialer,
+		AgentID:          opts.AgentID,
+		SessionID:        opts.SessionID,
+		InitialAckTuple:  initialAck,
+		Logger:           opts.Logger,
+		WAL:              w,
+		Metrics:          mw,
+		BackoffInitial:   opts.BackoffInitial,
+		BackoffMax:       opts.BackoffMax,
 		LogGoawayMessage: opts.LogGoawayMessage,
 		// Handshake metadata: the SessionInit frame MUST advertise the
 		// SAME algorithm / key fingerprint / context digest that the
@@ -395,6 +403,7 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		runDone:       make(chan error, 1),
 		contextDigest: ctxDigest,
 	}
+	s.appendLossFn = s.w.AppendLoss
 
 	go func() {
 		s.runDone <- tr.Run(runCtx, func(gen uint32, start uint64) (*wal.Reader, error) {
@@ -429,13 +438,13 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 //  3. On deadline, fall back to runCancel() and wait on runDone,
 //     bounded by closeRunCancelGrace.
 //  4. CONDITIONAL WAL close:
-//       - If runDone fired in step 2 OR step 3 — close the WAL.
-//         WAL-close errors are merged into the captured close error.
-//       - If closeRunCancelGrace ALSO elapsed in step 3 (the
-//         synthetic-timeout safety-net path) — DO NOT close the
-//         WAL. The bg goroutine may still hold a wal.Reader; closing
-//         the WAL would race. Return the synthetic error directly
-//         and emit the operator WARN per the Store docstring.
+//     - If runDone fired in step 2 OR step 3 — close the WAL.
+//     WAL-close errors are merged into the captured close error.
+//     - If closeRunCancelGrace ALSO elapsed in step 3 (the
+//     synthetic-timeout safety-net path) — DO NOT close the
+//     WAL. The bg goroutine may still hold a wal.Reader; closing
+//     the WAL would race. Return the synthetic error directly
+//     and emit the operator WARN per the Store docstring.
 //
 // Returns the run loop's terminal error on clean shutdown, a wrapped
 // WAL-close error if step 4 surfaced one, or the synthetic safety-

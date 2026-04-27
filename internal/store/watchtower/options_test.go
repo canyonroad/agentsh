@@ -315,8 +315,16 @@ func TestStore_CloseIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestStore_ErrIsNonBlocking verifies Err returns immediately and
-// does not stall waiting for the run loop.
+// TestOptions_EmitExtendedLossReasons_DefaultsFalse verifies that the
+// zero value of Options.EmitExtendedLossReasons is false, matching the
+// documented opt-in default.
+func TestOptions_EmitExtendedLossReasons_DefaultsFalse(t *testing.T) {
+	var opts watchtower.Options
+	if opts.EmitExtendedLossReasons {
+		t.Fatalf("zero-value Options.EmitExtendedLossReasons should be false")
+	}
+}
+
 func TestStore_ErrIsNonBlocking(t *testing.T) {
 	opts := validOpts(t.TempDir())
 	s, err := watchtower.New(context.Background(), opts)

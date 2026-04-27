@@ -16,6 +16,46 @@ import (
 // Test seam — production wiring sets this from transport.New.
 var encoderMetrics *metrics.WTPMetrics
 
+// encoderEmitExtendedReasons controls whether the encoder emits
+// TransportLoss frames for extended reasons (MAPPER_FAILURE,
+// INVALID_MAPPER, INVALID_TIMESTAMP, INVALID_UTF8, SEQUENCE_OVERFLOW,
+// ACK_REGRESSION_AFTER_GC). When false:
+//   - the encoder drops extended-reason markers (logged INFO) instead
+//     of emitting them.
+//   - in-flight reasons (mapper_failure, invalid_utf8, etc.) cannot
+//     reach the encoder because the drop sites skip wal.AppendLoss
+//     when the flag is off.
+//   - OVERFLOW and CRC_CORRUPTION emit unconditionally (part of the
+//     original wire schema).
+//
+// Set from watchtower.Store construction via
+// SetEncoderEmitExtendedReasons.
+var encoderEmitExtendedReasons bool
+
+// SetEncoderEmitExtendedReasons sets the package-level flag controlling
+// emission of extended TransportLoss reasons. Called from
+// watchtower.Store / internal/server.buildWatchtowerStore at startup.
+func SetEncoderEmitExtendedReasons(b bool) {
+	encoderEmitExtendedReasons = b
+}
+
+// isExtendedReason reports whether the wire enum is one of the six
+// reasons added in the 2026-04-27 spec. OVERFLOW and CRC_CORRUPTION
+// return false — they're always emitted regardless of the flag.
+func isExtendedReason(r wtpv1.TransportLossReason) bool {
+	switch r {
+	case wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_MAPPER_FAILURE,
+		wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_INVALID_MAPPER,
+		wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_INVALID_TIMESTAMP,
+		wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_INVALID_UTF8,
+		wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_SEQUENCE_OVERFLOW,
+		wtpv1.TransportLossReason_TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC:
+		return true
+	default:
+		return false
+	}
+}
+
 // LiveOptions configures the Live state's batcher and inflight window.
 type LiveOptions struct {
 	Batcher        BatcherOptions
@@ -307,6 +347,12 @@ func encodeBatchMessage(records []wal.Record) ([]*wtpv1.ClientMessage, error) {
 				if encoderMetrics != nil {
 					encoderMetrics.IncWTPLossUnknownReason(1)
 				}
+				continue
+			}
+			if !encoderEmitExtendedReasons && isExtendedReason(wireReason) {
+				// Spec §"Configuration": extended reasons are gated. Drop the
+				// marker; OVERFLOW/CRC_CORRUPTION fall through this branch
+				// because isExtendedReason returns false for them.
 				continue
 			}
 			tl := &wtpv1.TransportLoss{
