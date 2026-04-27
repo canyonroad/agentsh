@@ -233,6 +233,29 @@ func (s *Server) SessionInits() int {
 	return s.sessionInits
 }
 
+// WaitForSessionInits blocks until the server has accepted at least
+// `want` SessionInit handshakes OR the deadline elapses. Returns the
+// observed count and any deadline error.
+func (s *Server) WaitForSessionInits(want int, deadline time.Duration) (int, error) {
+	t := time.NewTimer(deadline)
+	defer t.Stop()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		s.mu.Lock()
+		got := s.sessionInits
+		s.mu.Unlock()
+		if got >= want {
+			return got, nil
+		}
+		select {
+		case <-t.C:
+			return got, fmt.Errorf("WaitForSessionInits: want %d, got %d after %v", want, got, deadline)
+		case <-tick.C:
+		}
+	}
+}
+
 // WaitForTransportLoss blocks until at least one TransportLoss frame
 // has arrived OR the deadline elapses. Returns the first frame and
 // any error.

@@ -87,8 +87,12 @@ func TestStore_OverflowEmitsTransportLossOnWire(t *testing.T) {
 
 	// Regression: session must not have restarted — the overflow must NOT
 	// have caused ErrRecordLossEncountered → session teardown.
-	if got := srv.SessionInits(); got != 1 {
-		t.Fatalf("SessionInits = %d; want 1 (no session restart)", got)
+	got, err := srv.WaitForSessionInits(1, 5*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForSessionInits: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("SessionInits = %d; want exactly 1 (no session restart)", got)
 	}
 }
 
@@ -189,8 +193,12 @@ func TestStore_CRCCorruptionEmitsTransportLossOnWire(t *testing.T) {
 
 	// SessionInits should be 2 (one per Store), not 3+ (no client-side
 	// restart on top of the two distinct lifetimes).
-	if got := srv.SessionInits(); got != 2 {
-		t.Fatalf("SessionInits = %d; want 2 (one per Store, no restart)", got)
+	got, err := srv.WaitForSessionInits(2, 5*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForSessionInits: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("SessionInits = %d; want exactly 2 (one per Store, no extra restarts)", got)
 	}
 }
 
