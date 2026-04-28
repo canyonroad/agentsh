@@ -384,6 +384,24 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 				case <-time.After(h.s.opts.AckDelay):
 				}
 			}
+			if h.s.opts.CloseAfterSessionInitRecv {
+				// Tear down the stream before sending any SessionAck.
+				// Drives the client's runConnecting recv-failed path.
+				return nil
+			}
+			if h.s.opts.RespondWithUnexpectedMessage {
+				// Send a BatchAck (a non-SessionAck ServerMessage
+				// variant) so the client's runConnecting classifies
+				// the response as WTPSessionFailureReasonUnexpectedMessage.
+				if err := stream.Send(&wtpv1.ServerMessage{
+					Msg: &wtpv1.ServerMessage_BatchAck{
+						BatchAck: &wtpv1.BatchAck{},
+					},
+				}); err != nil {
+					return err
+				}
+				return nil
+			}
 			if h.s.opts.RejectSession {
 				if err := stream.Send(&wtpv1.ServerMessage{
 					Msg: &wtpv1.ServerMessage_SessionAck{

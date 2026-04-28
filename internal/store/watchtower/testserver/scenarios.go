@@ -111,6 +111,27 @@ type Options struct {
 	RejectSession bool
 	RejectReason  string
 
+	// CloseAfterSessionInitRecv, when true, returns from the Stream
+	// handler immediately after the first SessionInit is received and
+	// validated (BEFORE sending SessionAck). Lets component tests drive
+	// the runConnecting recv-failed path: the client's conn.Recv() then
+	// surfaces an EOF / stream-closed error, classified as
+	// WTPSessionFailureReasonRecvFailed.
+	//
+	// Mutually exclusive with RejectSession and
+	// RespondWithUnexpectedMessage. When more than one is set the
+	// handler picks the first matching branch in the order they appear
+	// in this struct.
+	CloseAfterSessionInitRecv bool
+
+	// RespondWithUnexpectedMessage, when true, sends a BatchAck
+	// ServerMessage (instead of SessionAck) in response to a
+	// SessionInit. Lets component tests drive the runConnecting
+	// unexpected-message path: the client's first Recv after
+	// SessionInit returns a non-SessionAck variant, classified as
+	// WTPSessionFailureReasonUnexpectedMessage.
+	RespondWithUnexpectedMessage bool
+
 	// TransportLossAckDelay introduces an artificial delay before the
 	// BatchAck for a TransportLoss frame is sent. When non-zero, the
 	// server holds the ack for this duration before sending it. This
