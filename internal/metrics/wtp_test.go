@@ -485,8 +485,10 @@ func TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons(t *testing.T) {
 		"event_batch_body_unset",
 		"event_batch_compression_mismatch",
 		"event_batch_compression_unspecified",
+		"goaway_code_unspecified",
 		"payload_too_large",
 		"session_init_algorithm_unspecified",
+		"session_update_generation_invalid",
 		"unknown",
 	}
 	for _, reason := range expectedReasons {
