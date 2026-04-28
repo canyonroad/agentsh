@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -60,3 +61,46 @@ func TestSnyk_NoBinaryAvailable(t *testing.T) {
 type noBinaryErr struct{}
 
 func (*noBinaryErr) Error() string { return "exec: not found" }
+
+func TestSnyk_NonzeroExitWithFindingsStillReturned(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake CLI is a sh script")
+	}
+	abs, err := filepath.Abs(filepath.Join("..", "testdata", "snyk-fake", "snyk-agent-scan-fake-nonzero.sh"))
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	p := NewSnykProvider(SnykConfig{BinaryPath: abs})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := p.Scan(ctx, loadFixture(t, "minimal"))
+	if err != nil {
+		t.Fatalf("Scan should not error when JSON parses; got %v", err)
+	}
+	if len(resp.Findings) != 2 {
+		t.Errorf("expected 2 findings preserved despite non-zero exit, got %d", len(resp.Findings))
+	}
+	if resp.Metadata.Error == "" {
+		t.Errorf("expected Metadata.Error to record subprocess failure")
+	}
+}
+
+func TestSnyk_RespectsContextCancellation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake CLI is a sh script")
+	}
+	abs, err := filepath.Abs(filepath.Join("..", "testdata", "snyk-fake", "snyk-agent-scan-fake.sh"))
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	p := NewSnykProvider(SnykConfig{BinaryPath: abs})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel
+	_, err = p.Scan(ctx, loadFixture(t, "minimal"))
+	if err == nil {
+		t.Fatalf("expected ctx error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}

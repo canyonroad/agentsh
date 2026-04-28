@@ -75,6 +75,32 @@ func (p *snykProvider) Scan(ctx context.Context, req skillcheck.ScanRequest) (*s
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	out, err := cmd.Output()
+
+	// If ctx was cancelled or deadline expired, propagate that error so the
+	// orchestrator's timeout path works. The subprocess may have been killed.
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, cerr
+	}
+
+	// Try to parse stdout even on non-zero exit. Many scanners exit non-zero
+	// to signal "findings present"; dropping their JSON would silently lose data.
+	if len(out) > 0 {
+		findings, partial := parseSnykOutput(out, req.Skill, p.Name())
+		if len(findings) > 0 || !partial {
+			// Successful parse (or successful empty parse). Surface the run
+			// even if the process failed; record the failure in metadata.
+			meta := skillcheck.ResponseMetadata{Duration: time.Since(start), Partial: partial}
+			if err != nil {
+				meta.Error = err.Error()
+			}
+			return &skillcheck.ScanResponse{
+				Provider: p.Name(),
+				Findings: findings,
+				Metadata: meta,
+			}, nil
+		}
+	}
+
 	if err != nil {
 		return &skillcheck.ScanResponse{
 			Provider: p.Name(),
