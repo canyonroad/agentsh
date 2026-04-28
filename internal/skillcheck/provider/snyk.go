@@ -102,10 +102,7 @@ func (p *snykProvider) Scan(ctx context.Context, req skillcheck.ScanRequest) (*s
 	}
 
 	if err != nil {
-		return &skillcheck.ScanResponse{
-			Provider: p.Name(),
-			Metadata: skillcheck.ResponseMetadata{Duration: time.Since(start), Error: err.Error()},
-		}, nil
+		return nil, fmt.Errorf("snyk: subprocess failed (duration=%s): %w", time.Since(start), err)
 	}
 	findings, partial := parseSnykOutput(out, req.Skill, p.Name())
 	return &skillcheck.ScanResponse{

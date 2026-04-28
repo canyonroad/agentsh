@@ -62,6 +62,29 @@ type noBinaryErr struct{}
 
 func (*noBinaryErr) Error() string { return "exec: not found" }
 
+func TestSnyk_SubprocessCrashReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake CLI is a sh script")
+	}
+	abs, err := filepath.Abs(filepath.Join("..", "testdata", "snyk-fake", "snyk-agent-scan-fake-crash.sh"))
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	p := NewSnykProvider(SnykConfig{BinaryPath: abs})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := p.Scan(ctx, loadFixture(t, "minimal"))
+	if err == nil {
+		t.Fatalf("expected error from subprocess crash; got resp=%+v", resp)
+	}
+	if resp != nil {
+		t.Errorf("response should be nil on hard failure, got %+v", resp)
+	}
+	if !strings.Contains(err.Error(), "snyk") {
+		t.Errorf("error should mention provider name; got %v", err)
+	}
+}
+
 func TestSnyk_NonzeroExitWithFindingsStillReturned(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake CLI is a sh script")
