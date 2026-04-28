@@ -10,6 +10,19 @@ import (
 	"time"
 )
 
+// compressionRatioBuckets is the per-algo storage backing the
+// wtp_batch_compression_ratio histogram. The buckets array carries one
+// slot per upper bound in wtpCompressionRatioBucketsValues plus one for
+// the implicit +Inf bucket. Held under mu to keep ObserveBatchCompressionRatio
+// + emit consistent (the histogram is updated as a 3-tuple of count,
+// sum, buckets).
+type compressionRatioBuckets struct {
+	mu      sync.Mutex
+	buckets [8]uint64 // 7 bucket values aligned to wtpCompressionRatioBucketsValues + +Inf
+	count   uint64
+	sum     float64
+}
+
 // Collector provides a minimal Prometheus-compatible metrics exporter.
 type Collector struct {
 	startedAt time.Time
@@ -68,6 +81,20 @@ type Collector struct {
 	wtpLatencyBuckets [14]uint64 // 13 buckets + +Inf; index aligned with wtpLatencyBucketsSeconds
 	wtpLatencyCount   uint64
 	wtpLatencySum     float64
+
+	// Compression metrics (Task 4 of 2026-04-27 batch-compression plan).
+	// Per-algo storage using fixed fields rather than sync.Map keeps the
+	// always-emit cross product trivial — the emit code references each
+	// field directly. Add new algos by adding a field + an entry to the
+	// emit fixed slice (wtpCompressionAlgos) and the per-algo switch in
+	// ObserveBatchCompressionRatio + emitWTPMetrics.
+	wtpBatchCompressionRatioZstd compressionRatioBuckets
+	wtpBatchCompressionRatioGzip compressionRatioBuckets
+
+	wtpBatchCompressedBytesByAlgo   sync.Map // algo -> *atomic.Uint64
+	wtpBatchUncompressedBytesByAlgo sync.Map // algo -> *atomic.Uint64
+	wtpCompressErrorByAlgo          sync.Map // algo -> *atomic.Uint64
+	wtpDecompressErrorByLabels      sync.Map // "algo|reason" -> *atomic.Uint64
 }
 
 func New() *Collector {
