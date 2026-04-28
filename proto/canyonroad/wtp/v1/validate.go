@@ -324,3 +324,45 @@ func ValidateSessionUpdate(u *SessionUpdate) error {
 	}
 	return nil
 }
+
+// ValidateSessionAck rejects a structurally invalid inbound
+// SessionAck. Today the only structural failure the validator can
+// detect statelessly is a nil message — the SessionAck schema has no
+// MUST-be-set field invariants beyond presence (the accepted/
+// reject_reason coherence is a server contract that this validator
+// does not police). State-dependent invariants are enforced by the
+// transport's apply layer (applyServerAckTuple).
+func ValidateSessionAck(ack *SessionAck) error {
+	if ack == nil {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: session_ack is nil", ErrInvalidFrame),
+		}
+	}
+	return nil
+}
+
+// ValidateBatchAck rejects a nil BatchAck. Like SessionAck, the schema
+// has no MUST-be-set field invariants beyond presence;
+// state-dependent invariants are enforced by applyServerAckTuple.
+func ValidateBatchAck(ack *BatchAck) error {
+	if ack == nil {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: batch_ack is nil", ErrInvalidFrame),
+		}
+	}
+	return nil
+}
+
+// ValidateServerHeartbeat rejects a nil ServerHeartbeat. No other
+// stateless invariants apply.
+func ValidateServerHeartbeat(hb *ServerHeartbeat) error {
+	if hb == nil {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: server_heartbeat is nil", ErrInvalidFrame),
+		}
+	}
+	return nil
+}
