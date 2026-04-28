@@ -426,6 +426,17 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 			}); err != nil {
 				return err
 			}
+			// InjectAfterSessionAck: send a single arbitrary
+			// ServerMessage immediately after a successful SessionAck.
+			// Used by inbound-validation tests (malformed Goaway,
+			// malformed SessionUpdate) to exercise the recv classifier
+			// without first having to coax a client EventBatch through
+			// the handshake.
+			if h.s.opts.InjectAfterSessionAck != nil {
+				if err := stream.Send(h.s.opts.InjectAfterSessionAck); err != nil {
+					return err
+				}
+			}
 		case *wtpv1.ClientMessage_EventBatch:
 			// Receiver-side frame validation. Always on — spec
 			// compliance is not gated on observability wiring; the

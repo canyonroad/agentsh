@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
+	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
 // Options controls the server's behavior. Zero values use defaults
@@ -153,6 +154,17 @@ type Options struct {
 	// the wtp_dropped_invalid_frame_total{reason=...} counter or the
 	// defense-in-depth WARN.
 	Metrics transport.Metrics
+
+	// InjectAfterSessionAck, when non-nil, causes the testserver to send
+	// this ServerMessage immediately after a successful SessionAck and
+	// before any client-frame processing. Used to exercise inbound-
+	// validation paths (e.g. malformed Goaway, malformed SessionUpdate)
+	// without depending on client frames first reaching the server.
+	//
+	// Has no effect on the RejectSession, RespondWithUnexpectedMessage,
+	// or CloseAfterSessionInitRecv branches — those return before the
+	// successful-SessionAck send site.
+	InjectAfterSessionAck *wtpv1.ServerMessage
 
 	// Logger sinks the classifier's defense-in-depth WARN (emitted
 	// only when a non-*wtpv1.ValidationError reaches the classifier —
