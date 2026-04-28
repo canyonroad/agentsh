@@ -16,21 +16,30 @@ import (
 )
 
 // Metrics is the production-side counter/gauge surface the Transport calls
-// into. The real implementation is *internal/metrics.WTPMetrics; tests
-// substitute fakes. New() defaults to a no-op when Options.Metrics is nil
-// so callers can construct a Transport without wiring metrics.
+// into for ack/anomaly/recv-classifier bookkeeping. The real implementation
+// is *internal/metrics.WTPMetrics; tests substitute fakes. New() defaults
+// to a no-op when Options.Metrics is nil so callers can construct a
+// Transport without wiring metrics.
+//
+// Compression-specific metrics live on a separate CompressMetrics
+// interface so test fakes that don't care about compression don't have to
+// stub out the four compress methods.
 type Metrics interface {
 	SetAckHighWatermark(seq int64)
 	IncAnomalousAck(reason string)
 	IncResendNeeded()
 	IncAckRegressionLoss()
 	IncDroppedInvalidFrame(reason metrics.WTPInvalidFrameReason)
+}
 
-	// Compression metrics (Task 8 of 2026-04-27 batch-compression plan).
-	// Production implementer is *internal/metrics.WTPMetrics, which
-	// gained these methods in Task 4. The encoder's compressMetrics
-	// interface (state_live.go) is satisfied by anything with these
-	// four methods, so production wires *WTPMetrics directly.
+// CompressMetrics is the metrics surface encodeBatchMessage calls into for
+// per-batch compression bookkeeping. Production wiring is
+// *internal/metrics.WTPMetrics, which structurally satisfies both Metrics
+// and CompressMetrics — the same Collector instance is threaded into both
+// Options fields. New() defaults to a no-op when Options.CompressMetrics is
+// nil so tests that don't care about compression don't need to wire a
+// fake.
+type CompressMetrics interface {
 	IncCompressError(algo string)
 	ObserveBatchCompressionRatio(algo string, ratio float64)
 	AddBatchUncompressedBytes(algo string, n int)
@@ -44,10 +53,13 @@ func (noopMetrics) IncAnomalousAck(string)                               {}
 func (noopMetrics) IncResendNeeded()                                     {}
 func (noopMetrics) IncAckRegressionLoss()                                {}
 func (noopMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {}
-func (noopMetrics) IncCompressError(string)                              {}
-func (noopMetrics) ObserveBatchCompressionRatio(string, float64)         {}
-func (noopMetrics) AddBatchUncompressedBytes(string, int)                {}
-func (noopMetrics) AddBatchCompressedBytes(string, int)                  {}
+
+type noopCompressMetrics struct{}
+
+func (noopCompressMetrics) IncCompressError(string)                      {}
+func (noopCompressMetrics) ObserveBatchCompressionRatio(string, float64) {}
+func (noopCompressMetrics) AddBatchUncompressedBytes(string, int)        {}
+func (noopCompressMetrics) AddBatchCompressedBytes(string, int)          {}
 
 // AckTuple is the persisted (gen, seq) ack pair seeded from wal.Meta on
 // cold start. Present=false means the WAL has never recorded an ack
@@ -238,6 +250,15 @@ type Options struct {
 	// goroutine-safe across Transports but reused serially within one
 	// Transport.
 	Compressor compress.Encoder
+
+	// CompressMetrics is the per-Transport sink for compression
+	// bookkeeping (ratio histogram, byte counters, fail-open counter).
+	// nil disables compress metric recording — the encoder still runs,
+	// but observations are dropped. Production wires the same
+	// *WTPMetrics instance that satisfies Metrics; the two interfaces
+	// are deliberately separate so test fakes don't have to stub out
+	// methods they have no semantic relationship to.
+	CompressMetrics CompressMetrics
 }
 
 // validate enforces the construction-time invariants documented on
@@ -364,9 +385,14 @@ type Transport struct {
 	// compressor is the per-Transport batch encoder captured from
 	// Options.Compressor at New() time. Defaulted to a noneEncoder
 	// when Options.Compressor is nil so callers downstream can
-	// always invoke it without nil-checks. Not consumed yet; Task 8
-	// wires encodeBatchMessage to call it.
+	// always invoke it without nil-checks.
 	compressor compress.Encoder
+
+	// compressMetrics is the per-Transport compress-metrics sink
+	// captured from Options.CompressMetrics at New() time. Defaulted
+	// to a noopCompressMetrics when nil so encodeBatchMessage can
+	// always invoke it without nil-checks.
+	compressMetrics CompressMetrics
 }
 
 // New constructs a Transport. It does not dial; call Run to start.
@@ -398,9 +424,13 @@ func New(opts Options) (*Transport, error) {
 		runDone:                 make(chan struct{}),
 		emitExtendedLossReasons: opts.EmitExtendedLossReasons,
 		compressor:              opts.Compressor,
+		compressMetrics:         opts.CompressMetrics,
 	}
 	if t.compressor == nil {
 		t.compressor = noneCompressorSingleton
+	}
+	if t.compressMetrics == nil {
+		t.compressMetrics = noopCompressMetrics{}
 	}
 	if opts.InitialAckTuple != nil && opts.InitialAckTuple.Present {
 		seed := AckCursor{

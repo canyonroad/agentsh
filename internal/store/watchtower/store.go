@@ -381,6 +381,7 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		Logger:           opts.Logger,
 		WAL:              w,
 		Metrics:          mw,
+		CompressMetrics:  mw,
 		BackoffInitial:   opts.BackoffInitial,
 		BackoffMax:       opts.BackoffMax,
 		LogGoawayMessage: opts.LogGoawayMessage,

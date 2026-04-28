@@ -17,19 +17,6 @@ import (
 // Test seam — production wiring sets this from transport.New.
 var encoderMetrics *metrics.WTPMetrics
 
-// compressMetrics is the metrics surface encodeBatchMessage uses for
-// compression bookkeeping. Production wiring is *internal/metrics.WTPMetrics
-// (which implements all four methods after the metrics-side Task 4
-// landed). A nil value is allowed and disables metric recording.
-// Tests substitute a fake recorder to assert call patterns without
-// standing up a full Collector.
-type compressMetrics interface {
-	IncCompressError(algo string)
-	ObserveBatchCompressionRatio(algo string, ratio float64)
-	AddBatchUncompressedBytes(algo string, n int)
-	AddBatchCompressedBytes(algo string, n int)
-}
-
 // noneCompressorSingleton is the package-level fallback encoder used by
 // encodeBatchMessage's no-args wrapper (the test-only path that does not
 // thread a compressor through) and by transport.New when Options leaves
@@ -234,7 +221,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 					break
 				}
 				if outBatch := b.Add(rec); outBatch != nil {
-					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons, t.compressor, t.opts.Metrics)
+					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons, t.compressor, t.compressMetrics)
 					if err != nil {
 						_ = t.conn.Close()
 						t.teardownRecv()
@@ -274,7 +261,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			// returns the buffered batch.
 			if inflight.Len() < opts.MaxInflight {
 				if outBatch := b.Tick(now); outBatch != nil {
-					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons, t.compressor, t.opts.Metrics)
+					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons, t.compressor, t.compressMetrics)
 					if err != nil {
 						_ = t.conn.Close()
 						t.teardownRecv()
@@ -308,7 +295,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 // TransportLoss frames are emitted or silently dropped; callers pass
 // their per-Transport flag captured at run-state entry so a global flag
 // mutation in another test goroutine cannot affect an in-progress encode.
-var encodeBatchMessageFn = func(records []wal.Record, emitExtended bool, compressor compress.Encoder, m compressMetrics) ([]*wtpv1.ClientMessage, error) {
+var encodeBatchMessageFn = func(records []wal.Record, emitExtended bool, compressor compress.Encoder, m CompressMetrics) ([]*wtpv1.ClientMessage, error) {
 	return encodeBatchMessageWithCompressor(records, emitExtended, compressor, m)
 }
 
@@ -361,7 +348,7 @@ func extractWireHighWatermark(msg *wtpv1.ClientMessage) (uint32, uint64) {
 // exists for defense in depth.
 //
 // m is the metrics recorder; nil is allowed and disables recording.
-func encodeBatchMessageWithCompressor(records []wal.Record, emitExtended bool, compressor compress.Encoder, m compressMetrics) ([]*wtpv1.ClientMessage, error) {
+func encodeBatchMessageWithCompressor(records []wal.Record, emitExtended bool, compressor compress.Encoder, m CompressMetrics) ([]*wtpv1.ClientMessage, error) {
 	var msgs []*wtpv1.ClientMessage
 
 	var (

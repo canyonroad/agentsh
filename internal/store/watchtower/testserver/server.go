@@ -317,10 +317,6 @@ func (noopClassifierMetrics) IncResendNeeded()          {}
 func (noopClassifierMetrics) IncAckRegressionLoss()     {}
 func (noopClassifierMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {
 }
-func (noopClassifierMetrics) IncCompressError(string)                      {}
-func (noopClassifierMetrics) ObserveBatchCompressionRatio(string, float64) {}
-func (noopClassifierMetrics) AddBatchUncompressedBytes(string, int)        {}
-func (noopClassifierMetrics) AddBatchCompressedBytes(string, int)          {}
 
 // Stream implements the WatchtowerServer bidi streaming RPC. Every
 // ClientMessage variant the Transport can emit is handled:
