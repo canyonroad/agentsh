@@ -38,6 +38,10 @@ func (f *fakeMetrics) IncAckRegressionLoss() { f.ackRegressionLoss++ }
 func (f *fakeMetrics) IncDroppedInvalidFrame(reason metrics.WTPInvalidFrameReason) {
 	f.droppedInvalidFrameReasons = append(f.droppedInvalidFrameReasons, reason)
 }
+func (f *fakeMetrics) IncCompressError(string)                      {}
+func (f *fakeMetrics) ObserveBatchCompressionRatio(string, float64) {}
+func (f *fakeMetrics) AddBatchUncompressedBytes(string, int)        {}
+func (f *fakeMetrics) AddBatchCompressedBytes(string, int)          {}
 
 // logEntry decodes a single JSON-formatted slog record.
 type logEntry struct {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/metrics"
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport/compress"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"google.golang.org/protobuf/proto"
@@ -15,6 +16,33 @@ import (
 // loss-marker bookkeeping (currently: wtp_loss_unknown_reason_total).
 // Test seam — production wiring sets this from transport.New.
 var encoderMetrics *metrics.WTPMetrics
+
+// compressMetrics is the metrics surface encodeBatchMessage uses for
+// compression bookkeeping. Production wiring is *internal/metrics.WTPMetrics
+// (which implements all four methods after the metrics-side Task 4
+// landed). A nil value is allowed and disables metric recording.
+// Tests substitute a fake recorder to assert call patterns without
+// standing up a full Collector.
+type compressMetrics interface {
+	IncCompressError(algo string)
+	ObserveBatchCompressionRatio(algo string, ratio float64)
+	AddBatchUncompressedBytes(algo string, n int)
+	AddBatchCompressedBytes(algo string, n int)
+}
+
+// compressionAlgoLabel maps the wire enum to the metric label string.
+// Returns "none", "zstd", or "gzip"; callers must NOT pass UNSPECIFIED
+// — that is wire-incompatible per the proto contract.
+func compressionAlgoLabel(algo wtpv1.Compression) string {
+	switch algo {
+	case wtpv1.Compression_COMPRESSION_ZSTD:
+		return "zstd"
+	case wtpv1.Compression_COMPRESSION_GZIP:
+		return "gzip"
+	default:
+		return "none"
+	}
+}
 
 // SetEncoderEmitExtendedReasons is a retained no-op kept for binary
 // compatibility with test code that was written against the old
@@ -192,7 +220,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 					break
 				}
 				if outBatch := b.Add(rec); outBatch != nil {
-					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons)
+					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons, t.compressor, t.opts.Metrics)
 					if err != nil {
 						_ = t.conn.Close()
 						t.teardownRecv()
@@ -232,7 +260,7 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			// returns the buffered batch.
 			if inflight.Len() < opts.MaxInflight {
 				if outBatch := b.Tick(now); outBatch != nil {
-					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons)
+					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons, t.compressor, t.opts.Metrics)
 					if err != nil {
 						_ = t.conn.Close()
 						t.teardownRecv()
@@ -266,8 +294,8 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 // TransportLoss frames are emitted or silently dropped; callers pass
 // their per-Transport flag captured at run-state entry so a global flag
 // mutation in another test goroutine cannot affect an in-progress encode.
-var encodeBatchMessageFn = func(records []wal.Record, emitExtended bool) ([]*wtpv1.ClientMessage, error) {
-	return encodeBatchMessage(records, emitExtended)
+var encodeBatchMessageFn = func(records []wal.Record, emitExtended bool, compressor compress.Encoder, m compressMetrics) ([]*wtpv1.ClientMessage, error) {
+	return encodeBatchMessageWithCompressor(records, emitExtended, compressor, m)
 }
 
 // extractWireHighWatermark returns the (generation, to_sequence) of a
@@ -285,8 +313,8 @@ func extractWireHighWatermark(msg *wtpv1.ClientMessage) (uint32, uint64) {
 	}
 }
 
-// encodeBatchMessage walks `records` linearly, packing consecutive
-// RecordData into EventBatch ClientMessages and emitting one
+// encodeBatchMessageWithCompressor walks `records` linearly, packing
+// consecutive RecordData into EventBatch ClientMessages and emitting one
 // TransportLoss ClientMessage per RecordLoss. Total wire order is
 // preserved: a records list of [data, data, loss, data] produces three
 // frames in order: EventBatch, TransportLoss, EventBatch.
@@ -297,6 +325,18 @@ func extractWireHighWatermark(msg *wtpv1.ClientMessage) (uint32, uint64) {
 // state so a concurrent test mutation of a package-level flag cannot
 // affect an in-progress encode.
 //
+// Compression behavior:
+//   - If compressor.Algo() == COMPRESSION_NONE, the batch is emitted
+//     as today: EventBatch_Uncompressed{UncompressedEvents}.
+//   - Otherwise, the inner UncompressedEvents is proto-marshaled and
+//     fed to compressor.Encode. On success the batch is emitted as
+//     EventBatch_CompressedPayload with the compressor's Algo stamped
+//     into Compression.
+//   - On compressor.Encode error: fail-open. The batch is emitted as
+//     COMPRESSION_NONE for THIS batch only (subsequent batches still
+//     attempt compression with the same encoder), m.IncCompressError
+//     is called, and the events are not lost.
+//
 // On encountering a RecordLoss whose Reason has no wire enum mapping
 // (ToWireReason returns ok=false): the marker is DROPPED, an ERROR is
 // logged, and wtp_loss_unknown_reason_total is incremented.
@@ -306,9 +346,8 @@ func extractWireHighWatermark(msg *wtpv1.ClientMessage) (uint32, uint64) {
 // this from happening for known wal.LossReason* constants; this branch
 // exists for defense in depth.
 //
-// Compression is COMPRESSION_NONE on every EventBatch (zstd/gzip is
-// post-MVP). TransportLoss has no body; just (from, to, gen, reason).
-func encodeBatchMessage(records []wal.Record, emitExtended bool) ([]*wtpv1.ClientMessage, error) {
+// m is the metrics recorder; nil is allowed and disables recording.
+func encodeBatchMessageWithCompressor(records []wal.Record, emitExtended bool, compressor compress.Encoder, m compressMetrics) ([]*wtpv1.ClientMessage, error) {
 	var msgs []*wtpv1.ClientMessage
 
 	var (
@@ -319,18 +358,68 @@ func encodeBatchMessage(records []wal.Record, emitExtended bool) ([]*wtpv1.Clien
 		curSeen    bool
 	)
 
+	algo := compressor.Algo()
+	algoLabel := compressionAlgoLabel(algo)
+
+	var flushErr error
 	flushData := func() {
 		if !curSeen {
 			return
 		}
+		inner := &wtpv1.UncompressedEvents{Events: curEvents}
+
+		emitUncompressed := func() {
+			batch := &wtpv1.EventBatch{
+				FromSequence: curFromSeq,
+				ToSequence:   curToSeq,
+				Generation:   curGen,
+				Compression:  wtpv1.Compression_COMPRESSION_NONE,
+				Body:         &wtpv1.EventBatch_Uncompressed{Uncompressed: inner},
+			}
+			msgs = append(msgs, &wtpv1.ClientMessage{
+				Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: batch},
+			})
+		}
+
+		if algo == wtpv1.Compression_COMPRESSION_NONE {
+			emitUncompressed()
+			curEvents = nil
+			curSeen = false
+			return
+		}
+
+		raw, err := proto.Marshal(inner)
+		if err != nil {
+			flushErr = fmt.Errorf("encodeBatchMessage: marshal UncompressedEvents (gen=%d from=%d to=%d): %w", curGen, curFromSeq, curToSeq, err)
+			return
+		}
+
+		compressed, err := compressor.Encode(raw)
+		if err != nil {
+			// Fail-open: emit uncompressed for this batch only.
+			if m != nil {
+				m.IncCompressError(algoLabel)
+			}
+			emitUncompressed()
+			curEvents = nil
+			curSeen = false
+			return
+		}
+
+		if m != nil {
+			m.AddBatchUncompressedBytes(algoLabel, len(raw))
+			m.AddBatchCompressedBytes(algoLabel, len(compressed))
+			if len(raw) > 0 {
+				m.ObserveBatchCompressionRatio(algoLabel, float64(len(compressed))/float64(len(raw)))
+			}
+		}
+
 		batch := &wtpv1.EventBatch{
 			FromSequence: curFromSeq,
 			ToSequence:   curToSeq,
 			Generation:   curGen,
-			Compression:  wtpv1.Compression_COMPRESSION_NONE,
-			Body: &wtpv1.EventBatch_Uncompressed{
-				Uncompressed: &wtpv1.UncompressedEvents{Events: curEvents},
-			},
+			Compression:  algo,
+			Body:         &wtpv1.EventBatch_CompressedPayload{CompressedPayload: compressed},
 		}
 		msgs = append(msgs, &wtpv1.ClientMessage{
 			Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: batch},
@@ -343,6 +432,9 @@ func encodeBatchMessage(records []wal.Record, emitExtended bool) ([]*wtpv1.Clien
 		switch rec.Kind {
 		case wal.RecordLoss:
 			flushData()
+			if flushErr != nil {
+				return nil, flushErr
+			}
 			wireReason, ok := ToWireReason(rec.Loss.Reason)
 			if !ok {
 				if encoderMetrics != nil {
@@ -382,5 +474,17 @@ func encodeBatchMessage(records []wal.Record, emitExtended bool) ([]*wtpv1.Clien
 		}
 	}
 	flushData()
+	if flushErr != nil {
+		return nil, flushErr
+	}
 	return msgs, nil
+}
+
+// encodeBatchMessage retains the old signature as a thin wrapper that
+// uses a none-compressor and a nil metrics recorder. Used by tests that
+// were written against the original signature; production callers go
+// through encodeBatchMessageWithCompressor via the run-state seam.
+func encodeBatchMessage(records []wal.Record, emitExtended bool) ([]*wtpv1.ClientMessage, error) {
+	enc, _ := compress.NewEncoder("none", 0, 0)
+	return encodeBatchMessageWithCompressor(records, emitExtended, enc, nil)
 }

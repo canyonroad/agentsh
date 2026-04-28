@@ -25,6 +25,16 @@ type Metrics interface {
 	IncResendNeeded()
 	IncAckRegressionLoss()
 	IncDroppedInvalidFrame(reason metrics.WTPInvalidFrameReason)
+
+	// Compression metrics (Task 8 of 2026-04-27 batch-compression plan).
+	// Production implementer is *internal/metrics.WTPMetrics, which
+	// gained these methods in Task 4. The encoder's compressMetrics
+	// interface (state_live.go) is satisfied by anything with these
+	// four methods, so production wires *WTPMetrics directly.
+	IncCompressError(algo string)
+	ObserveBatchCompressionRatio(algo string, ratio float64)
+	AddBatchUncompressedBytes(algo string, n int)
+	AddBatchCompressedBytes(algo string, n int)
 }
 
 type noopMetrics struct{}
@@ -34,6 +44,10 @@ func (noopMetrics) IncAnomalousAck(string)                               {}
 func (noopMetrics) IncResendNeeded()                                     {}
 func (noopMetrics) IncAckRegressionLoss()                                {}
 func (noopMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {}
+func (noopMetrics) IncCompressError(string)                              {}
+func (noopMetrics) ObserveBatchCompressionRatio(string, float64)         {}
+func (noopMetrics) AddBatchUncompressedBytes(string, int)                {}
+func (noopMetrics) AddBatchCompressedBytes(string, int)                  {}
 
 // AckTuple is the persisted (gen, seq) ack pair seeded from wal.Meta on
 // cold start. Present=false means the WAL has never recorded an ack
