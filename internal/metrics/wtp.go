@@ -638,7 +638,7 @@ const (
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec     WTPInvalidFrameReason = "session_init_algorithm_unspecified"
 	WTPInvalidFrameReasonPayloadTooLarge                WTPInvalidFrameReason = "payload_too_large"
 	WTPInvalidFrameReasonDecompressError                WTPInvalidFrameReason = "decompress_error"
-	WTPInvalidFrameReasonGoawayCodeUnspecified          WTPInvalidFrameReason = "goaway_code_unspecified"
+	WTPInvalidFrameReasonGoawayCodeUnspec          WTPInvalidFrameReason = "goaway_code_unspecified"
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid WTPInvalidFrameReason = "session_update_generation_invalid"
 	// WTPInvalidFrameReasonClassifierBypass is the metrics-only reason
 	// emitted by the receiver-side errors.As-false defense-in-depth
@@ -656,7 +656,7 @@ var wtpInvalidFrameReasonsValid = map[WTPInvalidFrameReason]struct{}{
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec:     {},
 	WTPInvalidFrameReasonPayloadTooLarge:                {},
 	WTPInvalidFrameReasonDecompressError:                {},
-	WTPInvalidFrameReasonGoawayCodeUnspecified:          {},
+	WTPInvalidFrameReasonGoawayCodeUnspec:          {},
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid: {},
 	WTPInvalidFrameReasonClassifierBypass:               {},
 	WTPInvalidFrameReasonUnknown:                        {},
@@ -672,7 +672,7 @@ var wtpInvalidFrameReasonsEmitOrder = []WTPInvalidFrameReason{
 	WTPInvalidFrameReasonEventBatchBodyUnset,
 	WTPInvalidFrameReasonEventBatchCompressionMismatch,
 	WTPInvalidFrameReasonEventBatchCompressionUnspec,
-	WTPInvalidFrameReasonGoawayCodeUnspecified,
+	WTPInvalidFrameReasonGoawayCodeUnspec,
 	WTPInvalidFrameReasonPayloadTooLarge,
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid,
@@ -692,7 +692,7 @@ var validationReasonsShared = []WTPInvalidFrameReason{
 	WTPInvalidFrameReasonEventBatchCompressionMismatch,
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
 	WTPInvalidFrameReasonPayloadTooLarge,
-	WTPInvalidFrameReasonGoawayCodeUnspecified,
+	WTPInvalidFrameReasonGoawayCodeUnspec,
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid,
 	WTPInvalidFrameReasonUnknown,
 }
