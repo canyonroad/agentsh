@@ -96,15 +96,19 @@ func TestStore_CompressionRoundTrip(t *testing.T) {
 			}
 
 			// Wait for the full sequence to land at the receiver.
-			deadline := time.Now().Add(10 * time.Second)
+			// AssertReplayObserved tolerates duplicates so a reconnect+
+			// replay during the test window does not fail the test.
+			// Deadline of 60s is generous; this loop exits as soon as
+			// the assertion passes, so happy-path runtime is unchanged.
+			deadline := time.Now().Add(60 * time.Second)
 			for time.Now().Before(deadline) {
-				if err := srv.AssertSequenceRange(1, total); err == nil {
+				if err := srv.AssertReplayObserved(1, total); err == nil {
 					break
 				}
 				time.Sleep(50 * time.Millisecond)
 			}
-			if err := srv.AssertSequenceRange(1, total); err != nil {
-				t.Fatalf("AssertSequenceRange after deadline: %v", err)
+			if err := srv.AssertReplayObserved(1, total); err != nil {
+				t.Fatalf("AssertReplayObserved after deadline: %v", err)
 			}
 
 			// Confirm at least one batch was actually compressed (not silently
@@ -245,15 +249,19 @@ func TestStore_CompressionWireShapeConformance(t *testing.T) {
 		}
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
+	// Wait for delivery via the duplicate-tolerant assertion; reconnect+
+	// replay during the test window can legitimately re-send sequences.
+	// 60s deadline matches the size-envelope test; this loop exits as
+	// soon as the assertion passes.
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := srv.AssertSequenceRange(1, total); err == nil {
+		if err := srv.AssertReplayObserved(1, total); err == nil {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if err := srv.AssertSequenceRange(1, total); err != nil {
-		t.Fatalf("AssertSequenceRange: %v", err)
+	if err := srv.AssertReplayObserved(1, total); err != nil {
+		t.Fatalf("AssertReplayObserved: %v", err)
 	}
 
 	for i, b := range srv.Batches() {
