@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,7 +174,12 @@ func TestStore_SessionInit_UnexpectedMessage(t *testing.T) {
 // to fail the client's outbound send (the duplex pipe accepts the
 // frame regardless of what the server intends to do with it).
 type sendFailingConn struct {
-	closed atomic.Bool
+	closeCh   chan struct{}
+	closeOnce sync.Once
+}
+
+func newSendFailingConn() *sendFailingConn {
+	return &sendFailingConn{closeCh: make(chan struct{})}
 }
 
 func (c *sendFailingConn) Send(*wtpv1.ClientMessage) error {
@@ -184,32 +189,17 @@ func (c *sendFailingConn) Send(*wtpv1.ClientMessage) error {
 func (c *sendFailingConn) Recv() (*wtpv1.ServerMessage, error) {
 	// Block until Close so retry-path tests don't burn CPU; runConnecting
 	// never reaches Recv on the send-failed branch, but a real Conn would
-	// keep Recv pending until the stream tore down.
-	<-c.waitClosed()
+	// keep Recv pending until the stream tore down. Channel-based wait
+	// avoids spawning a poller goroutine per call.
+	<-c.closeCh
 	return nil, errors.New("sendFailingConn: closed")
 }
 
 func (c *sendFailingConn) CloseSend() error { return nil }
 
 func (c *sendFailingConn) Close() error {
-	c.closed.Store(true)
+	c.closeOnce.Do(func() { close(c.closeCh) })
 	return nil
-}
-
-// waitClosed returns a channel that is "closed" once Close has run.
-// Implemented as a poll loop because there is no straightforward way
-// to surface an atomic.Bool transition as a channel without owning a
-// dedicated goroutine; the poll cadence here is fine — Recv is only
-// called on paths that don't reach it during the send-failed case.
-func (c *sendFailingConn) waitClosed() <-chan struct{} {
-	ch := make(chan struct{})
-	go func() {
-		for !c.closed.Load() {
-			time.Sleep(20 * time.Millisecond)
-		}
-		close(ch)
-	}()
-	return ch
 }
 
 // TestStore_SessionInit_SendFailed wires a custom Dialer that returns
@@ -221,7 +211,7 @@ func TestStore_SessionInit_SendFailed(t *testing.T) {
 	c := metrics.New()
 
 	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
-		return &sendFailingConn{}, nil
+		return newSendFailingConn(), nil
 	})
 
 	s, err := watchtower.New(context.Background(), baseSessionInitOpts(t, dialer, c))
@@ -256,5 +246,10 @@ func TestStore_SessionInit_SendFailed(t *testing.T) {
 // site is verified indirectly by the four other reason subtests
 // sharing the same metrics.WTPMetrics handle.
 func TestStore_SessionInit_Unknown(t *testing.T) {
-	t.Skip("TODO: validator-failure path requires Options that pass watchtower.Options.validate() but fail wtpv1.ValidateSessionInit; the two surfaces overlap so the gap is brittle to engineer. Unit coverage is in internal/metrics/wtp_test.go (Task 2).")
+	t.Skip("validator-failure path is unreachable from a component test today: " +
+		"wtpv1.ValidateSessionInit (proto/canyonroad/wtp/v1/validate.go:265) only rejects " +
+		"Algorithm==UNSPECIFIED, but watchtower.Options.validate() " +
+		"(internal/store/watchtower/options.go) maps every accepted HMACAlgorithm to " +
+		"a non-UNSPECIFIED proto enum. Unit coverage for IncSessionInitFailures(unknown) " +
+		"lives in TestWTPMetrics_SessionInitFailures_PerReasonInc.")
 }

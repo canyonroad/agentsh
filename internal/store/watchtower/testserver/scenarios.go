@@ -119,9 +119,11 @@ type Options struct {
 	// WTPSessionFailureReasonRecvFailed.
 	//
 	// Mutually exclusive with RejectSession and
-	// RespondWithUnexpectedMessage. When more than one is set the
-	// handler picks the first matching branch in the order they appear
-	// in this struct.
+	// RespondWithUnexpectedMessage. When more than one of these is set
+	// the handler picks the first matching branch in the order:
+	// CloseAfterSessionInitRecv -> RespondWithUnexpectedMessage ->
+	// RejectSession. (Field declaration order in this struct is
+	// independent of evaluation order; do not rely on it.)
 	CloseAfterSessionInitRecv bool
 
 	// RespondWithUnexpectedMessage, when true, sends a BatchAck
