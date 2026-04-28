@@ -72,6 +72,20 @@ type Options struct {
 	// before pulling the plug.
 	BatchAckDelay time.Duration
 
+	// SuppressBatchAck, when true, skips sending the BatchAck for
+	// EventBatch frames entirely. EventBatches are still tallied and
+	// drop/goaway counters still tick, but the agent never observes
+	// an ack for user events; persistedAck stays pinned at zero and
+	// the WAL never GCs fully-acked sealed segments.
+	//
+	// Use this when a WAL-state test needs sealed segments to survive
+	// (CRC corruption injection) or needs WALMaxTotalSize to actually
+	// be hit (overflow tests) without racing against ack-driven GC.
+	// SessionAck and TransportLoss BatchAcks are unaffected — the
+	// agent's handshake still completes and TransportLoss frames
+	// still receive their symmetric ack per the spec.
+	SuppressBatchAck bool
+
 	// DropAfterBatchN closes the stream (returns an error from the
 	// server Stream handler) after observing N EventBatch messages on
 	// the CURRENT STREAM. Each Dial starts a fresh counter, so

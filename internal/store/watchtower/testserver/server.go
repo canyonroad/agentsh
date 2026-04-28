@@ -485,6 +485,15 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 			// points at (0, 0) which the Transport's
 			// applyServerAckTuple helper treats as a no-op under the
 			// steady-state cursor.
+			//
+			// SuppressBatchAck escape hatch: skip the per-batch ack
+			// entirely so the agent's persistedAck stays pinned at
+			// zero. The recv loop continues to the next frame
+			// without delay, so subsequent EventBatches and the
+			// TransportLoss frame are processed normally.
+			if h.s.opts.SuppressBatchAck {
+				continue
+			}
 			var (
 				lastSeq uint64
 				lastGen uint32
