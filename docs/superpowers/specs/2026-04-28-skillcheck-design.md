@@ -4,7 +4,15 @@
 **Status:** Draft, awaiting user review
 **Related:** `internal/pkgcheck/` (sibling pattern for npm/pip install scanning),
 `internal/threatfeed/` (sibling pattern for periodic catalog sync),
-`internal/fsmonitor/`, `internal/trash/`, `internal/approval/`, `internal/audit/`.
+`pkg/hotreload/watcher.go` (existing fsnotify-based watcher pattern),
+`internal/trash/`, `internal/approval/`, `internal/audit/`.
+
+**Note on file-watching primitive:** The original draft of this spec
+referenced `internal/fsmonitor` as the watcher base. That package is a
+FUSE-based workspace virtualization layer, not a generic recursive file
+watcher — wrong tool for watching `~/.claude/skills/`. The watcher
+described below uses `github.com/fsnotify/fsnotify` directly, following
+the pattern of `pkg/hotreload/watcher.go`.
 
 ## Summary
 
@@ -25,7 +33,7 @@ The architecture mirrors `internal/pkgcheck/`:
 
 Two trigger paths feed one pipeline:
 
-1. An **fsmonitor watcher** observes the watch roots for new `SKILL.md`
+1. An **fsnotify-based watcher** observes the watch roots for new `SKILL.md`
    landings (covers all install paths: git clone, marketplace plugin,
    manual `cp`).
 2. An **`agentsh skillcheck` CLI** for one-off scans, hook integrations,
@@ -89,7 +97,7 @@ something dangerous from being installed."
 
 Two triggers, two reasons:
 
-- **fsmonitor on watch roots** catches every install path including
+- **fsnotify watcher on watch roots** catches every install path including
   manual `cp` and `git clone`. Fires on `SKILL.md` landing inside a
   fresh dir under `~/.claude/skills/` or `~/.claude/plugins/*/skills/`.
   Post-write trigger — see "Quarantine" below for the race-window
@@ -113,7 +121,7 @@ Web zips and other skill formats are deferred (see Non-Goals).
 ## Architecture
 
 ```
-              fsmonitor watch                 agentsh skillcheck <path>
+              fsnotify watch                  agentsh skillcheck <path>
                 ~/.claude/skills/                       │
                 ~/.claude/plugins/*/skills/             │
                        │                                │
@@ -155,7 +163,7 @@ internal/skillcheck/
                       # Verdict, VerdictAction, FindingType, Severity
   loader.go           # walk dir, parse SKILL.md, hash, detect git origin
   loader_test.go
-  watcher.go          # wraps internal/fsmonitor; debounce; glob plugin paths
+  watcher.go          # wraps github.com/fsnotify/fsnotify; debounce; glob plugin paths
   watcher_test.go
   orchestrator.go     # mirrors pkgcheck/orchestrator.go
   orchestrator_test.go
@@ -295,13 +303,19 @@ Given a skill directory:
 
 ## Watcher
 
-Wraps `internal/fsmonitor` with two roots:
+Wraps `github.com/fsnotify/fsnotify` (already a project dep, used by
+`pkg/hotreload/watcher.go`) with two roots:
 - `~/.claude/skills/` (literal)
 - `~/.claude/plugins/*/skills/` (glob — re-evaluated when a new plugin
   dir is created)
 
+Recursive watching is implemented by `Add`-ing each subdir (fsnotify
+doesn't recurse natively on Linux/Windows); the watcher walks each root
+on startup and adds new skill dirs as they appear.
+
 Event filtering:
-- Only fire on `SKILL.md` close-write or rename-into events.
+- Only fire on `Create` or `Write` events whose path's basename is
+  `SKILL.md`.
 - 500ms debounce per skill dir to coalesce git-clone bursts.
 - Suppress events whose target skill SHA is in the per-session
   restore-allowlist (set by `restore` command).
@@ -311,6 +325,8 @@ Robustness:
   present in the cache (catches installs that happened while daemon
   was down).
 - Re-glob plugin path on each new plugin dir creation event.
+- Cross-platform: fsnotify supports Linux (inotify), macOS (kqueue/
+  FSEvents), Windows (ReadDirectoryChangesW).
 
 ## Cache
 
@@ -541,7 +557,7 @@ skillcheck:
 | `skills_sh` | `httptest.NewServer` returning canned responses. Cases: 200/404, malformed HTML, missing `__NEXT_DATA__`, timeout, audit-badge state matrix. |
 | `chainguard` / `repello` stubs | Single test confirming "not yet implemented" response. |
 | `loader` | Fixtures for: minimal valid skill, oversized skill, deep dir tree, broken frontmatter, git-cloned skill (origin detection), non-git skill, skill with `source:` frontmatter fallback. |
-| `watcher` | Synthetic fsmonitor events via in-process channel. Cases: skill landing, partial-write coalescing, plugin glob expansion, restore-allowlist suppression, daemon-startup catch-up. |
+| `watcher` | Synthetic fsnotify events via in-process channel (or a temp dir + real fsnotify writes). Cases: skill landing, partial-write coalescing, plugin glob expansion, restore-allowlist suppression, daemon-startup catch-up. |
 | `evaluator` | Table-driven over `(severity, provenance)` matrix → expected action. |
 | `orchestrator` | Reuse `pkgcheck` test patterns. |
 | `cache` | Reuse `pkgcheck/cache` test patterns. |
@@ -549,8 +565,8 @@ skillcheck:
 | Integration | Drop a malicious fixture skill into a temp watch root; assert `quarantined` audit + skill removed + restore round-trip + no re-quarantine after restore. |
 
 Cross-platform: per `CLAUDE.md`, verify `GOOS=windows go build ./...`
-succeeds. `internal/fsmonitor` is already cross-platform; no new
-platform-specific code expected.
+succeeds. `fsnotify` is cross-platform; no new platform-specific code
+expected.
 
 ## Open Questions / Future Work
 
