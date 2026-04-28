@@ -65,6 +65,17 @@ const (
 	// exceeds MaxCompressedPayloadBytes.
 	ReasonPayloadTooLarge ValidationReason = "payload_too_large"
 
+	// ReasonGoawayCodeUnspecified is returned by ValidateGoaway when the
+	// inbound Goaway has code == GOAWAY_CODE_UNSPECIFIED — that value is
+	// wire-incompatible per the proto's UNSPECIFIED contract.
+	ReasonGoawayCodeUnspecified ValidationReason = "goaway_code_unspecified"
+
+	// ReasonSessionUpdateGenerationInvalid is returned by
+	// ValidateSessionUpdate when the inbound SessionUpdate has
+	// generation == 0. Rotation MUST monotonically advance to a positive
+	// generation per the WTP client design.
+	ReasonSessionUpdateGenerationInvalid ValidationReason = "session_update_generation_invalid"
+
 	// ReasonUnknown is the schema-drift reason. It covers two
 	// failure classes that share one operator response ("investigate
 	// the proto schema delta"):
@@ -139,6 +150,8 @@ var allValidationReasons = []ValidationReason{
 	ReasonEventBatchCompressionMismatch,
 	ReasonSessionInitAlgorithmUnspecified,
 	ReasonPayloadTooLarge,
+	ReasonGoawayCodeUnspecified,
+	ReasonSessionUpdateGenerationInvalid,
 	ReasonUnknown,
 }
 
