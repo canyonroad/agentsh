@@ -400,8 +400,7 @@ func New(opts Options) (*Transport, error) {
 		compressor:              opts.Compressor,
 	}
 	if t.compressor == nil {
-		nopEnc, _ := compress.NewEncoder("none", 0, 0)
-		t.compressor = nopEnc
+		t.compressor = noneCompressorSingleton
 	}
 	if opts.InitialAckTuple != nil && opts.InitialAckTuple.Present {
 		seed := AckCursor{

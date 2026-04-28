@@ -30,6 +30,20 @@ type compressMetrics interface {
 	AddBatchCompressedBytes(algo string, n int)
 }
 
+// noneCompressorSingleton is the package-level fallback encoder used by
+// encodeBatchMessage's no-args wrapper (the test-only path that does not
+// thread a compressor through) and by transport.New when Options leaves
+// Compressor nil. Allocated once at init; if construction of the
+// none-encoder ever fails, the panic surfaces the bug at process start
+// rather than at the first encode call.
+var noneCompressorSingleton = func() compress.Encoder {
+	enc, err := compress.NewEncoder("none", 0, 0)
+	if err != nil {
+		panic(fmt.Errorf("transport: build none-encoder: %w", err))
+	}
+	return enc
+}()
+
 // compressionAlgoLabel maps the wire enum to the metric label string.
 // Returns "none", "zstd", or "gzip"; callers must NOT pass UNSPECIFIED
 // — that is wire-incompatible per the proto contract.
@@ -485,6 +499,5 @@ func encodeBatchMessageWithCompressor(records []wal.Record, emitExtended bool, c
 // were written against the original signature; production callers go
 // through encodeBatchMessageWithCompressor via the run-state seam.
 func encodeBatchMessage(records []wal.Record, emitExtended bool) ([]*wtpv1.ClientMessage, error) {
-	enc, _ := compress.NewEncoder("none", 0, 0)
-	return encodeBatchMessageWithCompressor(records, emitExtended, enc, nil)
+	return encodeBatchMessageWithCompressor(records, emitExtended, noneCompressorSingleton, nil)
 }
