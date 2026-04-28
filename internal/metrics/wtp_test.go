@@ -842,29 +842,35 @@ func TestWTPMetrics_SessionInitFailures_PerReasonInc(t *testing.T) {
 	c := New()
 	w := c.WTP()
 
-	// Increment each of the 6 reasons a unique number of times so the
-	// emit ordering is observable from the Prom output.
-	w.IncSessionInitFailures(WTPSessionFailureReasonInvalidUTF8)
-	w.IncSessionInitFailures(WTPSessionFailureReasonSendFailed)
-	w.IncSessionInitFailures(WTPSessionFailureReasonSendFailed)
-	w.IncSessionInitFailures(WTPSessionFailureReasonRecvFailed)
-	w.IncSessionInitFailures(WTPSessionFailureReasonRecvFailed)
-	w.IncSessionInitFailures(WTPSessionFailureReasonRecvFailed)
-	w.IncSessionInitFailures(WTPSessionFailureReasonUnexpectedMessage)
-	w.IncSessionInitFailures(WTPSessionFailureReasonRejected)
-	w.IncSessionInitFailures(WTPSessionFailureReasonRejected)
-	w.IncSessionInitFailures(WTPSessionFailureReasonRejected)
-	w.IncSessionInitFailures(WTPSessionFailureReasonRejected)
-	w.IncSessionInitFailures(WTPSessionFailureReasonUnknown)
+	// Each of the 6 reasons gets a distinct increment count so a
+	// mismatched-label bug surfaces as a cross-counts mismatch.
+	for i := 0; i < 1; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonInvalidUTF8)
+	}
+	for i := 0; i < 2; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonSendFailed)
+	}
+	for i := 0; i < 3; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonRecvFailed)
+	}
+	for i := 0; i < 4; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonUnexpectedMessage)
+	}
+	for i := 0; i < 5; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonRejected)
+	}
+	for i := 0; i < 6; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonUnknown)
+	}
 
 	body := scrape(t, c)
 	for _, want := range []string{
 		`wtp_session_init_failures_total{reason="invalid_utf8"} 1`,
 		`wtp_session_init_failures_total{reason="recv_failed"} 3`,
-		`wtp_session_init_failures_total{reason="rejected"} 4`,
+		`wtp_session_init_failures_total{reason="rejected"} 5`,
 		`wtp_session_init_failures_total{reason="send_failed"} 2`,
-		`wtp_session_init_failures_total{reason="unexpected_message"} 1`,
-		`wtp_session_init_failures_total{reason="unknown"} 1`,
+		`wtp_session_init_failures_total{reason="unexpected_message"} 4`,
+		`wtp_session_init_failures_total{reason="unknown"} 6`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing line %q\nbody:\n%s", want, body)
