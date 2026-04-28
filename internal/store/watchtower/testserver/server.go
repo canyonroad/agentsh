@@ -218,9 +218,11 @@ func (s *Server) TransportLosses() []*wtpv1.TransportLoss {
 	defer s.mu.Unlock()
 	out := make([]*wtpv1.TransportLoss, len(s.transportLosses))
 	for i, tl := range s.transportLosses {
-		// Deep copy so callers can't mutate server state.
-		cp := *tl
-		out[i] = &cp
+		// Deep copy so callers can't mutate server state. proto.Clone
+		// is the proto-aware copy that does NOT trip go vet's
+		// copylocks check (the `*tl` shorthand copies the embedded
+		// protoimpl.MessageState which contains a sync.Mutex).
+		out[i] = proto.Clone(tl).(*wtpv1.TransportLoss)
 	}
 	return out
 }
@@ -267,9 +269,11 @@ func (s *Server) WaitForTransportLoss(deadline time.Duration) (*wtpv1.TransportL
 	for {
 		s.mu.Lock()
 		if len(s.transportLosses) > 0 {
-			cp := *s.transportLosses[0]
+			// proto.Clone avoids the sync.Mutex-copy that go vet
+			// flags on a plain struct dereference of *wtpv1.TransportLoss.
+			cp := proto.Clone(s.transportLosses[0]).(*wtpv1.TransportLoss)
 			s.mu.Unlock()
-			return &cp, nil
+			return cp, nil
 		}
 		s.mu.Unlock()
 		select {
@@ -313,10 +317,6 @@ func (noopClassifierMetrics) IncResendNeeded()          {}
 func (noopClassifierMetrics) IncAckRegressionLoss()     {}
 func (noopClassifierMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {
 }
-func (noopClassifierMetrics) IncCompressError(string)                      {}
-func (noopClassifierMetrics) ObserveBatchCompressionRatio(string, float64) {}
-func (noopClassifierMetrics) AddBatchUncompressedBytes(string, int)        {}
-func (noopClassifierMetrics) AddBatchCompressedBytes(string, int)          {}
 
 // Stream implements the WatchtowerServer bidi streaming RPC. Every
 // ClientMessage variant the Transport can emit is handled:

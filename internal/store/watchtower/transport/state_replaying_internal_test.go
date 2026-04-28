@@ -52,7 +52,7 @@ func (t *Transport) RunReplayingForTest(ctx context.Context, r *Replayer) (State
 // outside the transport package cannot mutate it without going through
 // this guarded helper.
 func setBuildEventBatchFnForTest(fn func([]wal.Record) ([]*wtpv1.ClientMessage, error)) func() {
-	wrapped := func(records []wal.Record, _ bool, _ compress.Encoder, _ compressMetrics) ([]*wtpv1.ClientMessage, error) {
+	wrapped := func(records []wal.Record, _ bool, _ compress.Encoder, _ CompressMetrics) ([]*wtpv1.ClientMessage, error) {
 		return fn(records)
 	}
 	prev := buildEventBatchFn
@@ -87,7 +87,7 @@ func SetBuildEventBatchFnForTest(fn func([]wal.Record) ([]*wtpv1.ClientMessage, 
 // encoder plumbing and keeping two knobs is less invasive than
 // unifying them in a test-driven refactor.
 func SetEncodeBatchMessageFnForTest(fn func([]wal.Record) ([]*wtpv1.ClientMessage, error)) func() {
-	wrapped := func(records []wal.Record, _ bool, _ compress.Encoder, _ compressMetrics) ([]*wtpv1.ClientMessage, error) {
+	wrapped := func(records []wal.Record, _ bool, _ compress.Encoder, _ CompressMetrics) ([]*wtpv1.ClientMessage, error) {
 		return fn(records)
 	}
 	prev := encodeBatchMessageFn
