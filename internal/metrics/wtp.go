@@ -581,13 +581,21 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 type WTPSessionFailureReason string
 
 const (
-	WTPSessionFailureReasonInvalidUTF8 WTPSessionFailureReason = "invalid_utf8"
-	WTPSessionFailureReasonUnknown     WTPSessionFailureReason = "unknown"
+	WTPSessionFailureReasonInvalidUTF8       WTPSessionFailureReason = "invalid_utf8"
+	WTPSessionFailureReasonSendFailed        WTPSessionFailureReason = "send_failed"
+	WTPSessionFailureReasonRecvFailed        WTPSessionFailureReason = "recv_failed"
+	WTPSessionFailureReasonUnexpectedMessage WTPSessionFailureReason = "unexpected_message"
+	WTPSessionFailureReasonRejected          WTPSessionFailureReason = "rejected"
+	WTPSessionFailureReasonUnknown           WTPSessionFailureReason = "unknown"
 )
 
 var wtpSessionFailureReasonsValid = map[WTPSessionFailureReason]struct{}{
-	WTPSessionFailureReasonInvalidUTF8: {},
-	WTPSessionFailureReasonUnknown:     {},
+	WTPSessionFailureReasonInvalidUTF8:       {},
+	WTPSessionFailureReasonSendFailed:        {},
+	WTPSessionFailureReasonRecvFailed:        {},
+	WTPSessionFailureReasonUnexpectedMessage: {},
+	WTPSessionFailureReasonRejected:          {},
+	WTPSessionFailureReasonUnknown:           {},
 }
 
 // wtpSessionFailureReasonsEmitOrder is the canonical sort-by-string
@@ -596,6 +604,10 @@ var wtpSessionFailureReasonsValid = map[WTPSessionFailureReason]struct{}{
 // fired (always-emit contract).
 var wtpSessionFailureReasonsEmitOrder = []WTPSessionFailureReason{
 	WTPSessionFailureReasonInvalidUTF8,
+	WTPSessionFailureReasonRecvFailed,
+	WTPSessionFailureReasonRejected,
+	WTPSessionFailureReasonSendFailed,
+	WTPSessionFailureReasonUnexpectedMessage,
 	WTPSessionFailureReasonUnknown,
 }
 
