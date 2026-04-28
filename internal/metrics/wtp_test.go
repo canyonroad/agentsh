@@ -837,3 +837,37 @@ func scrape(t *testing.T, c *Collector) string {
 	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
 	return rr.Body.String()
 }
+
+func TestWTPMetrics_SessionInitFailures_PerReasonInc(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	// Increment each of the 6 reasons a unique number of times so the
+	// emit ordering is observable from the Prom output.
+	w.IncSessionInitFailures(WTPSessionFailureReasonInvalidUTF8)
+	w.IncSessionInitFailures(WTPSessionFailureReasonSendFailed)
+	w.IncSessionInitFailures(WTPSessionFailureReasonSendFailed)
+	w.IncSessionInitFailures(WTPSessionFailureReasonRecvFailed)
+	w.IncSessionInitFailures(WTPSessionFailureReasonRecvFailed)
+	w.IncSessionInitFailures(WTPSessionFailureReasonRecvFailed)
+	w.IncSessionInitFailures(WTPSessionFailureReasonUnexpectedMessage)
+	w.IncSessionInitFailures(WTPSessionFailureReasonRejected)
+	w.IncSessionInitFailures(WTPSessionFailureReasonRejected)
+	w.IncSessionInitFailures(WTPSessionFailureReasonRejected)
+	w.IncSessionInitFailures(WTPSessionFailureReasonRejected)
+	w.IncSessionInitFailures(WTPSessionFailureReasonUnknown)
+
+	body := scrape(t, c)
+	for _, want := range []string{
+		`wtp_session_init_failures_total{reason="invalid_utf8"} 1`,
+		`wtp_session_init_failures_total{reason="recv_failed"} 3`,
+		`wtp_session_init_failures_total{reason="rejected"} 4`,
+		`wtp_session_init_failures_total{reason="send_failed"} 2`,
+		`wtp_session_init_failures_total{reason="unexpected_message"} 1`,
+		`wtp_session_init_failures_total{reason="unknown"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing line %q\nbody:\n%s", want, body)
+		}
+	}
+}
