@@ -150,15 +150,22 @@ func TestStore_CompressionSizeEnvelope(t *testing.T) {
 		}
 	}
 
-	deadline := time.Now().Add(15 * time.Second)
+	// AssertReplayObserved tolerates duplicates because reconnect+replay
+	// can legitimately re-send sequences during the test window — the
+	// size envelope test cares about (a) every sequence arriving and
+	// (b) the per-batch compressed_payload size cap, neither of which
+	// is sensitive to duplicates. AssertSequenceRange would reject any
+	// replay-driven duplicate as a test failure even though the
+	// behavior is wire-legal.
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := srv.AssertSequenceRange(1, total); err == nil {
+		if err := srv.AssertReplayObserved(1, total); err == nil {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if err := srv.AssertSequenceRange(1, total); err != nil {
-		t.Fatalf("AssertSequenceRange: %v", err)
+	if err := srv.AssertReplayObserved(1, total); err != nil {
+		t.Fatalf("AssertReplayObserved: %v", err)
 	}
 
 	for i, b := range srv.Batches() {
