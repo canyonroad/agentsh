@@ -30,6 +30,7 @@ type Metrics interface {
 	IncResendNeeded()
 	IncAckRegressionLoss()
 	IncDroppedInvalidFrame(reason metrics.WTPInvalidFrameReason)
+	IncSessionInitFailures(reason metrics.WTPSessionFailureReason)
 }
 
 // CompressMetrics is the metrics surface encodeBatchMessage calls into for
@@ -53,6 +54,7 @@ func (noopMetrics) IncAnomalousAck(string)                               {}
 func (noopMetrics) IncResendNeeded()                                     {}
 func (noopMetrics) IncAckRegressionLoss()                                {}
 func (noopMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {}
+func (noopMetrics) IncSessionInitFailures(metrics.WTPSessionFailureReason) {}
 
 type noopCompressMetrics struct{}
 

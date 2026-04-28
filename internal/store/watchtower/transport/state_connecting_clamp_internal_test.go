@@ -27,6 +27,7 @@ type fakeMetrics struct {
 	resendNeeded               int
 	ackRegressionLoss          int
 	droppedInvalidFrameReasons []metrics.WTPInvalidFrameReason
+	sessionInitFailureReasons  []metrics.WTPSessionFailureReason
 }
 
 func (f *fakeMetrics) SetAckHighWatermark(seq int64) { f.ackHWMs = append(f.ackHWMs, seq) }
@@ -37,6 +38,9 @@ func (f *fakeMetrics) IncResendNeeded()      { f.resendNeeded++ }
 func (f *fakeMetrics) IncAckRegressionLoss() { f.ackRegressionLoss++ }
 func (f *fakeMetrics) IncDroppedInvalidFrame(reason metrics.WTPInvalidFrameReason) {
 	f.droppedInvalidFrameReasons = append(f.droppedInvalidFrameReasons, reason)
+}
+func (f *fakeMetrics) IncSessionInitFailures(reason metrics.WTPSessionFailureReason) {
+	f.sessionInitFailureReasons = append(f.sessionInitFailureReasons, reason)
 }
 
 // logEntry decodes a single JSON-formatted slog record.

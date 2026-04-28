@@ -317,6 +317,8 @@ func (noopClassifierMetrics) IncResendNeeded()          {}
 func (noopClassifierMetrics) IncAckRegressionLoss()     {}
 func (noopClassifierMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {
 }
+func (noopClassifierMetrics) IncSessionInitFailures(metrics.WTPSessionFailureReason) {
+}
 
 // Stream implements the WatchtowerServer bidi streaming RPC. Every
 // ClientMessage variant the Transport can emit is handled:
