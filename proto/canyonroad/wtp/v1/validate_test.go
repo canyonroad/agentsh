@@ -94,3 +94,143 @@ func TestValidateSessionInit_HappyPath(t *testing.T) {
 		t.Errorf("happy path should validate; got %v", err)
 	}
 }
+
+func TestValidateGoaway_Nil(t *testing.T) {
+	err := ValidateGoaway(nil)
+	if err == nil {
+		t.Fatal("ValidateGoaway(nil): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("ValidateGoaway(nil) err type = %T; want *ValidationError", err)
+	}
+	if ve.Reason != ReasonUnknown {
+		t.Errorf("ValidateGoaway(nil) reason = %q; want %q", ve.Reason, ReasonUnknown)
+	}
+}
+
+func TestValidateGoaway_CodeUnspecified(t *testing.T) {
+	err := ValidateGoaway(&Goaway{Code: GoawayCode_GOAWAY_CODE_UNSPECIFIED})
+	if err == nil {
+		t.Fatal("ValidateGoaway(code=UNSPECIFIED): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err type = %T; want *ValidationError", err)
+	}
+	if ve.Reason != ReasonGoawayCodeUnspecified {
+		t.Errorf("reason = %q; want %q", ve.Reason, ReasonGoawayCodeUnspecified)
+	}
+}
+
+func TestValidateGoaway_HappyPath(t *testing.T) {
+	cases := []GoawayCode{
+		GoawayCode_GOAWAY_CODE_DRAINING,
+		GoawayCode_GOAWAY_CODE_OVERLOAD,
+		GoawayCode_GOAWAY_CODE_UPGRADE,
+		GoawayCode_GOAWAY_CODE_AUTH,
+	}
+	for _, c := range cases {
+		t.Run(c.String(), func(t *testing.T) {
+			if err := ValidateGoaway(&Goaway{Code: c}); err != nil {
+				t.Errorf("ValidateGoaway(code=%v): %v", c, err)
+			}
+		})
+	}
+}
+
+func TestValidateSessionUpdate_Nil(t *testing.T) {
+	err := ValidateSessionUpdate(nil)
+	if err == nil {
+		t.Fatal("ValidateSessionUpdate(nil): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err type = %T; want *ValidationError", err)
+	}
+	if ve.Reason != ReasonUnknown {
+		t.Errorf("reason = %q; want %q", ve.Reason, ReasonUnknown)
+	}
+}
+
+func TestValidateSessionUpdate_GenerationZero(t *testing.T) {
+	err := ValidateSessionUpdate(&SessionUpdate{NewGeneration: 0, NewKeyFingerprint: "k", NewContextDigest: "d"})
+	if err == nil {
+		t.Fatal("ValidateSessionUpdate(gen=0): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err type = %T; want *ValidationError", err)
+	}
+	if ve.Reason != ReasonSessionUpdateGenerationInvalid {
+		t.Errorf("reason = %q; want %q", ve.Reason, ReasonSessionUpdateGenerationInvalid)
+	}
+}
+
+func TestValidateSessionUpdate_HappyPath(t *testing.T) {
+	if err := ValidateSessionUpdate(&SessionUpdate{
+		NewGeneration:     1,
+		NewKeyFingerprint: "k",
+		NewContextDigest:  "d",
+		BoundarySequence:  42,
+	}); err != nil {
+		t.Errorf("ValidateSessionUpdate: %v", err)
+	}
+}
+
+func TestValidateSessionAck_Nil(t *testing.T) {
+	err := ValidateSessionAck(nil)
+	if err == nil {
+		t.Fatal("ValidateSessionAck(nil): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Reason != ReasonUnknown {
+		t.Fatalf("err = %v; want *ValidationError with Reason=%q", err, ReasonUnknown)
+	}
+}
+
+func TestValidateSessionAck_AcceptedHappyPath(t *testing.T) {
+	if err := ValidateSessionAck(&SessionAck{Accepted: true, Generation: 1, AckHighWatermarkSeq: 42}); err != nil {
+		t.Errorf("ValidateSessionAck(accepted): %v", err)
+	}
+}
+
+func TestValidateSessionAck_RejectedHappyPath(t *testing.T) {
+	if err := ValidateSessionAck(&SessionAck{Accepted: false, RejectReason: "auth failed"}); err != nil {
+		t.Errorf("ValidateSessionAck(rejected w/ reason): %v", err)
+	}
+}
+
+func TestValidateBatchAck_Nil(t *testing.T) {
+	err := ValidateBatchAck(nil)
+	if err == nil {
+		t.Fatal("ValidateBatchAck(nil): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Reason != ReasonUnknown {
+		t.Fatalf("err = %v; want *ValidationError with Reason=%q", err, ReasonUnknown)
+	}
+}
+
+func TestValidateBatchAck_HappyPath(t *testing.T) {
+	if err := ValidateBatchAck(&BatchAck{Generation: 1, AckHighWatermarkSeq: 42}); err != nil {
+		t.Errorf("ValidateBatchAck: %v", err)
+	}
+}
+
+func TestValidateServerHeartbeat_Nil(t *testing.T) {
+	err := ValidateServerHeartbeat(nil)
+	if err == nil {
+		t.Fatal("ValidateServerHeartbeat(nil): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Reason != ReasonUnknown {
+		t.Fatalf("err = %v; want *ValidationError with Reason=%q", err, ReasonUnknown)
+	}
+}
+
+func TestValidateServerHeartbeat_HappyPath(t *testing.T) {
+	if err := ValidateServerHeartbeat(&ServerHeartbeat{AckHighWatermarkSeq: 42}); err != nil {
+		t.Errorf("ValidateServerHeartbeat: %v", err)
+	}
+}

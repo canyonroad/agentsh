@@ -24,7 +24,16 @@ import (
 // session does NOT restart (pre-spec regression: overflow caused
 // ErrRecordLossEncountered → session teardown).
 func TestStore_OverflowEmitsTransportLossOnWire(t *testing.T) {
-	srv := testserver.New(testserver.Options{})
+	// SuppressBatchAck: without it, the testserver acks every
+	// EventBatch as it arrives, the agent advances persistedAck, and
+	// the WAL GCs fully-acked sealed segments via
+	// segmentFullyAckedLocked — keeping totalBytes under the 8 KiB
+	// cap on slow runners (Windows file I/O, macOS FUSE-T) so
+	// overflow never fires. Suppressing the ack pins persistedAck at
+	// zero for the test's lifetime, so segments accumulate
+	// deterministically and overflow always trips. The TransportLoss
+	// frame's recv path is unaffected.
+	srv := testserver.New(testserver.Options{SuppressBatchAck: true})
 	defer srv.Close()
 	router := testserver.NewRoutingDialer(srv)
 
@@ -101,7 +110,17 @@ func TestStore_OverflowEmitsTransportLossOnWire(t *testing.T) {
 // segment), asserts a TransportLoss{reason: CRC_CORRUPTION} reaches the
 // wire AND the session does NOT fail-closed.
 func TestStore_CRCCorruptionEmitsTransportLossOnWire(t *testing.T) {
-	srv := testserver.New(testserver.Options{})
+	// SuppressBatchAck: without it, the testserver acks every
+	// EventBatch as it arrives, the agent advances persistedAck, and
+	// the WAL GCs fully-acked sealed segments via
+	// segmentFullyAckedLocked before s1.Close returns on slow runners
+	// (macOS FUSE-T, Windows file I/O). corruptOneSegment then finds
+	// only the live INPROGRESS segment and the test fails. Pinning
+	// the per-batch ack at zero keeps sealed segments alive across
+	// the close → corruption → reopen sequence. The s2 replay's
+	// CRC_CORRUPTION TransportLoss is delivered independently of the
+	// per-batch ack path.
+	srv := testserver.New(testserver.Options{SuppressBatchAck: true})
 	defer srv.Close()
 	router := testserver.NewRoutingDialer(srv)
 

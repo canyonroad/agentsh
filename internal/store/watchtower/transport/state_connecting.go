@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/agentsh/agentsh/internal/metrics"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
@@ -30,6 +31,7 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 		// triage. The error is surfaced via the returned state
 		// transition (StateShutdown); Transport.Err() carries the
 		// wrapped detail for the caller's diagnostic log.
+		t.metrics.IncSessionInitFailures(metrics.WTPSessionFailureReasonUnknown)
 		return StateShutdown, fmt.Errorf("invalid SessionInit: %w", err)
 	}
 
@@ -42,6 +44,7 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 	if err := conn.Send(init); err != nil {
 		_ = conn.Close()
 		t.conn = nil
+		t.metrics.IncSessionInitFailures(metrics.WTPSessionFailureReasonSendFailed)
 		return StateConnecting, fmt.Errorf("send SessionInit: %w", err)
 	}
 
@@ -49,6 +52,7 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 	if err != nil {
 		_ = conn.Close()
 		t.conn = nil
+		t.metrics.IncSessionInitFailures(metrics.WTPSessionFailureReasonRecvFailed)
 		return StateConnecting, fmt.Errorf("recv SessionAck: %w", err)
 	}
 
@@ -56,6 +60,7 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 	if ack == nil {
 		_ = conn.Close()
 		t.conn = nil
+		t.metrics.IncSessionInitFailures(metrics.WTPSessionFailureReasonUnexpectedMessage)
 		return StateConnecting, fmt.Errorf("expected SessionAck, got %T", msg.Msg)
 	}
 
@@ -63,6 +68,7 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 		t.rejectReason = ack.GetRejectReason()
 		_ = conn.Close()
 		t.conn = nil
+		t.metrics.IncSessionInitFailures(metrics.WTPSessionFailureReasonRejected)
 		return StateShutdown, fmt.Errorf("session rejected: %s", ack.GetRejectReason())
 	}
 

@@ -159,7 +159,7 @@ func TestAllValidationReasons_ReturnsFreshCopy(t *testing.T) {
 	}
 }
 
-// TestAllValidationReasons_ContainsCanonicalSet asserts the six canonical
+// TestAllValidationReasons_ContainsCanonicalSet asserts the canonical
 // reasons are present and no duplicates slipped in (aliases forbidden).
 func TestAllValidationReasons_ContainsCanonicalSet(t *testing.T) {
 	want := map[wtpv1.ValidationReason]struct{}{
@@ -168,6 +168,8 @@ func TestAllValidationReasons_ContainsCanonicalSet(t *testing.T) {
 		wtpv1.ReasonEventBatchCompressionMismatch:    {},
 		wtpv1.ReasonSessionInitAlgorithmUnspecified:  {},
 		wtpv1.ReasonPayloadTooLarge:                  {},
+		wtpv1.ReasonGoawayCodeUnspecified:            {},
+		wtpv1.ReasonSessionUpdateGenerationInvalid:   {},
 		wtpv1.ReasonUnknown:                          {},
 	}
 	got := wtpv1.AllValidationReasons()

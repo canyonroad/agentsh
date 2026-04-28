@@ -25,12 +25,12 @@ const (
 type WTPReconnectReason string
 
 const (
-	WTPReconnectReasonDialFailed              WTPReconnectReason = "dial_failed"
-	WTPReconnectReasonStreamRecvError         WTPReconnectReason = "stream_recv_error"
-	WTPReconnectReasonSendError               WTPReconnectReason = "send_error"
-	WTPReconnectReasonAckTimeout              WTPReconnectReason = "ack_timeout"
-	WTPReconnectReasonHeartbeatTimeout        WTPReconnectReason = "heartbeat_timeout"
-	WTPReconnectReasonServerGoaway            WTPReconnectReason = "server_goaway"
+	WTPReconnectReasonDialFailed       WTPReconnectReason = "dial_failed"
+	WTPReconnectReasonStreamRecvError  WTPReconnectReason = "stream_recv_error"
+	WTPReconnectReasonSendError        WTPReconnectReason = "send_error"
+	WTPReconnectReasonAckTimeout       WTPReconnectReason = "ack_timeout"
+	WTPReconnectReasonHeartbeatTimeout WTPReconnectReason = "heartbeat_timeout"
+	WTPReconnectReasonServerGoaway     WTPReconnectReason = "server_goaway"
 	// WTPReconnectReasonServerUpdateUnsupported and
 	// WTPReconnectReasonRecvUnknownFrame are the Task 22c dedicated
 	// labels for the fail-closed recv branches that previously
@@ -581,13 +581,21 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 type WTPSessionFailureReason string
 
 const (
-	WTPSessionFailureReasonInvalidUTF8 WTPSessionFailureReason = "invalid_utf8"
-	WTPSessionFailureReasonUnknown     WTPSessionFailureReason = "unknown"
+	WTPSessionFailureReasonInvalidUTF8       WTPSessionFailureReason = "invalid_utf8"
+	WTPSessionFailureReasonSendFailed        WTPSessionFailureReason = "send_failed"
+	WTPSessionFailureReasonRecvFailed        WTPSessionFailureReason = "recv_failed"
+	WTPSessionFailureReasonUnexpectedMessage WTPSessionFailureReason = "unexpected_message"
+	WTPSessionFailureReasonRejected          WTPSessionFailureReason = "rejected"
+	WTPSessionFailureReasonUnknown           WTPSessionFailureReason = "unknown"
 )
 
 var wtpSessionFailureReasonsValid = map[WTPSessionFailureReason]struct{}{
-	WTPSessionFailureReasonInvalidUTF8: {},
-	WTPSessionFailureReasonUnknown:     {},
+	WTPSessionFailureReasonInvalidUTF8:       {},
+	WTPSessionFailureReasonSendFailed:        {},
+	WTPSessionFailureReasonRecvFailed:        {},
+	WTPSessionFailureReasonUnexpectedMessage: {},
+	WTPSessionFailureReasonRejected:          {},
+	WTPSessionFailureReasonUnknown:           {},
 }
 
 // wtpSessionFailureReasonsEmitOrder is the canonical sort-by-string
@@ -596,6 +604,10 @@ var wtpSessionFailureReasonsValid = map[WTPSessionFailureReason]struct{}{
 // fired (always-emit contract).
 var wtpSessionFailureReasonsEmitOrder = []WTPSessionFailureReason{
 	WTPSessionFailureReasonInvalidUTF8,
+	WTPSessionFailureReasonRecvFailed,
+	WTPSessionFailureReasonRejected,
+	WTPSessionFailureReasonSendFailed,
+	WTPSessionFailureReasonUnexpectedMessage,
 	WTPSessionFailureReasonUnknown,
 }
 
@@ -620,12 +632,14 @@ var wtpSessionFailureReasonsEmitOrder = []WTPSessionFailureReason{
 type WTPInvalidFrameReason string
 
 const (
-	WTPInvalidFrameReasonEventBatchBodyUnset           WTPInvalidFrameReason = "event_batch_body_unset"
-	WTPInvalidFrameReasonEventBatchCompressionUnspec   WTPInvalidFrameReason = "event_batch_compression_unspecified"
-	WTPInvalidFrameReasonEventBatchCompressionMismatch WTPInvalidFrameReason = "event_batch_compression_mismatch"
-	WTPInvalidFrameReasonSessionInitAlgorithmUnspec    WTPInvalidFrameReason = "session_init_algorithm_unspecified"
-	WTPInvalidFrameReasonPayloadTooLarge               WTPInvalidFrameReason = "payload_too_large"
-	WTPInvalidFrameReasonDecompressError               WTPInvalidFrameReason = "decompress_error"
+	WTPInvalidFrameReasonEventBatchBodyUnset            WTPInvalidFrameReason = "event_batch_body_unset"
+	WTPInvalidFrameReasonEventBatchCompressionUnspec    WTPInvalidFrameReason = "event_batch_compression_unspecified"
+	WTPInvalidFrameReasonEventBatchCompressionMismatch  WTPInvalidFrameReason = "event_batch_compression_mismatch"
+	WTPInvalidFrameReasonSessionInitAlgorithmUnspec     WTPInvalidFrameReason = "session_init_algorithm_unspecified"
+	WTPInvalidFrameReasonPayloadTooLarge                WTPInvalidFrameReason = "payload_too_large"
+	WTPInvalidFrameReasonDecompressError                WTPInvalidFrameReason = "decompress_error"
+	WTPInvalidFrameReasonGoawayCodeUnspec          WTPInvalidFrameReason = "goaway_code_unspecified"
+	WTPInvalidFrameReasonSessionUpdateGenerationInvalid WTPInvalidFrameReason = "session_update_generation_invalid"
 	// WTPInvalidFrameReasonClassifierBypass is the metrics-only reason
 	// emitted by the receiver-side errors.As-false defense-in-depth
 	// guard AND by IncDroppedInvalidFrame's invalid-label collapse.
@@ -636,14 +650,16 @@ const (
 )
 
 var wtpInvalidFrameReasonsValid = map[WTPInvalidFrameReason]struct{}{
-	WTPInvalidFrameReasonEventBatchBodyUnset:           {},
-	WTPInvalidFrameReasonEventBatchCompressionUnspec:   {},
-	WTPInvalidFrameReasonEventBatchCompressionMismatch: {},
-	WTPInvalidFrameReasonSessionInitAlgorithmUnspec:    {},
-	WTPInvalidFrameReasonPayloadTooLarge:               {},
-	WTPInvalidFrameReasonDecompressError:               {},
-	WTPInvalidFrameReasonClassifierBypass:              {},
-	WTPInvalidFrameReasonUnknown:                       {},
+	WTPInvalidFrameReasonEventBatchBodyUnset:            {},
+	WTPInvalidFrameReasonEventBatchCompressionUnspec:    {},
+	WTPInvalidFrameReasonEventBatchCompressionMismatch:  {},
+	WTPInvalidFrameReasonSessionInitAlgorithmUnspec:     {},
+	WTPInvalidFrameReasonPayloadTooLarge:                {},
+	WTPInvalidFrameReasonDecompressError:                {},
+	WTPInvalidFrameReasonGoawayCodeUnspec:          {},
+	WTPInvalidFrameReasonSessionUpdateGenerationInvalid: {},
+	WTPInvalidFrameReasonClassifierBypass:               {},
+	WTPInvalidFrameReasonUnknown:                        {},
 }
 
 // wtpInvalidFrameReasonsEmitOrder mirrors the wtpSessionFailureReasonsEmitOrder
@@ -656,8 +672,10 @@ var wtpInvalidFrameReasonsEmitOrder = []WTPInvalidFrameReason{
 	WTPInvalidFrameReasonEventBatchBodyUnset,
 	WTPInvalidFrameReasonEventBatchCompressionMismatch,
 	WTPInvalidFrameReasonEventBatchCompressionUnspec,
+	WTPInvalidFrameReasonGoawayCodeUnspec,
 	WTPInvalidFrameReasonPayloadTooLarge,
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
+	WTPInvalidFrameReasonSessionUpdateGenerationInvalid,
 	WTPInvalidFrameReasonUnknown,
 }
 
@@ -674,6 +692,8 @@ var validationReasonsShared = []WTPInvalidFrameReason{
 	WTPInvalidFrameReasonEventBatchCompressionMismatch,
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
 	WTPInvalidFrameReasonPayloadTooLarge,
+	WTPInvalidFrameReasonGoawayCodeUnspec,
+	WTPInvalidFrameReasonSessionUpdateGenerationInvalid,
 	WTPInvalidFrameReasonUnknown,
 }
 

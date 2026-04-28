@@ -331,21 +331,21 @@ func TestWTPMetrics_DroppedSequenceOverflow(t *testing.T) {
 
 func TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons(t *testing.T) {
 	c := New()
-	rr := httptest.NewRecorder()
-	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
-	body := rr.Body.String()
-
-	expectedReasons := []string{"invalid_utf8", "unknown"}
-	for _, reason := range expectedReasons {
-		want := fmt.Sprintf(`wtp_session_init_failures_total{reason=%q} 0`, reason)
+	body := scrape(t, c)
+	for _, want := range []string{
+		`wtp_session_init_failures_total{reason="invalid_utf8"} 0`,
+		`wtp_session_init_failures_total{reason="recv_failed"} 0`,
+		`wtp_session_init_failures_total{reason="rejected"} 0`,
+		`wtp_session_init_failures_total{reason="send_failed"} 0`,
+		`wtp_session_init_failures_total{reason="unexpected_message"} 0`,
+		`wtp_session_init_failures_total{reason="unknown"} 0`,
+	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("missing zero-valued series %q\nbody:\n%s", want, body)
+			t.Errorf("missing always-emit line %q\nbody:\n%s", want, body)
 		}
 	}
 	c.WTP().IncSessionInitFailures(WTPSessionFailureReasonInvalidUTF8)
-	rr = httptest.NewRecorder()
-	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
-	body = rr.Body.String()
+	body = scrape(t, c)
 	if !strings.Contains(body, `wtp_session_init_failures_total{reason="invalid_utf8"} 1`) {
 		t.Errorf("expected invalid_utf8=1 after one IncSessionInitFailures\nbody:\n%s", body)
 	}
@@ -356,21 +356,21 @@ func TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons(t *testing.T) {
 
 func TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons(t *testing.T) {
 	c := New()
-	rr := httptest.NewRecorder()
-	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
-	body := rr.Body.String()
-
-	expectedReasons := []string{"invalid_utf8", "unknown"}
-	for _, reason := range expectedReasons {
-		want := fmt.Sprintf(`wtp_session_rotation_failures_total{reason=%q} 0`, reason)
+	body := scrape(t, c)
+	for _, want := range []string{
+		`wtp_session_rotation_failures_total{reason="invalid_utf8"} 0`,
+		`wtp_session_rotation_failures_total{reason="recv_failed"} 0`,
+		`wtp_session_rotation_failures_total{reason="rejected"} 0`,
+		`wtp_session_rotation_failures_total{reason="send_failed"} 0`,
+		`wtp_session_rotation_failures_total{reason="unexpected_message"} 0`,
+		`wtp_session_rotation_failures_total{reason="unknown"} 0`,
+	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("missing zero-valued series %q\nbody:\n%s", want, body)
+			t.Errorf("missing always-emit line %q\nbody:\n%s", want, body)
 		}
 	}
 	c.WTP().IncSessionRotationFailures(WTPSessionFailureReasonInvalidUTF8)
-	rr = httptest.NewRecorder()
-	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
-	body = rr.Body.String()
+	body = scrape(t, c)
 	if !strings.Contains(body, `wtp_session_rotation_failures_total{reason="invalid_utf8"} 1`) {
 		t.Errorf("expected invalid_utf8=1 after one IncSessionRotationFailures\nbody:\n%s", body)
 	}
@@ -485,8 +485,10 @@ func TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons(t *testing.T) {
 		"event_batch_body_unset",
 		"event_batch_compression_mismatch",
 		"event_batch_compression_unspecified",
+		"goaway_code_unspecified",
 		"payload_too_large",
 		"session_init_algorithm_unspecified",
+		"session_update_generation_invalid",
 		"unknown",
 	}
 	for _, reason := range expectedReasons {
@@ -836,4 +838,44 @@ func scrape(t *testing.T, c *Collector) string {
 	rr := httptest.NewRecorder()
 	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
 	return rr.Body.String()
+}
+
+func TestWTPMetrics_SessionInitFailures_PerReasonInc(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	// Each of the 6 reasons gets a distinct increment count so a
+	// mismatched-label bug surfaces as a cross-counts mismatch.
+	for i := 0; i < 1; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonInvalidUTF8)
+	}
+	for i := 0; i < 2; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonSendFailed)
+	}
+	for i := 0; i < 3; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonRecvFailed)
+	}
+	for i := 0; i < 4; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonUnexpectedMessage)
+	}
+	for i := 0; i < 5; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonRejected)
+	}
+	for i := 0; i < 6; i++ {
+		w.IncSessionInitFailures(WTPSessionFailureReasonUnknown)
+	}
+
+	body := scrape(t, c)
+	for _, want := range []string{
+		`wtp_session_init_failures_total{reason="invalid_utf8"} 1`,
+		`wtp_session_init_failures_total{reason="recv_failed"} 3`,
+		`wtp_session_init_failures_total{reason="rejected"} 5`,
+		`wtp_session_init_failures_total{reason="send_failed"} 2`,
+		`wtp_session_init_failures_total{reason="unexpected_message"} 4`,
+		`wtp_session_init_failures_total{reason="unknown"} 6`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing line %q\nbody:\n%s", want, body)
+		}
+	}
 }

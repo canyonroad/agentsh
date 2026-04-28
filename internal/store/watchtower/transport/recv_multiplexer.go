@@ -228,6 +228,14 @@ func (t *Transport) runRecv(rs *recvSession) {
 		}
 		switch m := msg.GetMsg().(type) {
 		case *wtpv1.ServerMessage_BatchAck:
+			if err := wtpv1.ValidateBatchAck(m.BatchAck); err != nil {
+				ClassifyAndIncInvalidFrame(t.opts.Logger, t.metrics, err)
+				select {
+				case rs.errCh <- fmt.Errorf("recv: invalid BatchAck: %w", err):
+				default:
+				}
+				return
+			}
 			a := m.BatchAck
 			ev := recvAckEvent{
 				kind: recvAckEventBatchAck,
@@ -244,6 +252,14 @@ func (t *Transport) runRecv(rs *recvSession) {
 				return
 			}
 		case *wtpv1.ServerMessage_ServerHeartbeat:
+			if err := wtpv1.ValidateServerHeartbeat(m.ServerHeartbeat); err != nil {
+				ClassifyAndIncInvalidFrame(t.opts.Logger, t.metrics, err)
+				select {
+				case rs.errCh <- fmt.Errorf("recv: invalid ServerHeartbeat: %w", err):
+				default:
+				}
+				return
+			}
 			h := m.ServerHeartbeat
 			ev := recvAckEvent{
 				kind: recvAckEventHeartbeat,
@@ -257,6 +273,14 @@ func (t *Transport) runRecv(rs *recvSession) {
 				return
 			}
 		case *wtpv1.ServerMessage_Goaway:
+			if err := wtpv1.ValidateGoaway(m.Goaway); err != nil {
+				ClassifyAndIncInvalidFrame(t.opts.Logger, t.metrics, err)
+				select {
+				case rs.errCh <- fmt.Errorf("recv: invalid Goaway: %w", err):
+				default:
+				}
+				return
+			}
 			// Task 22d: structured WARN before the errCh sentinel
 			// so operators see the branch without grepping the
 			// errCh substring. Standard fields plus the stable
@@ -290,6 +314,14 @@ func (t *Transport) runRecv(rs *recvSession) {
 			}
 			return
 		case *wtpv1.ServerMessage_ServerUpdate:
+			if err := wtpv1.ValidateSessionUpdate(m.ServerUpdate); err != nil {
+				ClassifyAndIncInvalidFrame(t.opts.Logger, t.metrics, err)
+				select {
+				case rs.errCh <- fmt.Errorf("recv: invalid ServerUpdate: %w", err):
+				default:
+				}
+				return
+			}
 			// Task 22d: structured WARN. Standard fields only —
 			// Phase 4 has no SessionUpdate handler, so dragging
 			// payload fields into the WARN now would be churn (the

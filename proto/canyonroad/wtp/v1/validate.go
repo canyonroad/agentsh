@@ -65,6 +65,17 @@ const (
 	// exceeds MaxCompressedPayloadBytes.
 	ReasonPayloadTooLarge ValidationReason = "payload_too_large"
 
+	// ReasonGoawayCodeUnspecified is returned by ValidateGoaway when the
+	// inbound Goaway has code == GOAWAY_CODE_UNSPECIFIED — that value is
+	// wire-incompatible per the proto's UNSPECIFIED contract.
+	ReasonGoawayCodeUnspecified ValidationReason = "goaway_code_unspecified"
+
+	// ReasonSessionUpdateGenerationInvalid is returned by
+	// ValidateSessionUpdate when the inbound SessionUpdate has
+	// generation == 0. Rotation MUST monotonically advance to a positive
+	// generation per the WTP client design.
+	ReasonSessionUpdateGenerationInvalid ValidationReason = "session_update_generation_invalid"
+
 	// ReasonUnknown is the schema-drift reason. It covers two
 	// failure classes that share one operator response ("investigate
 	// the proto schema delta"):
@@ -139,6 +150,8 @@ var allValidationReasons = []ValidationReason{
 	ReasonEventBatchCompressionMismatch,
 	ReasonSessionInitAlgorithmUnspecified,
 	ReasonPayloadTooLarge,
+	ReasonGoawayCodeUnspecified,
+	ReasonSessionUpdateGenerationInvalid,
 	ReasonUnknown,
 }
 
@@ -260,6 +273,95 @@ func ValidateSessionInit(s *SessionInit) error {
 		return &ValidationError{
 			Reason: ReasonSessionInitAlgorithmUnspecified,
 			Inner:  fmt.Errorf("%w: algorithm unspecified", ErrInvalidFrame),
+		}
+	}
+	return nil
+}
+
+// ValidateGoaway returns ReasonGoawayCodeUnspecified when the inbound
+// Goaway has code == GOAWAY_CODE_UNSPECIFIED — wire-incompatible per
+// the proto's UNSPECIFIED contract. Returns ReasonUnknown for nil
+// messages (a structural failure).
+//
+// Other Goaway fields (message, retry_immediately) have no MUST-be-set
+// invariants the validator can enforce statelessly.
+func ValidateGoaway(g *Goaway) error {
+	if g == nil {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: goaway is nil", ErrInvalidFrame),
+		}
+	}
+	if g.Code == GoawayCode_GOAWAY_CODE_UNSPECIFIED {
+		return &ValidationError{
+			Reason: ReasonGoawayCodeUnspecified,
+			Inner:  fmt.Errorf("%w: goaway code unspecified", ErrInvalidFrame),
+		}
+	}
+	return nil
+}
+
+// ValidateSessionUpdate returns ReasonSessionUpdateGenerationInvalid
+// when SessionUpdate.new_generation == 0 — rotation MUST monotonically
+// advance to a positive generation per the WTP client design (see
+// 2026-04-18-wtp-client-design.md). Returns ReasonUnknown for nil.
+//
+// State-dependent invariants ("new generation must be strictly higher
+// than current") are not the validator's concern; the rotation
+// handler enforces those (when Project C lands).
+func ValidateSessionUpdate(u *SessionUpdate) error {
+	if u == nil {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: session_update is nil", ErrInvalidFrame),
+		}
+	}
+	if u.NewGeneration == 0 {
+		return &ValidationError{
+			Reason: ReasonSessionUpdateGenerationInvalid,
+			Inner:  fmt.Errorf("%w: session_update new_generation == 0", ErrInvalidFrame),
+		}
+	}
+	return nil
+}
+
+// ValidateSessionAck rejects a structurally invalid inbound
+// SessionAck. Today the only structural failure the validator can
+// detect statelessly is a nil message — the SessionAck schema has no
+// MUST-be-set field invariants beyond presence (the accepted/
+// reject_reason coherence is a server contract that this validator
+// does not police). State-dependent invariants are enforced by the
+// transport's apply layer (applyServerAckTuple).
+func ValidateSessionAck(ack *SessionAck) error {
+	if ack == nil {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: session_ack is nil", ErrInvalidFrame),
+		}
+	}
+	return nil
+}
+
+// ValidateBatchAck rejects a nil BatchAck. Like SessionAck, the schema
+// has no MUST-be-set field invariants beyond presence;
+// state-dependent invariants are enforced by applyServerAckTuple.
+func ValidateBatchAck(ack *BatchAck) error {
+	if ack == nil {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: batch_ack is nil", ErrInvalidFrame),
+		}
+	}
+	return nil
+}
+
+// ValidateServerHeartbeat rejects a nil ServerHeartbeat. No other
+// stateless invariants apply.
+func ValidateServerHeartbeat(hb *ServerHeartbeat) error {
+	if hb == nil {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: server_heartbeat is nil", ErrInvalidFrame),
 		}
 	}
 	return nil

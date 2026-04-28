@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
+	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
 // Options controls the server's behavior. Zero values use defaults
@@ -70,6 +71,20 @@ type Options struct {
 	// server-restart test that must confirm at least one batch landed
 	// before pulling the plug.
 	BatchAckDelay time.Duration
+
+	// SuppressBatchAck, when true, skips sending the BatchAck for
+	// EventBatch frames entirely. EventBatches are still tallied and
+	// drop/goaway counters still tick, but the agent never observes
+	// an ack for user events; persistedAck stays pinned at zero and
+	// the WAL never GCs fully-acked sealed segments.
+	//
+	// Use this when a WAL-state test needs sealed segments to survive
+	// (CRC corruption injection) or needs WALMaxTotalSize to actually
+	// be hit (overflow tests) without racing against ack-driven GC.
+	// SessionAck and TransportLoss BatchAcks are unaffected — the
+	// agent's handshake still completes and TransportLoss frames
+	// still receive their symmetric ack per the spec.
+	SuppressBatchAck bool
 
 	// DropAfterBatchN closes the stream (returns an error from the
 	// server Stream handler) after observing N EventBatch messages on
@@ -111,6 +126,29 @@ type Options struct {
 	RejectSession bool
 	RejectReason  string
 
+	// CloseAfterSessionInitRecv, when true, returns from the Stream
+	// handler immediately after the first SessionInit is received and
+	// validated (BEFORE sending SessionAck). Lets component tests drive
+	// the runConnecting recv-failed path: the client's conn.Recv() then
+	// surfaces an EOF / stream-closed error, classified as
+	// WTPSessionFailureReasonRecvFailed.
+	//
+	// Mutually exclusive with RejectSession and
+	// RespondWithUnexpectedMessage. When more than one of these is set
+	// the handler picks the first matching branch in the order:
+	// CloseAfterSessionInitRecv -> RespondWithUnexpectedMessage ->
+	// RejectSession. (Field declaration order in this struct is
+	// independent of evaluation order; do not rely on it.)
+	CloseAfterSessionInitRecv bool
+
+	// RespondWithUnexpectedMessage, when true, sends a BatchAck
+	// ServerMessage (instead of SessionAck) in response to a
+	// SessionInit. Lets component tests drive the runConnecting
+	// unexpected-message path: the client's first Recv after
+	// SessionInit returns a non-SessionAck variant, classified as
+	// WTPSessionFailureReasonUnexpectedMessage.
+	RespondWithUnexpectedMessage bool
+
 	// TransportLossAckDelay introduces an artificial delay before the
 	// BatchAck for a TransportLoss frame is sent. When non-zero, the
 	// server holds the ack for this duration before sending it. This
@@ -130,6 +168,17 @@ type Options struct {
 	// the wtp_dropped_invalid_frame_total{reason=...} counter or the
 	// defense-in-depth WARN.
 	Metrics transport.Metrics
+
+	// InjectAfterSessionAck, when non-nil, causes the testserver to send
+	// this ServerMessage immediately after a successful SessionAck and
+	// before any client-frame processing. Used to exercise inbound-
+	// validation paths (e.g. malformed Goaway, malformed SessionUpdate)
+	// without depending on client frames first reaching the server.
+	//
+	// Has no effect on the RejectSession, RespondWithUnexpectedMessage,
+	// or CloseAfterSessionInitRecv branches — those return before the
+	// successful-SessionAck send site.
+	InjectAfterSessionAck *wtpv1.ServerMessage
 
 	// Logger sinks the classifier's defense-in-depth WARN (emitted
 	// only when a non-*wtpv1.ValidationError reaches the classifier —

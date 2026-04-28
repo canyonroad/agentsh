@@ -317,6 +317,8 @@ func (noopClassifierMetrics) IncResendNeeded()          {}
 func (noopClassifierMetrics) IncAckRegressionLoss()     {}
 func (noopClassifierMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {
 }
+func (noopClassifierMetrics) IncSessionInitFailures(metrics.WTPSessionFailureReason) {
+}
 
 // Stream implements the WatchtowerServer bidi streaming RPC. Every
 // ClientMessage variant the Transport can emit is handled:
@@ -382,6 +384,24 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 				case <-time.After(h.s.opts.AckDelay):
 				}
 			}
+			if h.s.opts.CloseAfterSessionInitRecv {
+				// Tear down the stream before sending any SessionAck.
+				// Drives the client's runConnecting recv-failed path.
+				return nil
+			}
+			if h.s.opts.RespondWithUnexpectedMessage {
+				// Send a BatchAck (a non-SessionAck ServerMessage
+				// variant) so the client's runConnecting classifies
+				// the response as WTPSessionFailureReasonUnexpectedMessage.
+				if err := stream.Send(&wtpv1.ServerMessage{
+					Msg: &wtpv1.ServerMessage_BatchAck{
+						BatchAck: &wtpv1.BatchAck{},
+					},
+				}); err != nil {
+					return err
+				}
+				return nil
+			}
 			if h.s.opts.RejectSession {
 				if err := stream.Send(&wtpv1.ServerMessage{
 					Msg: &wtpv1.ServerMessage_SessionAck{
@@ -405,6 +425,17 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 				},
 			}); err != nil {
 				return err
+			}
+			// InjectAfterSessionAck: send a single arbitrary
+			// ServerMessage immediately after a successful SessionAck.
+			// Used by inbound-validation tests (malformed Goaway,
+			// malformed SessionUpdate) to exercise the recv classifier
+			// without first having to coax a client EventBatch through
+			// the handshake.
+			if h.s.opts.InjectAfterSessionAck != nil {
+				if err := stream.Send(h.s.opts.InjectAfterSessionAck); err != nil {
+					return err
+				}
 			}
 		case *wtpv1.ClientMessage_EventBatch:
 			// Receiver-side frame validation. Always on — spec
@@ -454,6 +485,15 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 			// points at (0, 0) which the Transport's
 			// applyServerAckTuple helper treats as a no-op under the
 			// steady-state cursor.
+			//
+			// SuppressBatchAck escape hatch: skip the per-batch ack
+			// entirely so the agent's persistedAck stays pinned at
+			// zero. The recv loop continues to the next frame
+			// without delay, so subsequent EventBatches and the
+			// TransportLoss frame are processed normally.
+			if h.s.opts.SuppressBatchAck {
+				continue
+			}
 			var (
 				lastSeq uint64
 				lastGen uint32

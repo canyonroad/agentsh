@@ -143,4 +143,47 @@ Five new metric families surface compression behavior. All are emitted at zero o
 - Alert on `histogram_quantile(0.5, sum by (le, algo) (rate(wtp_batch_compression_ratio_bucket[5m]))) > 0.75` — if the median ratio drifts above 0.75 the codec is barely compressing; verify input shape or downgrade level.
 - Track `sum(rate(wtp_batch_compressed_bytes_total[1m])) / sum(rate(wtp_batch_uncompressed_bytes_total[1m]))` for the aggregate fleet ratio.
 
+## `wtp_session_init_failures_total{reason}`
+
+**Status:** Live as of PR (this branch). Previously emitted at zero with no producers wired.
+
+The agent increments this counter at every SessionInit handshake failure path in `state_connecting.go`. The reason enum is shared with `wtp_session_rotation_failures_total` (Project C — currently has no producer), so all 6 reason labels emit at zero on every scrape regardless of which producer is active.
+
+| Reason | Fires when (SessionInit producer) |
+|---|---|
+| `invalid_utf8` | Reserved for chain-rotation invalid-UTF-8 (Project C). The SessionInit producer does not currently emit this reason. |
+| `send_failed` | `conn.Send(SessionInit)` returns an error. Indicates network egress problems or server unreachability. |
+| `recv_failed` | `conn.Recv()` returns an error before SessionAck arrives. Indicates server liveness or network return-path problems. |
+| `unexpected_message` | The first inbound `ServerMessage` after SessionInit is not a `SessionAck`. Typically a server protocol bug or version mismatch. |
+| `rejected` | Server returned `SessionAck.accepted=false`. The structured WARN log carries the server-supplied `reject_reason` text; the counter only carries the count. Operator response: check server-side authorization / agent identity configuration. |
+| `unknown` | Validator (`ValidateSessionInit`) returned an error. Today this is `ReasonSessionInitAlgorithmUnspecified`; future validator surface gains add `errors.Is` branches at the emit site. Operator response: check Options misconfiguration (typically `Algorithm` left zero); structured ERR log carries the field-level cause. |
+
+**Operator alert recommendations.**
+
+- Notify-only on `rate(wtp_session_init_failures_total[10m]) > 0` — a single transient handshake failure during a normal reconnect cycle is not a problem.
+- Page on sustained `rejected` rate: `rate(wtp_session_init_failures_total{reason="rejected"}[5m]) > 0.01` indicates persistent server-side authorization failure.
+- Page on sustained `unknown` rate: indicates a misconfigured agent that cannot construct a valid SessionInit.
+
+**Reload model.** Read at handshake time on every reconnect; changes to `Options.Algorithm` etc. take effect on the next reconnect (no daemon restart needed for metric-side observation).
+
+## `wtp_dropped_invalid_frame_total{reason=goaway_code_unspecified|session_update_generation_invalid}`
+
+**Status:** Live as of PR (this branch). Two new reason labels added; the existing reasons (`event_batch_*`, `session_init_algorithm_unspecified`, `payload_too_large`, `decompress_error`, `classifier_bypass`, `unknown`) are unchanged.
+
+These two reasons fire on inbound frames that fail the new structural validators in `recv_multiplexer.go`:
+
+- `goaway_code_unspecified`: Server sent a `Goaway` with `code: GOAWAY_CODE_UNSPECIFIED`. Wire-incompatible per the proto's UNSPECIFIED contract — receivers MUST reject. Operator response: investigate server protocol-version mismatch.
+- `session_update_generation_invalid`: Server sent a `SessionUpdate` with `new_generation: 0`. Rotation MUST monotonically advance to a positive generation. Operator response: investigate server bug.
+
+In both cases the agent ALSO ticks `wtp_reconnects_total{reason="recv_unknown_frame"}` because the validator failure causes the recv goroutine to fail-close and the run loop reconnects. The two metrics answer different questions:
+- `wtp_dropped_invalid_frame_total{reason}` — frame-level diagnostic ("why was the frame rejected").
+- `wtp_reconnects_total{reason="recv_unknown_frame"}` — connection-level event ("why did we reconnect").
+
+A single malformed frame legitimately fires both.
+
+**Operator alert recommendations.**
+
+- Notify-only on any non-zero rate for these two new labels — server-side protocol drift is rare and worth investigation when it appears.
+- Page on `rate(...) > 0.01/s` sustained: server is consistently misbehaving and the agent is reconnect-looping.
+
 `wtp_decompress_error_total` is receiver-side; alert thresholds should live with the receiving Watchtower server's dashboards, not the agent's.
