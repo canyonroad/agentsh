@@ -156,6 +156,9 @@ func buildWatchtowerStore(
 		AuthBearer:              authBearer,
 		Filter:                  filter,
 		EmitExtendedLossReasons: cfg.EmitExtendedLossReasons,
+		CompressionAlgo:         cfg.Batch.Compression,
+		ZstdLevel:               cfg.Batch.ZstdLevel,
+		GzipLevel:               cfg.Batch.GzipLevel,
 	}
 	transport.SetEncoderEmitExtendedReasons(opts.EmitExtendedLossReasons)
 

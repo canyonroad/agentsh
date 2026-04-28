@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2193,4 +2194,93 @@ func TestAuditWatchtowerConfig_WALSyncModeDeferredRejected(t *testing.T) {
 			t.Errorf("err = %v, want mention of sync_mode", err)
 		}
 	})
+}
+
+func TestAuditWatchtowerConfig_BatchCompression_AcceptedAlgos(t *testing.T) {
+	cases := []struct {
+		algo      string
+		overrides string
+	}{
+		{"none", "    batch:\n      compression: \"none\"\n"},
+		{"zstd", "    batch:\n      compression: \"zstd\"\n      zstd_level: 3\n"},
+		{"gzip", "    batch:\n      compression: \"gzip\"\n      gzip_level: 6\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.algo, func(t *testing.T) {
+			yaml := validWatchtowerYAML(t, true, tc.overrides)
+			if _, err := loadFromString(t, yaml); err != nil {
+				t.Fatalf("compression=%q: load err=%v", tc.algo, err)
+			}
+		})
+	}
+}
+
+func TestAuditWatchtowerConfig_BatchCompression_RejectsUnknown(t *testing.T) {
+	yaml := validWatchtowerYAML(t, true, "    batch:\n      compression: \"snappy\"\n")
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for compression=snappy, got nil")
+	}
+	if !strings.Contains(err.Error(), "compression") {
+		t.Errorf("err=%v, want mention of compression", err)
+	}
+}
+
+func TestAuditWatchtowerConfig_BatchCompression_ZstdLevelBounds(t *testing.T) {
+	cases := []struct {
+		level   int
+		wantErr bool
+	}{
+		// applyDefaults turns 0 into 3, so 0 in YAML is effectively
+		// "unset" and accepted via the default. Test by setting an
+		// explicit nonzero out-of-range value where applyDefaults
+		// will not intervene.
+		{1, false}, {3, false}, {22, false}, {23, true}, {-1, true},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("level=%d", tc.level), func(t *testing.T) {
+			overrides := fmt.Sprintf("    batch:\n      compression: \"zstd\"\n      zstd_level: %d\n", tc.level)
+			yaml := validWatchtowerYAML(t, true, overrides)
+			_, err := loadFromString(t, yaml)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("level=%d err=%v wantErr=%v", tc.level, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestAuditWatchtowerConfig_BatchCompression_GzipLevelBounds(t *testing.T) {
+	cases := []struct {
+		level   int
+		wantErr bool
+	}{
+		{1, false}, {6, false}, {9, false}, {10, true}, {-1, true},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("level=%d", tc.level), func(t *testing.T) {
+			overrides := fmt.Sprintf("    batch:\n      compression: \"gzip\"\n      gzip_level: %d\n", tc.level)
+			yaml := validWatchtowerYAML(t, true, overrides)
+			_, err := loadFromString(t, yaml)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("level=%d err=%v wantErr=%v", tc.level, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestAuditWatchtowerConfig_BatchCompression_DefaultsExpand(t *testing.T) {
+	yaml := validWatchtowerYAML(t, false, "")
+	cfg, err := loadFromString(t, yaml)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.Audit.Watchtower.Batch.Compression; got != "none" {
+		t.Errorf("default compression = %q, want \"none\"", got)
+	}
+	if got := cfg.Audit.Watchtower.Batch.ZstdLevel; got != 3 {
+		t.Errorf("default zstd_level = %d, want 3", got)
+	}
+	if got := cfg.Audit.Watchtower.Batch.GzipLevel; got != 6 {
+		t.Errorf("default gzip_level = %d, want 6", got)
+	}
 }

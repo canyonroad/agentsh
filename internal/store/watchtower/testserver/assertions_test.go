@@ -11,7 +11,9 @@ import (
 
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/testserver"
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport/compress"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // sendUncompressedBatch is a test helper that sends an EventBatch
@@ -36,28 +38,34 @@ func sendUncompressedBatch(t *testing.T, conn testserver.Conn, events ...*wtpv1.
 	}
 }
 
-// sendCompressedBatchMarker is a test helper that sends an EventBatch
-// whose Body is the `compressed_payload` oneof variant — a valid wire
-// shape per the proto contract (§7.3): compression=ZSTD with a non-
-// empty bytes payload. The testserver records the message but does
-// not decode it; the assertion helpers must surface
-// ErrUnsupportedCompression for that recorded shape.
+// sendUnknownCompressionMarker is a test helper that sends an EventBatch
+// with a Compression enum value the testserver decoder does not
+// recognize. After Task 9, COMPRESSION_NONE / ZSTD / GZIP are all
+// transparently decoded by the assertion helpers; the only remaining
+// path that produces ErrUnsupportedCompression is an enum value that
+// neither the codec dispatch nor a future algo upgrade has been
+// taught about. Sending Compression(99) lands in decodeBatchEvents'
+// default arm without depending on garbage-bytes decode failure.
 //
-// The payload bytes are an opaque non-empty blob — the helpers never
-// look inside, and decoding is intentionally out of scope.
-func sendCompressedBatchMarker(t *testing.T, conn testserver.Conn) {
+// COMPRESSION_UNSPECIFIED is NOT a usable test input here: the
+// validator rejects it upstream with ReasonEventBatchCompressionUnspecified
+// before it ever reaches the assertion helpers.
+//
+// The CompressedPayload bytes are arbitrary non-empty content — the
+// helper never looks inside.
+func sendUnknownCompressionMarker(t *testing.T, conn testserver.Conn) {
 	t.Helper()
 	if err := conn.Send(&wtpv1.ClientMessage{
 		Msg: &wtpv1.ClientMessage_EventBatch{
 			EventBatch: &wtpv1.EventBatch{
-				Compression: wtpv1.Compression_COMPRESSION_ZSTD,
+				Compression: wtpv1.Compression(99), // unrecognized enum value
 				Body: &wtpv1.EventBatch_CompressedPayload{
 					CompressedPayload: []byte{0x01, 0x02, 0x03, 0x04},
 				},
 			},
 		},
 	}); err != nil {
-		t.Fatalf("send compressed EventBatch: %v", err)
+		t.Fatalf("send unknown-compression EventBatch: %v", err)
 	}
 }
 
@@ -287,12 +295,20 @@ func TestAssertRange_InvalidBoundsRejected(t *testing.T) {
 	}
 }
 
-// TestAssertRange_CompressedBatchFailsFast verifies that a recorded
-// batch whose Body is not UncompressedEvents causes the assertion
-// helpers to return ErrUnsupportedCompression rather than silently
-// skip. Also checks the helper-name prefix so the grep-friendly
+// TestAssertRange_UnknownCompressionFailsFast verifies that a recorded
+// batch whose Compression enum value is not one of NONE/ZSTD/GZIP
+// (e.g., a future algo the helper does not know about, OR a peer
+// emitting a corrupt enum value) causes the assertion helpers to
+// return ErrUnsupportedCompression rather than silently skipping the
+// batch. Also checks the helper-name prefix so the grep-friendly
 // diagnostic contract is locked in.
-func TestAssertRange_CompressedBatchFailsFast(t *testing.T) {
+//
+// COMPRESSION_NONE / COMPRESSION_ZSTD / COMPRESSION_GZIP are all
+// transparently decoded by the helpers (Task 9). UNSPECIFIED is
+// rejected by the validator upstream (ReasonEventBatchCompressionUnspecified),
+// so the only remaining ErrUnsupportedCompression path is the
+// "unknown enum value" branch this test exercises.
+func TestAssertRange_UnknownCompressionFailsFast(t *testing.T) {
 	srv := testserver.New(testserver.Options{})
 	defer srv.Close()
 
@@ -307,7 +323,7 @@ func TestAssertRange_CompressedBatchFailsFast(t *testing.T) {
 		t.Fatalf("recv SessionAck: %v", err)
 	}
 
-	sendCompressedBatchMarker(t, conn)
+	sendUnknownCompressionMarker(t, conn)
 	if _, err := srv.WaitForFirstBatch(2 * time.Second); err != nil {
 		t.Fatalf("WaitForFirstBatch: %v", err)
 	}
@@ -518,5 +534,103 @@ func TestServer_NilEventBatchRejectedByValidator(t *testing.T) {
 	// Harness never recorded the rejected batch.
 	if got := len(srv.Batches()); got != 0 {
 		t.Errorf("Batches len=%d, want 0 (rejected batch must not be tallied)", got)
+	}
+}
+
+// sendCompressedBatch is a test helper: marshals events into
+// UncompressedEvents bytes, compresses with the named algo via the
+// production compress.NewEncoder, and sends as a CompressedPayload-
+// shaped EventBatch. Used by the zstd/gzip decode tests below.
+func sendCompressedBatch(t *testing.T, conn testserver.Conn, algo string, events []*wtpv1.CompactEvent) {
+	t.Helper()
+	enc, err := compress.NewEncoder(algo, 3, 6)
+	if err != nil {
+		t.Fatalf("NewEncoder(%q): %v", algo, err)
+	}
+	raw, err := proto.Marshal(&wtpv1.UncompressedEvents{Events: events})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	cz, err := enc.Encode(raw)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	msg := &wtpv1.ClientMessage{
+		Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: &wtpv1.EventBatch{
+			FromSequence: events[0].Sequence,
+			ToSequence:   events[len(events)-1].Sequence,
+			Generation:   events[0].Generation,
+			Compression:  enc.Algo(),
+			Body:         &wtpv1.EventBatch_CompressedPayload{CompressedPayload: cz},
+		}},
+	}
+	if err := conn.Send(msg); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+}
+
+// TestAssertSequenceRange_DecodesZstdBatch verifies that the assertion
+// helpers transparently decode a zstd-compressed EventBatch and accept
+// its sequences as if it had been sent uncompressed.
+func TestAssertSequenceRange_DecodesZstdBatch(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	defer srv.Close()
+
+	conn, err := srv.Dial(context.Background())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	sendSessionInit(t, conn)
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv SessionAck: %v", err)
+	}
+
+	events := []*wtpv1.CompactEvent{
+		{Sequence: 1, Generation: 1},
+		{Sequence: 2, Generation: 1},
+	}
+	sendCompressedBatch(t, conn, "zstd", events)
+
+	if _, err := srv.WaitForFirstBatch(2 * time.Second); err != nil {
+		t.Fatalf("WaitForFirstBatch: %v", err)
+	}
+
+	if err := srv.AssertSequenceRange(1, 2); err != nil {
+		t.Fatalf("AssertSequenceRange(zstd): %v", err)
+	}
+}
+
+// TestAssertSequenceRange_DecodesGzipBatch verifies that the assertion
+// helpers transparently decode a gzip-compressed EventBatch and accept
+// its sequences as if it had been sent uncompressed.
+func TestAssertSequenceRange_DecodesGzipBatch(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	defer srv.Close()
+
+	conn, err := srv.Dial(context.Background())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	sendSessionInit(t, conn)
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv SessionAck: %v", err)
+	}
+
+	events := []*wtpv1.CompactEvent{
+		{Sequence: 1, Generation: 1},
+		{Sequence: 2, Generation: 1},
+	}
+	sendCompressedBatch(t, conn, "gzip", events)
+
+	if _, err := srv.WaitForFirstBatch(2 * time.Second); err != nil {
+		t.Fatalf("WaitForFirstBatch: %v", err)
+	}
+
+	if err := srv.AssertSequenceRange(1, 2); err != nil {
+		t.Fatalf("AssertSequenceRange(gzip): %v", err)
 	}
 }

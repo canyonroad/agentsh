@@ -948,8 +948,9 @@ type WatchtowerBatchConfig struct {
 	MaxBytes      int           `yaml:"max_bytes"`
 	MaxTimespan   time.Duration `yaml:"max_timespan"`
 	FlushInterval time.Duration `yaml:"flush_interval"`
-	Compression   string        `yaml:"compression"` // zstd (default) | gzip | none
-	ZstdLevel     int           `yaml:"zstd_level"`
+	Compression   string        `yaml:"compression"` // zstd | gzip | none (default)
+	ZstdLevel     int           `yaml:"zstd_level"`  // 1..22, default 3 (only used when compression="zstd")
+	GzipLevel     int           `yaml:"gzip_level"`  // 1..9,  default 6 (only used when compression="gzip")
 }
 
 type WatchtowerWALConfig struct {
@@ -996,6 +997,9 @@ func (w *AuditWatchtowerConfig) applyDefaults() {
 		}
 		if w.Batch.ZstdLevel == 0 {
 			w.Batch.ZstdLevel = 3
+		}
+		if w.Batch.GzipLevel == 0 {
+			w.Batch.GzipLevel = 6
 		}
 		if w.WAL.SegmentSize == 0 {
 			w.WAL.SegmentSize = 16 * 1024 * 1024
@@ -1206,13 +1210,15 @@ func (w *AuditWatchtowerConfig) validate() error {
 	}
 	switch w.Batch.Compression {
 	case "none":
-		// Supported: transport always sends COMPRESSION_NONE today.
-	case "zstd", "gzip":
-		// These compression algorithms are validated in the schema but not yet
-		// implemented in the transport (batches are always sent as
-		// COMPRESSION_NONE). Reject them at config validation time so operators
-		// see a clear error rather than silently having compression ignored.
-		return fmt.Errorf("audit.watchtower.batch.compression %q: only \"none\" is supported until batch compression is implemented in the transport", w.Batch.Compression)
+		// nothing to validate.
+	case "zstd":
+		if w.Batch.ZstdLevel < 1 || w.Batch.ZstdLevel > 22 {
+			return fmt.Errorf("audit.watchtower.batch.zstd_level %d: must be in [1,22]", w.Batch.ZstdLevel)
+		}
+	case "gzip":
+		if w.Batch.GzipLevel < 1 || w.Batch.GzipLevel > 9 {
+			return fmt.Errorf("audit.watchtower.batch.gzip_level %d: must be in [1,9]", w.Batch.GzipLevel)
+		}
 	default:
 		return fmt.Errorf("audit.watchtower.batch.compression %q: must be zstd, gzip, or none", w.Batch.Compression)
 	}

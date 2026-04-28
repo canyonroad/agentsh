@@ -114,6 +114,22 @@ type Options struct {
 	// original wire schema.
 	EmitExtendedLossReasons bool
 
+	// CompressionAlgo selects the algorithm used by the WTP transport
+	// for per-batch payload compression. Valid values: "none" (default),
+	// "zstd", "gzip". Empty string is treated as "none". The config
+	// layer (audit.watchtower.batch.compression) wires the operator-
+	// configured value here; see buildWatchtowerStore in
+	// internal/server/wtp.go.
+	CompressionAlgo string
+
+	// ZstdLevel and GzipLevel are the codec-specific compression levels
+	// applied when CompressionAlgo selects the corresponding codec; the
+	// other field is ignored. Zero is INVALID in production — the config
+	// layer's applyDefaults seeds zstd=3, gzip=6 before threading values
+	// here. NewEncoder rejects zero with a level-out-of-range error.
+	ZstdLevel int
+	GzipLevel int
+
 	// MaxInflight overrides the default in-flight window (8) for tests
 	// that need fine-grained back-pressure control. Zero means "use the
 	// default". Production callers leave this zero; tests set it to 1
@@ -303,6 +319,27 @@ func (o *Options) validate() error {
 	}
 	if o.SinkChainOverrideForTests != nil && !o.AllowSinkChainOverrideForTests {
 		return errors.New("watchtower: SinkChainOverrideForTests must be nil in production (set AllowSinkChainOverrideForTests in tests that need the seam)")
+	}
+	// Compression configuration: defense-in-depth. The upstream
+	// internal/config validator should reject bad values, but
+	// watchtower.New is also reachable from tests and direct programmatic
+	// use that bypass that path. Empty string is treated as "none" at
+	// construction time (see compress.go); we accept it here without
+	// requiring level fields, since the codec is inert. Level bounds
+	// mirror NewEncoder's accepted range: zstd [1,22], gzip [1,9].
+	switch o.CompressionAlgo {
+	case "", "none":
+		// ok; "" normalized to "none" at construction time.
+	case "zstd":
+		if o.ZstdLevel < 1 || o.ZstdLevel > 22 {
+			return fmt.Errorf("watchtower.Options: ZstdLevel %d: must be in [1,22] when CompressionAlgo=zstd", o.ZstdLevel)
+		}
+	case "gzip":
+		if o.GzipLevel < 1 || o.GzipLevel > 9 {
+			return fmt.Errorf("watchtower.Options: GzipLevel %d: must be in [1,9] when CompressionAlgo=gzip", o.GzipLevel)
+		}
+	default:
+		return fmt.Errorf("watchtower.Options: CompressionAlgo %q: must be \"\", \"none\", \"zstd\", or \"gzip\"", o.CompressionAlgo)
 	}
 	return nil
 }

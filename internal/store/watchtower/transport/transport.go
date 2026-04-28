@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/metrics"
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport/compress"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"golang.org/x/time/rate"
@@ -24,6 +25,16 @@ type Metrics interface {
 	IncResendNeeded()
 	IncAckRegressionLoss()
 	IncDroppedInvalidFrame(reason metrics.WTPInvalidFrameReason)
+
+	// Compression metrics (Task 8 of 2026-04-27 batch-compression plan).
+	// Production implementer is *internal/metrics.WTPMetrics, which
+	// gained these methods in Task 4. The encoder's compressMetrics
+	// interface (state_live.go) is satisfied by anything with these
+	// four methods, so production wires *WTPMetrics directly.
+	IncCompressError(algo string)
+	ObserveBatchCompressionRatio(algo string, ratio float64)
+	AddBatchUncompressedBytes(algo string, n int)
+	AddBatchCompressedBytes(algo string, n int)
 }
 
 type noopMetrics struct{}
@@ -33,6 +44,10 @@ func (noopMetrics) IncAnomalousAck(string)                               {}
 func (noopMetrics) IncResendNeeded()                                     {}
 func (noopMetrics) IncAckRegressionLoss()                                {}
 func (noopMetrics) IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason) {}
+func (noopMetrics) IncCompressError(string)                              {}
+func (noopMetrics) ObserveBatchCompressionRatio(string, float64)         {}
+func (noopMetrics) AddBatchUncompressedBytes(string, int)                {}
+func (noopMetrics) AddBatchCompressedBytes(string, int)                  {}
 
 // AckTuple is the persisted (gen, seq) ack pair seeded from wal.Meta on
 // cold start. Present=false means the WAL has never recorded an ack
@@ -214,6 +229,15 @@ type Options struct {
 	// production callers leave this false until the feature is enabled
 	// (internal/server/wtp.go buildWatchtowerStore).
 	EmitExtendedLossReasons bool
+
+	// Compressor is the per-Transport encoder used to compress
+	// EventBatch bodies. nil means "use COMPRESSION_NONE for every
+	// batch" — the behavior that predates this option. New() defaults
+	// a nil Compressor to the noneEncoder so callers always have a
+	// non-nil encoder. Constructed once at store-build time; not
+	// goroutine-safe across Transports but reused serially within one
+	// Transport.
+	Compressor compress.Encoder
 }
 
 // validate enforces the construction-time invariants documented on
@@ -336,6 +360,13 @@ type Transport struct {
 	// binaries that run multiple Stores with different flag values do not
 	// race on a shared global.
 	emitExtendedLossReasons bool
+
+	// compressor is the per-Transport batch encoder captured from
+	// Options.Compressor at New() time. Defaulted to a noneEncoder
+	// when Options.Compressor is nil so callers downstream can
+	// always invoke it without nil-checks. Not consumed yet; Task 8
+	// wires encodeBatchMessage to call it.
+	compressor compress.Encoder
 }
 
 // New constructs a Transport. It does not dial; call Run to start.
@@ -366,6 +397,10 @@ func New(opts Options) (*Transport, error) {
 		stopCh:                  make(chan stopReq, 1),
 		runDone:                 make(chan struct{}),
 		emitExtendedLossReasons: opts.EmitExtendedLossReasons,
+		compressor:              opts.Compressor,
+	}
+	if t.compressor == nil {
+		t.compressor = noneCompressorSingleton
 	}
 	if opts.InitialAckTuple != nil && opts.InitialAckTuple.Present {
 		seed := AckCursor{
@@ -407,6 +442,15 @@ func (t *Transport) RejectReason() string {
 // store.go correctly wires opts.LogGoawayMessage through to transport.New.
 func (t *Transport) LogGoawayMessage() bool {
 	return t.opts.LogGoawayMessage
+}
+
+// CompressorAlgo returns the wtpv1.Compression value produced by the
+// Transport's configured compressor. Used by tests asserting the
+// wire-through path from watchtower.Options → transport.Options →
+// Transport.compressor. Production code should not call this — it
+// reaches inside the encoder seam.
+func (t *Transport) CompressorAlgo() wtpv1.Compression {
+	return t.compressor.Algo()
 }
 
 // stopReq carries a Stop request through the run loop. The done channel

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport/compress"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
@@ -107,7 +108,7 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 			return StateConnecting, fmt.Errorf("replay batch: %w", err)
 		}
 		if len(batch.Records) > 0 {
-			msgs, err := buildEventBatchFn(batch.Records, t.emitExtendedLossReasons)
+			msgs, err := buildEventBatchFn(batch.Records, t.emitExtendedLossReasons, t.compressor, t.opts.Metrics)
 			if err != nil {
 				_ = t.conn.Close()
 				t.teardownRecv()
@@ -144,6 +145,6 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 // Tests that need to assert against a custom wire shape can override
 // via setBuildEventBatchFnForTest (see state_replaying_internal_test.go).
 // Production code MUST NOT mutate this variable.
-var buildEventBatchFn = func(records []wal.Record, emitExtended bool) ([]*wtpv1.ClientMessage, error) {
-	return encodeBatchMessage(records, emitExtended)
+var buildEventBatchFn = func(records []wal.Record, emitExtended bool, compressor compress.Encoder, m compressMetrics) ([]*wtpv1.ClientMessage, error) {
+	return encodeBatchMessageWithCompressor(records, emitExtended, compressor, m)
 }

@@ -724,3 +724,116 @@ func TestWTPMetrics_ReconnectsAlwaysEmittedIncludesFailClosedControlFrameLabels(
 		}
 	}
 }
+
+// --------------------------------------------------------------------
+// Task 4 (batch-compression plan): metrics surface for compression.
+// --------------------------------------------------------------------
+
+func TestWTPMetrics_BatchCompressionRatio(t *testing.T) {
+	c := New()
+	w := c.WTP()
+	w.ObserveBatchCompressionRatio("zstd", 0.25)
+	w.ObserveBatchCompressionRatio("zstd", 0.40)
+	w.ObserveBatchCompressionRatio("gzip", 0.55)
+
+	body := scrape(t, c)
+	for _, want := range []string{
+		`wtp_batch_compression_ratio_count{algo="zstd"} 2`,
+		`wtp_batch_compression_ratio_count{algo="gzip"} 1`,
+		`wtp_batch_compression_ratio_bucket{algo="zstd",le="0.5"} 2`, // both 0.25 and 0.40 land here
+		`wtp_batch_compression_ratio_bucket{algo="gzip",le="0.5"} 0`, // 0.55 is above 0.5
+		`wtp_batch_compression_ratio_bucket{algo="gzip",le="0.75"} 1`,
+		`wtp_batch_compression_ratio_bucket{algo="zstd",le="+Inf"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing line %q\nbody:\n%s", want, body)
+		}
+	}
+}
+
+func TestWTPMetrics_BatchCompressionRatio_AlwaysEmitsBothAlgos(t *testing.T) {
+	c := New()
+	body := scrape(t, c)
+	// Without any Observe calls, both algos must still appear at zero in
+	// the canonical bucket set, count, and sum.
+	for _, want := range []string{
+		`wtp_batch_compression_ratio_count{algo="zstd"} 0`,
+		`wtp_batch_compression_ratio_count{algo="gzip"} 0`,
+		`wtp_batch_compression_ratio_sum{algo="zstd"} 0`,
+		`wtp_batch_compression_ratio_sum{algo="gzip"} 0`,
+		`wtp_batch_compression_ratio_bucket{algo="zstd",le="+Inf"} 0`,
+		`wtp_batch_compression_ratio_bucket{algo="gzip",le="+Inf"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing always-emit line %q\nbody:\n%s", want, body)
+		}
+	}
+}
+
+func TestWTPMetrics_BatchByteCounters(t *testing.T) {
+	c := New()
+	w := c.WTP()
+	w.AddBatchUncompressedBytes("zstd", 10000)
+	w.AddBatchCompressedBytes("zstd", 2500)
+
+	body := scrape(t, c)
+	for _, want := range []string{
+		`wtp_batch_uncompressed_bytes_total{algo="zstd"} 10000`,
+		`wtp_batch_compressed_bytes_total{algo="zstd"} 2500`,
+		// Always-emit for the other algo at zero.
+		`wtp_batch_uncompressed_bytes_total{algo="gzip"} 0`,
+		`wtp_batch_compressed_bytes_total{algo="gzip"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing line %q\nbody:\n%s", want, body)
+		}
+	}
+}
+
+func TestWTPMetrics_CompressErrorAlwaysEmittedAllAlgos(t *testing.T) {
+	c := New()
+	body := scrape(t, c)
+	for _, want := range []string{
+		`wtp_compress_error_total{algo="zstd"} 0`,
+		`wtp_compress_error_total{algo="gzip"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing initial-zero line %q\nbody:\n%s", want, body)
+		}
+	}
+	c.WTP().IncCompressError("zstd")
+	body = scrape(t, c)
+	if !strings.Contains(body, `wtp_compress_error_total{algo="zstd"} 1`) {
+		t.Errorf("missing post-inc line\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_compress_error_total{algo="gzip"} 0`) {
+		t.Errorf("gzip should still be zero\nbody:\n%s", body)
+	}
+}
+
+func TestWTPMetrics_DecompressErrorAlwaysEmittedAllAlgosAndReasons(t *testing.T) {
+	c := New()
+	body := scrape(t, c)
+	for _, algo := range []string{"zstd", "gzip"} {
+		for _, reason := range []string{"decode_error", "oversize", "proto_unmarshal"} {
+			want := fmt.Sprintf(`wtp_decompress_error_total{algo=%q,reason=%q} 0`, algo, reason)
+			if !strings.Contains(body, want) {
+				t.Errorf("missing always-emit line %q\nbody:\n%s", want, body)
+			}
+		}
+	}
+	c.WTP().IncDecompressError("zstd", "oversize")
+	body = scrape(t, c)
+	if !strings.Contains(body, `wtp_decompress_error_total{algo="zstd",reason="oversize"} 1`) {
+		t.Errorf("missing post-inc line\nbody:\n%s", body)
+	}
+}
+
+// scrape renders the Prometheus exposition for the Collector and returns
+// it as a string. Used by Task 4 compression-metrics tests.
+func scrape(t *testing.T, c *Collector) string {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	return rr.Body.String()
+}

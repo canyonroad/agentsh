@@ -344,3 +344,92 @@ func TestStore_ErrIsNonBlocking(t *testing.T) {
 		t.Fatal("Err() did not return within 500ms; expected non-blocking peek")
 	}
 }
+
+// TestOptions_CompressionValidation locks in the validate() contract
+// for CompressionAlgo / ZstdLevel / GzipLevel. The upstream
+// internal/config validator is the primary gate; this is defense-in-
+// depth for tests and direct programmatic callers that bypass config.
+func TestOptions_CompressionValidation(t *testing.T) {
+	t.Run("empty_algo_ok", func(t *testing.T) {
+		opts := validOpts(t.TempDir())
+		opts.CompressionAlgo = ""
+		s, err := watchtower.New(context.Background(), opts)
+		if err != nil {
+			t.Fatalf("expected New to accept empty CompressionAlgo, got: %v", err)
+		}
+		defer closeStore(t, s)
+	})
+	t.Run("none_ok", func(t *testing.T) {
+		opts := validOpts(t.TempDir())
+		opts.CompressionAlgo = "none"
+		s, err := watchtower.New(context.Background(), opts)
+		if err != nil {
+			t.Fatalf("expected New to accept CompressionAlgo=none, got: %v", err)
+		}
+		defer closeStore(t, s)
+	})
+	t.Run("zstd_valid_level_ok", func(t *testing.T) {
+		opts := validOpts(t.TempDir())
+		opts.CompressionAlgo = "zstd"
+		opts.ZstdLevel = 3
+		s, err := watchtower.New(context.Background(), opts)
+		if err != nil {
+			t.Fatalf("expected New to accept zstd with level=3, got: %v", err)
+		}
+		defer closeStore(t, s)
+	})
+	t.Run("gzip_valid_level_ok", func(t *testing.T) {
+		opts := validOpts(t.TempDir())
+		opts.CompressionAlgo = "gzip"
+		opts.GzipLevel = 6
+		s, err := watchtower.New(context.Background(), opts)
+		if err != nil {
+			t.Fatalf("expected New to accept gzip with level=6, got: %v", err)
+		}
+		defer closeStore(t, s)
+	})
+	t.Run("zstd_level_too_low_rejected", func(t *testing.T) {
+		opts := validOpts(t.TempDir())
+		opts.CompressionAlgo = "zstd"
+		opts.ZstdLevel = 0
+		_, err := watchtower.New(context.Background(), opts)
+		if err == nil || !strings.Contains(err.Error(), "ZstdLevel") {
+			t.Fatalf("expected ZstdLevel error, got: %v", err)
+		}
+	})
+	t.Run("zstd_level_too_high_rejected", func(t *testing.T) {
+		opts := validOpts(t.TempDir())
+		opts.CompressionAlgo = "zstd"
+		opts.ZstdLevel = 23
+		_, err := watchtower.New(context.Background(), opts)
+		if err == nil || !strings.Contains(err.Error(), "ZstdLevel") {
+			t.Fatalf("expected ZstdLevel error, got: %v", err)
+		}
+	})
+	t.Run("gzip_level_too_low_rejected", func(t *testing.T) {
+		opts := validOpts(t.TempDir())
+		opts.CompressionAlgo = "gzip"
+		opts.GzipLevel = 0
+		_, err := watchtower.New(context.Background(), opts)
+		if err == nil || !strings.Contains(err.Error(), "GzipLevel") {
+			t.Fatalf("expected GzipLevel error, got: %v", err)
+		}
+	})
+	t.Run("gzip_level_too_high_rejected", func(t *testing.T) {
+		opts := validOpts(t.TempDir())
+		opts.CompressionAlgo = "gzip"
+		opts.GzipLevel = 10
+		_, err := watchtower.New(context.Background(), opts)
+		if err == nil || !strings.Contains(err.Error(), "GzipLevel") {
+			t.Fatalf("expected GzipLevel error, got: %v", err)
+		}
+	})
+	t.Run("unknown_algo_rejected", func(t *testing.T) {
+		opts := validOpts(t.TempDir())
+		opts.CompressionAlgo = "snappy"
+		_, err := watchtower.New(context.Background(), opts)
+		if err == nil || !strings.Contains(err.Error(), "CompressionAlgo") {
+			t.Fatalf("expected CompressionAlgo error, got: %v", err)
+		}
+	})
+}

@@ -1,22 +1,30 @@
 package testserver
 
 import (
+	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+	"github.com/klauspost/compress/zstd"
 	"google.golang.org/protobuf/proto"
 )
 
 // ErrUnsupportedCompression is returned by the assertion helpers when
-// the Server has recorded an EventBatch whose Body is not an
-// UncompressedEvents oneof variant. The helpers CANNOT decode
-// compressed batches without a compression-specific codec (zstd /
-// lz4), which the MVP test harness does not carry as a dependency.
-// Tests that need sequence-level assertions MUST drive the Transport
-// in a configuration that produces uncompressed batches.
-var ErrUnsupportedCompression = errors.New("testserver: recorded batch body is not UncompressedEvents; assertion helpers cannot decode compressed batches")
+// the Server has recorded an EventBatch whose Compression enum value
+// is one the helper does not know how to decode — typically
+// COMPRESSION_UNSPECIFIED, or a future algorithm we have not been
+// taught. COMPRESSION_NONE, COMPRESSION_ZSTD, and COMPRESSION_GZIP
+// are all decoded transparently by the helpers; tests no longer need
+// to drive the Transport in an uncompressed-only configuration to
+// make sequence-level assertions work. Errors from the codecs
+// themselves (malformed payload, proto unmarshal failure) are also
+// wrapped in this sentinel so callers can use errors.Is to gate on
+// "the helpers could not extract events from this batch."
+var ErrUnsupportedCompression = errors.New("testserver: assertion helpers could not decode recorded batch body")
 
 // ErrInvalidRange is returned by AssertSequenceRange and
 // AssertReplayObserved when first > last. The helpers interpret the
@@ -59,13 +67,81 @@ func (s *Server) WaitForFirstBatch(deadline time.Duration) (*wtpv1.EventBatch, e
 	}
 }
 
+// decodeBatchEvents returns the CompactEvents inside an EventBatch,
+// transparently decoding zstd or gzip compressed_payload as needed.
+// Returns an error for any Compression value the helper does not
+// recognize (UNSPECIFIED, or a future algo we have not been taught).
+//
+// The decompressed read is bounded by wtpv1.MaxDecompressedBatchBytes
+// to mirror the production receiver's defensive cap; testserver tests
+// that exercise oversized inputs can rely on the same boundary.
+func decodeBatchEvents(b *wtpv1.EventBatch) ([]*wtpv1.CompactEvent, error) {
+	switch b.GetCompression() {
+	case wtpv1.Compression_COMPRESSION_NONE:
+		u := b.GetUncompressed()
+		if u == nil {
+			return nil, errors.New("body is not UncompressedEvents")
+		}
+		return u.Events, nil
+	case wtpv1.Compression_COMPRESSION_ZSTD:
+		raw, err := zstdDecodeBounded(b.GetCompressedPayload(), wtpv1.MaxDecompressedBatchBytes)
+		if err != nil {
+			return nil, fmt.Errorf("zstd decode: %w", err)
+		}
+		var u wtpv1.UncompressedEvents
+		if err := proto.Unmarshal(raw, &u); err != nil {
+			return nil, fmt.Errorf("proto unmarshal: %w", err)
+		}
+		return u.Events, nil
+	case wtpv1.Compression_COMPRESSION_GZIP:
+		raw, err := gzipDecodeBounded(b.GetCompressedPayload(), wtpv1.MaxDecompressedBatchBytes)
+		if err != nil {
+			return nil, fmt.Errorf("gzip decode: %w", err)
+		}
+		var u wtpv1.UncompressedEvents
+		if err := proto.Unmarshal(raw, &u); err != nil {
+			return nil, fmt.Errorf("proto unmarshal: %w", err)
+		}
+		return u.Events, nil
+	default:
+		return nil, fmt.Errorf("compression=%v not handled", b.GetCompression())
+	}
+}
+
+// zstdDecodeBounded decompresses the given zstd payload and returns
+// up to max+1 bytes. The +1 is intentional: callers can detect a cap
+// hit by observing len(out) > max rather than silently truncating at
+// exactly the cap. The testserver call sites do not currently enforce
+// the cap; production receivers will via the validator.
+func zstdDecodeBounded(in []byte, max int) ([]byte, error) {
+	r, err := zstd.NewReader(bytes.NewReader(in))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(io.LimitReader(r, int64(max)+1))
+}
+
+// gzipDecodeBounded decompresses the given gzip payload and returns
+// up to max+1 bytes. See zstdDecodeBounded for the cap-detection
+// rationale.
+func gzipDecodeBounded(in []byte, max int) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(in))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(io.LimitReader(r, int64(max)+1))
+}
+
 // compactEventSequences flattens every UncompressedEvents' CompactEvent
 // Sequence field across all recorded batches into an ordered slice.
-// Returns ErrUnsupportedCompression if any recorded batch's Body is
-// not an UncompressedEvents variant — the helpers cannot decode
-// compressed bodies without additional codec dependencies, and
-// silently skipping them would produce misleading "missing seq"
-// diagnostics.
+// Compressed bodies (zstd, gzip) are decoded transparently via
+// decodeBatchEvents. Returns ErrUnsupportedCompression (wrapping the
+// underlying decode error) if any recorded batch uses a Compression
+// enum value the helper does not recognize, or if a known codec
+// fails to decode its payload — silently skipping such batches would
+// produce misleading "missing seq" diagnostics.
 //
 // Non-goal: this helper does NOT validate CompactEvent.generation,
 // EventBatch.from_sequence / to_sequence, or the compression / body
@@ -75,11 +151,12 @@ func (s *Server) WaitForFirstBatch(deadline time.Duration) (*wtpv1.EventBatch, e
 func (s *Server) compactEventSequences() ([]uint64, error) {
 	out := []uint64{}
 	for i, b := range s.Batches() {
-		u := b.GetUncompressed()
-		if u == nil {
-			return nil, fmt.Errorf("%w (batch index=%d, compression=%v)", ErrUnsupportedCompression, i, b.GetCompression())
+		evs, err := decodeBatchEvents(b)
+		if err != nil {
+			return nil, fmt.Errorf("%w (batch index=%d, compression=%v): %v",
+				ErrUnsupportedCompression, i, b.GetCompression(), err)
 		}
-		for _, ev := range u.GetEvents() {
+		for _, ev := range evs {
 			out = append(out, ev.GetSequence())
 		}
 	}

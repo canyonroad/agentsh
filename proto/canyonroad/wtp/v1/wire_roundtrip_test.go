@@ -15,6 +15,8 @@ func TestWireGoldens_RoundTrip(t *testing.T) {
 	}{
 		{"compact_event.bin", func() proto.Message { return new(CompactEvent) }},
 		{"event_batch.bin", func() proto.Message { return new(EventBatch) }},
+		{"event_batch_zstd.bin", func() proto.Message { return new(EventBatch) }},
+		{"event_batch_gzip.bin", func() proto.Message { return new(EventBatch) }},
 		{"session_init.bin", func() proto.Message { return new(SessionInit) }},
 	}
 	for _, tc := range cases {

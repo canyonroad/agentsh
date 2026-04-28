@@ -55,7 +55,7 @@ func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Rea
 				break
 			}
 			if outBatch := b.Add(rec); outBatch != nil {
-				msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons)
+				msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons, t.compressor, t.opts.Metrics)
 				if err != nil {
 					break drainLoop
 				}
@@ -69,7 +69,7 @@ func (t *Transport) runShutdown(parent context.Context, b *Batcher, rdr *wal.Rea
 		}
 	}
 	if final := b.Drain(); final != nil {
-		msgs, err := encodeBatchMessageFn(final.Records, t.emitExtendedLossReasons)
+		msgs, err := encodeBatchMessageFn(final.Records, t.emitExtendedLossReasons, t.compressor, t.opts.Metrics)
 		if err == nil {
 			for _, msg := range msgs {
 				_ = t.conn.Send(msg)

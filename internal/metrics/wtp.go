@@ -455,6 +455,76 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 	fmt.Fprintf(w, "wtp_send_latency_seconds_bucket{le=\"+Inf\"} %d\n", bucketsSnapshot[len(wtpLatencyBucketsSeconds)])
 	fmt.Fprintf(w, "wtp_send_latency_seconds_sum %g\n", sumSnapshot)
 	fmt.Fprintf(w, "wtp_send_latency_seconds_count %d\n", countSnapshot)
+
+	// Task 4: batch-compression metrics. Five families, all with `algo`
+	// labels. Always-emit cross product so dashboards have a stable
+	// schema before any compression happens.
+
+	fmt.Fprint(w, "# HELP wtp_batch_compression_ratio Compressed/uncompressed size ratio per WTP batch.\n")
+	fmt.Fprint(w, "# TYPE wtp_batch_compression_ratio histogram\n")
+	for _, algo := range wtpCompressionAlgos {
+		var h *compressionRatioBuckets
+		switch algo {
+		case "zstd":
+			h = &c.wtpBatchCompressionRatioZstd
+		case "gzip":
+			h = &c.wtpBatchCompressionRatioGzip
+		}
+		h.mu.Lock()
+		bs := h.buckets
+		sum := h.sum
+		count := h.count
+		h.mu.Unlock()
+		for i, ub := range wtpCompressionRatioBucketsValues {
+			fmt.Fprintf(w, "wtp_batch_compression_ratio_bucket{algo=%q,le=\"%g\"} %d\n", algo, ub, bs[i])
+		}
+		fmt.Fprintf(w, "wtp_batch_compression_ratio_bucket{algo=%q,le=\"+Inf\"} %d\n", algo, bs[len(wtpCompressionRatioBucketsValues)])
+		fmt.Fprintf(w, "wtp_batch_compression_ratio_sum{algo=%q} %g\n", algo, sum)
+		fmt.Fprintf(w, "wtp_batch_compression_ratio_count{algo=%q} %d\n", algo, count)
+	}
+
+	fmt.Fprint(w, "# HELP wtp_batch_compressed_bytes_total Bytes emitted as EventBatch.compressed_payload, by algorithm.\n")
+	fmt.Fprint(w, "# TYPE wtp_batch_compressed_bytes_total counter\n")
+	for _, algo := range wtpCompressionAlgos {
+		var n uint64
+		if v, ok := c.wtpBatchCompressedBytesByAlgo.Load(algo); ok && v != nil {
+			n = v.(*atomic.Uint64).Load()
+		}
+		fmt.Fprintf(w, "wtp_batch_compressed_bytes_total{algo=%q} %d\n", algo, n)
+	}
+
+	fmt.Fprint(w, "# HELP wtp_batch_uncompressed_bytes_total Marshaled UncompressedEvents size pre-compression, by algorithm.\n")
+	fmt.Fprint(w, "# TYPE wtp_batch_uncompressed_bytes_total counter\n")
+	for _, algo := range wtpCompressionAlgos {
+		var n uint64
+		if v, ok := c.wtpBatchUncompressedBytesByAlgo.Load(algo); ok && v != nil {
+			n = v.(*atomic.Uint64).Load()
+		}
+		fmt.Fprintf(w, "wtp_batch_uncompressed_bytes_total{algo=%q} %d\n", algo, n)
+	}
+
+	fmt.Fprint(w, "# HELP wtp_compress_error_total Sender-side fail-open fallbacks: encoder returned an error and the batch was emitted as COMPRESSION_NONE.\n")
+	fmt.Fprint(w, "# TYPE wtp_compress_error_total counter\n")
+	for _, algo := range wtpCompressionAlgos {
+		var n uint64
+		if v, ok := c.wtpCompressErrorByAlgo.Load(algo); ok && v != nil {
+			n = v.(*atomic.Uint64).Load()
+		}
+		fmt.Fprintf(w, "wtp_compress_error_total{algo=%q} %d\n", algo, n)
+	}
+
+	fmt.Fprint(w, "# HELP wtp_decompress_error_total Receiver-side decode failures by algorithm and reason.\n")
+	fmt.Fprint(w, "# TYPE wtp_decompress_error_total counter\n")
+	for _, algo := range wtpCompressionAlgos {
+		for _, reason := range wtpDecompressReasons {
+			var n uint64
+			key := algo + "|" + reason
+			if v, ok := c.wtpDecompressErrorByLabels.Load(key); ok && v != nil {
+				n = v.(*atomic.Uint64).Load()
+			}
+			fmt.Fprintf(w, "wtp_decompress_error_total{algo=%q,reason=%q} %d\n", algo, reason, n)
+		}
+	}
 }
 
 // ----- Task 22a: sink-failure metrics --------------------------------
@@ -893,5 +963,134 @@ func (w *WTPMetrics) IncWALQuarantine(reason WTPWALQuarantineReason) {
 		reason = WTPWALQuarantineReasonUnknown
 	}
 	ptr, _ := w.c.wtpWALQuarantineByReason.LoadOrStore(string(reason), &atomic.Uint64{})
+	ptr.(*atomic.Uint64).Add(1)
+}
+
+// ----- Task 4: batch-compression metrics ----------------------------
+//
+// Five new families. All carry an `algo` label whose canonical, fixed
+// value set is wtpCompressionAlgos (currently "gzip", "zstd"). Adding
+// a new algorithm requires:
+//
+//   - extending wtpCompressionAlgos (in alphabetical order for stable
+//     emission),
+//   - adding a per-algo compressionRatioBuckets field on Collector,
+//   - extending the algo-switch in ObserveBatchCompressionRatio and the
+//     histogram-emit block in emitWTPMetrics.
+//
+// All five series follow the always-emit contract: every (algo) and
+// (algo, reason) combination in the canonical cross product appears in
+// the very first scrape with a zero value, even when no Observe/Inc
+// calls have happened yet. Counter helpers reject unrecognized algos so
+// out-of-band callers (typo, bug) don't pollute label cardinality —
+// bounded by the fixed set above.
+
+// wtpCompressionRatioBucketsValues is the fixed upper-bound set for the
+// wtp_batch_compression_ratio histogram. compressionRatioBuckets.buckets
+// is sized to len(wtpCompressionRatioBucketsValues)+1 (the implicit +Inf
+// bucket).
+var wtpCompressionRatioBucketsValues = []float64{0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0}
+
+// wtpCompressionAlgos is the canonical algo emission order
+// (alphabetical) shared by every batch-compression series.
+var wtpCompressionAlgos = []string{"gzip", "zstd"}
+
+// wtpDecompressReasons is the canonical reason set for the
+// wtp_decompress_error_total counter. Always-emit cross product is
+// len(wtpCompressionAlgos) * len(wtpDecompressReasons).
+var wtpDecompressReasons = []string{"decode_error", "oversize", "proto_unmarshal"}
+
+// ObserveBatchCompressionRatio records one compressed/uncompressed
+// size ratio for the wtp_batch_compression_ratio histogram. Unknown
+// algos are dropped silently (no observation, no error counter) — the
+// caller already validated `algo` against the encoder it constructed.
+func (w *WTPMetrics) ObserveBatchCompressionRatio(algo string, ratio float64) {
+	if w == nil || w.c == nil {
+		return
+	}
+	var h *compressionRatioBuckets
+	switch algo {
+	case "zstd":
+		h = &w.c.wtpBatchCompressionRatioZstd
+	case "gzip":
+		h = &w.c.wtpBatchCompressionRatioGzip
+	default:
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.count++
+	h.sum += ratio
+	for i, ub := range wtpCompressionRatioBucketsValues {
+		if ratio <= ub {
+			h.buckets[i]++
+		}
+	}
+	h.buckets[len(wtpCompressionRatioBucketsValues)]++ // +Inf
+}
+
+// AddBatchUncompressedBytes adds n to wtp_batch_uncompressed_bytes_total
+// {algo}. Negative n and unknown algos are dropped.
+func (w *WTPMetrics) AddBatchUncompressedBytes(algo string, n int) {
+	if w == nil || w.c == nil || n < 0 {
+		return
+	}
+	if algo != "zstd" && algo != "gzip" {
+		return
+	}
+	ptr, _ := w.c.wtpBatchUncompressedBytesByAlgo.LoadOrStore(algo, &atomic.Uint64{})
+	ptr.(*atomic.Uint64).Add(uint64(n))
+}
+
+// AddBatchCompressedBytes adds n to wtp_batch_compressed_bytes_total
+// {algo}. Negative n and unknown algos are dropped.
+func (w *WTPMetrics) AddBatchCompressedBytes(algo string, n int) {
+	if w == nil || w.c == nil || n < 0 {
+		return
+	}
+	if algo != "zstd" && algo != "gzip" {
+		return
+	}
+	ptr, _ := w.c.wtpBatchCompressedBytesByAlgo.LoadOrStore(algo, &atomic.Uint64{})
+	ptr.(*atomic.Uint64).Add(uint64(n))
+}
+
+// IncCompressError increments wtp_compress_error_total{algo}. Used on
+// sender-side fail-open fallback when the encoder returned an error
+// and the batch was emitted as COMPRESSION_NONE. Unknown algos are
+// dropped.
+func (w *WTPMetrics) IncCompressError(algo string) {
+	if w == nil || w.c == nil {
+		return
+	}
+	if algo != "zstd" && algo != "gzip" {
+		return
+	}
+	ptr, _ := w.c.wtpCompressErrorByAlgo.LoadOrStore(algo, &atomic.Uint64{})
+	ptr.(*atomic.Uint64).Add(1)
+}
+
+// IncDecompressError increments wtp_decompress_error_total{algo,reason}.
+// Used by the receiver to count decode failures. Unknown algos and
+// reasons are dropped to bound label cardinality.
+func (w *WTPMetrics) IncDecompressError(algo, reason string) {
+	if w == nil || w.c == nil {
+		return
+	}
+	if algo != "zstd" && algo != "gzip" {
+		return
+	}
+	valid := false
+	for _, r := range wtpDecompressReasons {
+		if r == reason {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return
+	}
+	key := algo + "|" + reason
+	ptr, _ := w.c.wtpDecompressErrorByLabels.LoadOrStore(key, &atomic.Uint64{})
 	ptr.(*atomic.Uint64).Add(1)
 }
