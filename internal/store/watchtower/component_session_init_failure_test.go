@@ -46,6 +46,13 @@ func scrapeMetricsFor(t *testing.T, c *metrics.Collector) string {
 // fragile when the metric ticks more than once (e.g. retried paths
 // like recv_failed and unexpected_message that loop through Connecting
 // backoff). Capturing the count and asserting >= 1 sidesteps that.
+//
+// TODO: a parallel helper for wtp_dropped_invalid_frame_total lives in
+// component_invalid_frame_test.go. If a third metric-counter component
+// test arrives, extract a shared metricCounterRE(metricName, reason)
+// + waitForMetricCounter helper into a new
+// component_metrics_helpers_test.go file rather than cloning a third
+// time.
 func reasonCounterRE(reason string) *regexp.Regexp {
 	return regexp.MustCompile(`wtp_session_init_failures_total\{reason="` + regexp.QuoteMeta(reason) + `"\} (\d+)`)
 }

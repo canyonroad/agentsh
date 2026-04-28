@@ -22,6 +22,13 @@ import (
 // targets the dropped-invalid-frame counter family wired by
 // transport.ClassifyAndIncInvalidFrame on recv-side validation
 // failures (recv_multiplexer.go Task 9).
+//
+// TODO: a parallel helper for wtp_session_init_failures_total lives in
+// component_session_init_failure_test.go. If a third metric-counter
+// component test arrives, extract a shared
+// metricCounterRE(metricName, reason) helper into a new
+// component_metrics_helpers_test.go file rather than cloning a third
+// time.
 func invalidFrameReasonCounterRE(reason string) *regexp.Regexp {
 	return regexp.MustCompile(`wtp_dropped_invalid_frame_total\{reason="` + regexp.QuoteMeta(reason) + `"\} (\d+)`)
 }
