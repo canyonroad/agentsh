@@ -1,5 +1,9 @@
 package watchtower
 
+import (
+	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+)
+
 // Test-only inspectors exported for sibling _test.go files in this and
 // other packages. The _test.go suffix excludes this file from
 // production builds automatically — no build tag needed.
@@ -35,5 +39,19 @@ func (s *Store) OptsLogGoawayMessageForTest() bool {
 // Options.LogGoawayMessage was set to, causing the assertion to fail.
 func (s *Store) TransportLogGoawayMessageForTest() bool {
 	return s.tr.LogGoawayMessage()
+}
+
+// OptsCompressionAlgoForTest returns the Options.CompressionAlgo value
+// the Store was constructed with.
+func (s *Store) OptsCompressionAlgoForTest() string {
+	return s.opts.CompressionAlgo
+}
+
+// TransportCompressorAlgoForTest returns the Compression enum the
+// Transport's compressor reports via Algo(). If store.go ever stops
+// constructing a compressor from opts.CompressionAlgo, this returns
+// COMPRESSION_NONE (the noneEncoder default applied in transport.New).
+func (s *Store) TransportCompressorAlgoForTest() wtpv1.Compression {
+	return s.tr.CompressorAlgo()
 }
 

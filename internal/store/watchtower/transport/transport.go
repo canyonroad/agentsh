@@ -431,6 +431,15 @@ func (t *Transport) LogGoawayMessage() bool {
 	return t.opts.LogGoawayMessage
 }
 
+// CompressorAlgo returns the wtpv1.Compression value produced by the
+// Transport's configured compressor. Used by tests asserting the
+// wire-through path from watchtower.Options → transport.Options →
+// Transport.compressor. Production code should not call this — it
+// reaches inside the encoder seam.
+func (t *Transport) CompressorAlgo() wtpv1.Compression {
+	return t.compressor.Algo()
+}
+
 // stopReq carries a Stop request through the run loop. The done channel
 // is closed by whichever loop branch services the request, which
 // unblocks the Stop caller. drainDeadline bounds how long runShutdown

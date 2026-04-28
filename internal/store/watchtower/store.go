@@ -15,6 +15,7 @@ import (
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport/compress"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
@@ -362,6 +363,16 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		tpAlgo = wtpv1.HashAlgorithm_HASH_ALGORITHM_HMAC_SHA256
 	}
 
+	compressionAlgo := opts.CompressionAlgo
+	if compressionAlgo == "" {
+		compressionAlgo = "none"
+	}
+	compressor, err := compress.NewEncoder(compressionAlgo, opts.ZstdLevel, opts.GzipLevel)
+	if err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("watchtower: compress encoder: %w", err)
+	}
+
 	tr, err := transport.New(transport.Options{
 		Dialer:           dialer,
 		AgentID:          opts.AgentID,
@@ -383,6 +394,7 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		KeyFingerprint:          opts.KeyFingerprint,
 		ContextDigest:           ctxDigest,
 		EmitExtendedLossReasons: opts.EmitExtendedLossReasons,
+		Compressor:              compressor,
 	})
 	if err != nil {
 		_ = w.Close()
