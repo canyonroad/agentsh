@@ -52,6 +52,13 @@ func LoadSkill(path string, limits LoaderLimits) (*SkillRef, map[string][]byte, 
 		if err != nil {
 			return err
 		}
+		// Reject symlinks before any other check — a symlink to a dir would
+		// otherwise be followed, and a symlink to a large/sensitive file would
+		// bypass the per-file size cap because d.Info().Size() returns the
+		// symlink's own (tiny) size while os.ReadFile reads the target.
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("loader: symlinks are not allowed (%s)", p)
+		}
 		if d.IsDir() {
 			// Skip .git internals from the file map; we read .git/config separately.
 			if filepath.Base(p) == ".git" && p != abs {

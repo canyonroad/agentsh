@@ -1,7 +1,9 @@
 package skillcheck
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -84,4 +86,25 @@ func keysOf(m map[string][]byte) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func TestLoadSkill_RejectsSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink permissions vary on Windows; covered on unix")
+	}
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "SKILL.md"), []byte("---\nname: x\n---\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Plant a symlink that would otherwise pull in /etc/passwd content.
+	if err := os.Symlink("/etc/passwd", filepath.Join(tmp, "evil.txt")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	_, _, err := LoadSkill(tmp, DefaultLoaderLimits())
+	if err == nil {
+		t.Fatalf("expected error for skill containing symlink")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("error should mention symlinks; got %v", err)
+	}
 }
