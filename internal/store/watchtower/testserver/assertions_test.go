@@ -11,7 +11,9 @@ import (
 
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/testserver"
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport/compress"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // sendUncompressedBatch is a test helper that sends an EventBatch
@@ -518,5 +520,103 @@ func TestServer_NilEventBatchRejectedByValidator(t *testing.T) {
 	// Harness never recorded the rejected batch.
 	if got := len(srv.Batches()); got != 0 {
 		t.Errorf("Batches len=%d, want 0 (rejected batch must not be tallied)", got)
+	}
+}
+
+// sendCompressedBatch is a test helper: marshals events into
+// UncompressedEvents bytes, compresses with the named algo via the
+// production compress.NewEncoder, and sends as a CompressedPayload-
+// shaped EventBatch. Used by the zstd/gzip decode tests below.
+func sendCompressedBatch(t *testing.T, conn testserver.Conn, algo string, events []*wtpv1.CompactEvent) {
+	t.Helper()
+	enc, err := compress.NewEncoder(algo, 3, 6)
+	if err != nil {
+		t.Fatalf("NewEncoder(%q): %v", algo, err)
+	}
+	raw, err := proto.Marshal(&wtpv1.UncompressedEvents{Events: events})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	cz, err := enc.Encode(raw)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	msg := &wtpv1.ClientMessage{
+		Msg: &wtpv1.ClientMessage_EventBatch{EventBatch: &wtpv1.EventBatch{
+			FromSequence: events[0].Sequence,
+			ToSequence:   events[len(events)-1].Sequence,
+			Generation:   events[0].Generation,
+			Compression:  enc.Algo(),
+			Body:         &wtpv1.EventBatch_CompressedPayload{CompressedPayload: cz},
+		}},
+	}
+	if err := conn.Send(msg); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+}
+
+// TestAssertSequenceRange_DecodesZstdBatch verifies that the assertion
+// helpers transparently decode a zstd-compressed EventBatch and accept
+// its sequences as if it had been sent uncompressed.
+func TestAssertSequenceRange_DecodesZstdBatch(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	defer srv.Close()
+
+	conn, err := srv.Dial(context.Background())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	sendSessionInit(t, conn)
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv SessionAck: %v", err)
+	}
+
+	events := []*wtpv1.CompactEvent{
+		{Sequence: 1, Generation: 1},
+		{Sequence: 2, Generation: 1},
+	}
+	sendCompressedBatch(t, conn, "zstd", events)
+
+	if _, err := srv.WaitForFirstBatch(2 * time.Second); err != nil {
+		t.Fatalf("WaitForFirstBatch: %v", err)
+	}
+
+	if err := srv.AssertSequenceRange(1, 2); err != nil {
+		t.Fatalf("AssertSequenceRange(zstd): %v", err)
+	}
+}
+
+// TestAssertSequenceRange_DecodesGzipBatch verifies that the assertion
+// helpers transparently decode a gzip-compressed EventBatch and accept
+// its sequences as if it had been sent uncompressed.
+func TestAssertSequenceRange_DecodesGzipBatch(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	defer srv.Close()
+
+	conn, err := srv.Dial(context.Background())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	sendSessionInit(t, conn)
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv SessionAck: %v", err)
+	}
+
+	events := []*wtpv1.CompactEvent{
+		{Sequence: 1, Generation: 1},
+		{Sequence: 2, Generation: 1},
+	}
+	sendCompressedBatch(t, conn, "gzip", events)
+
+	if _, err := srv.WaitForFirstBatch(2 * time.Second); err != nil {
+		t.Fatalf("WaitForFirstBatch: %v", err)
+	}
+
+	if err := srv.AssertSequenceRange(1, 2); err != nil {
+		t.Fatalf("AssertSequenceRange(gzip): %v", err)
 	}
 }
