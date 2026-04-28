@@ -207,24 +207,34 @@ func TestRecvMultiplexer_FailClosedWarnLogGoawayOptIn(t *testing.T) {
 
 // TestRecvMultiplexer_FailClosedWarnLogGoawayZeroValues exercises the
 // "field emitted at zero" contract for the Goaway branch — a
-// Code=UNSPECIFIED, RetryImmediately=false, Message="" goaway must
-// still emit goaway_code (with the enum's String() form for the
-// zero), goaway_retry_immediately=false (NOT absent), and
-// goaway_message_present=false. Under the opt-in mode, goaway_message
-// must be present with value "" (NOT absent).
+// RetryImmediately=false, Message="" goaway must still emit
+// goaway_code (with the enum's String() form), goaway_retry_immediately=false
+// (NOT absent), and goaway_message_present=false. Under the opt-in
+// mode, goaway_message must be present with value "" (NOT absent).
+//
+// Note: Code MUST be a non-UNSPECIFIED value because Task 9 inserted
+// a ValidateGoaway step at the top of the Goaway arm — UNSPECIFIED
+// is rejected as ReasonGoawayCodeUnspecified before reaching the
+// WARN site. The "field emitted at zero" contract this test
+// exercises is for the OTHER fields (retry_immediately, message),
+// which the validator does not touch.
 func TestRecvMultiplexer_FailClosedWarnLogGoawayZeroValues(t *testing.T) {
 	t.Run("default_mode", func(t *testing.T) {
 		fc := newRecvFakeConn()
 		tr, h := newFailClosedTransport(t, fc, false)
 		msg := &wtpv1.ServerMessage{
 			Msg: &wtpv1.ServerMessage_Goaway{
-				Goaway: &wtpv1.Goaway{}, // all zero
+				Goaway: &wtpv1.Goaway{
+					// Code MUST be non-UNSPECIFIED to pass validation.
+					Code: wtpv1.GoawayCode_GOAWAY_CODE_DRAINING,
+					// RetryImmediately and Message left at zero values.
+				},
 			},
 		}
 		_ = driveFailClosed(t, tr, fc, msg)
 		rec := findOneWarn(t, h, "goaway_received")
 		attrs := attrMap(rec)
-		checkAttrEq(t, attrs, "goaway_code", "GOAWAY_CODE_UNSPECIFIED")
+		checkAttrEq(t, attrs, "goaway_code", "GOAWAY_CODE_DRAINING")
 		checkAttrBool(t, attrs, "goaway_retry_immediately", false)
 		checkAttrBool(t, attrs, "goaway_message_present", false)
 		if _, present := attrs["goaway_message"]; present {
@@ -236,7 +246,9 @@ func TestRecvMultiplexer_FailClosedWarnLogGoawayZeroValues(t *testing.T) {
 		tr, h := newFailClosedTransport(t, fc, true)
 		msg := &wtpv1.ServerMessage{
 			Msg: &wtpv1.ServerMessage_Goaway{
-				Goaway: &wtpv1.Goaway{},
+				Goaway: &wtpv1.Goaway{
+					Code: wtpv1.GoawayCode_GOAWAY_CODE_DRAINING,
+				},
 			},
 		}
 		_ = driveFailClosed(t, tr, fc, msg)
@@ -258,7 +270,10 @@ func TestRecvMultiplexer_FailClosedWarnLogGoawaySanitization(t *testing.T) {
 		tr, h := newFailClosedTransport(t, fc, true)
 		msg := &wtpv1.ServerMessage{
 			Msg: &wtpv1.ServerMessage_Goaway{
-				Goaway: &wtpv1.Goaway{Message: "hello\x00\x01world\x7f"},
+				Goaway: &wtpv1.Goaway{
+					Code:    wtpv1.GoawayCode_GOAWAY_CODE_DRAINING,
+					Message: "hello\x00\x01world\x7f",
+				},
 			},
 		}
 		_ = driveFailClosed(t, tr, fc, msg)
@@ -274,7 +289,10 @@ func TestRecvMultiplexer_FailClosedWarnLogGoawaySanitization(t *testing.T) {
 		tr, h := newFailClosedTransport(t, fc, true)
 		msg := &wtpv1.ServerMessage{
 			Msg: &wtpv1.ServerMessage_Goaway{
-				Goaway: &wtpv1.Goaway{Message: "foo\tbar\nbaz"},
+				Goaway: &wtpv1.Goaway{
+					Code:    wtpv1.GoawayCode_GOAWAY_CODE_DRAINING,
+					Message: "foo\tbar\nbaz",
+				},
 			},
 		}
 		_ = driveFailClosed(t, tr, fc, msg)
@@ -293,7 +311,10 @@ func TestRecvMultiplexer_FailClosedWarnLogGoawaySanitization(t *testing.T) {
 		// UTF-8). strings.ToValidUTF8 must reject all of them.
 		msg := &wtpv1.ServerMessage{
 			Msg: &wtpv1.ServerMessage_Goaway{
-				Goaway: &wtpv1.Goaway{Message: "prefix\xff\xfe\xfd\xed\xa0\x80suffix"},
+				Goaway: &wtpv1.Goaway{
+					Code:    wtpv1.GoawayCode_GOAWAY_CODE_DRAINING,
+					Message: "prefix\xff\xfe\xfd\xed\xa0\x80suffix",
+				},
 			},
 		}
 		_ = driveFailClosed(t, tr, fc, msg)
@@ -311,7 +332,10 @@ func TestRecvMultiplexer_FailClosedWarnLogGoawaySanitization(t *testing.T) {
 		tr, h := newFailClosedTransport(t, fc, true)
 		msg := &wtpv1.ServerMessage{
 			Msg: &wtpv1.ServerMessage_Goaway{
-				Goaway: &wtpv1.Goaway{Message: strings.Repeat("a", 1024)},
+				Goaway: &wtpv1.Goaway{
+					Code:    wtpv1.GoawayCode_GOAWAY_CODE_DRAINING,
+					Message: strings.Repeat("a", 1024),
+				},
 			},
 		}
 		_ = driveFailClosed(t, tr, fc, msg)
@@ -345,7 +369,10 @@ func TestRecvMultiplexer_FailClosedWarnLogGoawaySanitization(t *testing.T) {
 
 		msg := &wtpv1.ServerMessage{
 			Msg: &wtpv1.ServerMessage_Goaway{
-				Goaway: &wtpv1.Goaway{Message: b.String()},
+				Goaway: &wtpv1.Goaway{
+					Code:    wtpv1.GoawayCode_GOAWAY_CODE_DRAINING,
+					Message: b.String(),
+				},
 			},
 		}
 		_ = driveFailClosed(t, tr, fc, msg)
@@ -375,7 +402,7 @@ func TestRecvMultiplexer_FailClosedWarnLogServerUpdate(t *testing.T) {
 	tr, h := newFailClosedTransport(t, fc, false)
 	msg := &wtpv1.ServerMessage{
 		Msg: &wtpv1.ServerMessage_ServerUpdate{
-			ServerUpdate: &wtpv1.SessionUpdate{},
+			ServerUpdate: &wtpv1.SessionUpdate{NewGeneration: 1},
 		},
 	}
 	if err := driveFailClosed(t, tr, fc, msg); err == nil {
