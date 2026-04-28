@@ -137,7 +137,7 @@ Five new metric families surface compression behavior. All are emitted at zero o
 
 **Operator alerts.** Recommended starting points:
 
-- Alert on `rate(wtp_compress_error_total[10m]) > 0` — non-zero indicates a regression in the codec or unexpected input that exercises the fail-open path. Should be flat-zero in steady state.
+- Notify-only on `rate(wtp_compress_error_total[10m]) > 0` — non-zero indicates a regression in the codec or unexpected input that exercises the fail-open path. Should be flat-zero in steady state. For paging, use a higher rate threshold matched to your batch volume (e.g. `> 0.01/s` over 10m for fleets emitting many batches per second) — single transient errors are not data-loss events and should not page.
 - Alert on `histogram_quantile(0.5, sum by (le, algo) (rate(wtp_batch_compression_ratio_bucket[5m]))) > 0.75` — if the median ratio drifts above 0.75 the codec is barely compressing; verify input shape or downgrade level.
 - Track `sum(rate(wtp_batch_compressed_bytes_total[1m])) / sum(rate(wtp_batch_uncompressed_bytes_total[1m]))` for the aggregate fleet ratio.
 
