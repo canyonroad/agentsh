@@ -277,3 +277,26 @@ func ValidateSessionInit(s *SessionInit) error {
 	}
 	return nil
 }
+
+// ValidateGoaway returns ReasonGoawayCodeUnspecified when the inbound
+// Goaway has code == GOAWAY_CODE_UNSPECIFIED — wire-incompatible per
+// the proto's UNSPECIFIED contract. Returns ReasonUnknown for nil
+// messages (a structural failure).
+//
+// Other Goaway fields (message, retry_immediately) have no MUST-be-set
+// invariants the validator can enforce statelessly.
+func ValidateGoaway(g *Goaway) error {
+	if g == nil {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: goaway is nil", ErrInvalidFrame),
+		}
+	}
+	if g.Code == GoawayCode_GOAWAY_CODE_UNSPECIFIED {
+		return &ValidationError{
+			Reason: ReasonGoawayCodeUnspecified,
+			Inner:  fmt.Errorf("%w: goaway code unspecified", ErrInvalidFrame),
+		}
+	}
+	return nil
+}

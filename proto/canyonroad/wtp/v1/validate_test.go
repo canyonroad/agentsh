@@ -94,3 +94,47 @@ func TestValidateSessionInit_HappyPath(t *testing.T) {
 		t.Errorf("happy path should validate; got %v", err)
 	}
 }
+
+func TestValidateGoaway_Nil(t *testing.T) {
+	err := ValidateGoaway(nil)
+	if err == nil {
+		t.Fatal("ValidateGoaway(nil): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("ValidateGoaway(nil) err type = %T; want *ValidationError", err)
+	}
+	if ve.Reason != ReasonUnknown {
+		t.Errorf("ValidateGoaway(nil) reason = %q; want %q", ve.Reason, ReasonUnknown)
+	}
+}
+
+func TestValidateGoaway_CodeUnspecified(t *testing.T) {
+	err := ValidateGoaway(&Goaway{Code: GoawayCode_GOAWAY_CODE_UNSPECIFIED})
+	if err == nil {
+		t.Fatal("ValidateGoaway(code=UNSPECIFIED): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err type = %T; want *ValidationError", err)
+	}
+	if ve.Reason != ReasonGoawayCodeUnspecified {
+		t.Errorf("reason = %q; want %q", ve.Reason, ReasonGoawayCodeUnspecified)
+	}
+}
+
+func TestValidateGoaway_HappyPath(t *testing.T) {
+	cases := []GoawayCode{
+		GoawayCode_GOAWAY_CODE_DRAINING,
+		GoawayCode_GOAWAY_CODE_OVERLOAD,
+		GoawayCode_GOAWAY_CODE_UPGRADE,
+		GoawayCode_GOAWAY_CODE_AUTH,
+	}
+	for _, c := range cases {
+		t.Run(c.String(), func(t *testing.T) {
+			if err := ValidateGoaway(&Goaway{Code: c}); err != nil {
+				t.Errorf("ValidateGoaway(code=%v): %v", c, err)
+			}
+		})
+	}
+}
