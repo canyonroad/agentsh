@@ -138,3 +138,42 @@ func TestValidateGoaway_HappyPath(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateSessionUpdate_Nil(t *testing.T) {
+	err := ValidateSessionUpdate(nil)
+	if err == nil {
+		t.Fatal("ValidateSessionUpdate(nil): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err type = %T; want *ValidationError", err)
+	}
+	if ve.Reason != ReasonUnknown {
+		t.Errorf("reason = %q; want %q", ve.Reason, ReasonUnknown)
+	}
+}
+
+func TestValidateSessionUpdate_GenerationZero(t *testing.T) {
+	err := ValidateSessionUpdate(&SessionUpdate{NewGeneration: 0, NewKeyFingerprint: "k", NewContextDigest: "d"})
+	if err == nil {
+		t.Fatal("ValidateSessionUpdate(gen=0): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err type = %T; want *ValidationError", err)
+	}
+	if ve.Reason != ReasonSessionUpdateGenerationInvalid {
+		t.Errorf("reason = %q; want %q", ve.Reason, ReasonSessionUpdateGenerationInvalid)
+	}
+}
+
+func TestValidateSessionUpdate_HappyPath(t *testing.T) {
+	if err := ValidateSessionUpdate(&SessionUpdate{
+		NewGeneration:     1,
+		NewKeyFingerprint: "k",
+		NewContextDigest:  "d",
+		BoundarySequence:  42,
+	}); err != nil {
+		t.Errorf("ValidateSessionUpdate: %v", err)
+	}
+}

@@ -300,3 +300,27 @@ func ValidateGoaway(g *Goaway) error {
 	}
 	return nil
 }
+
+// ValidateSessionUpdate returns ReasonSessionUpdateGenerationInvalid
+// when SessionUpdate.new_generation == 0 — rotation MUST monotonically
+// advance to a positive generation per the WTP client design (see
+// 2026-04-18-wtp-client-design.md). Returns ReasonUnknown for nil.
+//
+// State-dependent invariants ("new generation must be strictly higher
+// than current") are not the validator's concern; the rotation
+// handler enforces those (when Project C lands).
+func ValidateSessionUpdate(u *SessionUpdate) error {
+	if u == nil {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: session_update is nil", ErrInvalidFrame),
+		}
+	}
+	if u.NewGeneration == 0 {
+		return &ValidationError{
+			Reason: ReasonSessionUpdateGenerationInvalid,
+			Inner:  fmt.Errorf("%w: session_update new_generation == 0", ErrInvalidFrame),
+		}
+	}
+	return nil
+}
