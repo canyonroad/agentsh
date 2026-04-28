@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/metrics"
+	"github.com/agentsh/agentsh/internal/store/watchtower/transport/compress"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"golang.org/x/time/rate"
@@ -214,6 +215,15 @@ type Options struct {
 	// production callers leave this false until the feature is enabled
 	// (internal/server/wtp.go buildWatchtowerStore).
 	EmitExtendedLossReasons bool
+
+	// Compressor is the per-Transport encoder used to compress
+	// EventBatch bodies. nil means "use COMPRESSION_NONE for every
+	// batch" — the behavior that predates this option. New() defaults
+	// a nil Compressor to the noneEncoder so callers always have a
+	// non-nil encoder. Constructed once at store-build time; not
+	// goroutine-safe across Transports but reused serially within one
+	// Transport.
+	Compressor compress.Encoder
 }
 
 // validate enforces the construction-time invariants documented on
@@ -336,6 +346,13 @@ type Transport struct {
 	// binaries that run multiple Stores with different flag values do not
 	// race on a shared global.
 	emitExtendedLossReasons bool
+
+	// compressor is the per-Transport batch encoder captured from
+	// Options.Compressor at New() time. Defaulted to a noneEncoder
+	// when Options.Compressor is nil so callers downstream can
+	// always invoke it without nil-checks. Not consumed yet; Task 8
+	// wires encodeBatchMessage to call it.
+	compressor compress.Encoder
 }
 
 // New constructs a Transport. It does not dial; call Run to start.
@@ -366,6 +383,11 @@ func New(opts Options) (*Transport, error) {
 		stopCh:                  make(chan stopReq, 1),
 		runDone:                 make(chan struct{}),
 		emitExtendedLossReasons: opts.EmitExtendedLossReasons,
+		compressor:              opts.Compressor,
+	}
+	if t.compressor == nil {
+		nopEnc, _ := compress.NewEncoder("none", 0, 0)
+		t.compressor = nopEnc
 	}
 	if opts.InitialAckTuple != nil && opts.InitialAckTuple.Present {
 		seed := AckCursor{
