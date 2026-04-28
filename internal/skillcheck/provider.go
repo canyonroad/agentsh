@@ -20,11 +20,11 @@ type CheckProvider interface {
 	Scan(ctx context.Context, req ScanRequest) (*ScanResponse, error)
 }
 
-// ProviderEntry pairs a CheckProvider with timeout and failure handling.
+// ProviderEntry pairs a CheckProvider with timeout and failure handling config.
 type ProviderEntry struct {
 	Provider  CheckProvider
 	Timeout   time.Duration
-	OnFailure string // "warn" | "deny" | "allow" | "approve"
+	OnFailure string // "warn" | "block" | "allow" | "approve"
 }
 
 // ProviderError records a failure from a single provider.
@@ -34,6 +34,7 @@ type ProviderError struct {
 	OnFailure string
 }
 
+// Error implements the error interface.
 func (e ProviderError) Error() string {
 	return fmt.Sprintf("provider %s: %v", e.Provider, e.Err)
 }
