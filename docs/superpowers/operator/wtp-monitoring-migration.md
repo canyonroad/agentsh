@@ -87,6 +87,8 @@ The proto schema (`Compression` enum + `compressed_payload` oneof field) has sup
 
 **Recommended setting.** Once your Watchtower receiver is confirmed to support `compressed_payload` (verify the deployed server version actually decodes it), set `compression: zstd` for the bandwidth win. zstd at level 3 is the recommended starting point.
 
+**Wire-incompatibility risk.** Receivers that pre-date the proto's `compressed_payload` oneof field, or that have not been upgraded to decode it, will reject batches with `Compression: COMPRESSION_ZSTD` or `COMPRESSION_GZIP`. The exact failure mode depends on the receiver's strict-enum behavior — typically a Goaway with an "unrecognized compression" diagnostic, followed by an agent reconnect loop. Verify your Watchtower server version supports compressed batches BEFORE setting `compression: zstd` (or `gzip`). If you observe a reconnect loop after flipping this knob, revert to `compression: none` and restart the agent.
+
 **Reload model.** Read at transport-construction time. Changes take effect ONLY after a daemon restart.
 
 **Default-flip migration policy.** The default may flip from `none` to `zstd` in a future release once metrics across the fleet show clean encode behavior and server-side parity is confirmed. Such a flip would land via the major-schema-version-bump process used for other operator-visible defaults — silent flips are forbidden.
@@ -133,11 +135,11 @@ Five new metric families surface compression behavior. All are emitted at zero o
 | `wtp_batch_compressed_bytes_total` | Counter | `algo` ∈ {`zstd`, `gzip`} | Total bytes emitted as `EventBatch.compressed_payload`. |
 | `wtp_batch_uncompressed_bytes_total` | Counter | `algo` ∈ {`zstd`, `gzip`} | Total marshaled `UncompressedEvents` bytes pre-compression. Pairs with the row above for an aggregate ratio. |
 | `wtp_compress_error_total` | Counter | `algo` ∈ {`zstd`, `gzip`} | Number of fail-open fallbacks (encoder returned an error and the batch was sent as `Compression: COMPRESSION_NONE` for that batch only). A non-zero counter is a debug signal, NOT a data-loss event. |
-| `wtp_decompress_error_total` | Counter | `algo` ∈ {`zstd`, `gzip`}, `reason` ∈ {`decode_error`, `oversize`, `proto_unmarshal`} | Receiver-side decode failures. The agent emits this from its testserver path; production receivers in another repo adopt the same names. |
+| `wtp_decompress_error_total` | Counter | `algo` ∈ {`zstd`, `gzip`}, `reason` ∈ {`decode_error`, `oversize`, `proto_unmarshal`} | Receiver-side decode failures by algorithm and reason. Currently name-reserved: the proto package documents `decompress_error` as a metrics-only `WTPInvalidFrameReason`, and the agent emits this family at zero (always-emit contract) for receiver compatibility. The agent itself does not currently increment this metric — production receivers in another repo are responsible for the actual counts. |
 
 **Operator alerts.** Recommended starting points:
 
-- Notify-only on `rate(wtp_compress_error_total[10m]) > 0` — non-zero indicates a regression in the codec or unexpected input that exercises the fail-open path. Should be flat-zero in steady state. For paging, use a higher rate threshold matched to your batch volume (e.g. `> 0.01/s` over 10m for fleets emitting many batches per second) — single transient errors are not data-loss events and should not page.
+- Recommended threshold for `wtp_compress_error_total`: monitor the rate, not the absolute. A single transient encoder error fires the metric and emits the batch as `Compression: NONE` — that is by design and is not a data-loss event. Use a rate threshold matched to your batch volume; e.g., `rate(wtp_compress_error_total{algo=...}[10m]) > 0.01` for fleets emitting many batches per second. Sustained non-zero rates indicate a real regression worth investigating.
 - Alert on `histogram_quantile(0.5, sum by (le, algo) (rate(wtp_batch_compression_ratio_bucket[5m]))) > 0.75` — if the median ratio drifts above 0.75 the codec is barely compressing; verify input shape or downgrade level.
 - Track `sum(rate(wtp_batch_compressed_bytes_total[1m])) / sum(rate(wtp_batch_uncompressed_bytes_total[1m]))` for the aggregate fleet ratio.
 

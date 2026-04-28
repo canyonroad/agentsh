@@ -320,5 +320,26 @@ func (o *Options) validate() error {
 	if o.SinkChainOverrideForTests != nil && !o.AllowSinkChainOverrideForTests {
 		return errors.New("watchtower: SinkChainOverrideForTests must be nil in production (set AllowSinkChainOverrideForTests in tests that need the seam)")
 	}
+	// Compression configuration: defense-in-depth. The upstream
+	// internal/config validator should reject bad values, but
+	// watchtower.New is also reachable from tests and direct programmatic
+	// use that bypass that path. Empty string is treated as "none" at
+	// construction time (see compress.go); we accept it here without
+	// requiring level fields, since the codec is inert. Level bounds
+	// mirror NewEncoder's accepted range: zstd [1,22], gzip [1,9].
+	switch o.CompressionAlgo {
+	case "", "none":
+		// ok; "" normalized to "none" at construction time.
+	case "zstd":
+		if o.ZstdLevel < 1 || o.ZstdLevel > 22 {
+			return fmt.Errorf("watchtower.Options: ZstdLevel %d: must be in [1,22] when CompressionAlgo=zstd", o.ZstdLevel)
+		}
+	case "gzip":
+		if o.GzipLevel < 1 || o.GzipLevel > 9 {
+			return fmt.Errorf("watchtower.Options: GzipLevel %d: must be in [1,9] when CompressionAlgo=gzip", o.GzipLevel)
+		}
+	default:
+		return fmt.Errorf("watchtower.Options: CompressionAlgo %q: must be \"\", \"none\", \"zstd\", or \"gzip\"", o.CompressionAlgo)
+	}
 	return nil
 }
