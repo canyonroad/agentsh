@@ -40,7 +40,14 @@ func (p *localProvider) Scan(ctx context.Context, req skillcheck.ScanRequest) (*
 	start := time.Now()
 	var findings []skillcheck.Finding
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	for path, data := range req.Files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if hidden := scanHiddenUnicode(data); hidden != "" {
 			findings = append(findings, skillcheck.Finding{
 				Type:     skillcheck.FindingHiddenUnicode,

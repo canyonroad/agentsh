@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -71,4 +72,16 @@ func hasType(fs []skillcheck.Finding, t skillcheck.FindingType) bool {
 		}
 	}
 	return false
+}
+
+func TestLocal_RespectsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel
+	resp, err := NewLocalProvider().Scan(ctx, loadFixture(t, "minimal"))
+	if err == nil {
+		t.Fatalf("expected ctx error, got resp=%+v", resp)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
 }
