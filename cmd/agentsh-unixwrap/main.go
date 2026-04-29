@@ -75,6 +75,7 @@ func main() {
 		InterceptMetadata:  cfg.InterceptMetadata,
 		BlockIOUring:       cfg.BlockIOUring,
 		BlockedSyscalls:    blockedNrs,
+		BlockedFamilies:    cfg.BlockedFamilies,
 		OnBlockAction:      onBlock,
 	}
 

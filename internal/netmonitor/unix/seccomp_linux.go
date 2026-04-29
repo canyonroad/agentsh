@@ -27,8 +27,9 @@ func DetectSupport() error {
 
 // Filter encapsulates a loaded seccomp user-notify filter and its notify fd.
 type Filter struct {
-	fd        seccomp.ScmpFd
-	blockList map[uint32]seccompkg.OnBlockAction
+	fd               seccomp.ScmpFd
+	blockList        map[uint32]seccompkg.OnBlockAction
+	blockedFamilyMap map[uint64]seccompkg.BlockedFamily
 }
 
 func (f *Filter) Close() error {
@@ -47,6 +48,20 @@ func (f *Filter) BlockListMap() map[uint32]seccompkg.OnBlockAction {
 	}
 	out := make(map[uint32]seccompkg.OnBlockAction, len(f.blockList))
 	for k, v := range f.blockList {
+		out[k] = v
+	}
+	return out
+}
+
+// BlockedFamilyMap returns a copy of the per-family dispatch map
+// (key = (syscall<<32)|family → BlockedFamily) for consumers that need to
+// route log/log_and_kill family notifications. Used by the notify handler.
+func (f *Filter) BlockedFamilyMap() map[uint64]seccompkg.BlockedFamily {
+	if f == nil || len(f.blockedFamilyMap) == 0 {
+		return nil
+	}
+	out := make(map[uint64]seccompkg.BlockedFamily, len(f.blockedFamilyMap))
+	for k, v := range f.blockedFamilyMap {
 		out[k] = v
 	}
 	return out
@@ -221,6 +236,7 @@ type FilterConfig struct {
 	InterceptMetadata  bool  // statx, newfstatat, faccessat2, readlinkat
 	BlockIOUring       bool  // io_uring_setup/enter/register → EPERM
 	BlockedSyscalls    []int // syscall numbers to block; action controlled by OnBlockAction
+	BlockedFamilies    []seccompkg.BlockedFamily
 	OnBlockAction      seccompkg.OnBlockAction
 }
 
@@ -355,6 +371,7 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 			"value", cfg.OnBlockAction)
 	}
 	blockListMap := map[uint32]seccompkg.OnBlockAction{}
+	blockedFamilyMap := map[uint64]seccompkg.BlockedFamily{}
 	switch action {
 	case seccompkg.OnBlockErrno:
 		errnoAction := seccomp.ActErrno.SetReturnCode(int16(unix.EPERM))
@@ -375,6 +392,38 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 				return nil, fmt.Errorf("add blocked notify rule %v: %w", nr, err)
 			}
 			blockListMap[uint32(nr)] = action
+		}
+	}
+
+	// Per-socket-family blocking on socket(2) and socketpair(2).
+	// libseccomp action-precedence (KILL > TRAP > ERRNO > … > NOTIFY) ensures
+	// these conditional rules take priority over the unconditional ActNotify
+	// rule on socket(2) added by UnixSocketEnabled.
+	for _, bf := range cfg.BlockedFamilies {
+		cond := seccomp.ScmpCondition{
+			Argument: 0,
+			Op:       seccomp.CompareEqual,
+			Operand1: uint64(bf.Family),
+		}
+		famAction, err := familyToScmpAction(bf.Action)
+		if err != nil {
+			slog.Warn("seccomp: skipping family rule with unknown action",
+				"family", bf.Name, "action", bf.Action, "error", err)
+			continue
+		}
+		installed := true
+		for _, sc := range []int{unix.SYS_SOCKET, unix.SYS_SOCKETPAIR} {
+			if addErr := filt.AddRuleConditional(
+				seccomp.ScmpSyscall(sc), famAction, []seccomp.ScmpCondition{cond},
+			); addErr != nil {
+				slog.Warn("seccomp: failed to add family rule; family skipped",
+					"family", bf.Name, "syscall", sc, "error", addErr)
+				installed = false
+			}
+		}
+		if installed && (bf.Action == seccompkg.OnBlockLog || bf.Action == seccompkg.OnBlockLogAndKill) {
+			blockedFamilyMap[uint64(unix.SYS_SOCKET)<<32|uint64(bf.Family)] = bf
+			blockedFamilyMap[uint64(unix.SYS_SOCKETPAIR)<<32|uint64(bf.Family)] = bf
 		}
 	}
 
@@ -408,11 +457,26 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	if err != nil {
 		// If no notify rules, fd will be -1, which is fine
 		if !cfg.UnixSocketEnabled && !cfg.ExecveEnabled && !cfg.FileMonitorEnabled {
-			return &Filter{fd: -1, blockList: blockListMap}, nil
+			return &Filter{fd: -1, blockList: blockListMap, blockedFamilyMap: blockedFamilyMap}, nil
 		}
 		return nil, err
 	}
-	return &Filter{fd: fd, blockList: blockListMap}, nil
+	return &Filter{fd: fd, blockList: blockListMap, blockedFamilyMap: blockedFamilyMap}, nil
+}
+
+// familyToScmpAction maps an OnBlockAction to the libseccomp action used
+// for per-family conditional rules on socket(2)/socketpair(2).
+func familyToScmpAction(a seccompkg.OnBlockAction) (seccomp.ScmpAction, error) {
+	switch a {
+	case seccompkg.OnBlockErrno:
+		return seccomp.ActErrno.SetReturnCode(int16(unix.EAFNOSUPPORT)), nil
+	case seccompkg.OnBlockKill:
+		return seccomp.ActKillProcess, nil
+	case seccompkg.OnBlockLog, seccompkg.OnBlockLogAndKill:
+		return seccomp.ActNotify, nil
+	default:
+		return seccomp.ActAllow, fmt.Errorf("unknown family block action %q", a)
+	}
 }
 
 // loadWithRetryOnWaitKillFailure loads a seccomp filter and, if the load

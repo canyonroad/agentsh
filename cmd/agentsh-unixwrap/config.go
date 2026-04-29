@@ -6,22 +6,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
 )
 
 // WrapperConfig is the configuration passed via AGENTSH_SECCOMP_CONFIG env var.
 type WrapperConfig struct {
-	UnixSocketEnabled   bool     `json:"unix_socket_enabled"`
-	ExecveEnabled       bool     `json:"execve_enabled"`
-	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
-	FileMonitorEnabled  bool     `json:"file_monitor_enabled"`
-	BlockedSyscalls     []string `json:"blocked_syscalls"`
-	OnBlock             string   `json:"on_block,omitempty"`
+	UnixSocketEnabled   bool                      `json:"unix_socket_enabled"`
+	ExecveEnabled       bool                      `json:"execve_enabled"`
+	SignalFilterEnabled bool                      `json:"signal_filter_enabled"`
+	FileMonitorEnabled  bool                      `json:"file_monitor_enabled"`
+	BlockedSyscalls     []string                  `json:"blocked_syscalls"`
+	BlockedFamilies     []seccompkg.BlockedFamily `json:"blocked_families,omitempty"`
+	OnBlock             string                    `json:"on_block,omitempty"`
 
 	InterceptMetadata bool `json:"intercept_metadata,omitempty"`
 	BlockIOUring      bool `json:"block_io_uring,omitempty"`
 
 	// Landlock filesystem restrictions
-	LandlockEnabled bool `json:"landlock_enabled,omitempty"`
+	LandlockEnabled bool     `json:"landlock_enabled,omitempty"`
 	LandlockABI     int      `json:"landlock_abi,omitempty"`
 	Workspace       string   `json:"workspace,omitempty"`
 	AllowExecute    []string `json:"allow_execute,omitempty"`
