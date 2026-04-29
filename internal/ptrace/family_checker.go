@@ -31,6 +31,10 @@ type FamilyChecker struct {
 	bySyscall map[uint64]map[uint64]seccomp.BlockedFamily
 	// emit is the audit sink; nil means skip audit emission (local dev / tests).
 	emit FamilyEmitter
+	// tgkillFn is the test seam for unix.Tgkill. Tests can inject failure paths.
+	tgkillFn func(tgid, tid int, sig unix.Signal) error
+	// denySyscallFn is the test seam for tracer.denySyscall. Tests can inject failure paths.
+	denySyscallFn func(tid int, errno int) error
 }
 
 // NewFamilyChecker indexes the entries for fast lookup. nil/empty input
@@ -47,6 +51,9 @@ func NewFamilyCheckerWithEmitter(entries []seccomp.BlockedFamily, emit FamilyEmi
 	c := &FamilyChecker{
 		bySyscall: map[uint64]map[uint64]seccomp.BlockedFamily{},
 		emit:      emit,
+		tgkillFn: func(tgid, tid int, sig unix.Signal) error {
+			return unix.Tgkill(tgid, tid, sig)
+		},
 	}
 	for _, sc := range []uint64{uint64(unix.SYS_SOCKET), uint64(unix.SYS_SOCKETPAIR)} {
 		c.bySyscall[sc] = map[uint64]seccomp.BlockedFamily{}
@@ -111,6 +118,9 @@ var ptraceAlreadyResumed = errors.New("ptrace: tracee already resumed by Apply")
 //
 // On ESRCH from denySyscall (tracee vanished), Apply returns ptraceAlreadyResumed
 // so the caller does not attempt another ptrace call on a dead TID.
+//
+// The audit event is always emitted AFTER enforcement runs, so outcome reflects
+// what actually happened — not just what was intended.
 func (c *FamilyChecker) Apply(
 	tid int,
 	tgid int,
@@ -120,13 +130,22 @@ func (c *FamilyChecker) Apply(
 	bf seccomp.BlockedFamily,
 	sessionID string,
 ) error {
+	// denySC is the effective deny function: prefer the injected seam (tests),
+	// fall back to the real tracer method (production).
+	denySC := c.denySyscallFn
+	if denySC == nil {
+		denySC = func(t int, errno int) error {
+			return tracer.denySyscall(t, errno)
+		}
+	}
+
 	switch action {
 	case seccomp.OnBlockErrno:
 		// denySyscall sets ORIG_RAX=-1 and records PendingDenyErrno so the
 		// tracer's exit-stop handler overwrites RAX with -EAFNOSUPPORT.
 		// It also calls unix.PtraceSyscall internally, so the tracee is
 		// already continued — return ptraceAlreadyResumed.
-		if err := tracer.denySyscall(tid, int(unix.EAFNOSUPPORT)); err != nil {
+		if err := denySC(tid, int(unix.EAFNOSUPPORT)); err != nil {
 			// ESRCH means the tracee is already gone — same outcome.
 			if errors.Is(err, unix.ESRCH) {
 				return ptraceAlreadyResumed
@@ -136,40 +155,64 @@ func (c *FamilyChecker) Apply(
 		return ptraceAlreadyResumed
 
 	case seccomp.OnBlockKill, seccomp.OnBlockLogAndKill:
-		if action == seccomp.OnBlockLogAndKill {
-			c.emitFamilyBlocked(tid, syscallNr, bf, action, sessionID, "killed")
-		}
-		if err := unix.Tgkill(tgid, tid, unix.SIGKILL); err != nil {
-			if errors.Is(err, unix.ESRCH) {
-				// Process already vanished; nothing to do.
-				return nil
+		// Run enforcement first, then emit event with the actual outcome.
+		tgkill := c.tgkillFn
+		if tgkill == nil {
+			tgkill = func(tg, t int, sig unix.Signal) error {
+				return unix.Tgkill(tg, t, sig)
 			}
-			// Real failure: fail closed — deny the syscall and surface the error.
-			if denyErr := tracer.denySyscall(tid, int(unix.EAFNOSUPPORT)); denyErr != nil {
+		}
+
+		err := tgkill(tgid, tid, unix.SIGKILL)
+		var actualOutcome string
+		var retErr error
+
+		if err == nil {
+			actualOutcome = "killed"
+			retErr = PtraceKillRequested
+		} else if errors.Is(err, unix.ESRCH) {
+			// Process already vanished; nothing to do.
+			actualOutcome = "vanished"
+			retErr = nil
+		} else {
+			// Real Tgkill failure: fail closed — deny the syscall.
+			if denyErr := denySC(tid, int(unix.EAFNOSUPPORT)); denyErr != nil {
 				// denySyscall itself failed; log and let caller know tracee state
 				// is uncertain — return ptraceAlreadyResumed to prevent a second
 				// allowSyscall on an indeterminate tracee.
 				slog.Warn("ptrace: tgkill failed and deny fallback also failed",
 					"tid", tid, "tgkill_err", err, "deny_err", denyErr)
-				return ptraceAlreadyResumed
+				actualOutcome = "deny_fallback_failed"
+			} else {
+				// denySyscall succeeded (tracee already resumed via deny path).
+				slog.Warn("ptrace: tgkill failed; denied syscall instead",
+					"tid", tid, "tgkill_err", err)
+				actualOutcome = "denied"
 			}
-			// denySyscall succeeded (tracee already resumed via deny path).
-			slog.Warn("ptrace: tgkill failed; denied syscall instead",
-				"tid", tid, "tgkill_err", err)
-			return ptraceAlreadyResumed
+			retErr = ptraceAlreadyResumed
 		}
-		return PtraceKillRequested
+
+		if action == seccomp.OnBlockLogAndKill {
+			c.emitFamilyBlocked(tid, syscallNr, bf, action, sessionID, actualOutcome)
+		}
+		return retErr
 
 	case seccomp.OnBlockLog:
-		c.emitFamilyBlocked(tid, syscallNr, bf, action, sessionID, "denied")
-		// Deny the syscall — log == log_and_deny in ptrace mode, mirroring the
-		// seccomp engine (OnBlockLog denies AND logs there too).
-		if err := tracer.denySyscall(tid, int(unix.EAFNOSUPPORT)); err != nil {
+		// Run enforcement first, then emit with the actual outcome.
+		actualOutcome := "denied"
+		if err := denySC(tid, int(unix.EAFNOSUPPORT)); err != nil {
 			if errors.Is(err, unix.ESRCH) {
+				// Tracee vanished: emit with "denied" (the intended outcome) and
+				// return the already-resumed sentinel so the caller does not
+				// attempt another ptrace call.
+				c.emitFamilyBlocked(tid, syscallNr, bf, action, sessionID, actualOutcome)
 				return ptraceAlreadyResumed
 			}
+			actualOutcome = "deny_failed"
+			c.emitFamilyBlocked(tid, syscallNr, bf, action, sessionID, actualOutcome)
 			return err
 		}
+		c.emitFamilyBlocked(tid, syscallNr, bf, action, sessionID, actualOutcome)
 		return ptraceAlreadyResumed
 
 	default:

@@ -393,6 +393,7 @@ func handleFamilyBlockNotify(
 				"action":        string(bf.Action),
 				"outcome":       outcome,
 				"arch":          runtime.GOARCH,
+				"engine":        "seccomp",
 			},
 		}
 		if err := emit.AppendEvent(context.Background(), ev); err != nil {
