@@ -1052,3 +1052,126 @@ sandbox:
 		t.Error("back-compat: allow_bind should default to false (security hardening vs prior accidental permissive)")
 	}
 }
+
+// TestBlockedFamiliesUsesNotify verifies that the helper function correctly
+// identifies families that require the userspace notify handler.
+func TestBlockedFamiliesUsesNotify(t *testing.T) {
+	cases := []struct {
+		name     string
+		families []config.SandboxSeccompSocketFamilyConfig
+		want     bool
+	}{
+		{
+			name:     "empty",
+			families: nil,
+			want:     false,
+		},
+		{
+			name:     "errno only",
+			families: []config.SandboxSeccompSocketFamilyConfig{{Family: "AF_ALG", Action: "errno"}},
+			want:     false,
+		},
+		{
+			name:     "kill only",
+			families: []config.SandboxSeccompSocketFamilyConfig{{Family: "AF_ALG", Action: "kill"}},
+			want:     false,
+		},
+		{
+			name:     "log",
+			families: []config.SandboxSeccompSocketFamilyConfig{{Family: "AF_ALG", Action: "log"}},
+			want:     true,
+		},
+		{
+			name:     "log_and_kill",
+			families: []config.SandboxSeccompSocketFamilyConfig{{Family: "AF_ALG", Action: "log_and_kill"}},
+			want:     true,
+		},
+		{
+			name: "mixed: log and errno — log wins",
+			families: []config.SandboxSeccompSocketFamilyConfig{
+				{Family: "AF_ALG", Action: "errno"},
+				{Family: "AF_INET", Action: "log"},
+			},
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := blockedFamiliesUsesNotify(tc.families)
+			if got != tc.want {
+				t.Errorf("blockedFamiliesUsesNotify(%v) = %v, want %v", tc.families, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMainFilterUsesUserNotify_FamilyLog verifies that mainFilterUsesUserNotify
+// returns true when the config contains a family with a log action, even when
+// all other notify-triggering options are disabled. This guards against the
+// signal-filter stacking bug (#191): if the predicate misses family-log entries,
+// a second USER_NOTIF filter (signal) could be stacked on top of the main one.
+func TestMainFilterUsesUserNotify_FamilyLog(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mainFilterUsesUserNotify is Linux-only")
+	}
+	cfg := &config.Config{}
+	// All notify features explicitly off.
+	disabled := false
+	cfg.Sandbox.Seccomp.UnixSocket.Enabled = false
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &disabled
+	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &disabled
+	// Only a single family with log action.
+	cfg.Sandbox.Seccomp.BlockedSocketFamilies = []config.SandboxSeccompSocketFamilyConfig{
+		{Family: "AF_ALG", Action: "log"},
+	}
+	app := &App{cfg: cfg}
+
+	if !app.mainFilterUsesUserNotify(false) {
+		t.Error("mainFilterUsesUserNotify should return true when a family has log action")
+	}
+}
+
+// TestMainFilterUsesUserNotify_FamilyLogAndKill mirrors TestMainFilterUsesUserNotify_FamilyLog
+// for log_and_kill.
+func TestMainFilterUsesUserNotify_FamilyLogAndKill(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mainFilterUsesUserNotify is Linux-only")
+	}
+	cfg := &config.Config{}
+	disabled := false
+	cfg.Sandbox.Seccomp.UnixSocket.Enabled = false
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &disabled
+	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &disabled
+	cfg.Sandbox.Seccomp.BlockedSocketFamilies = []config.SandboxSeccompSocketFamilyConfig{
+		{Family: "AF_ALG", Action: "log_and_kill"},
+	}
+	app := &App{cfg: cfg}
+
+	if !app.mainFilterUsesUserNotify(false) {
+		t.Error("mainFilterUsesUserNotify should return true when a family has log_and_kill action")
+	}
+}
+
+// TestMainFilterUsesUserNotify_FamilyErrnoAndKill_NoNotify verifies that
+// mainFilterUsesUserNotify returns false when all families use kernel-side
+// actions (errno or kill).
+func TestMainFilterUsesUserNotify_FamilyErrnoAndKill_NoNotify(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mainFilterUsesUserNotify is Linux-only")
+	}
+	cfg := &config.Config{}
+	disabled := false
+	cfg.Sandbox.Seccomp.UnixSocket.Enabled = false
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &disabled
+	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &disabled
+	cfg.Sandbox.Seccomp.BlockedSocketFamilies = []config.SandboxSeccompSocketFamilyConfig{
+		{Family: "AF_ALG", Action: "errno"},
+		{Family: "AF_INET", Action: "kill"},
+	}
+	app := &App{cfg: cfg}
+
+	if app.mainFilterUsesUserNotify(false) {
+		t.Error("mainFilterUsesUserNotify should return false when all families use errno/kill (kernel-side)")
+	}
+}

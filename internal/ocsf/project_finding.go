@@ -50,14 +50,15 @@ func findingProjector(activity uint32, findingType string) Projector {
 
 func init() {
 	findingTypes := map[string]string{
-		"command_policy":            "policy_decision",
-		"seccomp_blocked":           "policy_decision",
-		"agent_detected":            "agent_self_detected",
-		"taint_created":             "taint",
-		"taint_propagated":          "taint",
-		"taint_removed":             "taint",
-		"mcp_cross_server_blocked":  "policy_decision",
-		"mcp_tool_call_intercepted": "policy_decision",
+		"command_policy":                   "policy_decision",
+		"seccomp_blocked":                  "policy_decision",
+		"seccomp_socket_family_blocked":    "policy_decision",
+		"agent_detected":                   "agent_self_detected",
+		"taint_created":                    "taint",
+		"taint_propagated":                 "taint",
+		"taint_removed":                    "taint",
+		"mcp_cross_server_blocked":         "policy_decision",
+		"mcp_tool_call_intercepted":        "policy_decision",
 	}
 	for t, ft := range findingTypes {
 		register(t, Mapping{

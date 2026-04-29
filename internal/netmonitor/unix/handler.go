@@ -260,6 +260,17 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 
 		// Existing unix socket handling
 		ctxReq := ExtractContext(req)
+
+		// Family-blocked dispatch: check if this (syscall, arg0/AF) pair is in the
+		// blocked-family map. This runs BEFORE unix-socket dispatch so that
+		// socket/socketpair calls for a blocked family are caught even when
+		// UnixSocketEnabled is also true. The map is only populated for log and
+		// log_and_kill actions; errno/kill are handled kernel-side.
+		if bf, ok := blockList.FamilyBlockListed(uint32(req.Data.Syscall), req.Data.Args[0]); ok {
+			handleFamilyBlockNotify(ctx, int(scmpFD), req, bf, sessID, emit)
+			continue
+		}
+
 		if !isUnixSocketSyscall(ctxReq.Syscall) {
 			slog.Debug("ServeNotifyWithExecve: non-unix syscall, allowing", "session_id", sessID, "syscall", ctxReq.Syscall)
 			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {

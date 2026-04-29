@@ -4,14 +4,18 @@ package unix
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
-	"golang.org/x/sys/unix"
+	"github.com/agentsh/agentsh/pkg/types"
+	gounix "golang.org/x/sys/unix"
 )
 
 // familyHelperEnv gates the re-exec body inside the family block tests.
@@ -73,7 +77,7 @@ func runFamilyHelperErrno(t *testing.T) {
 	t.Helper()
 	cfg := FilterConfig{
 		BlockedFamilies: []seccompkg.BlockedFamily{
-			{Family: unix.AF_ALG, Action: seccompkg.OnBlockErrno, Name: "AF_ALG"},
+			{Family: gounix.AF_ALG, Action: seccompkg.OnBlockErrno, Name: "AF_ALG"},
 		},
 	}
 	filt, err := InstallFilterWithConfig(cfg)
@@ -83,10 +87,10 @@ func runFamilyHelperErrno(t *testing.T) {
 	defer filt.Close()
 
 	// Raw syscall so the filter interception is visible at the syscall level.
-	fd, _, errno := unix.RawSyscall(unix.SYS_SOCKET, unix.AF_ALG, unix.SOCK_SEQPACKET, 0)
+	fd, _, errno := gounix.RawSyscall(gounix.SYS_SOCKET, gounix.AF_ALG, gounix.SOCK_SEQPACKET, 0)
 	if fd != ^uintptr(0) {
 		// Unexpectedly got a valid fd — close it.
-		_ = unix.Close(int(fd))
+		_ = gounix.Close(int(fd))
 		fmt.Printf("socket_result=OK (expected EAFNOSUPPORT)\n")
 		return
 	}
@@ -104,7 +108,7 @@ func TestSeccompFamilyBlock_Map_Errno(t *testing.T) {
 	cfg := FilterConfig{
 		UnixSocketEnabled: true,
 		BlockedFamilies: []seccompkg.BlockedFamily{
-			{Family: unix.AF_ALG, Action: seccompkg.OnBlockErrno, Name: "AF_ALG"},
+			{Family: gounix.AF_ALG, Action: seccompkg.OnBlockErrno, Name: "AF_ALG"},
 		},
 	}
 	filt, err := InstallFilterWithConfig(cfg)
@@ -128,7 +132,7 @@ func TestSeccompFamilyBlock_Map_Log(t *testing.T) {
 	cfg := FilterConfig{
 		UnixSocketEnabled: true,
 		BlockedFamilies: []seccompkg.BlockedFamily{
-			{Family: unix.AF_ALG, Action: seccompkg.OnBlockLog, Name: "AF_ALG"},
+			{Family: gounix.AF_ALG, Action: seccompkg.OnBlockLog, Name: "AF_ALG"},
 		},
 	}
 	filt, err := InstallFilterWithConfig(cfg)
@@ -138,8 +142,8 @@ func TestSeccompFamilyBlock_Map_Log(t *testing.T) {
 	defer filt.Close()
 
 	m := filt.BlockedFamilyMap()
-	socketKey := uint64(unix.SYS_SOCKET)<<32 | uint64(unix.AF_ALG)
-	socketpairKey := uint64(unix.SYS_SOCKETPAIR)<<32 | uint64(unix.AF_ALG)
+	socketKey := uint64(gounix.SYS_SOCKET)<<32 | uint64(gounix.AF_ALG)
+	socketpairKey := uint64(gounix.SYS_SOCKETPAIR)<<32 | uint64(gounix.AF_ALG)
 
 	if _, ok := m[socketKey]; !ok {
 		t.Errorf("BlockedFamilyMap missing SYS_SOCKET|AF_ALG key; map: %v", m)
@@ -164,7 +168,7 @@ func TestSeccompFamilyBlock_Map_LogAndKill(t *testing.T) {
 	cfg := FilterConfig{
 		UnixSocketEnabled: true,
 		BlockedFamilies: []seccompkg.BlockedFamily{
-			{Family: unix.AF_ALG, Action: seccompkg.OnBlockLogAndKill, Name: "AF_ALG"},
+			{Family: gounix.AF_ALG, Action: seccompkg.OnBlockLogAndKill, Name: "AF_ALG"},
 		},
 	}
 	filt, err := InstallFilterWithConfig(cfg)
@@ -188,7 +192,7 @@ func TestSeccompFamilyBlock_Map_Kill(t *testing.T) {
 	cfg := FilterConfig{
 		UnixSocketEnabled: true,
 		BlockedFamilies: []seccompkg.BlockedFamily{
-			{Family: unix.AF_ALG, Action: seccompkg.OnBlockKill, Name: "AF_ALG"},
+			{Family: gounix.AF_ALG, Action: seccompkg.OnBlockKill, Name: "AF_ALG"},
 		},
 	}
 	filt, err := InstallFilterWithConfig(cfg)
@@ -218,7 +222,7 @@ func TestSeccompFamilyBlock_Coexistence_MapState(t *testing.T) {
 	cfg := FilterConfig{
 		UnixSocketEnabled: true,
 		BlockedFamilies: []seccompkg.BlockedFamily{
-			{Family: unix.AF_ALG, Action: seccompkg.OnBlockErrno, Name: "AF_ALG"},
+			{Family: gounix.AF_ALG, Action: seccompkg.OnBlockErrno, Name: "AF_ALG"},
 		},
 	}
 	filt, err := InstallFilterWithConfig(cfg)
@@ -261,3 +265,158 @@ func TestFamilyToScmpAction(t *testing.T) {
 }
 
 const familyHelperErrno = "errno"
+const familyHelperNotifyLog = "notify_log"
+
+// TestSeccompFamilyBlock_Notify_LogDispatched verifies that when a filter is
+// installed with BlockedFamilies=[{AF_ALG, log}] and UnixSocketEnabled=false,
+// socket(AF_ALG) dispatches through the notify handler and returns EAFNOSUPPORT,
+// and that a seccomp_socket_family_blocked audit event is emitted.
+//
+// The test re-execs itself as a helper subprocess that installs the filter,
+// starts the notify handler, and performs a raw socket(AF_ALG) syscall.
+// Skip if insufficient privileges.
+func TestSeccompFamilyBlock_Notify_LogDispatched(t *testing.T) {
+	if os.Getenv(familyHelperEnv) == familyHelperNotifyLog {
+		runFamilyHelperNotifyLog(t)
+		return
+	}
+
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify not supported: %v", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+
+	cmd := exec.Command(exe, "-test.run=^TestSeccompFamilyBlock_Notify_LogDispatched$", "-test.v")
+	cmd.Env = append(os.Environ(), familyHelperEnv+"="+familyHelperNotifyLog)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	runErr := cmd.Run()
+	combined := out.String()
+
+	if runErr != nil {
+		lower := strings.ToLower(combined)
+		if strings.Contains(lower, "permission denied") ||
+			strings.Contains(lower, "operation not permitted") ||
+			strings.Contains(lower, "lacks user notify") ||
+			strings.Contains(lower, "skip") {
+			t.Skipf("host cannot install seccomp filter; skipping.\nhelper output:\n%s", combined)
+		}
+		t.Fatalf("helper subprocess failed: %v\noutput:\n%s", runErr, combined)
+	}
+
+	if !strings.Contains(combined, "socket_result=EAFNOSUPPORT") &&
+		!strings.Contains(combined, "socket_result=address family not supported") &&
+		!strings.Contains(combined, "errno=97") {
+		t.Errorf("expected socket(AF_ALG) to return EAFNOSUPPORT via notify handler; helper output:\n%s", combined)
+	}
+	if !strings.Contains(combined, "audit_event=seccomp_socket_family_blocked") {
+		t.Errorf("expected seccomp_socket_family_blocked audit event; helper output:\n%s", combined)
+	}
+}
+
+// runFamilyHelperNotifyLog is the subprocess body for TestSeccompFamilyBlock_Notify_LogDispatched.
+// It installs the filter with log action, runs the notify handler, performs a
+// raw socket(AF_ALG) call, and prints the result and audit event type.
+func runFamilyHelperNotifyLog(t *testing.T) {
+	t.Helper()
+
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify not supported: %v", err)
+	}
+
+	cfg := FilterConfig{
+		UnixSocketEnabled: false,
+		BlockedFamilies: []seccompkg.BlockedFamily{
+			{Family: gounix.AF_ALG, Action: seccompkg.OnBlockLog, Name: "AF_ALG"},
+		},
+	}
+	filt, err := InstallFilterWithConfig(cfg)
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "permission") || strings.Contains(lower, "operation not permitted") {
+			t.Skipf("cannot install seccomp filter (privilege): %v", err)
+		}
+		t.Fatalf("InstallFilterWithConfig: %v", err)
+	}
+	defer filt.Close()
+
+	notifFD := filt.NotifFD()
+	if notifFD < 0 {
+		t.Fatalf("expected valid notify fd; got %d", notifFD)
+	}
+
+	// Build a BlockListConfig carrying the family map.
+	familyByKey := filt.BlockedFamilyMap()
+	if len(familyByKey) == 0 {
+		t.Fatalf("BlockedFamilyMap is empty; log action should populate it")
+	}
+	bl := &BlockListConfig{FamilyByKey: familyByKey}
+
+	// Collect emitted events.
+	type capturedEvent struct{ typ string }
+	var (
+		mu     sync.Mutex
+		events []capturedEvent
+	)
+	emitter := &captureEmitter{fn: func(typ string) {
+		mu.Lock()
+		events = append(events, capturedEvent{typ: typ})
+		mu.Unlock()
+	}}
+
+	// Run the notify handler in background.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	notifyFile := os.NewFile(uintptr(notifFD), "seccomp-notify")
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		ServeNotifyWithExecve(ctx, notifyFile, "test-family-notify", nil, emitter, nil, nil, bl)
+	}()
+
+	// Perform the blocked socket call.
+	fd, _, errno := gounix.RawSyscall(gounix.SYS_SOCKET, gounix.AF_ALG, gounix.SOCK_SEQPACKET, 0)
+	if fd != ^uintptr(0) {
+		_ = gounix.Close(int(fd))
+		fmt.Printf("socket_result=OK (expected EAFNOSUPPORT)\n")
+	} else {
+		fmt.Printf("socket_result=%v (errno=%d)\n", errno, int(errno))
+	}
+
+	// Cancel and wait for handler to exit.
+	cancel()
+	select {
+	case <-handlerDone:
+	case <-time.After(2 * time.Second):
+		fmt.Printf("handler did not exit in time\n")
+	}
+
+	// Report emitted events.
+	mu.Lock()
+	defer mu.Unlock()
+	for _, ev := range events {
+		fmt.Printf("audit_event=%s\n", ev.typ)
+	}
+}
+
+// captureEmitter records the Type field of every emitted event.
+type captureEmitter struct {
+	fn func(typ string)
+}
+
+func (e *captureEmitter) AppendEvent(_ context.Context, ev types.Event) error {
+	if e.fn != nil {
+		e.fn(ev.Type)
+	}
+	return nil
+}
+func (e *captureEmitter) Publish(ev types.Event) {
+	if e.fn != nil {
+		e.fn(ev.Type)
+	}
+}

@@ -467,6 +467,9 @@ func (a *App) mainFilterUsesUserNotify(execveEnabled bool) bool {
 	if blockListUsesNotify(a.cfg.Sandbox.Seccomp.Syscalls.Block, a.cfg.Sandbox.Seccomp.Syscalls.OnBlock) {
 		return true
 	}
+	if blockedFamiliesUsesNotify(a.cfg.Sandbox.Seccomp.BlockedSocketFamilies) {
+		return true
+	}
 	return false
 }
 
@@ -483,6 +486,18 @@ func blockListUsesNotify(block []string, onBlock string) bool {
 		return false
 	}
 	return resolvableBlockListCount(block) > 0
+}
+
+// blockedFamiliesUsesNotify reports whether any BlockedSocketFamilies entry
+// uses an action that requires the userspace notify handler (log or log_and_kill).
+// errno and kill are handled kernel-side and do not require a notify fd.
+func blockedFamiliesUsesNotify(families []config.SandboxSeccompSocketFamilyConfig) bool {
+	for _, f := range families {
+		if f.Action == "log" || f.Action == "log_and_kill" {
+			return true
+		}
+	}
+	return false
 }
 
 // acceptNotifyFD listens on the Unix socket for a single connection from the CLI,
