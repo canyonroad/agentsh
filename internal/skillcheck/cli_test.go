@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/agentsh/agentsh/internal/trash"
 )
 
 func TestCLI_ScanReportsVerdict(t *testing.T) {
@@ -113,17 +115,171 @@ func TestCLI_ExitCodePinning(t *testing.T) {
 	}
 }
 
-func TestCLI_PlaceholderSubcommands(t *testing.T) {
-	for _, sub := range []string{"list-quarantined", "restore", "cache"} {
-		var out bytes.Buffer
-		cli := &CLI{Stdout: &out, Providers: map[string]ProviderEntry{}}
-		code := cli.Run(context.Background(), []string{sub})
-		if code != 0 {
-			t.Errorf("%s: want exit 0, got %d", sub, code)
-		}
-		if !strings.Contains(out.String(), "not implemented yet") {
-			t.Errorf("%s: want 'not implemented yet' in output, got: %s", sub, out.String())
-		}
+func TestCLI_ListQuarantined_Empty(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	cli := &CLI{Stdout: &out, TrashDir: dir}
+	code := cli.Run(context.Background(), []string{"list-quarantined"})
+	if code != 0 {
+		t.Errorf("exit=%d want 0", code)
+	}
+	if !strings.Contains(out.String(), "no quarantined skills") {
+		t.Errorf("got: %s", out.String())
+	}
+}
+
+func TestCLI_ListQuarantined_NoTrashDir(t *testing.T) {
+	var out bytes.Buffer
+	cli := &CLI{Stdout: &out}
+	code := cli.Run(context.Background(), []string{"list-quarantined"})
+	if code != 1 {
+		t.Errorf("exit=%d want 1", code)
+	}
+	if !strings.Contains(out.String(), "trash dir not configured") {
+		t.Errorf("got: %s", out.String())
+	}
+}
+
+func TestCLI_ListQuarantined_WithEntries(t *testing.T) {
+	dir := t.TempDir()
+	// Divert a real file so we have something to list.
+	srcFile := filepath.Join(dir, "skill.md")
+	if err := os.WriteFile(srcFile, []byte("test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := trash.Divert(srcFile, trash.Config{TrashDir: dir, Command: "test-cmd"})
+	if err != nil {
+		t.Fatalf("divert: %v", err)
+	}
+
+	var out bytes.Buffer
+	cli := &CLI{Stdout: &out, TrashDir: dir}
+	code := cli.Run(context.Background(), []string{"list-quarantined"})
+	if code != 0 {
+		t.Errorf("exit=%d want 0", code)
+	}
+	if !strings.Contains(out.String(), srcFile) {
+		t.Errorf("expected original path in output; got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "test-cmd") {
+		t.Errorf("expected command in output; got: %s", out.String())
+	}
+}
+
+func TestCLI_Restore_NoToken(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	cli := &CLI{Stdout: &out, TrashDir: dir}
+	code := cli.Run(context.Background(), []string{"restore"})
+	if code != 2 {
+		t.Errorf("exit=%d want 2", code)
+	}
+	if !strings.Contains(out.String(), "usage") {
+		t.Errorf("got: %s", out.String())
+	}
+}
+
+func TestCLI_Restore_NoTrashDir(t *testing.T) {
+	var out bytes.Buffer
+	cli := &CLI{Stdout: &out}
+	code := cli.Run(context.Background(), []string{"restore", "sometoken"})
+	if code != 2 {
+		t.Errorf("exit=%d want 2", code)
+	}
+	if !strings.Contains(out.String(), "usage") {
+		t.Errorf("got: %s", out.String())
+	}
+}
+
+func TestCLI_Restore_BogusToken(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	cli := &CLI{Stdout: &out, TrashDir: dir}
+	code := cli.Run(context.Background(), []string{"restore", "bogus-token-xyz"})
+	if code != 1 {
+		t.Errorf("exit=%d want 1", code)
+	}
+	if !strings.Contains(out.String(), "restore:") {
+		t.Errorf("got: %s", out.String())
+	}
+}
+
+func TestCLI_Restore_HappyPath(t *testing.T) {
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "skill.md")
+	if err := os.WriteFile(srcFile, []byte("test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := trash.Divert(srcFile, trash.Config{TrashDir: dir, Command: "test-cmd"})
+	if err != nil {
+		t.Fatalf("divert: %v", err)
+	}
+
+	// Restore to a new dest so we don't collide with original path.
+	dest := filepath.Join(dir, "restored.md")
+	var out bytes.Buffer
+	cli := &CLI{Stdout: &out, TrashDir: dir}
+	code := cli.Run(context.Background(), []string{"restore", entry.Token, dest})
+	if code != 0 {
+		t.Errorf("exit=%d want 0; output: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "restored to") {
+		t.Errorf("got: %s", out.String())
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("restored file does not exist: %v", err)
+	}
+}
+
+func TestCLI_Restore_DestExists(t *testing.T) {
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "skill.md")
+	if err := os.WriteFile(srcFile, []byte("test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := trash.Divert(srcFile, trash.Config{TrashDir: dir, Command: "test-cmd"})
+	if err != nil {
+		t.Fatalf("divert: %v", err)
+	}
+
+	// Create a file at the dest before restore.
+	dest := filepath.Join(dir, "existing.md")
+	if err := os.WriteFile(dest, []byte("occupied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	cli := &CLI{Stdout: &out, TrashDir: dir}
+	code := cli.Run(context.Background(), []string{"restore", entry.Token, dest})
+	if code != 1 {
+		t.Errorf("exit=%d want 1; output: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "restore:") {
+		t.Errorf("got: %s", out.String())
+	}
+}
+
+func TestCLI_Cache_DeferredPrune(t *testing.T) {
+	var out bytes.Buffer
+	cli := &CLI{Stdout: &out}
+	code := cli.Run(context.Background(), []string{"cache", "prune"})
+	if code != 0 {
+		t.Errorf("exit=%d want 0", code)
+	}
+	if !strings.Contains(out.String(), "deferred") {
+		t.Errorf("got: %s", out.String())
+	}
+}
+
+func TestCLI_Cache_NoArgs(t *testing.T) {
+	var out bytes.Buffer
+	cli := &CLI{Stdout: &out}
+	code := cli.Run(context.Background(), []string{"cache"})
+	if code != 2 {
+		t.Errorf("exit=%d want 2", code)
+	}
+	if !strings.Contains(out.String(), "usage") {
+		t.Errorf("got: %s", out.String())
 	}
 }
 
