@@ -276,6 +276,90 @@ func TestWatcher_GlobMatchesMultiplePluginsOverTime(t *testing.T) {
 	}
 }
 
+func TestWatcher_GlobStaticAncestorAppearsAfterStart(t *testing.T) {
+	parent := t.TempDir()
+	pluginsDir := filepath.Join(parent, "plugins") // doesn't exist yet
+	rootGlob := filepath.Join(pluginsDir, "*", "skills")
+
+	events := make(chan string, 8)
+	w, err := NewWatcher(WatcherConfig{
+		Roots:    []string{rootGlob},
+		Debounce: 50 * time.Millisecond,
+		OnSkill:  func(skillDir string) { events <- skillDir },
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	defer w.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Now create the static ancestor of the glob.
+	if err := os.MkdirAll(pluginsDir, 0o755); err != nil {
+		t.Fatalf("mkdir plugins: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	// Then a plugin appears.
+	plug := filepath.Join(pluginsDir, "plug-a", "skills")
+	skill := filepath.Join(plug, "first")
+	if err := os.MkdirAll(skill, 0o755); err != nil {
+		t.Fatalf("mkdir plug: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: first\n---\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	select {
+	case got := <-events:
+		if got != skill {
+			t.Errorf("got %s want %s", got, skill)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not detect skill after glob ancestor appeared post-start")
+	}
+}
+
+func TestWatcher_AtomicLiteralRootCreation(t *testing.T) {
+	parent := t.TempDir()
+	rootPath := filepath.Join(parent, "deeply", "nested", "skills")
+
+	events := make(chan string, 8)
+	w, err := NewWatcher(WatcherConfig{
+		Roots:    []string{rootPath},
+		Debounce: 50 * time.Millisecond,
+		OnSkill:  func(skillDir string) { events <- skillDir },
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	defer w.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Atomic-ish: MkdirAll creates the entire chain plus a skill in one go.
+	skill := filepath.Join(rootPath, "first")
+	if err := os.MkdirAll(skill, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: first\n---\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	select {
+	case got := <-events:
+		if got != skill {
+			t.Errorf("got %s want %s", got, skill)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not detect skill in atomically-created chain")
+	}
+}
+
 func TestWatcher_DoesNotFireOnSiblingsOfMissingRoot(t *testing.T) {
 	parent := t.TempDir()
 	rootPath := filepath.Join(parent, "skills") // doesn't exist yet

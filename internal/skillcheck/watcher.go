@@ -251,11 +251,33 @@ func (w *Watcher) maybePromote(path string) {
 	//    already exist under this new intermediate dir (e.g. MkdirAll created
 	//    the full chain atomically and we only saw the top-level Create).
 	if w.isAncestorOfPendingLocked(path) {
-		// Snapshot pendingGlobs while holding the lock.
+		// Snapshot pendingGlobs while holding the lock. Also scan for any
+		// pending literal roots that are now present beneath this intermediate
+		// path (handles the case where MkdirAll created the entire chain and
+		// we only received the top-level Create event).
 		snapGlobs := make([]string, len(w.pendingGlobs))
 		copy(snapGlobs, w.pendingGlobs)
+		var promotedLiterals []string
+		remainingPending := w.pending[:0]
+		for _, p := range w.pending {
+			if isUnderOrEqual(p, path) {
+				if _, err := os.Stat(p); err == nil {
+					w.promoted[p] = true
+					promotedLiterals = append(promotedLiterals, p)
+					continue
+				}
+			}
+			remainingPending = append(remainingPending, p)
+		}
+		w.pending = remainingPending
 		w.mu.Unlock()
+
 		_ = w.watcher.Add(path)
+
+		// Promote any literal roots that already exist beneath the new watch.
+		for _, p := range promotedLiterals {
+			w.registerDirRecursive(p)
+		}
 		// Re-run glob matching synchronously; any new matches get promoted.
 		for _, g := range snapGlobs {
 			matches, _ := filepath.Glob(g)
@@ -303,6 +325,13 @@ func (w *Watcher) isAncestorOfPendingLocked(path string) bool {
 		// (e.g. path="/a", glob="/a/b/*/skills" → globAncestor="/a/b").
 		ga := filepath.Clean(globAncestor(g))
 		if strings.HasPrefix(ga, prefix) {
+			return true
+		}
+		// Case A2: path IS the glob's static ancestor exactly.
+		// (e.g. path="/plugins", glob="/plugins/*/skills" → globAncestor="/plugins").
+		// HasPrefix(ga, prefix) above requires ga to start with path+sep, which
+		// fails when they are equal; handle that case explicitly.
+		if cleanPath == ga {
 			return true
 		}
 		// Case B: path is under the glob's static ancestor but not yet a full
