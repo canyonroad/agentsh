@@ -2,6 +2,7 @@ package cache
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,7 +38,9 @@ func New(cfg Config) (*Cache, error) {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
 	c := &Cache{cfg: cfg, entries: map[string]entry{}, path: filepath.Join(cfg.Dir, "skillcache.json")}
-	_ = c.load()
+	if err := c.load(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("skillcheck cache: load %s: %w", c.path, err)
+	}
 	return c, nil
 }
 
@@ -64,8 +67,15 @@ func (c *Cache) Put(sha string, v *skillcheck.Verdict) {
 func (c *Cache) Flush() error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	now := time.Now()
+	live := make(map[string]entry, len(c.entries))
+	for k, e := range c.entries {
+		if now.Before(e.ExpiresAt) {
+			live[k] = e
+		}
+	}
 	tmp := c.path + ".tmp"
-	data, err := json.Marshal(c.entries)
+	data, err := json.Marshal(live)
 	if err != nil {
 		return fmt.Errorf("marshal cache: %w", err)
 	}

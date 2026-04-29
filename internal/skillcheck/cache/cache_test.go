@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -54,5 +56,42 @@ func TestPersistence(t *testing.T) {
 	got, ok := c2.Get("k")
 	if !ok || got.Action != skillcheck.VerdictBlock {
 		t.Errorf("persistence failed; ok=%v action=%s", ok, got.Action)
+	}
+}
+
+func TestFlush_DropsExpiredEntries(t *testing.T) {
+	dir := t.TempDir()
+	c, err := New(Config{Dir: dir, DefaultTTL: time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.Put("expired", &skillcheck.Verdict{Action: skillcheck.VerdictAllow})
+	time.Sleep(5 * time.Millisecond)
+	c.Put("fresh", &skillcheck.Verdict{Action: skillcheck.VerdictWarn})
+	if err := c.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	// Reload from disk; expired should be gone.
+	c2, err := New(Config{Dir: dir, DefaultTTL: time.Hour})
+	if err != nil {
+		t.Fatalf("New2: %v", err)
+	}
+	if _, ok := c2.Get("expired"); ok {
+		t.Errorf("expired entry should not have been persisted across Flush")
+	}
+	if _, ok := c2.Get("fresh"); !ok {
+		t.Errorf("fresh entry should still be present")
+	}
+}
+
+func TestNew_SurfacesCorruption(t *testing.T) {
+	dir := t.TempDir()
+	// Write garbage where the cache file lives.
+	if err := os.WriteFile(filepath.Join(dir, "skillcache.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := New(Config{Dir: dir, DefaultTTL: time.Hour})
+	if err == nil {
+		t.Fatalf("expected error from corrupt cache file")
 	}
 }
