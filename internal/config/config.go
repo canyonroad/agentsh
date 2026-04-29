@@ -2232,5 +2232,16 @@ func validateConfig(cfg *Config) error {
 	if err := cfg.Audit.Watchtower.validate(); err != nil {
 		return err
 	}
+	// Validate blocked_socket_families entries.
+	for i, e := range cfg.Sandbox.Seccomp.BlockedSocketFamilies {
+		if _, _, ok := seccompPkg.ParseFamily(e.Family); !ok {
+			return fmt.Errorf("sandbox.seccomp.blocked_socket_families[%d].family: %q is not a valid AF_* name or number", i, e.Family)
+		}
+		if e.Action != "" {
+			if _, ok := seccompPkg.ParseOnBlock(e.Action); !ok {
+				return fmt.Errorf("sandbox.seccomp.blocked_socket_families[%d].action: %q is not valid (allowed: errno, kill, log, log_and_kill)", i, e.Action)
+			}
+		}
+	}
 	return nil
 }

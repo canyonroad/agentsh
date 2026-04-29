@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -261,4 +262,45 @@ sandbox:
 	require.Equal(t, "errno", cfg.Sandbox.Seccomp.BlockedSocketFamilies[0].Action)
 	require.Equal(t, "AF_VSOCK", cfg.Sandbox.Seccomp.BlockedSocketFamilies[1].Family)
 	require.Equal(t, "kill", cfg.Sandbox.Seccomp.BlockedSocketFamilies[1].Action)
+}
+
+func TestSandboxSeccompSocketFamily_RejectsUnknownName(t *testing.T) {
+	cfg := &Config{}
+	cfg.Sandbox.FUSE.Audit.Mode = "monitor" // satisfy existing FUSE validator
+	cfg.Sandbox.Seccomp.Enabled = true
+	cfg.Sandbox.Seccomp.BlockedSocketFamilies = []SandboxSeccompSocketFamilyConfig{
+		{Family: "AF_NOT_REAL", Action: "errno"},
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatalf("expected error for unknown family name")
+	}
+	if !strings.Contains(err.Error(), "AF_NOT_REAL") {
+		t.Errorf("error should mention bad name; got %v", err)
+	}
+}
+
+func TestSandboxSeccompSocketFamily_RejectsBadAction(t *testing.T) {
+	cfg := &Config{}
+	cfg.Sandbox.FUSE.Audit.Mode = "monitor"
+	cfg.Sandbox.Seccomp.Enabled = true
+	cfg.Sandbox.Seccomp.BlockedSocketFamilies = []SandboxSeccompSocketFamilyConfig{
+		{Family: "AF_ALG", Action: "deny"}, // "deny" is not in the OnBlockAction enum
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Errorf("expected error for invalid action")
+	}
+}
+
+func TestSandboxSeccompSocketFamily_AcceptsNumericFamily(t *testing.T) {
+	cfg := &Config{}
+	cfg.Sandbox.FUSE.Audit.Mode = "monitor"
+	cfg.Sandbox.Seccomp.Enabled = true
+	cfg.Sandbox.Seccomp.BlockedSocketFamilies = []SandboxSeccompSocketFamilyConfig{
+		{Family: "38", Action: "errno"},
+	}
+	if err := validateConfig(cfg); err != nil {
+		t.Errorf("numeric family should be accepted; got %v", err)
+	}
 }
