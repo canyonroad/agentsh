@@ -35,6 +35,7 @@ type Config struct {
 	LinuxCapabilities CapabilitiesConfig      `yaml:"capabilities"`
 	ThreatFeeds       ThreatFeedsConfig       `yaml:"threat_feeds"`
 	PackageChecks     PackageChecksConfig     `yaml:"package_checks"`
+	Skillcheck        SkillcheckConfig        `yaml:"skillcheck"`
 	PolicySocket      PolicySocketConfig      `yaml:"policy_socket"`
 }
 
@@ -162,11 +163,11 @@ type AuditConfig struct {
 }
 
 type AuditStorageConfig struct {
-	Enabled       *bool         `yaml:"enabled"`         // defaults to true; set false to skip SQLite
+	Enabled       *bool         `yaml:"enabled"` // defaults to true; set false to skip SQLite
 	SQLitePath    string        `yaml:"sqlite_path"`
-	BatchSize     int           `yaml:"batch_size"`      // events per batch (default 64)
-	FlushInterval time.Duration `yaml:"flush_interval"`  // max time before flush (default 50ms)
-	ChannelSize   int           `yaml:"channel_size"`    // async buffer capacity (default 4096)
+	BatchSize     int           `yaml:"batch_size"`     // events per batch (default 64)
+	FlushInterval time.Duration `yaml:"flush_interval"` // max time before flush (default 50ms)
+	ChannelSize   int           `yaml:"channel_size"`   // async buffer capacity (default 4096)
 }
 
 type AuditWebhookConfig struct {
@@ -843,9 +844,9 @@ type DevelopmentPProfConfig struct {
 // Spec: docs/superpowers/specs/2026-04-18-wtp-client-design.md §"Configuration & Wiring".
 type AuditWatchtowerConfig struct {
 	Enabled       bool   `yaml:"enabled"`
-	Endpoint      string `yaml:"endpoint"`        // host:port
-	SessionID     string `yaml:"session_id"`      // optional; auto-generated ULID if empty
-	StateDir      string `yaml:"state_dir"`       // default GetUserStateDir() + "/wtp"; per-OS path differs (XDG_STATE_HOME on Linux, LOCALAPPDATA on Windows). See defaultWatchtowerStateDir.
+	Endpoint      string `yaml:"endpoint"`   // host:port
+	SessionID     string `yaml:"session_id"` // optional; auto-generated ULID if empty
+	StateDir      string `yaml:"state_dir"`  // default GetUserStateDir() + "/wtp"; per-OS path differs (XDG_STATE_HOME on Linux, LOCALAPPDATA on Windows). See defaultWatchtowerStateDir.
 	EphemeralMode bool   `yaml:"ephemeral_mode"`
 
 	// LogGoawayMessage controls whether the WARN log emitted on GOAWAY
