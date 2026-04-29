@@ -172,6 +172,110 @@ func TestWatcher_DetectsRootCreatedAfterStart(t *testing.T) {
 	}
 }
 
+func TestWatcher_DeepNestedRootMissing(t *testing.T) {
+	parent := t.TempDir()
+	rootPath := filepath.Join(parent, "level1", "level2", "skills") // grandgrand-parent only
+
+	events := make(chan string, 8)
+	w, err := NewWatcher(WatcherConfig{
+		Roots:    []string{rootPath},
+		Debounce: 50 * time.Millisecond,
+		OnSkill:  func(skillDir string) { events <- skillDir },
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	defer w.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Create the chain incrementally.
+	for _, sub := range []string{"level1", "level1/level2", "level1/level2/skills"} {
+		if err := os.MkdirAll(filepath.Join(parent, sub), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", sub, err)
+		}
+		time.Sleep(150 * time.Millisecond) // let watcher cascade
+	}
+
+	skillDir := filepath.Join(rootPath, "first")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: first\n---\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	select {
+	case got := <-events:
+		if got != skillDir {
+			t.Errorf("got %s want %s", got, skillDir)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not detect skill in deeply-nested root that appeared after start")
+	}
+}
+
+func TestWatcher_GlobMatchesMultiplePluginsOverTime(t *testing.T) {
+	parent := t.TempDir()
+	pluginsDir := filepath.Join(parent, "plugins")
+	if err := os.MkdirAll(pluginsDir, 0o755); err != nil {
+		t.Fatalf("mkdir plugins: %v", err)
+	}
+	rootGlob := filepath.Join(pluginsDir, "*", "skills")
+
+	events := make(chan string, 16)
+	w, err := NewWatcher(WatcherConfig{
+		Roots:    []string{rootGlob},
+		Debounce: 50 * time.Millisecond,
+		OnSkill:  func(skillDir string) { events <- skillDir },
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	defer w.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// First plugin lands.
+	plugA := filepath.Join(pluginsDir, "plug-a", "skills")
+	skillA := filepath.Join(plugA, "skill-a")
+	if err := os.MkdirAll(skillA, 0o755); err != nil {
+		t.Fatalf("mkdir A: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillA, "SKILL.md"), []byte("---\nname: a\n---\n"), 0o644); err != nil {
+		t.Fatalf("write A: %v", err)
+	}
+
+	// Second plugin lands LATER.
+	time.Sleep(300 * time.Millisecond)
+	plugB := filepath.Join(pluginsDir, "plug-b", "skills")
+	skillB := filepath.Join(plugB, "skill-b")
+	if err := os.MkdirAll(skillB, 0o755); err != nil {
+		t.Fatalf("mkdir B: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillB, "SKILL.md"), []byte("---\nname: b\n---\n"), 0o644); err != nil {
+		t.Fatalf("write B: %v", err)
+	}
+
+	seen := map[string]bool{}
+	deadline := time.After(3 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case got := <-events:
+			seen[got] = true
+		case <-deadline:
+			t.Fatalf("only saw %d events for two distinct plugins; events: %v", len(seen), seen)
+		}
+	}
+	if !seen[skillA] || !seen[skillB] {
+		t.Errorf("missing detection: A=%v B=%v", seen[skillA], seen[skillB])
+	}
+}
+
 func TestWatcher_DoesNotFireOnSiblingsOfMissingRoot(t *testing.T) {
 	parent := t.TempDir()
 	rootPath := filepath.Join(parent, "skills") // doesn't exist yet
