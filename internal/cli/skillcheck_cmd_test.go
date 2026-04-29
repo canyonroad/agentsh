@@ -22,7 +22,10 @@ func TestCobraRestore_ForwardsToken(t *testing.T) {
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
 	cmd.SetArgs([]string{"restore", "sometoken-xyz"})
-	_ = cmd.ExecuteContext(context.Background())
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Errorf("expected error from cobra for failed inner CLI restore (bogus token)")
+	}
 	out := buf.String()
 	// The usage message contains the literal "<token>" placeholder.
 	// It only appears when args were not forwarded; a real restore call

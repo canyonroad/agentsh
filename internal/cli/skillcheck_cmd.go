@@ -94,7 +94,10 @@ func newSkillcheckListQuarantinedCmd() *cobra.Command {
 				Stdout:    cmd.OutOrStdout(),
 				Providers: map[string]skillcheck.ProviderEntry{},
 			}
-			cli.Run(cmd.Context(), []string{"list-quarantined"})
+			code := cli.Run(cmd.Context(), []string{"list-quarantined"})
+			if code != 0 {
+				return &ExitError{code: code}
+			}
 			return nil
 		},
 	}
@@ -110,7 +113,10 @@ func newSkillcheckRestoreCmd(trashDir string) *cobra.Command {
 				Providers: map[string]skillcheck.ProviderEntry{},
 				TrashDir:  trashDir,
 			}
-			cli.Run(cmd.Context(), append([]string{"restore"}, args...))
+			code := cli.Run(cmd.Context(), append([]string{"restore"}, args...))
+			if code != 0 {
+				return &ExitError{code: code}
+			}
 			return nil
 		},
 	}
@@ -129,7 +135,10 @@ func newSkillcheckCacheCmd() *cobra.Command {
 				Stdout:    cmd.OutOrStdout(),
 				Providers: map[string]skillcheck.ProviderEntry{},
 			}
-			cli.Run(cmd.Context(), append([]string{"cache", "prune"}, args...))
+			code := cli.Run(cmd.Context(), append([]string{"cache", "prune"}, args...))
+			if code != 0 {
+				return &ExitError{code: code}
+			}
 			return nil
 		},
 	})
@@ -139,7 +148,10 @@ func newSkillcheckCacheCmd() *cobra.Command {
 			Stdout:    cmd.OutOrStdout(),
 			Providers: map[string]skillcheck.ProviderEntry{},
 		}
-		cli.Run(cmd.Context(), []string{"cache"})
+		code := cli.Run(cmd.Context(), []string{"cache"})
+		if code != 0 {
+			return &ExitError{code: code}
+		}
 		return nil
 	}
 	return cmd
