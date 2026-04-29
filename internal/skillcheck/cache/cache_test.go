@@ -61,17 +61,21 @@ func TestPersistence(t *testing.T) {
 
 func TestFlush_DropsExpiredEntries(t *testing.T) {
 	dir := t.TempDir()
-	c, err := New(Config{Dir: dir, DefaultTTL: time.Millisecond})
+	c, err := New(Config{Dir: dir, DefaultTTL: time.Hour})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	c.Put("expired", &skillcheck.Verdict{Action: skillcheck.VerdictAllow})
-	time.Sleep(5 * time.Millisecond)
+	// Seed an already-expired entry directly so the test does not depend on sleeps.
+	c.mu.Lock()
+	c.entries["expired"] = entry{
+		Verdict:   &skillcheck.Verdict{Action: skillcheck.VerdictAllow},
+		ExpiresAt: time.Now().Add(-time.Hour),
+	}
+	c.mu.Unlock()
 	c.Put("fresh", &skillcheck.Verdict{Action: skillcheck.VerdictWarn})
 	if err := c.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
-	// Reload from disk; expired should be gone.
 	c2, err := New(Config{Dir: dir, DefaultTTL: time.Hour})
 	if err != nil {
 		t.Fatalf("New2: %v", err)
