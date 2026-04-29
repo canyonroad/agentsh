@@ -20,7 +20,7 @@ import (
 // provider); a stub that exercises the same pipeline is the correct pattern.
 func TestEndToEnd_QuarantineRoundTrip(t *testing.T) {
 	root := t.TempDir()
-	trashDir := filepath.Join(root, ".trash")
+	trashDir := t.TempDir() // outside root so restore doesn't re-trigger the watcher
 
 	d, err := NewDaemon(DaemonConfig{
 		Roots:    []string{root},
@@ -102,5 +102,35 @@ func TestEndToEnd_QuarantineRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "evil") {
 		t.Errorf("list output missing 'evil': %s", out.String())
+	}
+
+	// Round-trip: extract the token from list output and restore.
+	listOutput := out.String()
+	// list output format: "<token>\t<originalPath>\t<command>\n" per entry
+	parts := strings.Fields(strings.TrimSpace(listOutput))
+	if len(parts) < 1 {
+		t.Fatalf("could not parse token from list output: %q", listOutput)
+	}
+	token := parts[0]
+
+	restoreDest := filepath.Join(t.TempDir(), "restored-evil")
+	out.Reset()
+	cli2 := &CLI{Stdout: out, TrashDir: trashDir, Providers: map[string]ProviderEntry{}}
+	code := cli2.Run(ctx, []string{"restore", token, restoreDest})
+	if code != 0 {
+		t.Fatalf("restore exit=%d output=%q", code, out.String())
+	}
+
+	// Verify the restored SKILL.md matches the fixture content.
+	restoredContent, err := os.ReadFile(filepath.Join(restoreDest, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read restored SKILL.md: %v", err)
+	}
+	fixtureContent, err := os.ReadFile(filepath.Join("testdata", "skills", "malicious-e2e", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if string(restoredContent) != string(fixtureContent) {
+		t.Errorf("restored content does not match fixture")
 	}
 }
