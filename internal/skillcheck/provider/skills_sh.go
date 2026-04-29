@@ -113,10 +113,20 @@ func (p *skillsShProvider) Scan(ctx context.Context, req skillcheck.ScanRequest)
 			Metadata: skillcheck.ResponseMetadata{Duration: time.Since(start)},
 		}, nil
 	}
-	// 404 or any other non-2xx: neutral — missing provenance is not a finding.
+	if resp.StatusCode == http.StatusNotFound {
+		// 404: skill genuinely not in registry — neutral, no finding.
+		return &skillcheck.ScanResponse{
+			Provider: p.Name(),
+			Metadata: skillcheck.ResponseMetadata{Duration: time.Since(start)},
+		}, nil
+	}
+	// Any other status (5xx, 429, etc.): soft-fail so operators can see the issue.
 	return &skillcheck.ScanResponse{
 		Provider: p.Name(),
-		Metadata: skillcheck.ResponseMetadata{Duration: time.Since(start)},
+		Metadata: skillcheck.ResponseMetadata{
+			Duration: time.Since(start),
+			Error:    fmt.Sprintf("skills.sh: unexpected status %d", resp.StatusCode),
+		},
 	}, nil
 }
 
@@ -133,5 +143,6 @@ func parseGitHubOriginPath(rawURL string) (string, string, bool) {
 	if len(parts) < 2 {
 		return "", "", false
 	}
-	return parts[0], parts[1], true
+	repo := strings.TrimSuffix(parts[1], ".git")
+	return parts[0], repo, true
 }

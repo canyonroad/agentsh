@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,5 +77,66 @@ func TestSkillsSh_404IsNeutral(t *testing.T) {
 	}
 	if len(resp.Findings) != 0 {
 		t.Errorf("404 should produce no findings, got %+v", resp.Findings)
+	}
+}
+
+func TestSkillsSh_500EmitsErrorMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	p := NewSkillsShProvider(SkillsShConfig{BaseURL: srv.URL, Timeout: time.Second})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req := loadFixture(t, "minimal")
+	req.Skill.Name = "minimal"
+	req.Skill.Origin = &skillcheck.GitOrigin{URL: "https://github.com/example/skills"}
+	resp, err := p.Scan(ctx, req)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(resp.Findings) != 0 {
+		t.Errorf("500 should produce no findings, got %+v", resp.Findings)
+	}
+	if resp.Metadata.Error == "" {
+		t.Errorf("500 should populate Metadata.Error so the failure is visible")
+	}
+}
+
+func TestSkillsSh_StripDotGitSuffix(t *testing.T) {
+	seen := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	p := NewSkillsShProvider(SkillsShConfig{BaseURL: srv.URL, Timeout: time.Second})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req := loadFixture(t, "minimal")
+	req.Skill.Name = "minimal"
+	req.Skill.Origin = &skillcheck.GitOrigin{URL: "https://github.com/example/skills.git"}
+	if _, err := p.Scan(ctx, req); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if seen != "/example/skills/minimal" {
+		t.Errorf("path=%q want /example/skills/minimal", seen)
+	}
+}
+
+func TestSkillsSh_429EmitsErrorMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	p := NewSkillsShProvider(SkillsShConfig{BaseURL: srv.URL, Timeout: time.Second})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req := loadFixture(t, "minimal")
+	req.Skill.Name = "minimal"
+	req.Skill.Origin = &skillcheck.GitOrigin{URL: "https://github.com/example/skills"}
+	resp, _ := p.Scan(ctx, req)
+	if resp.Metadata.Error == "" || !strings.Contains(resp.Metadata.Error, "429") {
+		t.Errorf("429 should mention rate limit; got %q", resp.Metadata.Error)
 	}
 }
