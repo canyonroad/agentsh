@@ -49,18 +49,29 @@ func (c *CLI) runScan(ctx context.Context, args []string) int {
 		fmt.Fprintln(c.stdout(), "usage: agentsh skillcheck scan <path>")
 		return 2
 	}
-	limits := c.Limits
-	if limits.PerFileBytes == 0 {
-		limits = DefaultLoaderLimits()
-	}
+	limits := resolveLimits(c.Limits)
 	ref, files, err := LoadSkill(args[0], limits)
 	if err != nil {
 		fmt.Fprintln(c.stdout(), "load:", err)
 		return 1
 	}
 	o := NewOrchestrator(OrchestratorConfig{Providers: c.Providers})
-	findings, _ := o.ScanAll(ctx, ScanRequest{Skill: *ref, Files: files})
+	findings, provErrs := o.ScanAll(ctx, ScanRequest{Skill: *ref, Files: files})
+	findings = append(findings, synthesizeProviderErrorFindings(provErrs, *ref)...)
 	v := NewEvaluator(c.Thresholds).Evaluate(findings, *ref)
+	floor := actionFloorFromProviderErrors(provErrs)
+	if floor.weight() > v.Action.weight() {
+		v.Action = floor
+		if v.Summary == "" {
+			v.Summary = fmt.Sprintf("escalated by provider failure floor=%s", floor)
+		} else {
+			v.Summary = v.Summary + fmt.Sprintf(" [floor=%s from provider failures]", floor)
+		}
+		if sv, ok := v.Skills[ref.String()]; ok {
+			sv.Action = floor
+			v.Skills[ref.String()] = sv
+		}
+	}
 	fmt.Fprintln(c.stdout(), v.String())
 	if v.Action == VerdictBlock {
 		return 3
@@ -78,4 +89,17 @@ func (c *CLI) runDoctor() int {
 		fmt.Fprintf(c.stdout(), "%-12s ok\n", name)
 	}
 	return 0
+}
+
+// resolveLimits defaults each LoaderLimits field independently so callers
+// that set only one field don't lose the other. Used by both CLI and Daemon.
+func resolveLimits(cfg LoaderLimits) LoaderLimits {
+	defaults := DefaultLoaderLimits()
+	if cfg.PerFileBytes == 0 {
+		cfg.PerFileBytes = defaults.PerFileBytes
+	}
+	if cfg.TotalBytes == 0 {
+		cfg.TotalBytes = defaults.TotalBytes
+	}
+	return cfg
 }

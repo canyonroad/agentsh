@@ -3,6 +3,7 @@ package skillcheck
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,5 +124,53 @@ func TestCLI_PlaceholderSubcommands(t *testing.T) {
 		if !strings.Contains(out.String(), "not implemented yet") {
 			t.Errorf("%s: want 'not implemented yet' in output, got: %s", sub, out.String())
 		}
+	}
+}
+
+func TestCLI_ProviderDenyFailureExitsBlock(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: skill\n---\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cli := &CLI{
+		Stdout: new(bytes.Buffer),
+		Providers: map[string]ProviderEntry{
+			"broken": {
+				Provider:  stubProvider{name: "broken", err: errors.New("boom")},
+				OnFailure: "deny",
+			},
+		},
+	}
+	code := cli.Run(context.Background(), []string{"scan", skillDir})
+	if code != 3 {
+		t.Errorf("expected exit code 3 (block) when provider with on_failure=deny fails; got %d", code)
+	}
+}
+
+func TestCLI_PartialLimitsConfigStillScans(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: skill\n---\nbody\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Configure ONLY PerFileBytes; TotalBytes left at 0 (would mean "no
+	// skill exceeds 0 bytes" without defaulting → all loads fail).
+	cli := &CLI{
+		Stdout:    new(bytes.Buffer),
+		Limits:    LoaderLimits{PerFileBytes: 16 * 1024},
+		Providers: map[string]ProviderEntry{},
+	}
+	code := cli.Run(context.Background(), []string{"scan", skillDir})
+	if code != 0 {
+		t.Errorf("expected exit code 0 with partial limits; got %d (TotalBytes default not applied)", code)
 	}
 }

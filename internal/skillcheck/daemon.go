@@ -60,15 +60,9 @@ func NewDaemon(cfg DaemonConfig) (*Daemon, error) {
 	if cfg.Cache == nil {
 		return nil, ErrNilCache
 	}
-	// Bug 3 fix: default each limit field independently so callers that set
-	// only one field don't lose the other.
-	defaults := DefaultLoaderLimits()
-	if cfg.Limits.PerFileBytes == 0 {
-		cfg.Limits.PerFileBytes = defaults.PerFileBytes
-	}
-	if cfg.Limits.TotalBytes == 0 {
-		cfg.Limits.TotalBytes = defaults.TotalBytes
-	}
+	// Default each limit field independently so callers that set only one
+	// field don't lose the other.
+	cfg.Limits = resolveLimits(cfg.Limits)
 	d := &Daemon{
 		cfg:    cfg,
 		orches: NewOrchestrator(OrchestratorConfig{Providers: cfg.Providers}),
