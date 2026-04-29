@@ -182,3 +182,92 @@ func TestSelectFamilyEngine_WrapperMissing_NeitherFallback(t *testing.T) {
 		t.Errorf("expected familyEngineNone when wrapper missing and ptrace unavailable; got %v", got)
 	}
 }
+
+// TestResolveFamilyCheckerForPtrace_AlwaysWiresWhenFamiliesConfigured verifies
+// the defensive wiring fix: resolveFamilyCheckerForPtrace must return a
+// non-nil FamilyChecker whenever BlockedSocketFamilies is non-empty,
+// regardless of which engine selectFamilyBlockingEngine would choose.
+// This is the direct regression test for the hybrid-ptrace fail-open bug
+// (see commit message for context).
+func TestResolveFamilyCheckerForPtrace_AlwaysWiresWhenFamiliesConfigured(t *testing.T) {
+	cfg := &config.Config{
+		Sandbox: config.SandboxConfig{
+			Seccomp: config.SandboxSeccompConfig{
+				Enabled: true,
+				BlockedSocketFamilies: []config.SandboxSeccompSocketFamilyConfig{
+					{Family: "AF_ALG", Action: "errno"},
+				},
+			},
+			Ptrace: config.SandboxPtraceConfig{Enabled: true},
+		},
+	}
+
+	checker, err := resolveFamilyCheckerForPtrace(cfg)
+	if err != nil {
+		t.Fatalf("resolveFamilyCheckerForPtrace returned unexpected error: %v", err)
+	}
+	if checker == nil {
+		t.Error("expected non-nil FamilyChecker when BlockedSocketFamilies is configured; got nil (families would fail open)")
+	}
+}
+
+// TestResolveFamilyCheckerForPtrace_NilWhenNoFamilies verifies that no
+// FamilyChecker is created when the blocked families list is empty.
+func TestResolveFamilyCheckerForPtrace_NilWhenNoFamilies(t *testing.T) {
+	cfg := &config.Config{
+		Sandbox: config.SandboxConfig{
+			Seccomp: config.SandboxSeccompConfig{
+				Enabled:               true,
+				BlockedSocketFamilies: nil,
+			},
+			Ptrace: config.SandboxPtraceConfig{Enabled: true},
+		},
+	}
+
+	checker, err := resolveFamilyCheckerForPtrace(cfg)
+	if err != nil {
+		t.Fatalf("resolveFamilyCheckerForPtrace returned unexpected error: %v", err)
+	}
+	if checker != nil {
+		t.Error("expected nil FamilyChecker when BlockedSocketFamilies is empty; got non-nil")
+	}
+}
+
+// TestResolveFamilyCheckerForPtrace_SeccompSelectedEngine verifies the key
+// scenario from the bug report: even when selectFamilyBlockingEngine would
+// choose familyEngineSeccomp (wrapper present, seccomp enabled), the helper
+// still returns a non-nil checker so the ptrace tracer is wired defensively.
+func TestResolveFamilyCheckerForPtrace_SeccompSelectedEngine(t *testing.T) {
+	// Simulate "seccomp would win" from the selector's perspective.
+	withPresentWrapper(t)
+
+	cfg := &config.Config{
+		Sandbox: config.SandboxConfig{
+			Seccomp: config.SandboxSeccompConfig{
+				Enabled: true,
+				BlockedSocketFamilies: []config.SandboxSeccompSocketFamilyConfig{
+					{Family: "AF_ALG", Action: "errno"},
+				},
+			},
+			Ptrace: config.SandboxPtraceConfig{Enabled: true},
+		},
+	}
+
+	// Confirm selector would pick seccomp.
+	families := oneFamilySlice()
+	caps := &capabilities.SecurityCapabilities{Seccomp: true, Ptrace: true}
+	engine := selectFamilyBlockingEngine(families, &cfg.Sandbox, caps)
+	if engine != familyEngineSeccomp {
+		t.Skipf("precondition failed: expected seccomp engine, got %v", engine)
+	}
+
+	// The defensive helper must still wire the checker.
+	checker, err := resolveFamilyCheckerForPtrace(cfg)
+	if err != nil {
+		t.Fatalf("resolveFamilyCheckerForPtrace returned unexpected error: %v", err)
+	}
+	if checker == nil {
+		t.Error("expected non-nil FamilyChecker even when seccomp engine is selected; " +
+			"ptrace tracer must be defensively wired (families would fail open otherwise)")
+	}
+}

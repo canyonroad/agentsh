@@ -56,9 +56,13 @@ func wrapperWillRun(cfg *config.SandboxConfig) bool {
 	return err == nil
 }
 
-// selectFamilyBlockingEngine picks the appropriate enforcement engine for
+// selectFamilyBlockingEngine reports which engine WILL primarily enforce
 // socket-family blocking given the resolved family list, the sandbox config,
-// and the detected host capabilities.
+// and the detected host capabilities.  Used for diagnostics and the
+// warn-and-continue path only — it is NOT load-bearing for which engine
+// actually enforces.  Both the seccomp and ptrace engines may hold the
+// FamilyChecker; runtime dispatch is mutually exclusive (a syscall reaches at
+// most one engine), so dual installation is safe.
 //
 // Decision order (per spec §"Engine selection"):
 //  1. seccomp available + enabled in config + wrapper will run → seccomp engine
