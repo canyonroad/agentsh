@@ -543,10 +543,13 @@ func New(cfg *config.Config) (*Server, error) {
 		if cfg.Skillcheck.TrashDir == "" {
 			return nil, fmt.Errorf("skillcheck.trash_dir: required when skillcheck is enabled (block verdicts cannot quarantine without it)")
 		}
-		if !anyProviderEnabled(cfg.Skillcheck.Providers) {
+		skillcheckProviders, err := buildSkillcheckProviders(cfg.Skillcheck.Providers)
+		if err != nil {
+			return nil, err
+		}
+		if len(skillcheckProviders) == 0 {
 			return nil, fmt.Errorf("skillcheck.providers: at least one provider must be enabled when skillcheck is enabled")
 		}
-		skillcheckProviders := buildSkillcheckProviders(cfg.Skillcheck.Providers)
 		cacheDir := cfg.Skillcheck.CacheDir
 		if cacheDir == "" {
 			cacheDir = filepath.Join(filepath.Dir(cfg.Audit.Storage.SQLitePath), "skillcache")

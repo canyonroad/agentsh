@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -16,11 +17,19 @@ import (
 )
 
 // buildSkillcheckProviders constructs a ProviderEntry map from the config.
-func buildSkillcheckProviders(cfgs map[string]config.SkillcheckProviderConfig) map[string]skillcheck.ProviderEntry {
+// It returns an error if any enabled provider has an unrecognized name.
+func buildSkillcheckProviders(cfgs map[string]config.SkillcheckProviderConfig) (map[string]skillcheck.ProviderEntry, error) {
 	out := map[string]skillcheck.ProviderEntry{}
+	valid := map[string]bool{
+		"local": true, "snyk": true, "skills_sh": true,
+		"chainguard": true, "repello": true,
+	}
 	for name, c := range cfgs {
 		if !c.Enabled {
 			continue
+		}
+		if !valid[name] {
+			return nil, fmt.Errorf("skillcheck.providers: unknown provider %q (valid: local, snyk, skills_sh, chainguard, repello)", name)
 		}
 		var p skillcheck.CheckProvider
 		switch name {
@@ -39,22 +48,9 @@ func buildSkillcheckProviders(cfgs map[string]config.SkillcheckProviderConfig) m
 		case "repello":
 			p = provider.NewRepelloProvider()
 		}
-		if p == nil {
-			continue
-		}
 		out[name] = skillcheck.ProviderEntry{Provider: p, Timeout: c.Timeout, OnFailure: c.OnFailure}
 	}
-	return out
-}
-
-// anyProviderEnabled reports whether at least one provider in the map has Enabled: true.
-func anyProviderEnabled(providers map[string]config.SkillcheckProviderConfig) bool {
-	for _, p := range providers {
-		if p.Enabled {
-			return true
-		}
-	}
-	return false
+	return out, nil
 }
 
 // buildSkillcheckThresholds converts the string→string YAML map into
