@@ -191,6 +191,19 @@ func TestCLI_Restore_NoTrashDir(t *testing.T) {
 	}
 }
 
+func TestCLI_Restore_RejectsExtraArgs(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	cli := &CLI{Stdout: &out, TrashDir: dir}
+	code := cli.Run(context.Background(), []string{"restore", "tok", "dest", "extra"})
+	if code != 2 {
+		t.Errorf("exit=%d want 2 (usage)", code)
+	}
+	if !strings.Contains(out.String(), "usage") {
+		t.Errorf("got: %s", out.String())
+	}
+}
+
 func TestCLI_Restore_BogusToken(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer

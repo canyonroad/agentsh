@@ -123,7 +123,7 @@ func (c *CLI) runList() int {
 }
 
 func (c *CLI) runRestore(args []string) int {
-	if c.TrashDir == "" || len(args) < 1 {
+	if c.TrashDir == "" || len(args) < 1 || len(args) > 2 {
 		fmt.Fprintln(c.stdout(), "usage: agentsh skillcheck restore <token> [dest]")
 		return 2
 	}
