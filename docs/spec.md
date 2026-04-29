@@ -2025,7 +2025,14 @@ sandbox:
         - umount2
         # ... see docs/seccomp.md for full default list
       on_block: kill  # kill | log_and_kill
+    blocked_socket_families:        # see docs/seccomp.md § Socket Family Blocking
+      - family: AF_ALG              # blocks socket(AF_ALG, ...) → EAFNOSUPPORT
+        action: errno
 ```
+
+**Default blocked socket families** (when `blocked_socket_families` is unset):
+
+agentsh ships a default list of 12 families blocked at `errno` (returns `EAFNOSUPPORT`): `AF_ALG`, `AF_VSOCK`, `AF_RDS`, `AF_TIPC`, `AF_KCM`, plus the dead protocols `AF_X25`, `AF_AX25`, `AF_NETROM`, `AF_ROSE`, `AF_DECnet`, `AF_APPLETALK`, `AF_IPX`. Set the field to `[]` to opt out.
 
 **Default blocked syscalls** (when seccomp is enabled):
 
