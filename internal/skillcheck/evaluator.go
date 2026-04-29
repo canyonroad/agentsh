@@ -38,11 +38,12 @@ func (e *Evaluator) Evaluate(findings []Finding, skill SkillRef) *Verdict {
 		return &Verdict{Action: VerdictAllow, Summary: "no findings"}
 	}
 
-	// 1. base severity = max non-provenance severity
+	// 1. base severity = max non-provenance severity; negative provenance
+	// (audit_fail) is included because it represents a known-bad signal.
 	base := SeverityInfo
 	for _, f := range findings {
-		if f.Type == FindingProvenance {
-			continue
+		if f.Type == FindingProvenance && !isAuditFail(f) {
+			continue // exclude positive provenance from base
 		}
 		if f.Severity.Weight() > base.Weight() {
 			base = f.Severity
@@ -57,10 +58,8 @@ func (e *Evaluator) Evaluate(findings []Finding, skill SkillRef) *Verdict {
 			continue
 		}
 		registered = true
-		for _, r := range f.Reasons {
-			if r.Code == "skills_sh_audit_fail" {
-				auditFail = true
-			}
+		if isAuditFail(f) {
+			auditFail = true
 		}
 	}
 	adjusted := base
@@ -116,4 +115,18 @@ func stepDown(s Severity) Severity {
 	default:
 		return SeverityInfo
 	}
+}
+
+// isAuditFail reports whether a provenance finding represents a failed
+// upstream audit (e.g. skills_sh_audit_fail) rather than a positive signal.
+func isAuditFail(f Finding) bool {
+	if f.Type != FindingProvenance {
+		return false
+	}
+	for _, r := range f.Reasons {
+		if r.Code == "skills_sh_audit_fail" {
+			return true
+		}
+	}
+	return false
 }

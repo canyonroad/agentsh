@@ -49,7 +49,32 @@ func TestEvaluator_ProvenanceFailUpgrades(t *testing.T) {
 		{Type: FindingPromptInjection, Severity: SeverityMedium, Skill: skill},
 		{Type: FindingProvenance, Severity: SeverityHigh, Skill: skill, Reasons: []Reason{{Code: "skills_sh_audit_fail"}}},
 	}, skill)
-	if v.Action != VerdictApprove {
-		t.Errorf("medium+failed-audit → action=%s want approve", v.Action)
+	if v.Action != VerdictBlock {
+		t.Errorf("medium+failed-audit → action=%s want block", v.Action)
+	}
+}
+
+func TestEvaluator_FailedAuditAloneIsNotAllow(t *testing.T) {
+	e := NewEvaluator(DefaultThresholds())
+	skill := SkillRef{Name: "x", SHA256: "abc"}
+	v := e.Evaluate([]Finding{
+		{Type: FindingProvenance, Severity: SeverityHigh, Skill: skill,
+			Reasons: []Reason{{Code: "skills_sh_audit_fail"}}},
+	}, skill)
+	if v.Action == VerdictAllow {
+		t.Fatalf("a failed-audit-only finding must not be allowed; got %s", v.Action)
+	}
+}
+
+func TestEvaluator_FailedAuditAloneEscalates(t *testing.T) {
+	e := NewEvaluator(DefaultThresholds())
+	skill := SkillRef{Name: "x", SHA256: "abc"}
+	// High failed-audit alone: base = high (now included), stepUp → critical, → block.
+	v := e.Evaluate([]Finding{
+		{Type: FindingProvenance, Severity: SeverityHigh, Skill: skill,
+			Reasons: []Reason{{Code: "skills_sh_audit_fail"}}},
+	}, skill)
+	if v.Action != VerdictBlock {
+		t.Errorf("high failed-audit alone → action=%s want block", v.Action)
 	}
 }
