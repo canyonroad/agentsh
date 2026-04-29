@@ -151,6 +151,20 @@ func (d *Daemon) scanPath(skillDir string) {
 	findings, provErrs := d.orches.ScanAll(ctx, ScanRequest{Skill: *ref, Files: files})
 	findings = append(findings, synthesizeProviderErrorFindings(provErrs, *ref)...)
 	v := d.eval.Evaluate(findings, *ref)
+	floor := actionFloorFromProviderErrors(provErrs)
+	if floor.weight() > v.Action.weight() {
+		v.Action = floor
+		if v.Summary == "" {
+			v.Summary = fmt.Sprintf("escalated by provider failure floor=%s", floor)
+		} else {
+			v.Summary = v.Summary + fmt.Sprintf(" [floor=%s from provider failures]", floor)
+		}
+		// Also update the per-skill verdict in v.Skills if present.
+		if sv, ok := v.Skills[ref.String()]; ok {
+			sv.Action = floor
+			v.Skills[ref.String()] = sv
+		}
+	}
 	d.cfg.Cache.Put(ref.SHA256, v)
 	d.applyAndAudit(ctx, *ref, v)
 }
@@ -167,6 +181,30 @@ func (d *Daemon) applyAndAudit(ctx context.Context, skill SkillRef, v *Verdict) 
 			Extra:   map[string]string{"error": err.Error()},
 		})
 	}
+}
+
+// actionFloorFromProviderErrors computes the minimum VerdictAction that must
+// be applied due to provider failures, regardless of finding severity or
+// provenance adjustments. This is the configured OnFailure escalation floor.
+func actionFloorFromProviderErrors(errs []ProviderError) VerdictAction {
+	floor := VerdictAllow
+	for _, e := range errs {
+		var a VerdictAction
+		switch e.OnFailure {
+		case "deny", "block":
+			a = VerdictBlock
+		case "approve":
+			a = VerdictApprove
+		case "warn":
+			a = VerdictWarn
+		default:
+			a = VerdictAllow
+		}
+		if a.weight() > floor.weight() {
+			floor = a
+		}
+	}
+	return floor
 }
 
 // synthesizeProviderErrorFindings converts ProviderErrors into synthetic Findings

@@ -3,6 +3,7 @@ package skillcheck
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -27,10 +28,15 @@ func (a *fakeApproval) Ask(ctx context.Context, skill SkillRef, v *Verdict) (boo
 }
 
 type fakeAudit struct {
+	mu     sync.Mutex
 	events []AuditEvent
 }
 
-func (a *fakeAudit) Emit(ctx context.Context, ev AuditEvent) { a.events = append(a.events, ev) }
+func (a *fakeAudit) Emit(ctx context.Context, ev AuditEvent) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.events = append(a.events, ev)
+}
 
 func TestApply_Allow_NoOp(t *testing.T) {
 	q := &fakeQuarantine{}

@@ -118,3 +118,96 @@ func TestDaemon_ProviderErrorWithDenyEscalatesToBlock(t *testing.T) {
 	}
 	t.Fatalf("provider error with on_failure=deny should have escalated to quarantine")
 }
+
+func TestDaemon_DenyFloorBeatsPositiveProvenance(t *testing.T) {
+	// Provider error with OnFailure=deny, plus a positive provenance finding.
+	// Without the floor, evaluator would downgrade critical → high → approve.
+	// With the floor, the deny survives.
+	root := t.TempDir()
+	trashDir := filepath.Join(root, ".trash")
+
+	d, err := NewDaemon(DaemonConfig{
+		Roots:    []string{root},
+		TrashDir: trashDir,
+		Cache:    newMemCache(),
+		Providers: map[string]ProviderEntry{
+			"broken": {Provider: stubProvider{name: "broken", err: errors.New("boom")}, OnFailure: "deny"},
+			"skillssh": {Provider: stubProvider{name: "skillssh", findings: []Finding{
+				{Type: FindingProvenance, Severity: SeverityInfo, Reasons: []Reason{{Code: "skills_sh_registered"}}},
+			}}},
+		},
+		Approval: &fakeApproval{approved: false},
+		Audit:    &fakeAudit{},
+	})
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+	defer d.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	skillDir := filepath.Join(root, "victim")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: victim\n---\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(skillDir); os.IsNotExist(err) {
+			return // quarantined as expected
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("provider deny + positive provenance should still block (floor enforced); skill remained installed")
+}
+
+func TestDaemon_WarnFloorAllowsLowerActionsToWin(t *testing.T) {
+	// Provider error with OnFailure=warn, plus a critical real finding.
+	// Floor=warn should NOT downgrade the critical → block evaluator outcome.
+	root := t.TempDir()
+	trashDir := filepath.Join(root, ".trash")
+
+	d, err := NewDaemon(DaemonConfig{
+		Roots:    []string{root},
+		TrashDir: trashDir,
+		Cache:    newMemCache(),
+		Providers: map[string]ProviderEntry{
+			"broken": {Provider: stubProvider{name: "broken", err: errors.New("boom")}, OnFailure: "warn"},
+			"real": {Provider: stubProvider{name: "real", findings: []Finding{
+				{Type: FindingPromptInjection, Severity: SeverityCritical},
+			}}},
+		},
+		Approval: &fakeApproval{approved: false},
+		Audit:    &fakeAudit{},
+	})
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+	defer d.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	skillDir := filepath.Join(root, "victim2")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: victim2\n---\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(skillDir); os.IsNotExist(err) {
+			return // critical → block; warn floor doesn't lower it
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("critical finding should block regardless of warn floor; skill remained installed")
+}
