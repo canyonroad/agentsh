@@ -1,5 +1,3 @@
-//go:build linux && cgo
-
 package seccomp
 
 import "strconv"
