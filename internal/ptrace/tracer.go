@@ -89,9 +89,9 @@ type NetworkResult struct {
 	Allow            bool
 	Action           string // "" (legacy), "allow", "deny", "redirect"
 	Errno            int32
-	RedirectAddr     string // for redirect
-	RedirectPort     int    // for redirect
-	RedirectUpstream string // Forward DNS query to this resolver (ip:port)
+	RedirectAddr     string      // for redirect
+	RedirectPort     int         // for redirect
+	RedirectUpstream string      // Forward DNS query to this resolver (ip:port)
 	Records          []DNSRecord // Synthetic DNS response records
 }
 
@@ -142,28 +142,29 @@ type TracerConfig struct {
 	FileHandler      FileHandler
 	NetworkHandler   NetworkHandler
 	SignalHandler    SignalHandler
+	FamilyChecker    *FamilyChecker // nil disables socket-family blocking
 	Metrics          Metrics
 }
 
 // TraceeState tracks the state of a single traced thread.
 type TraceeState struct {
-	TID              int
-	TGID             int
-	ParentPID        int
-	SessionID        string
-	CommandID        string
-	InSyscall        bool
-	LastNr           int
-	Attached         time.Time
-	ParkedAt         time.Time
+	TID                   int
+	TGID                  int
+	ParentPID             int
+	SessionID             string
+	CommandID             string
+	InSyscall             bool
+	LastNr                int
+	Attached              time.Time
+	ParkedAt              time.Time
 	PendingDenyErrno      int
 	PendingFakeZero       bool  // force return value to 0 on syscall exit
 	PendingReturnOverride int64 // force return value to this on syscall exit
 	HasPendingReturn      bool  // whether PendingReturnOverride is active
 	PendingInterrupt      bool
-	HasPrefilter     bool // true if seccomp prefilter is installed for this tracee
-	PendingPrefilter bool // inject seccomp filter on next syscall stop
-	NeedExitStop     bool // resume with PtraceSyscall to catch exit
+	HasPrefilter          bool // true if seccomp prefilter is installed for this tracee
+	PendingPrefilter      bool // inject seccomp filter on next syscall stop
+	NeedExitStop          bool // resume with PtraceSyscall to catch exit
 	// TGID-level: any thread in this TGID triggered escalation
 	NeedsReadEscalation  bool
 	NeedsWriteEscalation bool
@@ -173,14 +174,14 @@ type TraceeState struct {
 	// Deferred: inject escalation at next exit stop
 	PendingReadEscalation  bool
 	PendingWriteEscalation bool
-	IsVforkChild     bool
-	SuppressInitialStop bool // suppress initial SIGSTOP from auto-trace
-	LastOpenFlags    int    // flags from last openat/openat2 entry (event-loop-only)
-	LastOpenOp       string // operation from last openat/openat2 entry (event-loop-only)
-	LastFileAction   string // action from last file entry-time policy check (event-loop-only)
-	PendingExecStubFD  int // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
-	PendingExecSavedFD int // fd that was displaced by stub fd; restored on exec failure (-1 = none)
-	MemFD              int
+	IsVforkChild           bool
+	SuppressInitialStop    bool   // suppress initial SIGSTOP from auto-trace
+	LastOpenFlags          int    // flags from last openat/openat2 entry (event-loop-only)
+	LastOpenOp             string // operation from last openat/openat2 entry (event-loop-only)
+	LastFileAction         string // action from last file entry-time policy check (event-loop-only)
+	PendingExecStubFD      int    // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
+	PendingExecSavedFD     int    // fd that was displaced by stub fd; restored on exec failure (-1 = none)
+	MemFD                  int
 }
 
 type resumeRequest struct {
@@ -193,9 +194,9 @@ type resumeRequest struct {
 type ExitReason int
 
 const (
-	ExitNormal    ExitReason = iota // process exited or was signaled (Code/Signal valid)
-	ExitVanished                    // ESRCH — process disappeared (ptrace call failed)
-	ExitTracerDown                  // tracer shut down while process was running
+	ExitNormal     ExitReason = iota // process exited or was signaled (Code/Signal valid)
+	ExitVanished                     // ESRCH — process disappeared (ptrace call failed)
+	ExitTracerDown                   // tracer shut down while process was running
 )
 
 // ExitStatus carries process exit information for tracer-managed wait.
@@ -239,9 +240,9 @@ func WithKeepStopped() AttachOption {
 
 // Tracer implements a ptrace-based syscall tracer.
 type Tracer struct {
-	cfg             TracerConfig
-	metrics         Metrics
-	processTree     *ProcessTree
+	cfg         TracerConfig
+	metrics     Metrics
+	processTree *ProcessTree
 
 	attachQueue chan attachRequest
 	resumeQueue chan resumeRequest
@@ -997,6 +998,39 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 
 // dispatchSyscall routes a syscall to the appropriate handler.
 func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *SyscallContext) {
+	// Socket-family blocking: check before all other handlers so that
+	// FamilyChecker rules take precedence over the generic network handler.
+	// SYS_SOCKET and SYS_SOCKETPAIR pass the AF_* family as arg0.
+	if t.cfg.FamilyChecker != nil &&
+		(nr == unix.SYS_SOCKET || nr == unix.SYS_SOCKETPAIR) {
+		family := sc.Info.Args[0]
+		if bf, ok := t.cfg.FamilyChecker.Check(uint64(nr), family); ok {
+			tgid := tid
+			t.mu.Lock()
+			if state := t.tracees[tid]; state != nil {
+				tgid = state.TGID
+			}
+			t.mu.Unlock()
+
+			err := t.cfg.FamilyChecker.Apply(tid, tgid, t, bf.Action, nr, bf)
+			switch {
+			case errors.Is(err, PtraceKillRequested):
+				unix.Tgkill(tgid, tid, unix.SIGKILL)
+				t.allowSyscall(tid)
+			case errors.Is(err, ptraceAlreadyResumed):
+				// denySyscall already resumed the tracee — nothing more to do.
+			case err != nil:
+				slog.Warn("ptrace: family check apply failed",
+					"tid", tid, "family", bf.Name, "error", err)
+				t.allowSyscall(tid)
+			default:
+				// log/log_and_kill(non-kill) or unknown action: allow proceeds.
+				t.allowSyscall(tid)
+			}
+			return
+		}
+	}
+
 	switch {
 	case isExecveSyscall(nr):
 		t.handleExecve(ctx, tid, sc)

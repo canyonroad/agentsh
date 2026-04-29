@@ -3,6 +3,10 @@
 package ptrace
 
 import (
+	"errors"
+	"log/slog"
+	"runtime"
+
 	"github.com/agentsh/agentsh/internal/seccomp"
 	"golang.org/x/sys/unix"
 )
@@ -42,4 +46,107 @@ func (c *FamilyChecker) Check(syscall, arg0 uint64) (seccomp.BlockedFamily, bool
 	}
 	bf, ok := families[arg0]
 	return bf, ok
+}
+
+// PtraceKillRequested is the sentinel error returned by Apply when the
+// action requires sending SIGKILL to the tracee. The caller is responsible
+// for delivering the signal; Apply does not kill the process itself.
+var PtraceKillRequested = errors.New("ptrace: kill requested by family check")
+
+// ptraceAlreadyResumed is an internal sentinel returned by Apply when
+// the action has already resumed the tracee (e.g., via denySyscall).
+// The caller must not call allowSyscall in this case.
+var ptraceAlreadyResumed = errors.New("ptrace: tracee already resumed by Apply")
+
+// Apply executes the blocking action for a matched family rule against a
+// stopped tracee. The caller has already matched via Check.
+//
+// errno:        calls denySyscall(tid, EAFNOSUPPORT) so the tracer's exit-stop
+//
+//	machinery delivers the correct return value on syscall exit.
+//	Returns ptraceAlreadyResumed (internal) to signal the tracee
+//	was already continued; the caller must not call allowSyscall.
+//
+// kill:         returns PtraceKillRequested so the caller delivers SIGKILL via
+//
+//	unix.Tgkill; Apply does not kill the process itself.
+//
+// log:          emits a slog event with audit_event=seccomp_socket_family_blocked
+//
+//	(cross-engine audit consistency) and returns nil (allow proceeds).
+//
+// log_and_kill: emits the audit event and returns PtraceKillRequested.
+//
+// On ESRCH from denySyscall (tracee vanished), Apply returns ptraceAlreadyResumed
+// so the caller does not attempt another ptrace call on a dead TID.
+func (c *FamilyChecker) Apply(
+	tid int,
+	tgid int,
+	tracer *Tracer,
+	action seccomp.OnBlockAction,
+	syscallNr int,
+	bf seccomp.BlockedFamily,
+) error {
+	switch action {
+	case seccomp.OnBlockErrno:
+		// denySyscall sets ORIG_RAX=-1 and records PendingDenyErrno so the
+		// tracer's exit-stop handler overwrites RAX with -EAFNOSUPPORT.
+		// It also calls unix.PtraceSyscall internally, so the tracee is
+		// already continued — return ptraceAlreadyResumed.
+		if err := tracer.denySyscall(tid, int(unix.EAFNOSUPPORT)); err != nil {
+			// ESRCH means the tracee is already gone — same outcome.
+			if errors.Is(err, unix.ESRCH) {
+				return ptraceAlreadyResumed
+			}
+			return err
+		}
+		return ptraceAlreadyResumed
+
+	case seccomp.OnBlockKill:
+		return PtraceKillRequested
+
+	case seccomp.OnBlockLog:
+		emitFamilyBlockedLog(tid, syscallNr, bf, action)
+		return nil
+
+	case seccomp.OnBlockLogAndKill:
+		emitFamilyBlockedLog(tid, syscallNr, bf, action)
+		return PtraceKillRequested
+
+	default:
+		// Unknown action — fail open: allow the syscall to proceed.
+		return nil
+	}
+}
+
+// emitFamilyBlockedLog emits a structured slog event for a family block.
+// The event type "seccomp_socket_family_blocked" matches the seccomp engine
+// (internal/netmonitor/unix/blocklist_linux.go) for cross-engine SIEM
+// consistency.
+func emitFamilyBlockedLog(tid int, syscallNr int, bf seccomp.BlockedFamily, action seccomp.OnBlockAction) {
+	syscallName := familySyscallName(syscallNr)
+	slog.Info("ptrace: socket family blocked",
+		"audit_event", "seccomp_socket_family_blocked",
+		"family_name", bf.Name,
+		"family_number", bf.Family,
+		"syscall", syscallName,
+		"syscall_nr", syscallNr,
+		"action", string(action),
+		"engine", "ptrace",
+		"pid", tid,
+		"arch", runtime.GOARCH,
+	)
+}
+
+// familySyscallName returns a human-readable name for socket/socketpair.
+// For any other syscall number a numeric sentinel is returned.
+func familySyscallName(nr int) string {
+	switch nr {
+	case unix.SYS_SOCKET:
+		return "socket"
+	case unix.SYS_SOCKETPAIR:
+		return "socketpair"
+	default:
+		return "unknown"
+	}
 }
