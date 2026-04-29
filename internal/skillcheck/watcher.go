@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,11 +28,13 @@ type WatcherConfig struct {
 // where a timer goroutine already entered its callback before Stop returned.
 // Callers must tolerate at most one OnSkill call after Close.
 type Watcher struct {
-	cfg     WatcherConfig
-	watcher *fsnotify.Watcher
-	mu      sync.Mutex
-	timers  map[string]*time.Timer
-	roots   []string // original watch roots, for create-of-root detection
+	cfg      WatcherConfig
+	watcher  *fsnotify.Watcher
+	mu       sync.Mutex
+	timers   map[string]*time.Timer
+	roots    []string        // original configured roots
+	pending  []string        // roots not yet existing; consulted for Create-promotion
+	promoted map[string]bool // roots that have been registered (full subtree watched)
 }
 
 // NewWatcher creates a new Watcher. Call Run to start processing events.
@@ -43,7 +46,13 @@ func NewWatcher(cfg WatcherConfig) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Watcher{cfg: cfg, watcher: w, timers: map[string]*time.Timer{}, roots: cfg.Roots}, nil
+	return &Watcher{
+		cfg:      cfg,
+		watcher:  w,
+		timers:   map[string]*time.Timer{},
+		roots:    cfg.Roots,
+		promoted: map[string]bool{},
+	}, nil
 }
 
 // Run blocks until ctx is cancelled. It adds each root (and any nested
@@ -120,9 +129,17 @@ func (w *Watcher) addRecursive(path string) {
 		// existing ancestor so we see the eventual creation.
 		ancestor := nearestExistingAncestor(path)
 		_ = w.watcher.Add(ancestor)
+		// Track the original path as pending so we only promote when the
+		// configured root itself is created, not arbitrary siblings.
+		w.mu.Lock()
+		w.pending = append(w.pending, path)
+		w.mu.Unlock()
 		return
 	}
 	for _, m := range matches {
+		w.mu.Lock()
+		w.promoted[m] = true
+		w.mu.Unlock()
 		w.registerDirRecursive(m)
 	}
 }
@@ -130,35 +147,71 @@ func (w *Watcher) addRecursive(path string) {
 func (w *Watcher) handleEvent(ev fsnotify.Event) {
 	if ev.Op&fsnotify.Create != 0 {
 		if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-			w.registerDirRecursive(ev.Name)
-			// Also check if this creation matches any configured watch root
-			// so a late-arriving root gets fully promoted.
-			for _, root := range w.roots {
-				matches, _ := filepath.Glob(root)
-				for _, m := range matches {
-					if m == ev.Name {
-						// Already handled by registerDirRecursive above.
-						break
-					}
-				}
-			}
+			w.maybePromote(ev.Name)
 			return
-		}
-		// For non-directory creates: check if the created path now satisfies
-		// any configured root that previously had no matches (e.g., the root
-		// dir itself just appeared as a file — unlikely, but be safe).
-		for _, root := range w.roots {
-			matches, _ := filepath.Glob(root)
-			for _, m := range matches {
-				if m == ev.Name {
-					w.registerDirRecursive(ev.Name)
-				}
-			}
 		}
 	}
 	if filepath.Base(ev.Name) == "SKILL.md" && (ev.Op&(fsnotify.Create|fsnotify.Write) != 0) {
-		w.scheduleDebounce(filepath.Dir(ev.Name))
+		parent := filepath.Dir(ev.Name)
+		if w.isUnderPromoted(parent) {
+			w.scheduleDebounce(parent)
+		}
 	}
+}
+
+// maybePromote decides whether a newly-created directory should be registered.
+// It recurses immediately if the path is under an already-promoted root, or
+// promotes it if it matches a pending root.
+func (w *Watcher) maybePromote(path string) {
+	w.mu.Lock()
+	// Already inside a promoted root? Recurse normally.
+	for promotedRoot := range w.promoted {
+		if isUnderOrEqual(path, promotedRoot) {
+			w.mu.Unlock()
+			w.registerDirRecursive(path)
+			return
+		}
+	}
+	// Otherwise, only promote if it matches a pending root.
+	for i, p := range w.pending {
+		match := false
+		if path == p {
+			match = true
+		} else if matched, _ := filepath.Match(p, path); matched {
+			match = true
+		}
+		if match {
+			// Remove from pending, mark promoted, register subtree.
+			w.pending = append(w.pending[:i], w.pending[i+1:]...)
+			w.promoted[path] = true
+			w.mu.Unlock()
+			w.registerDirRecursive(path)
+			return
+		}
+	}
+	w.mu.Unlock()
+	// Not under any watched root, not a pending root — ignore.
+}
+
+// isUnderPromoted reports whether path is under (or equal to) any promoted root.
+func (w *Watcher) isUnderPromoted(path string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for root := range w.promoted {
+		if isUnderOrEqual(path, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// isUnderOrEqual reports whether child is equal to parent or a descendant of it.
+func isUnderOrEqual(child, parent string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && rel != "")
 }
 
 func (w *Watcher) scheduleDebounce(skillDir string) {
