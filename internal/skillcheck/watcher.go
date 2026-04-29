@@ -31,6 +31,7 @@ type Watcher struct {
 	watcher *fsnotify.Watcher
 	mu      sync.Mutex
 	timers  map[string]*time.Timer
+	roots   []string // original watch roots, for create-of-root detection
 }
 
 // NewWatcher creates a new Watcher. Call Run to start processing events.
@@ -42,7 +43,7 @@ func NewWatcher(cfg WatcherConfig) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Watcher{cfg: cfg, watcher: w, timers: map[string]*time.Timer{}}, nil
+	return &Watcher{cfg: cfg, watcher: w, timers: map[string]*time.Timer{}, roots: cfg.Roots}, nil
 }
 
 // Run blocks until ctx is cancelled. It adds each root (and any nested
@@ -79,45 +80,84 @@ func (w *Watcher) Close() error {
 	return w.watcher.Close()
 }
 
+// nearestExistingAncestor walks up the directory tree until it finds a path
+// that exists on disk, returning that path.
+func nearestExistingAncestor(p string) string {
+	for {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return p // reached filesystem root
+		}
+		p = parent
+	}
+}
+
+// registerDirRecursive walks path, adds every subdirectory to the fsnotify
+// watcher, and schedules a debounce for every SKILL.md found.
+func (w *Watcher) registerDirRecursive(path string) {
+	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			_ = w.watcher.Add(p)
+			return nil
+		}
+		if filepath.Base(p) == "SKILL.md" {
+			w.scheduleDebounce(filepath.Dir(p))
+		}
+		return nil
+	})
+}
+
 func (w *Watcher) addRecursive(path string) {
 	matches, err := filepath.Glob(path)
 	if err != nil || len(matches) == 0 {
-		// Glob may not match yet; add as literal so its parent gets watched too.
-		_ = w.watcher.Add(path)
+		// Path doesn't exist yet (or glob has no matches). Watch the nearest
+		// existing ancestor so we see the eventual creation.
+		ancestor := nearestExistingAncestor(path)
+		_ = w.watcher.Add(ancestor)
 		return
 	}
 	for _, m := range matches {
-		_ = w.watcher.Add(m)
-		_ = filepath.WalkDir(m, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				_ = w.watcher.Add(p)
-			}
-			return nil
-		})
+		w.registerDirRecursive(m)
 	}
 }
 
 func (w *Watcher) handleEvent(ev fsnotify.Event) {
+	if ev.Op&fsnotify.Create != 0 {
+		if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
+			w.registerDirRecursive(ev.Name)
+			// Also check if this creation matches any configured watch root
+			// so a late-arriving root gets fully promoted.
+			for _, root := range w.roots {
+				matches, _ := filepath.Glob(root)
+				for _, m := range matches {
+					if m == ev.Name {
+						// Already handled by registerDirRecursive above.
+						break
+					}
+				}
+			}
+			return
+		}
+		// For non-directory creates: check if the created path now satisfies
+		// any configured root that previously had no matches (e.g., the root
+		// dir itself just appeared as a file — unlikely, but be safe).
+		for _, root := range w.roots {
+			matches, _ := filepath.Glob(root)
+			for _, m := range matches {
+				if m == ev.Name {
+					w.registerDirRecursive(ev.Name)
+				}
+			}
+		}
+	}
 	if filepath.Base(ev.Name) == "SKILL.md" && (ev.Op&(fsnotify.Create|fsnotify.Write) != 0) {
 		w.scheduleDebounce(filepath.Dir(ev.Name))
-		return
-	}
-	// New subdir → start watching it too, then check if SKILL.md already landed.
-	// The check handles the race where SKILL.md is written before fsnotify
-	// delivers the directory-create event and we register the watch.
-	if ev.Op&fsnotify.Create != 0 {
-		_ = w.watcher.Add(ev.Name)
-		w.checkExistingSkill(ev.Name)
-	}
-}
-
-// checkExistingSkill fires a debounce if SKILL.md already exists in dir.
-func (w *Watcher) checkExistingSkill(dir string) {
-	if _, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil {
-		w.scheduleDebounce(dir)
 	}
 }
 
