@@ -3,6 +3,7 @@ package skillcheck
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"time"
 )
@@ -59,6 +60,15 @@ func NewDaemon(cfg DaemonConfig) (*Daemon, error) {
 	if cfg.Cache == nil {
 		return nil, ErrNilCache
 	}
+	// Bug 3 fix: default each limit field independently so callers that set
+	// only one field don't lose the other.
+	defaults := DefaultLoaderLimits()
+	if cfg.Limits.PerFileBytes == 0 {
+		cfg.Limits.PerFileBytes = defaults.PerFileBytes
+	}
+	if cfg.Limits.TotalBytes == 0 {
+		cfg.Limits.TotalBytes = defaults.TotalBytes
+	}
 	d := &Daemon{
 		cfg:    cfg,
 		orches: NewOrchestrator(OrchestratorConfig{Providers: cfg.Providers}),
@@ -94,8 +104,7 @@ func (d *Daemon) Run(ctx context.Context) {
 
 // Close flushes the verdict cache to disk and releases the fsnotify watcher.
 func (d *Daemon) Close() error {
-	_ = d.cfg.Cache.Flush()
-	return d.watcher.Close()
+	return errors.Join(d.cfg.Cache.Flush(), d.watcher.Close())
 }
 
 // startupSweep walks every root once on launch so installs that happened
@@ -126,11 +135,7 @@ func (d *Daemon) startupSweep(ctx context.Context) {
 func (d *Daemon) scanPath(skillDir string) {
 	ctx := d.runCtx
 
-	limits := d.cfg.Limits
-	if limits.PerFileBytes == 0 {
-		limits = DefaultLoaderLimits()
-	}
-	ref, files, err := LoadSkill(skillDir, limits)
+	ref, files, err := LoadSkill(skillDir, d.cfg.Limits)
 	if err != nil {
 		d.cfg.Audit.Emit(ctx, AuditEvent{
 			Kind:  "skillcheck.scan_failed",
@@ -140,11 +145,69 @@ func (d *Daemon) scanPath(skillDir string) {
 		return
 	}
 	if v, ok := d.cfg.Cache.Get(ref.SHA256); ok {
-		_ = d.actioner.Apply(ctx, *ref, v)
+		d.applyAndAudit(ctx, *ref, v)
 		return
 	}
-	findings, _ := d.orches.ScanAll(ctx, ScanRequest{Skill: *ref, Files: files})
+	findings, provErrs := d.orches.ScanAll(ctx, ScanRequest{Skill: *ref, Files: files})
+	findings = append(findings, synthesizeProviderErrorFindings(provErrs, *ref)...)
 	v := d.eval.Evaluate(findings, *ref)
 	d.cfg.Cache.Put(ref.SHA256, v)
-	_ = d.actioner.Apply(ctx, *ref, v)
+	d.applyAndAudit(ctx, *ref, v)
+}
+
+// applyAndAudit calls actioner.Apply and emits a skillcheck.action_failed audit
+// event if the action returns an error (e.g. quarantine fails due to disk full).
+func (d *Daemon) applyAndAudit(ctx context.Context, skill SkillRef, v *Verdict) {
+	if err := d.actioner.Apply(ctx, skill, v); err != nil {
+		d.cfg.Audit.Emit(ctx, AuditEvent{
+			Kind:    "skillcheck.action_failed",
+			At:      time.Now(),
+			Skill:   skill,
+			Verdict: v,
+			Extra:   map[string]string{"error": err.Error()},
+		})
+	}
+}
+
+// synthesizeProviderErrorFindings converts ProviderErrors into synthetic Findings
+// according to each provider's OnFailure policy so the evaluator can enforce them.
+func synthesizeProviderErrorFindings(errs []ProviderError, skill SkillRef) []Finding {
+	if len(errs) == 0 {
+		return nil
+	}
+	out := make([]Finding, 0, len(errs))
+	for _, pe := range errs {
+		switch pe.OnFailure {
+		case "deny", "block":
+			out = append(out, Finding{
+				Type:     FindingPolicyViolation,
+				Provider: pe.Provider,
+				Skill:    skill,
+				Severity: SeverityCritical,
+				Title:    fmt.Sprintf("provider %s failed (on_failure: deny)", pe.Provider),
+				Detail:   pe.Err.Error(),
+			})
+		case "approve":
+			out = append(out, Finding{
+				Type:     FindingPolicyViolation,
+				Provider: pe.Provider,
+				Skill:    skill,
+				Severity: SeverityHigh,
+				Title:    fmt.Sprintf("provider %s failed (on_failure: approve)", pe.Provider),
+				Detail:   pe.Err.Error(),
+			})
+		case "warn":
+			out = append(out, Finding{
+				Type:     FindingPolicyViolation,
+				Provider: pe.Provider,
+				Skill:    skill,
+				Severity: SeverityMedium,
+				Title:    fmt.Sprintf("provider %s failed (on_failure: warn)", pe.Provider),
+				Detail:   pe.Err.Error(),
+			})
+		default:
+			// "allow" or empty: silent acceptance — no finding injected.
+		}
+	}
+	return out
 }

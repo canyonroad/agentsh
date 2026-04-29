@@ -2,6 +2,7 @@ package skillcheck
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -60,8 +61,12 @@ func TestDaemon_QuarantinesMaliciousSkill(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	skillDir := filepath.Join(root, "evil")
-	os.MkdirAll(skillDir, 0o755)
-	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: evil\n---\n"), 0o644)
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: evil\n---\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -71,4 +76,45 @@ func TestDaemon_QuarantinesMaliciousSkill(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("skill was not quarantined within 3s")
+}
+
+func TestDaemon_ProviderErrorWithDenyEscalatesToBlock(t *testing.T) {
+	root := t.TempDir()
+	trashDir := filepath.Join(root, ".trash")
+
+	d, err := NewDaemon(DaemonConfig{
+		Roots:    []string{root},
+		TrashDir: trashDir,
+		Cache:    newMemCache(),
+		Providers: map[string]ProviderEntry{
+			"broken": {Provider: stubProvider{name: "broken", err: errors.New("boom")}, OnFailure: "deny"},
+		},
+		Approval: &fakeApproval{approved: false},
+		Audit:    &fakeAudit{},
+	})
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+	defer d.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	skillDir := filepath.Join(root, "skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: x\n---\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(skillDir); os.IsNotExist(err) {
+			return // quarantined as expected
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("provider error with on_failure=deny should have escalated to quarantine")
 }
