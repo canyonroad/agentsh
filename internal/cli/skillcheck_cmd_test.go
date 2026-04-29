@@ -8,28 +8,27 @@ import (
 )
 
 func TestCobraRestore_ForwardsToken(t *testing.T) {
-	cmd := newSkillcheckCmd()
+	// Use a real temp dir as TrashDir so runRestore's guard (`c.TrashDir == ""`)
+	// does not fire. With TrashDir set and the token forwarded, the inner CLI
+	// calls trash.Restore, which fails with "restore: ..." because the token
+	// doesn't exist in trash. That error path never prints the "<token>"
+	// placeholder. Without the fix (args dropped), runRestore receives
+	// args=[] → len(args)<1 → prints the usage line that contains "<token>".
+	// Asserting that "<token>" is absent therefore distinguishes forwarded from
+	// dropped.
+	tmpDir := t.TempDir()
+	cmd := newSkillcheckCmdWith(skillcheckConfig{TrashDir: tmpDir})
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
 	cmd.SetArgs([]string{"restore", "sometoken-xyz"})
-	// We expect this to fail with a real error path that mentions
-	// "trash dir not configured" (TrashDir is empty in the stub CLI),
-	// NOT the usage error from missing args.
 	_ = cmd.ExecuteContext(context.Background())
 	out := buf.String()
-	// Without TrashDir set, the inner CLI returns "usage: agentsh skillcheck restore <token> [dest]"
-	// because the first check in runRestore is `c.TrashDir == ""`. If args were
-	// dropped (argv[1:] == []), the inner CLI would also print the usage line.
-	// Either way a usage line means the token was dropped, so we check that
-	// the output does NOT indicate arg-drop by verifying the token appears or
-	// that we got the trash-dir-not-configured path (same usage line either way).
-	// The real distinction: if args are forwarded, runRestore sees argv=["sometoken-xyz"]
-	// and TrashDir=="" → prints usage (same line). So we must test a different way:
-	// we verify that cobra itself did NOT reject the call with its own usage dump
-	// (which would include "Usage:" with capital U and the cobra command tree).
-	if strings.Contains(out, "Usage:") {
-		t.Errorf("cobra produced its own usage error (args not forwarded?): %s", out)
+	// The usage message contains the literal "<token>" placeholder.
+	// It only appears when args were not forwarded; a real restore call
+	// (success or trash error) never prints it.
+	if strings.Contains(out, "<token>") {
+		t.Errorf("cobra dropped restore token; got usage error: %s", out)
 	}
 }
 
@@ -46,9 +45,6 @@ func TestCobraCachePrune_ForwardsSubcommand(t *testing.T) {
 	// If "prune" was dropped (old bug: argv=["cache"]), runCache receives
 	// args=[] and returns "usage: agentsh skillcheck cache prune".
 	if !strings.Contains(out, "deferred") {
-		t.Errorf("expected deferred message from cache prune; got: %q", out)
-	}
-	if strings.Contains(out, "usage:") {
-		t.Errorf("cobra dropped 'prune' arg; got usage error: %s", out)
+		t.Errorf("cobra dropped 'prune'; expected deferred message, got: %s", out)
 	}
 }

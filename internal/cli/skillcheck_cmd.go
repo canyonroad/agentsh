@@ -6,7 +6,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// skillcheckConfig holds optional overrides for the skillcheck cobra layer,
+// used primarily to inject a TrashDir in tests.
+type skillcheckConfig struct {
+	TrashDir string // if empty, restore/list-quarantined use the default (empty, which prints usage)
+}
+
 func newSkillcheckCmd() *cobra.Command {
+	return newSkillcheckCmdWith(skillcheckConfig{})
+}
+
+func newSkillcheckCmdWith(cfg skillcheckConfig) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "skillcheck",
 		Short: "Scan, inspect, and manage AI agent skill installations",
@@ -26,7 +36,7 @@ Subcommands:
 		newSkillcheckScanCmd(),
 		newSkillcheckDoctorCmd(),
 		newSkillcheckListQuarantinedCmd(),
-		newSkillcheckRestoreCmd(),
+		newSkillcheckRestoreCmd(cfg.TrashDir),
 		newSkillcheckCacheCmd(),
 	)
 	return cmd
@@ -90,7 +100,7 @@ func newSkillcheckListQuarantinedCmd() *cobra.Command {
 	}
 }
 
-func newSkillcheckRestoreCmd() *cobra.Command {
+func newSkillcheckRestoreCmd(trashDir string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "restore",
 		Short: "Restore a quarantined skill (not implemented yet, see Task 16+)",
@@ -98,6 +108,7 @@ func newSkillcheckRestoreCmd() *cobra.Command {
 			cli := &skillcheck.CLI{
 				Stdout:    cmd.OutOrStdout(),
 				Providers: map[string]skillcheck.ProviderEntry{},
+				TrashDir:  trashDir,
 			}
 			cli.Run(cmd.Context(), append([]string{"restore"}, args...))
 			return nil
