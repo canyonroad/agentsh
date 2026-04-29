@@ -202,9 +202,10 @@ func (c *FamilyChecker) Apply(
 		actualOutcome := "denied"
 		if err := denySC(tid, int(unix.EAFNOSUPPORT)); err != nil {
 			if errors.Is(err, unix.ESRCH) {
-				// Tracee vanished: emit with "denied" (the intended outcome) and
-				// return the already-resumed sentinel so the caller does not
-				// attempt another ptrace call.
+				// Tracee vanished: report the actual outcome, not the
+				// intended one. Return the already-resumed sentinel so the
+				// caller does not attempt another ptrace call.
+				actualOutcome = "vanished"
 				c.emitFamilyBlocked(tid, syscallNr, bf, action, sessionID, actualOutcome)
 				return ptraceAlreadyResumed
 			}

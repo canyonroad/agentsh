@@ -292,3 +292,34 @@ func TestApply_Log_DenySyscallFailure(t *testing.T) {
 		t.Errorf("outcome=%q; want \"deny_failed\"", outcome)
 	}
 }
+
+// TestApply_Log_DenySyscallESRCH verifies that when denySyscall returns ESRCH
+// in OnBlockLog mode (tracee vanished mid-syscall), the emitted outcome is
+// "vanished" rather than the intended "denied".
+func TestApply_Log_DenySyscallESRCH(t *testing.T) {
+	logBF := seccomp.BlockedFamily{
+		Family: unix.AF_ALG,
+		Name:   "AF_ALG",
+		Action: seccomp.OnBlockLog,
+	}
+	sink := &applyTestEmitter{}
+	c := NewFamilyCheckerWithEmitter([]seccomp.BlockedFamily{logBF}, sink)
+	c.denySyscallFn = func(tid int, errno int) error { return unix.ESRCH }
+
+	err := c.Apply(100, 200, nil, seccomp.OnBlockLog, unix.SYS_SOCKET, logBF, "sess-6")
+	if err != ptraceAlreadyResumed {
+		t.Errorf("Apply return = %v; want ptraceAlreadyResumed", err)
+	}
+
+	evts := sink.Events()
+	if len(evts) == 0 {
+		t.Fatal("expected at least one audit event; got none")
+	}
+	outcome, _ := evts[0].Fields["outcome"].(string)
+	if outcome == "denied" {
+		t.Errorf("outcome=%q; must NOT be \"denied\" when tracee vanished — want \"vanished\"", outcome)
+	}
+	if outcome != "vanished" {
+		t.Errorf("outcome=%q; want \"vanished\"", outcome)
+	}
+}
