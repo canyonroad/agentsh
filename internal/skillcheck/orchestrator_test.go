@@ -8,10 +8,11 @@ import (
 )
 
 type stubProvider struct {
-	name     string
-	findings []Finding
-	err      error
-	delay    time.Duration
+	name      string
+	findings  []Finding
+	err       error
+	delay     time.Duration
+	metaError string
 }
 
 func (s stubProvider) Name() string                { return s.name }
@@ -25,7 +26,11 @@ func (s stubProvider) Scan(ctx context.Context, req ScanRequest) (*ScanResponse,
 	if s.err != nil {
 		return nil, s.err
 	}
-	return &ScanResponse{Provider: s.name, Findings: s.findings}, nil
+	resp := &ScanResponse{Provider: s.name, Findings: s.findings}
+	if s.metaError != "" {
+		resp.Metadata.Error = s.metaError
+	}
+	return resp, nil
 }
 
 func TestOrchestrator_MergesFindings(t *testing.T) {

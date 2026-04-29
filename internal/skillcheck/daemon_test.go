@@ -211,3 +211,47 @@ func TestDaemon_WarnFloorAllowsLowerActionsToWin(t *testing.T) {
 	}
 	t.Fatalf("critical finding should block regardless of warn floor; skill remained installed")
 }
+
+// TestDaemon_SnykNonzeroWithFindingsNoSyntheticDuplicate verifies that when a
+// provider sets Metadata.Error AND returns real findings (mirroring snyk's
+// behaviour of signalling "findings present" via non-zero exit code), the
+// orchestrator does NOT record a ProviderError and therefore the daemon does
+// NOT inject a duplicate synthetic policy_violation finding.
+//
+// Before the fix the orchestrator added to errs unconditionally when
+// Metadata.Error != "", so scanPath called synthesizeProviderErrorFindings and
+// produced one extra finding on top of the real ones.
+func TestDaemon_SnykNonzeroWithFindingsNoSyntheticDuplicate(t *testing.T) {
+	o := NewOrchestrator(OrchestratorConfig{Providers: map[string]ProviderEntry{
+		"snyk": {
+			Provider: stubProvider{
+				name: "snyk",
+				findings: []Finding{{
+					Type:     FindingPromptInjection,
+					Severity: SeverityMedium,
+					Title:    "real finding",
+				}},
+				metaError: "exit status 1", // non-zero exit, valid JSON — snyk pattern
+			},
+			OnFailure: "warn",
+		},
+	}})
+
+	findings, errs := o.ScanAll(context.Background(), ScanRequest{})
+
+	// The real finding must come through.
+	if len(findings) != 1 {
+		t.Errorf("expected exactly 1 real finding, got %d: %+v", len(findings), findings)
+	}
+	// No ProviderError should be recorded because the provider returned findings.
+	if len(errs) != 0 {
+		t.Errorf("expected 0 provider errors (soft error with findings), got %d: %+v", len(errs), errs)
+	}
+
+	// Confirm that synthesizeProviderErrorFindings gets an empty errs slice and
+	// therefore adds nothing — total finding count stays at 1.
+	allFindings := append(findings, synthesizeProviderErrorFindings(errs, SkillRef{})...)
+	if len(allFindings) != 1 {
+		t.Errorf("expected exactly 1 finding after synthesis step, got %d (duplicate synthetic?)", len(allFindings))
+	}
+}

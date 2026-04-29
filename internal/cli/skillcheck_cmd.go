@@ -99,7 +99,7 @@ func newSkillcheckRestoreCmd() *cobra.Command {
 				Stdout:    cmd.OutOrStdout(),
 				Providers: map[string]skillcheck.ProviderEntry{},
 			}
-			cli.Run(cmd.Context(), []string{"restore"})
+			cli.Run(cmd.Context(), append([]string{"restore"}, args...))
 			return nil
 		},
 	}
@@ -118,7 +118,7 @@ func newSkillcheckCacheCmd() *cobra.Command {
 				Stdout:    cmd.OutOrStdout(),
 				Providers: map[string]skillcheck.ProviderEntry{},
 			}
-			cli.Run(cmd.Context(), []string{"cache"})
+			cli.Run(cmd.Context(), append([]string{"cache", "prune"}, args...))
 			return nil
 		},
 	})

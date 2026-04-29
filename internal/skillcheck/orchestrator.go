@@ -78,7 +78,7 @@ func (o *Orchestrator) ScanAll(ctx context.Context, req ScanRequest) ([]Finding,
 				return
 			}
 
-			if resp != nil && resp.Metadata.Error != "" {
+			if resp != nil && resp.Metadata.Error != "" && len(resp.Findings) == 0 {
 				errs = append(errs, ProviderError{
 					Provider:  name,
 					Err:       fmt.Errorf("%s", resp.Metadata.Error),
