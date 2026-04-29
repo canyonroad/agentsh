@@ -4,6 +4,7 @@ import (
 	"context"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -128,6 +129,15 @@ func hasGlobMagic(s string) bool {
 	return strings.ContainsAny(s, "*?[")
 }
 
+// globMatch reports whether name matches the glob pattern, normalising both to
+// forward-slash form before comparison. This ensures consistent behaviour on
+// Windows where fsnotify may deliver paths with backslashes while filepath.Join
+// constructs patterns with backslashes too — but where edge cases around
+// filepath.Match's separator semantics can cause mismatches.
+func globMatch(pattern, name string) (bool, error) {
+	return path.Match(filepath.ToSlash(pattern), filepath.ToSlash(name))
+}
+
 // globAncestor returns the longest path prefix of a glob pattern that contains
 // no glob meta-characters. For example, "/a/b/*/skills" → "/a/b".
 func globAncestor(pattern string) string {
@@ -237,7 +247,7 @@ func (w *Watcher) maybePromote(path string) {
 
 	// 3. Glob pending match? Promote but KEEP the glob in pendingGlobs.
 	for _, g := range w.pendingGlobs {
-		if matched, _ := filepath.Match(g, path); matched {
+		if matched, _ := globMatch(g, path); matched {
 			w.promoted[path] = true
 			w.mu.Unlock()
 			w.registerDirRecursive(path)
@@ -322,7 +332,7 @@ func (w *Watcher) maybePromoteSilent(path string) {
 	}
 	// Glob pending match?
 	for _, g := range w.pendingGlobs {
-		if matched, _ := filepath.Match(g, path); matched {
+		if matched, _ := globMatch(g, path); matched {
 			w.promoted[path] = true
 			w.mu.Unlock()
 			w.registerDirRecursive(path)

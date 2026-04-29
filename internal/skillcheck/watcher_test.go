@@ -238,7 +238,9 @@ func TestWatcher_GlobMatchesMultiplePluginsOverTime(t *testing.T) {
 	defer cancel()
 	go w.Run(ctx)
 	defer w.Close()
-	time.Sleep(100 * time.Millisecond)
+	// Allow extra time for the watcher goroutine to start and register the
+	// pluginsDir watch; 100 ms is too tight on loaded Windows CI runners.
+	time.Sleep(300 * time.Millisecond)
 
 	// First plugin lands.
 	plugA := filepath.Join(pluginsDir, "plug-a", "skills")
@@ -294,7 +296,10 @@ func TestWatcher_GlobStaticAncestorAppearsAfterStart(t *testing.T) {
 	defer cancel()
 	go w.Run(ctx)
 	defer w.Close()
-	time.Sleep(100 * time.Millisecond)
+	// Allow extra time for the watcher goroutine to start and register a watch
+	// on the nearest ancestor of the non-existent pluginsDir; 100 ms is too
+	// tight on loaded Windows CI runners.
+	time.Sleep(300 * time.Millisecond)
 
 	// Now create the static ancestor of the glob.
 	if err := os.MkdirAll(pluginsDir, 0o755); err != nil {

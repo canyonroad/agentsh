@@ -82,8 +82,10 @@ func TestEndToEnd_QuarantineRoundTrip(t *testing.T) {
 	}
 	dst.Close()
 
-	// Wait for quarantine.
-	deadline := time.Now().Add(3 * time.Second)
+	// Wait for quarantine. Use a 10s deadline: on Windows CI runners under
+	// load, the Daemon's fsnotify → LoadSkill → Scan → Evaluate → Apply
+	// pipeline adds significant latency on top of fsnotify event delivery.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(skillDir); os.IsNotExist(err) {
 			break
@@ -91,7 +93,7 @@ func TestEndToEnd_QuarantineRoundTrip(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if _, err := os.Stat(skillDir); !os.IsNotExist(err) {
-		t.Fatalf("skill was not quarantined within 3s")
+		t.Fatalf("skill was not quarantined within 10s")
 	}
 
 	// Use CLI to confirm we can list the quarantined entry.
