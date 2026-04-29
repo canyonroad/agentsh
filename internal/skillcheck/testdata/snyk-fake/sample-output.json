@@ -1,0 +1,19 @@
+{
+  "findings": [
+    {
+      "type": "prompt_injection",
+      "severity": "high",
+      "title": "Prompt injection in SKILL.md",
+      "detail": "found marker",
+      "reason_code": "snyk_prompt_injection",
+      "links": ["https://snyk.io/example"],
+      "metadata": {"snyk_id": "SNYK-EXAMPLE-1"}
+    },
+    {
+      "type": "credential_leak",
+      "severity": "critical",
+      "title": "Hardcoded API key",
+      "reason_code": "snyk_secret_in_skill"
+    }
+  ]
+}

@@ -33,6 +33,8 @@ import (
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/skillcheck"
+	"github.com/agentsh/agentsh/internal/skillcheck/cache"
 	storepkg "github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/internal/store/jsonl"
@@ -74,6 +76,8 @@ type Server struct {
 
 	threatSyncer *threatfeed.Syncer
 	threatStore  *threatfeed.Store
+
+	skillcheckDaemon *skillcheck.Daemon // nil when skillcheck.enabled=false
 
 	app *api.App // for lifecycle management (ptrace tracer shutdown)
 
@@ -529,6 +533,62 @@ func New(cfg *config.Config) (*Server, error) {
 		})
 		app.SetPackageChecker(pkgChecker)
 	}
+
+	// Initialize skillcheck daemon (optional).
+	var skillcheckDaemon *skillcheck.Daemon
+	if cfg.Skillcheck.Enabled {
+		if len(cfg.Skillcheck.WatchRoots) == 0 {
+			return nil, fmt.Errorf("skillcheck.watch_roots: at least one root required when skillcheck is enabled")
+		}
+		if cfg.Skillcheck.TrashDir == "" {
+			return nil, fmt.Errorf("skillcheck.trash_dir: required when skillcheck is enabled (block verdicts cannot quarantine without it)")
+		}
+		skillcheckProviders, err := buildSkillcheckProviders(cfg.Skillcheck.Providers)
+		if err != nil {
+			return nil, err
+		}
+		if len(skillcheckProviders) == 0 {
+			return nil, fmt.Errorf("skillcheck.providers: at least one provider must be enabled when skillcheck is enabled")
+		}
+		cacheDir := cfg.Skillcheck.CacheDir
+		if cacheDir == "" {
+			cacheDir = filepath.Join(filepath.Dir(cfg.Audit.Storage.SQLitePath), "skillcache")
+		}
+		skillcache, cacheErr := cache.New(cache.Config{Dir: cacheDir, DefaultTTL: 24 * time.Hour})
+		if cacheErr != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("init skillcheck cache: %w", cacheErr)
+		}
+		daemon, daemonErr := skillcheck.NewDaemon(skillcheck.DaemonConfig{
+			Roots:    cfg.Skillcheck.WatchRoots,
+			TrashDir: cfg.Skillcheck.TrashDir,
+			Cache:    skillcache,
+			Limits: skillcheck.LoaderLimits{
+				PerFileBytes: cfg.Skillcheck.Limits.PerFileBytes,
+				TotalBytes:   cfg.Skillcheck.Limits.TotalBytes,
+			},
+			Providers:  skillcheckProviders,
+			Thresholds: buildSkillcheckThresholds(cfg.Skillcheck.Thresholds),
+			Audit:      newSkillcheckAuditSink(store),
+			Approval:   newSkillcheckApproval(approvalsMgr),
+		})
+		if daemonErr != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("init skillcheck: %w", daemonErr)
+		}
+		skillcheckDaemon = daemon
+		// Warn at startup if approve thresholds are configured but there is no
+		// approvals manager — those verdicts will be denied (escalated to block).
+		if approvalsMgr == nil {
+			for _, action := range cfg.Skillcheck.Thresholds {
+				if strings.EqualFold(action, "approve") {
+					slog.Warn("skillcheck has approve thresholds but approvals manager is not configured; approve verdicts will be denied (block)")
+					break
+				}
+			}
+		}
+	}
+
 	router := app.Router()
 
 	readTimeoutStr := cfg.Server.HTTP.ReadTimeout
@@ -603,18 +663,19 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	srv := &Server{
-		httpServer:     s,
-		store:          store,
-		broker:         broker,
-		sessions:       sessions,
-		fatalAuditErr:  fatalAuditErr,
-		sessionTimeout: sessionTimeout,
-		idleTimeout:    idleTimeout,
-		reapInterval:   reapInterval,
-		threatSyncer:   threatSyncer,
-		threatStore:    threatStore,
-		app:            app,
-		kmsProvider:    kmsProvider,
+		httpServer:       s,
+		store:            store,
+		broker:           broker,
+		sessions:         sessions,
+		fatalAuditErr:    fatalAuditErr,
+		sessionTimeout:   sessionTimeout,
+		idleTimeout:      idleTimeout,
+		reapInterval:     reapInterval,
+		threatSyncer:     threatSyncer,
+		threatStore:      threatStore,
+		skillcheckDaemon: skillcheckDaemon,
+		app:              app,
+		kmsProvider:      kmsProvider,
 	}
 
 	// Start the policy socket server (macOS only; no-op on other platforms).
@@ -915,6 +976,21 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
+	var skillcheckDone chan struct{}
+	if s.skillcheckDaemon != nil {
+		skillcheckDone = make(chan struct{})
+		go func() {
+			defer close(skillcheckDone)
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("skillcheck daemon panicked", "panic", r)
+				}
+			}()
+			s.skillcheckDaemon.Run(ctx)
+			_ = s.skillcheckDaemon.Close()
+		}()
+	}
+
 	errCh := make(chan error, 3)
 	go func() {
 		if err := httpServer.Serve(httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -962,6 +1038,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if syncerDone != nil {
 			<-syncerDone
+		}
+		if skillcheckDone != nil {
+			<-skillcheckDone
 		}
 		if policySockDone != nil {
 			<-policySockDone
