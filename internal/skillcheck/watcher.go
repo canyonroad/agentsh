@@ -134,6 +134,12 @@ func hasGlobMagic(s string) bool {
 // Windows where fsnotify may deliver paths with backslashes while filepath.Join
 // constructs patterns with backslashes too — but where edge cases around
 // filepath.Match's separator semantics can cause mismatches.
+//
+// TODO(skillcheck): Windows glob-root behavior under fsnotify still has
+// timing/event-delivery quirks not fully addressed by this normalisation;
+// TestWatcher_GlobMatchesMultiplePluginsOverTime and
+// TestWatcher_GlobStaticAncestorAppearsAfterStart skip on Windows pending
+// deeper investigation. Tracked as PR #259 follow-up.
 func globMatch(pattern, name string) (bool, error) {
 	return path.Match(filepath.ToSlash(pattern), filepath.ToSlash(name))
 }
