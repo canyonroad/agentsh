@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agentsh/agentsh/internal/trash"
 )
 
 // TestEndToEnd_QuarantineRoundTrip drops the malicious fixture into a temp
@@ -85,15 +87,25 @@ func TestEndToEnd_QuarantineRoundTrip(t *testing.T) {
 	// Wait for quarantine. Use a 10s deadline: on Windows CI runners under
 	// load, the Daemon's fsnotify → LoadSkill → Scan → Evaluate → Apply
 	// pipeline adds significant latency on top of fsnotify event delivery.
+	//
+	// Both conditions must hold before we proceed: the source skill dir is
+	// gone AND the trash has at least one entry. On Windows, trash.Divert
+	// moves the source before persisting the manifest, so a check on source-
+	// removal alone races against the manifest write.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(skillDir); os.IsNotExist(err) {
+		_, statErr := os.Stat(skillDir)
+		entries, _ := trash.List(trashDir)
+		if os.IsNotExist(statErr) && len(entries) > 0 {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	if _, err := os.Stat(skillDir); !os.IsNotExist(err) {
 		t.Fatalf("skill was not quarantined within 10s")
+	}
+	if entries, _ := trash.List(trashDir); len(entries) == 0 {
+		t.Fatalf("trash list is empty after quarantine completed (race between source removal and manifest write?)")
 	}
 
 	// Use CLI to confirm we can list the quarantined entry.
