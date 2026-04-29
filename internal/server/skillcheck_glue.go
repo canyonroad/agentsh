@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
@@ -45,16 +47,50 @@ func buildSkillcheckProviders(cfgs map[string]config.SkillcheckProviderConfig) m
 	return out
 }
 
-// buildSkillcheckThresholds converts the string→string YAML map into
-// the typed Thresholds map. Unknown keys and values are silently ignored
-// so a stale config does not break startup; the defaults cover omitted entries.
-func buildSkillcheckThresholds(cfgs map[string]string) skillcheck.Thresholds {
-	if len(cfgs) == 0 {
-		return skillcheck.DefaultThresholds()
+// anyProviderEnabled reports whether at least one provider in the map has Enabled: true.
+func anyProviderEnabled(providers map[string]config.SkillcheckProviderConfig) bool {
+	for _, p := range providers {
+		if p.Enabled {
+			return true
+		}
 	}
+	return false
+}
+
+// buildSkillcheckThresholds converts the string→string YAML map into
+// the typed Thresholds map. Severity keys and action values are validated
+// against the known enums; invalid entries are logged and skipped so the
+// default for that severity stays in effect.
+func buildSkillcheckThresholds(cfgs map[string]string) skillcheck.Thresholds {
 	t := skillcheck.DefaultThresholds()
-	for sev, action := range cfgs {
-		t[skillcheck.Severity(sev)] = skillcheck.VerdictAction(action)
+	if len(cfgs) == 0 {
+		return t
+	}
+	validSeverities := map[string]skillcheck.Severity{
+		"info":     skillcheck.SeverityInfo,
+		"low":      skillcheck.SeverityLow,
+		"medium":   skillcheck.SeverityMedium,
+		"high":     skillcheck.SeverityHigh,
+		"critical": skillcheck.SeverityCritical,
+	}
+	validActions := map[string]skillcheck.VerdictAction{
+		"allow":   skillcheck.VerdictAllow,
+		"warn":    skillcheck.VerdictWarn,
+		"approve": skillcheck.VerdictApprove,
+		"block":   skillcheck.VerdictBlock,
+	}
+	for sevStr, actStr := range cfgs {
+		sev, sevOK := validSeverities[strings.ToLower(sevStr)]
+		if !sevOK {
+			slog.Warn("skillcheck threshold severity is not valid; ignoring", "severity", sevStr)
+			continue
+		}
+		act, actOK := validActions[strings.ToLower(actStr)]
+		if !actOK {
+			slog.Warn("skillcheck threshold for severity has invalid action; using default", "severity", sevStr, "action", actStr)
+			continue
+		}
+		t[sev] = act
 	}
 	return t
 }
@@ -103,10 +139,8 @@ func (s *skillcheckAuditSink) Emit(ctx context.Context, ev skillcheck.AuditEvent
 }
 
 // skillcheckApproval wraps approvals.Manager as skillcheck.Approver.
-// When approvalsMgr is nil (approvals not enabled), every ask returns approved=true
-// so that a block verdict is not silently dropped — the daemon will quarantine
-// after approval is denied, and with no approval manager we default to allowing
-// the user to proceed (fail-open on approval, not fail-open on block).
+// When approvalsMgr is nil (approvals not enabled), every ask returns false
+// (deny) so the action layer escalates to block — fail-closed, not fail-open.
 type skillcheckApproval struct {
 	mgr *approvals.Manager
 }
@@ -117,8 +151,9 @@ func newSkillcheckApproval(mgr *approvals.Manager) skillcheck.Approver {
 
 func (a *skillcheckApproval) Ask(ctx context.Context, skill skillcheck.SkillRef, v *skillcheck.Verdict) (bool, error) {
 	if a.mgr == nil {
-		// No approval manager configured; fall back to allow.
-		return true, nil
+		// Approvals not configured: deny so the action layer escalates to block.
+		// This is the safe fail-closed default.
+		return false, nil
 	}
 	sha := skill.SHA256
 	if len(sha) > 12 {

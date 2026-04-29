@@ -537,12 +537,21 @@ func New(cfg *config.Config) (*Server, error) {
 	// Initialize skillcheck daemon (optional).
 	var skillcheckDaemon *skillcheck.Daemon
 	if cfg.Skillcheck.Enabled {
+		if len(cfg.Skillcheck.WatchRoots) == 0 {
+			return nil, fmt.Errorf("skillcheck.watch_roots: at least one root required when skillcheck is enabled")
+		}
+		if cfg.Skillcheck.TrashDir == "" {
+			return nil, fmt.Errorf("skillcheck.trash_dir: required when skillcheck is enabled (block verdicts cannot quarantine without it)")
+		}
+		if !anyProviderEnabled(cfg.Skillcheck.Providers) {
+			return nil, fmt.Errorf("skillcheck.providers: at least one provider must be enabled when skillcheck is enabled")
+		}
 		skillcheckProviders := buildSkillcheckProviders(cfg.Skillcheck.Providers)
 		cacheDir := cfg.Skillcheck.CacheDir
 		if cacheDir == "" {
 			cacheDir = filepath.Join(filepath.Dir(cfg.Audit.Storage.SQLitePath), "skillcache")
 		}
-		skillcache, cacheErr := cache.New(cache.Config{Dir: cacheDir})
+		skillcache, cacheErr := cache.New(cache.Config{Dir: cacheDir, DefaultTTL: 24 * time.Hour})
 		if cacheErr != nil {
 			_ = store.Close()
 			return nil, fmt.Errorf("init skillcheck cache: %w", cacheErr)
@@ -565,6 +574,16 @@ func New(cfg *config.Config) (*Server, error) {
 			return nil, fmt.Errorf("init skillcheck: %w", daemonErr)
 		}
 		skillcheckDaemon = daemon
+		// Warn at startup if approve thresholds are configured but there is no
+		// approvals manager — those verdicts will be denied (escalated to block).
+		if approvalsMgr == nil {
+			for _, action := range cfg.Skillcheck.Thresholds {
+				if strings.EqualFold(action, "approve") {
+					slog.Warn("skillcheck has approve thresholds but approvals manager is not configured; approve verdicts will be denied (block)")
+					break
+				}
+			}
+		}
 	}
 
 	router := app.Router()
