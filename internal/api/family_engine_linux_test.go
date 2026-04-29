@@ -202,7 +202,7 @@ func TestResolveFamilyCheckerForPtrace_AlwaysWiresWhenFamiliesConfigured(t *test
 		},
 	}
 
-	checker, err := resolveFamilyCheckerForPtrace(cfg)
+	checker, err := resolveFamilyCheckerForPtrace(cfg, nil)
 	if err != nil {
 		t.Fatalf("resolveFamilyCheckerForPtrace returned unexpected error: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestResolveFamilyCheckerForPtrace_NilWhenNoFamilies(t *testing.T) {
 		},
 	}
 
-	checker, err := resolveFamilyCheckerForPtrace(cfg)
+	checker, err := resolveFamilyCheckerForPtrace(cfg, nil)
 	if err != nil {
 		t.Fatalf("resolveFamilyCheckerForPtrace returned unexpected error: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestResolveFamilyCheckerForPtrace_SeccompSelectedEngine(t *testing.T) {
 	}
 
 	// The defensive helper must still wire the checker.
-	checker, err := resolveFamilyCheckerForPtrace(cfg)
+	checker, err := resolveFamilyCheckerForPtrace(cfg, nil)
 	if err != nil {
 		t.Fatalf("resolveFamilyCheckerForPtrace returned unexpected error: %v", err)
 	}

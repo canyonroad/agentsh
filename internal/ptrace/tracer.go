@@ -1006,13 +1006,15 @@ func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *Sysca
 		family := sc.Info.Args[0]
 		if bf, ok := t.cfg.FamilyChecker.Check(uint64(nr), family); ok {
 			tgid := tid
+			var sessionID string
 			t.mu.Lock()
 			if state := t.tracees[tid]; state != nil {
 				tgid = state.TGID
+				sessionID = state.SessionID
 			}
 			t.mu.Unlock()
 
-			err := t.cfg.FamilyChecker.Apply(tid, tgid, t, bf.Action, nr, bf)
+			err := t.cfg.FamilyChecker.Apply(tid, tgid, t, bf.Action, nr, bf, sessionID)
 			switch {
 			case errors.Is(err, PtraceKillRequested):
 				// Apply already delivered SIGKILL via Tgkill; allow the tracee

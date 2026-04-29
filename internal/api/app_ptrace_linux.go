@@ -9,7 +9,24 @@ import (
 	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/ptrace"
+	"github.com/agentsh/agentsh/pkg/types"
 )
+
+// ptraceFamilyEmitter adapts the API's event store/broker to the
+// ptrace.FamilyEmitter interface so family-block audit events reach the
+// same sink as the seccomp engine's events.
+type ptraceFamilyEmitter struct {
+	store  eventStore
+	broker eventBroker
+}
+
+func (e *ptraceFamilyEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
+	return e.store.AppendEvent(ctx, ev)
+}
+
+func (e *ptraceFamilyEmitter) Publish(ev types.Event) {
+	e.broker.Publish(ev)
+}
 
 // initPtraceTracer initializes the ptrace tracer if configured.
 // Called from NewApp on Linux when sandbox.ptrace.enabled is true.
@@ -43,7 +60,8 @@ func (a *App) initPtraceTracer() {
 	// its own independent wiring path (buildSeccompWrapperConfig); runtime
 	// dispatch is mutually exclusive, so dual installation is safe — no
 	// double-audit risk.
-	familyChecker, err := resolveFamilyCheckerForPtrace(a.cfg)
+	emit := &ptraceFamilyEmitter{store: a.store, broker: a.broker}
+	familyChecker, err := resolveFamilyCheckerForPtrace(a.cfg, emit)
 	if err != nil {
 		slog.Warn("initPtraceTracer: failed to resolve blocked_socket_families; socket-family blocking will not be enforced via ptrace",
 			"error", err)
@@ -98,8 +116,12 @@ func (a *App) initPtraceTracer() {
 // selectFamilyBlockingEngine reports as primary.  The caller is responsible
 // for the warn-and-continue log when the selector returns familyEngineNone.
 //
+// emit is wired into the checker so every family-block fires an audit event
+// through the same sink as the seccomp engine.  Pass nil to skip audit
+// emission (tests / cases where the emitter is not yet available).
+//
 // Extracted as a standalone function for testability.
-func resolveFamilyCheckerForPtrace(cfg *config.Config) (*ptrace.FamilyChecker, error) {
+func resolveFamilyCheckerForPtrace(cfg *config.Config, emit ptrace.FamilyEmitter) (*ptrace.FamilyChecker, error) {
 	families, err := config.ResolveBlockedFamilies(cfg.Sandbox.Seccomp.BlockedSocketFamilies)
 	if err != nil {
 		return nil, err
@@ -107,7 +129,7 @@ func resolveFamilyCheckerForPtrace(cfg *config.Config) (*ptrace.FamilyChecker, e
 	if len(families) == 0 {
 		return nil, nil
 	}
-	return ptrace.NewFamilyChecker(families), nil
+	return ptrace.NewFamilyCheckerWithEmitter(families, emit), nil
 }
 
 // closePtraceTracer stops the ptrace tracer if running.

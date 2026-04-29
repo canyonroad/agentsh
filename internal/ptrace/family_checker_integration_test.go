@@ -8,12 +8,49 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/seccomp"
+	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
+
+// fakeEmitter is a thread-safe in-memory audit sink for tests.
+type fakeEmitter struct {
+	mu     sync.Mutex
+	events []types.Event
+}
+
+func (f *fakeEmitter) AppendEvent(_ context.Context, ev types.Event) error {
+	f.mu.Lock()
+	f.events = append(f.events, ev)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeEmitter) Publish(ev types.Event) {
+	f.mu.Lock()
+	// Publish is also captured so tests can assert it was called.
+	// We deduplicate by ID to avoid double-counting.
+	for _, existing := range f.events {
+		if existing.ID == ev.ID {
+			f.mu.Unlock()
+			return
+		}
+	}
+	f.events = append(f.events, ev)
+	f.mu.Unlock()
+}
+
+func (f *fakeEmitter) Events() []types.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]types.Event, len(f.events))
+	copy(out, f.events)
+	return out
+}
 
 // socketHelperSrc is a minimal Go program that waits for a ready file then calls
 // socket(AF_ALG) via a raw syscall, printing the errno result. The ready file
@@ -244,17 +281,19 @@ func TestIntegration_FamilyChecker_AllowNonBlocked(t *testing.T) {
 }
 
 // TestIntegration_FamilyChecker_Log verifies that action=log denies the
-// syscall (returns EAFNOSUPPORT) AND emits the audit event — mirroring the
-// seccomp engine, where OnBlockLog means log-and-deny.
+// syscall (returns EAFNOSUPPORT) AND emits a types.Event to the audit sink
+// with the same shape as the seccomp engine — mirroring the spec guarantee
+// that operators see the same SIEM signal regardless of which engine fired.
 func TestIntegration_FamilyChecker_Log(t *testing.T) {
 	requirePtrace(t)
 
 	helperBin := buildSocketHelper(t)
 	tmpDir := t.TempDir()
 
-	checker := NewFamilyChecker([]seccomp.BlockedFamily{
+	sink := &fakeEmitter{}
+	checker := NewFamilyCheckerWithEmitter([]seccomp.BlockedFamily{
 		{Family: unix.AF_ALG, Action: seccomp.OnBlockLog, Name: "AF_ALG"},
-	})
+	}, sink)
 	result := runWithFamilyChecker(t, TracerConfig{
 		TraceExecve:   true,
 		FamilyChecker: checker,
@@ -270,5 +309,42 @@ func TestIntegration_FamilyChecker_Log(t *testing.T) {
 	}
 	if result == "socket_result=OK" {
 		t.Errorf("socket(AF_ALG) was NOT blocked by FamilyChecker (log action must deny); got: %q", result)
+	}
+
+	// Audit-sink assertion: the event must reach the same pipeline as the
+	// seccomp engine.  Assert exactly one event was published with the
+	// correct shape (Type, Outcome, engine field).
+	events := sink.Events()
+	if len(events) == 0 {
+		t.Fatal("audit sink received no events; expected exactly one seccomp_socket_family_blocked event from ptrace engine")
+	}
+	if len(events) > 1 {
+		t.Errorf("audit sink received %d events; expected exactly 1", len(events))
+	}
+	ev := events[0]
+	if ev.Type != "seccomp_socket_family_blocked" {
+		t.Errorf("event Type=%q; want %q", ev.Type, "seccomp_socket_family_blocked")
+	}
+	if ev.PID == 0 {
+		t.Error("event PID is 0; expected the tracee's TID")
+	}
+	wantFields := map[string]any{
+		"family_name":   "AF_ALG",
+		"family_number": uint64(unix.AF_ALG),
+		"syscall":       "socket",
+		"action":        string(seccomp.OnBlockLog),
+		"outcome":       "denied",
+		"engine":        "ptrace",
+	}
+	for k, want := range wantFields {
+		got, ok := ev.Fields[k]
+		if !ok {
+			t.Errorf("event missing field %q", k)
+			continue
+		}
+		// Compare as strings to avoid uint64 vs int mismatches in map[string]any.
+		if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
+			t.Errorf("event Fields[%q]=%v (%T); want %v (%T)", k, got, got, want, want)
+		}
 	}
 }
