@@ -352,6 +352,13 @@ func TestSeccompFamilyBlock_Notify_LogDispatched(t *testing.T) {
 	runErr := cmd.Run()
 	combined := out.String()
 
+	// Check for an explicit skip sentinel first — t.Skipf in the child exits
+	// status 0, so runErr is nil even when the child skipped. Without this
+	// check the parent would continue to assertions on empty output and fail.
+	if strings.Contains(combined, "SKIP:") {
+		t.Skipf("child skipped: %s", combined)
+	}
+
 	if runErr != nil {
 		lower := strings.ToLower(combined)
 		if strings.Contains(lower, "permission denied") ||
@@ -507,6 +514,13 @@ func TestFamilyDispatchBeforeGenericBlocklist(t *testing.T) {
 	cmd.Stderr = &out
 	runErr := cmd.Run()
 	combined := out.String()
+
+	// Check for an explicit skip sentinel first — t.Skipf in the child exits
+	// status 0, so runErr is nil even when the child skipped. Without this
+	// check the parent would continue to assertions on empty output and fail.
+	if strings.Contains(combined, "SKIP:") {
+		t.Skipf("child skipped: %s", combined)
+	}
 
 	if runErr != nil {
 		lower := strings.ToLower(combined)
