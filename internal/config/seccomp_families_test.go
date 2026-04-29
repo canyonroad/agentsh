@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/seccomp"
@@ -37,5 +38,17 @@ func TestResolveBlockedFamilies_RejectsBadEntry(t *testing.T) {
 	_, err := ResolveBlockedFamilies(in)
 	if err == nil {
 		t.Errorf("expected error for bogus family name")
+	}
+}
+
+func TestResolveBlockedFamilies_RejectsBadAction(t *testing.T) {
+	_, err := ResolveBlockedFamilies([]SandboxSeccompSocketFamilyConfig{
+		{Family: "AF_ALG", Action: "deny"}, // not in {errno, kill, log, log_and_kill}
+	})
+	if err == nil {
+		t.Errorf("expected error for invalid action")
+	}
+	if err != nil && !strings.Contains(err.Error(), "deny") {
+		t.Errorf("error should mention bad action; got %v", err)
 	}
 }
