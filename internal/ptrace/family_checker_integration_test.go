@@ -57,6 +57,64 @@ func main() {
 }
 `
 
+// socketInetHelperSrc is a minimal Go program that calls socket(AF_INET,
+// SOCK_STREAM, 0) and reports whether it returned a valid fd.
+// Used by TestIntegration_FamilyChecker_AllowNonBlocked.
+const socketInetHelperSrc = `//go:build linux
+
+package main
+
+import (
+	"fmt"
+	"os"
+	"time"
+	"syscall"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: socket-inet-helper <ready-file>")
+		os.Exit(1)
+	}
+	readyFile := os.Args[1]
+
+	// Wait for the ready file (max 10s).
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// AF_INET = 2; SOCK_STREAM = 1
+	fd, _, errno := syscall.RawSyscall(syscall.SYS_SOCKET, 2, 1, 0)
+	if errno != 0 {
+		fmt.Printf("socket_result=ERRNO errno=%d\n", int(errno))
+		return
+	}
+	syscall.Close(int(fd))
+	fmt.Printf("socket_result=OK fd=%d\n", int(fd))
+}
+`
+
+// buildSocketInetHelper compiles socketInetHelperSrc in a temp dir and
+// returns the binary path.
+func buildSocketInetHelper(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	src := tmpDir + "/main.go"
+	bin := tmpDir + "/socket-inet-helper"
+	if err := os.WriteFile(src, []byte(socketInetHelperSrc), 0644); err != nil {
+		t.Fatalf("write socket inet helper src: %v", err)
+	}
+	out, err := exec.Command("go", "build", "-o", bin, src).CombinedOutput()
+	if err != nil {
+		t.Fatalf("build socket inet helper: %v\n%s", err, out)
+	}
+	return bin
+}
+
 // buildSocketHelper compiles socketHelperSrc in a temp dir and returns the binary path.
 func buildSocketHelper(t *testing.T) string {
 	t.Helper()
@@ -163,55 +221,31 @@ func TestIntegration_FamilyChecker_Errno(t *testing.T) {
 func TestIntegration_FamilyChecker_AllowNonBlocked(t *testing.T) {
 	requirePtrace(t)
 
+	helperBin := buildSocketInetHelper(t)
+	tmpDir := t.TempDir()
+
 	checker := NewFamilyChecker([]seccomp.BlockedFamily{
 		{Family: unix.AF_ALG, Action: seccomp.OnBlockErrno, Name: "AF_ALG"},
 	})
-	netHandler := &mockNetworkHandler{defaultAllow: true}
+	result := runWithFamilyChecker(t, TracerConfig{
+		TraceExecve:   true,
+		FamilyChecker: checker,
+		ExecHandler:   &mockExecHandler{defaultAllow: true},
+	}, helperBin, tmpDir+"/ready1", tmpDir+"/ready2", tmpDir+"/result.txt")
+	t.Logf("ptrace allow-non-blocked result: %s", result)
 
-	tmpDir := t.TempDir()
-	readyFile := tmpDir + "/ready"
-
-	tr := NewTracer(TracerConfig{
-		TraceExecve:    true,
-		TraceNetwork:   true,
-		FamilyChecker:  checker,
-		ExecHandler:    &mockExecHandler{defaultAllow: true},
-		NetworkHandler: netHandler,
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() { errCh <- tr.Run(ctx) }()
-
-	shellCmd := fmt.Sprintf(
-		`while [ ! -f %s ]; do sleep 0.01; done; (echo | nc -n -w1 127.0.0.1 1 2>/dev/null); true`,
-		readyFile,
-	)
-	cmd := exec.Command("/bin/sh", "-c", shellCmd)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+	// AF_INET must pass through unblocked: the helper should return a valid fd.
+	if !strings.Contains(result, "socket_result=OK") {
+		t.Errorf("expected socket(AF_INET) to succeed (non-blocked family); got: %q", result)
 	}
-	pid := cmd.Process.Pid
-	cmd.Process.Release()
-
-	tr.AttachPID(pid)
-	if !waitForAttach(t, tr, 2*time.Second) {
-		t.Skip("could not attach in time")
+	if strings.Contains(result, "ERRNO") || strings.Contains(result, "errno=97") {
+		t.Errorf("socket(AF_INET) was erroneously blocked by FamilyChecker; got: %q", result)
 	}
-	os.WriteFile(readyFile, []byte("go"), 0644)
-
-	waitForTraceesDrained(t, tr, 8*time.Second)
-	cancel()
-	<-errCh
-
-	calls := netHandler.CallCount()
-	t.Logf("network handler calls (AF_INET connect): %d", calls)
 }
 
-// TestIntegration_FamilyChecker_Log verifies that action=log does NOT inject
-// EAFNOSUPPORT — the syscall is allowed to proceed to the kernel.
+// TestIntegration_FamilyChecker_Log verifies that action=log denies the
+// syscall (returns EAFNOSUPPORT) AND emits the audit event — mirroring the
+// seccomp engine, where OnBlockLog means log-and-deny.
 func TestIntegration_FamilyChecker_Log(t *testing.T) {
 	requirePtrace(t)
 
@@ -228,9 +262,13 @@ func TestIntegration_FamilyChecker_Log(t *testing.T) {
 	}, helperBin, tmpDir+"/ready1", tmpDir+"/ready2", tmpDir+"/result.txt")
 	t.Logf("ptrace log-action result: %s", result)
 
-	// With log action the tracer must NOT inject EAFNOSUPPORT.
-	if strings.Contains(result, "errno=97") {
-		t.Errorf("log action must not inject EAFNOSUPPORT (errno 97); got: %q", result)
+	// With log action the tracer must inject EAFNOSUPPORT (log == log_and_deny).
+	if !strings.Contains(result, "EAFNOSUPPORT") &&
+		!strings.Contains(result, "address family not supported") &&
+		!strings.Contains(result, "errno=97") {
+		t.Errorf("log action must deny socket(AF_ALG) with EAFNOSUPPORT; got: %q", result)
 	}
-	t.Log("log action: tracer allowed the syscall (audit event logged to slog)")
+	if result == "socket_result=OK" {
+		t.Errorf("socket(AF_ALG) was NOT blocked by FamilyChecker (log action must deny); got: %q", result)
+	}
 }

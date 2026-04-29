@@ -1015,7 +1015,8 @@ func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *Sysca
 			err := t.cfg.FamilyChecker.Apply(tid, tgid, t, bf.Action, nr, bf)
 			switch {
 			case errors.Is(err, PtraceKillRequested):
-				unix.Tgkill(tgid, tid, unix.SIGKILL)
+				// Apply already delivered SIGKILL via Tgkill; allow the tracee
+				// to run so it receives the signal.
 				t.allowSyscall(tid)
 			case errors.Is(err, ptraceAlreadyResumed):
 				// denySyscall already resumed the tracee — nothing more to do.
@@ -1024,7 +1025,7 @@ func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *Sysca
 					"tid", tid, "family", bf.Name, "error", err)
 				t.allowSyscall(tid)
 			default:
-				// log/log_and_kill(non-kill) or unknown action: allow proceeds.
+				// Unknown action: allow proceeds.
 				t.allowSyscall(tid)
 			}
 			return
