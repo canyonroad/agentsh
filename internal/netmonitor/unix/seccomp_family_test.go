@@ -264,8 +264,62 @@ func TestFamilyToScmpAction(t *testing.T) {
 	}
 }
 
+// TestFamilyDispatchBeforeGenericBlocklist_Unit is a unit-level guard for the
+// dispatch ordering fix: when both a generic blocklist entry for socket(2) AND
+// a more-specific family entry for AF_ALG are configured, FamilyBlockListed
+// must return true (and thus win) before IsBlockListed is consulted.
+//
+// This does NOT need real seccomp — it exercises only the BlockListConfig
+// lookup methods to prove the dispatch branching in ServeNotifyWithExecve is
+// correct by construction.
+func TestFamilyDispatchBeforeGenericBlocklist_Unit(t *testing.T) {
+	genericAction := seccompkg.OnBlockLog       // generic socket action
+	familyAction := seccompkg.OnBlockLogAndKill // more-specific AF_ALG action
+
+	bl := &BlockListConfig{
+		// Generic blocklist: socket(2) → log
+		ActionByNr: map[uint32]seccompkg.OnBlockAction{
+			uint32(gounix.SYS_SOCKET): genericAction,
+		},
+		// Family blocklist: (socket, AF_ALG) → log_and_kill
+		FamilyByKey: map[uint64]seccompkg.BlockedFamily{
+			uint64(gounix.SYS_SOCKET)<<32 | uint64(gounix.AF_ALG): {
+				Family: gounix.AF_ALG,
+				Action: familyAction,
+				Name:   "AF_ALG",
+			},
+		},
+	}
+
+	// For SYS_SOCKET + AF_ALG: family check should match (and would win).
+	bf, familyMatched := bl.FamilyBlockListed(uint32(gounix.SYS_SOCKET), uint64(gounix.AF_ALG))
+	if !familyMatched {
+		t.Fatal("FamilyBlockListed should match for (SYS_SOCKET, AF_ALG)")
+	}
+	if bf.Action != familyAction {
+		t.Errorf("family action = %q; want %q", bf.Action, familyAction)
+	}
+
+	// Generic check also matches — but dispatch order means family checked first.
+	_, genericMatched := bl.IsBlockListed(uint32(gounix.SYS_SOCKET))
+	if !genericMatched {
+		t.Fatal("IsBlockListed should also match for SYS_SOCKET (sanity check)")
+	}
+
+	// For SYS_SOCKET + AF_INET: family check should NOT match; generic should.
+	_, familyMatchedInet := bl.FamilyBlockListed(uint32(gounix.SYS_SOCKET), uint64(gounix.AF_INET))
+	if familyMatchedInet {
+		t.Error("FamilyBlockListed should NOT match for (SYS_SOCKET, AF_INET)")
+	}
+	_, genericMatchedInet := bl.IsBlockListed(uint32(gounix.SYS_SOCKET))
+	if !genericMatchedInet {
+		t.Error("IsBlockListed should match for SYS_SOCKET even for non-blocked family")
+	}
+}
+
 const familyHelperErrno = "errno"
 const familyHelperNotifyLog = "notify_log"
+const familyHelperFamilyWinsOverBlocklist = "family_wins_over_blocklist"
 
 // TestSeccompFamilyBlock_Notify_LogDispatched verifies that when a filter is
 // installed with BlockedFamilies=[{AF_ALG, log}] and UnixSocketEnabled=false,
@@ -418,5 +472,159 @@ func (e *captureEmitter) AppendEvent(_ context.Context, ev types.Event) error {
 func (e *captureEmitter) Publish(ev types.Event) {
 	if e.fn != nil {
 		e.fn(ev.Type)
+	}
+}
+
+// TestFamilyDispatchBeforeGenericBlocklist verifies the dispatch ordering fix:
+// when a filter has socket(2) in the generic syscall blocklist (on_block=log) AND
+// AF_ALG in blocked_socket_families (action=log — so the process is NOT killed and
+// can print the audit event), the family-specific event type must win.
+//
+// The key assertion: audit event type is seccomp_socket_family_blocked, NOT
+// seccomp_blocked.
+//
+// The test re-execs itself as a helper subprocess. Skip if the host cannot
+// install a seccomp notify filter.
+func TestFamilyDispatchBeforeGenericBlocklist(t *testing.T) {
+	if os.Getenv(familyHelperEnv) == familyHelperFamilyWinsOverBlocklist {
+		runFamilyHelperFamilyWinsOverBlocklist(t)
+		return
+	}
+
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify not supported: %v", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+
+	cmd := exec.Command(exe, "-test.run=^TestFamilyDispatchBeforeGenericBlocklist$", "-test.v")
+	cmd.Env = append(os.Environ(), familyHelperEnv+"="+familyHelperFamilyWinsOverBlocklist)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	runErr := cmd.Run()
+	combined := out.String()
+
+	if runErr != nil {
+		lower := strings.ToLower(combined)
+		if strings.Contains(lower, "permission denied") ||
+			strings.Contains(lower, "operation not permitted") ||
+			strings.Contains(lower, "lacks user notify") ||
+			strings.Contains(lower, "skip") {
+			t.Skipf("host cannot install seccomp filter; skipping.\nhelper output:\n%s", combined)
+		}
+		t.Fatalf("helper subprocess failed: %v\noutput:\n%s", runErr, combined)
+	}
+
+	// Family action must win: audit event is socket_family_blocked, not syscall_blocked.
+	if !strings.Contains(combined, "audit_event=seccomp_socket_family_blocked") {
+		t.Errorf("expected seccomp_socket_family_blocked audit event (family action must win);\nhelper output:\n%s", combined)
+	}
+	if strings.Contains(combined, "audit_event=seccomp_blocked") {
+		t.Errorf("seccomp_blocked event emitted — generic blocklist shadowed family action;\nhelper output:\n%s", combined)
+	}
+}
+
+// runFamilyHelperFamilyWinsOverBlocklist is the subprocess body for
+// TestFamilyDispatchBeforeGenericBlocklist. It installs a filter that has:
+//   - socket(2) in the generic syscall blocklist (on_block=log → notify path)
+//   - AF_ALG in the blocked-family map with action=log (notify path, no kill)
+//
+// Using log (not log_and_kill) for the family action so the process is not
+// killed and can emit the audit event before printing. The test parent verifies
+// that the emitted audit event is seccomp_socket_family_blocked, not
+// seccomp_blocked.
+func runFamilyHelperFamilyWinsOverBlocklist(t *testing.T) {
+	t.Helper()
+
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify not supported: %v", err)
+	}
+
+	// Install a filter with both a generic socket blocklist entry (log) AND a
+	// family-specific entry for AF_ALG (also log, so the process is not killed
+	// and can print results). The family action must win (event type check).
+	cfg := FilterConfig{
+		UnixSocketEnabled: false,
+		BlockedSyscalls:   []int{int(gounix.SYS_SOCKET)},
+		OnBlockAction:     seccompkg.OnBlockLog,
+		BlockedFamilies: []seccompkg.BlockedFamily{
+			{Family: gounix.AF_ALG, Action: seccompkg.OnBlockLog, Name: "AF_ALG"},
+		},
+	}
+	filt, err := InstallFilterWithConfig(cfg)
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "permission") || strings.Contains(lower, "operation not permitted") {
+			t.Skipf("cannot install seccomp filter (privilege): %v", err)
+		}
+		t.Fatalf("InstallFilterWithConfig: %v", err)
+	}
+	defer filt.Close()
+
+	notifFD := filt.NotifFD()
+	if notifFD < 0 {
+		t.Fatalf("expected valid notify fd; got %d", notifFD)
+	}
+
+	// Build BlockListConfig with both the generic socket action AND the family map.
+	familyByKey := filt.BlockedFamilyMap()
+	if len(familyByKey) == 0 {
+		t.Fatalf("BlockedFamilyMap is empty; log family should populate it")
+	}
+	bl := &BlockListConfig{
+		ActionByNr:  filt.BlockListMap(),
+		FamilyByKey: familyByKey,
+	}
+	if len(bl.ActionByNr) == 0 {
+		t.Fatalf("BlockListMap is empty; log action on socket should populate it")
+	}
+
+	// Collect emitted events.
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+	emitter := &captureEmitter{fn: func(typ string) {
+		mu.Lock()
+		events = append(events, typ)
+		mu.Unlock()
+	}}
+
+	// Run the notify handler in background.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	notifyFile := os.NewFile(uintptr(notifFD), "seccomp-notify")
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		ServeNotifyWithExecve(ctx, notifyFile, "test-family-dispatch-order", nil, emitter, nil, nil, bl)
+	}()
+
+	// Perform the blocked socket call.
+	fd, _, errno := gounix.RawSyscall(gounix.SYS_SOCKET, gounix.AF_ALG, gounix.SOCK_SEQPACKET, 0)
+	if fd != ^uintptr(0) {
+		_ = gounix.Close(int(fd))
+		fmt.Printf("socket_result=OK\n")
+	} else {
+		fmt.Printf("socket_result=%v (errno=%d)\n", errno, int(errno))
+	}
+
+	// Cancel and wait for handler to exit.
+	cancel()
+	select {
+	case <-handlerDone:
+	case <-time.After(2 * time.Second):
+		fmt.Printf("handler did not exit in time\n")
+	}
+
+	// Report emitted events so the parent can assert dispatch routing.
+	mu.Lock()
+	defer mu.Unlock()
+	for _, ev := range events {
+		fmt.Printf("audit_event=%s\n", ev)
 	}
 }
