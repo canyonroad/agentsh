@@ -245,39 +245,39 @@ func (w *Watcher) maybePromote(path string) {
 		}
 	}
 
-	// 4. Intermediate ancestor of any pending root? Add a temporary watch so
-	//    the next-level Create event reaches us. Do NOT mark as promoted.
-	//    Also immediately re-evaluate all pending globs in case subdirectories
-	//    already exist under this new intermediate dir (e.g. MkdirAll created
-	//    the full chain atomically and we only saw the top-level Create).
+	// 4. Intermediate ancestor of a pending root.
+	// Order: install watch first, then walk to reconcile any state we missed.
 	if w.isAncestorOfPendingLocked(path) {
-		// Snapshot pendingGlobs while holding the lock. Also scan for any
-		// pending literal roots that are now present beneath this intermediate
-		// path (handles the case where MkdirAll created the entire chain and
-		// we only received the top-level Create event).
+		// Snapshot pendingGlobs before releasing the lock so glob re-evaluation
+		// below is consistent.
 		snapGlobs := make([]string, len(w.pendingGlobs))
 		copy(snapGlobs, w.pendingGlobs)
-		var promotedLiterals []string
-		remainingPending := w.pending[:0]
-		for _, p := range w.pending {
-			if isUnderOrEqual(p, path) {
-				if _, err := os.Stat(p); err == nil {
-					w.promoted[p] = true
-					promotedLiterals = append(promotedLiterals, p)
-					continue
-				}
-			}
-			remainingPending = append(remainingPending, p)
-		}
-		w.pending = remainingPending
 		w.mu.Unlock()
 
+		// Install watch first to minimise the window where new Create events
+		// can be lost.
 		_ = w.watcher.Add(path)
 
-		// Promote any literal roots that already exist beneath the new watch.
-		for _, p := range promotedLiterals {
-			w.registerDirRecursive(p)
-		}
+		// Walk the subtree to catch state that may have landed before our
+		// watch was installed.
+		_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || !d.IsDir() {
+				// Schedule debounce for SKILL.md files whose write completed
+				// before our watch was active.
+				if err == nil && !d.IsDir() && filepath.Base(p) == "SKILL.md" {
+					if w.isUnderPromoted(filepath.Dir(p)) {
+						w.scheduleDebounce(filepath.Dir(p))
+					}
+				}
+				return nil
+			}
+			// Register a watch for each subdirectory and promote any pending
+			// matches we find.
+			_ = w.watcher.Add(p)
+			w.maybePromoteSilent(p)
+			return nil
+		})
+
 		// Re-run glob matching synchronously; any new matches get promoted.
 		for _, g := range snapGlobs {
 			matches, _ := filepath.Glob(g)
@@ -296,6 +296,39 @@ func (w *Watcher) maybePromote(path string) {
 		return
 	}
 
+	w.mu.Unlock()
+}
+
+// maybePromoteSilent is like maybePromote but assumes the dir already
+// has a watch installed (or doesn't need one) and only handles the
+// pending-root matching part. It's used by reconciliation walks where
+// adding watches is the caller's responsibility.
+func (w *Watcher) maybePromoteSilent(path string) {
+	w.mu.Lock()
+	// Already promoted? Done.
+	if w.promoted[path] {
+		w.mu.Unlock()
+		return
+	}
+	// Literal pending match?
+	for i, p := range w.pending {
+		if path == p {
+			w.pending = append(w.pending[:i], w.pending[i+1:]...)
+			w.promoted[path] = true
+			w.mu.Unlock()
+			w.registerDirRecursive(path)
+			return
+		}
+	}
+	// Glob pending match?
+	for _, g := range w.pendingGlobs {
+		if matched, _ := filepath.Match(g, path); matched {
+			w.promoted[path] = true
+			w.mu.Unlock()
+			w.registerDirRecursive(path)
+			return
+		}
+	}
 	w.mu.Unlock()
 }
 

@@ -360,6 +360,51 @@ func TestWatcher_AtomicLiteralRootCreation(t *testing.T) {
 	}
 }
 
+func TestWatcher_DeepAtomicCreateUnderRunningWatcher(t *testing.T) {
+	// This test asserts the reconcile-on-Add path catches state that lands
+	// before the watch is fully installed. Synthetic race: do many MkdirAlls
+	// back-to-back and assert all skills are detected.
+	parent := t.TempDir()
+	rootPath := filepath.Join(parent, "deeply", "nested", "skills")
+
+	events := make(chan string, 32)
+	w, err := NewWatcher(WatcherConfig{
+		Roots:    []string{rootPath},
+		Debounce: 30 * time.Millisecond,
+		OnSkill:  func(skillDir string) { events <- skillDir },
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	defer w.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Atomic create of root + 5 skills in a single operation each.
+	for i := 0; i < 5; i++ {
+		skill := filepath.Join(rootPath, "skill-"+string(rune('a'+i)))
+		if err := os.MkdirAll(skill, 0o755); err != nil {
+			t.Fatalf("mkdir %d: %v", i, err)
+		}
+		if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: x\n---\n"), 0o644); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+
+	seen := map[string]bool{}
+	deadline := time.After(3 * time.Second)
+	for len(seen) < 5 {
+		select {
+		case got := <-events:
+			seen[got] = true
+		case <-deadline:
+			t.Fatalf("only saw %d/5 skills; events: %v", len(seen), seen)
+		}
+	}
+}
+
 func TestWatcher_DoesNotFireOnSiblingsOfMissingRoot(t *testing.T) {
 	parent := t.TempDir()
 	rootPath := filepath.Join(parent, "skills") // doesn't exist yet
