@@ -540,7 +540,7 @@ func TestServer_NilEventBatchRejectedByValidator(t *testing.T) {
 // sendCompressedBatch is a test helper: marshals events into
 // UncompressedEvents bytes, compresses with the named algo via the
 // production compress.NewEncoder, and sends as a CompressedPayload-
-// shaped EventBatch. Used by the zstd/gzip decode tests below.
+// shaped EventBatch. Shared by compressed-batch tests.
 func sendCompressedBatch(t *testing.T, conn testserver.Conn, algo string, events []*wtpv1.CompactEvent) {
 	t.Helper()
 	enc, err := compress.NewEncoder(algo, 3, 6)

@@ -295,6 +295,40 @@ func TestServer_AckDelayDelaysBatchAck(t *testing.T) {
 	}
 }
 
+// TestServer_BatchAckUsesEventBatchEnvelopeWatermark verifies that the
+// test server acks EventBatch frames with the same envelope tuple the
+// transport uses for inflight tracking. This matters for compressed
+// batches because their event list is opaque to the generic ack path.
+func TestServer_BatchAckUsesEventBatchEnvelopeWatermark(t *testing.T) {
+	srv := testserver.New(testserver.Options{})
+	defer srv.Close()
+
+	conn := dialOrFatal(t, srv)
+	defer conn.Close()
+
+	sendSessionInit(t, conn)
+	if _, err := recvWithDeadline(t, conn, 2*time.Second); err != nil {
+		t.Fatalf("recv SessionAck: %v", err)
+	}
+
+	sendCompressedBatch(t, conn, "zstd", []*wtpv1.CompactEvent{
+		{Sequence: 11, Generation: 3},
+		{Sequence: 17, Generation: 3},
+	})
+	got, err := recvWithDeadline(t, conn, 2*time.Second)
+	if err != nil {
+		t.Fatalf("recv BatchAck: %v", err)
+	}
+	ack := got.GetBatchAck()
+	if ack == nil {
+		t.Fatalf("got %T, want BatchAck", got.Msg)
+	}
+	if ack.GetAckHighWatermarkSeq() != 17 || ack.GetGeneration() != 3 {
+		t.Fatalf("BatchAck tuple=(%d, %d), want (17, 3)",
+			ack.GetAckHighWatermarkSeq(), ack.GetGeneration())
+	}
+}
+
 // TestServer_DropAfterBatchN verifies the server returns an error from
 // the Stream handler after observing the configured number of
 // EventBatch messages on the CURRENT stream. The client observes the
@@ -418,7 +452,6 @@ func TestServer_PerStreamCountersResetOnReconnect(t *testing.T) {
 		t.Fatalf("Batches len=%d across both streams, want 3", got)
 	}
 }
-
 
 // TestServer_InvalidEventBatchClassifiedAndStreamDropped is the live-
 // path acceptance for transport.ClassifyAndIncInvalidFrame (Task 22b
