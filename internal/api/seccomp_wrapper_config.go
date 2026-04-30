@@ -1,22 +1,25 @@
 package api
 
 import (
+	"log/slog"
 	"os"
 
 	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
+	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
 	"github.com/agentsh/agentsh/internal/session"
 )
 
 // seccompWrapperConfig is passed to the agentsh-unixwrap wrapper via
 // AGENTSH_SECCOMP_CONFIG environment variable to configure seccomp-bpf filtering.
 type seccompWrapperConfig struct {
-	UnixSocketEnabled   bool     `json:"unix_socket_enabled"`
-	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
-	ExecveEnabled       bool     `json:"execve_enabled"`
-	FileMonitorEnabled  bool     `json:"file_monitor_enabled"`
-	BlockedSyscalls     []string `json:"blocked_syscalls"`
-	OnBlock             string   `json:"on_block,omitempty"`
+	UnixSocketEnabled   bool                      `json:"unix_socket_enabled"`
+	SignalFilterEnabled bool                      `json:"signal_filter_enabled"`
+	ExecveEnabled       bool                      `json:"execve_enabled"`
+	FileMonitorEnabled  bool                      `json:"file_monitor_enabled"`
+	BlockedSyscalls     []string                  `json:"blocked_syscalls"`
+	BlockedFamilies     []seccompkg.BlockedFamily `json:"blocked_families,omitempty"`
+	OnBlock             string                    `json:"on_block,omitempty"`
 
 	// File monitor sub-options
 	InterceptMetadata bool `json:"intercept_metadata,omitempty"`
@@ -52,6 +55,17 @@ func (a *App) buildSeccompWrapperConfig(s *session.Session, p seccompWrapperPara
 		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
 		OnBlock:             a.cfg.Sandbox.Seccomp.Syscalls.OnBlock,
 		ServerPID:           os.Getpid(),
+	}
+
+	// Resolve and forward blocked socket families.
+	if len(a.cfg.Sandbox.Seccomp.BlockedSocketFamilies) > 0 {
+		families, err := config.ResolveBlockedFamilies(a.cfg.Sandbox.Seccomp.BlockedSocketFamilies)
+		if err != nil {
+			slog.Warn("seccomp: failed to resolve blocked_socket_families; families will not be blocked",
+				"error", err)
+		} else {
+			seccompCfg.BlockedFamilies = families
+		}
 	}
 
 	fmDefault := config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE, false)

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -155,5 +156,151 @@ func TestOnBlockValidatorAcceptsLegalValues(t *testing.T) {
 			cfg.Sandbox.Seccomp.Syscalls.OnBlock = v
 			require.NoError(t, validateConfig(cfg))
 		})
+	}
+}
+
+// TestSandboxSeccompSocketFamilyConfig_DefaultMerge verifies that when
+// blocked_socket_families is omitted (nil slice), applyDefaults populates
+// the list from DefaultBlockedFamilies (including AF_ALG).
+func TestSandboxSeccompSocketFamilyConfig_DefaultMerge(t *testing.T) {
+	cfg := &Config{}
+	cfg.Sandbox.Seccomp.Enabled = true
+	applyDefaults(cfg)
+
+	require.NotEmpty(t, cfg.Sandbox.Seccomp.BlockedSocketFamilies,
+		"expected default-merge to populate BlockedSocketFamilies; got empty")
+
+	found := false
+	for _, e := range cfg.Sandbox.Seccomp.BlockedSocketFamilies {
+		if e.Family == "AF_ALG" {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "AF_ALG missing from default BlockedSocketFamilies")
+}
+
+// TestSandboxSeccompSocketFamilyConfig_ExplicitEmptyOptOut verifies that when
+// blocked_socket_families is set to an explicit empty slice (opt-out),
+// applyDefaults does NOT replace it with defaults.
+func TestSandboxSeccompSocketFamilyConfig_ExplicitEmptyOptOut(t *testing.T) {
+	yamlData := []byte(`
+sandbox:
+  seccomp:
+    enabled: true
+    blocked_socket_families: []
+`)
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal(yamlData, &cfg))
+	require.NotNil(t, cfg.Sandbox.Seccomp.BlockedSocketFamilies,
+		"explicit [] must parse as non-nil empty slice")
+
+	applyDefaults(&cfg)
+
+	require.Empty(t, cfg.Sandbox.Seccomp.BlockedSocketFamilies,
+		"explicit empty should not be replaced by defaults")
+}
+
+// TestSandboxSeccompSocketFamilyConfig_NonEmptyOverridesDefaults verifies that
+// when the operator provides explicit entries, applyDefaults leaves them alone.
+func TestSandboxSeccompSocketFamilyConfig_NonEmptyOverridesDefaults(t *testing.T) {
+	yamlData := []byte(`
+sandbox:
+  seccomp:
+    enabled: true
+    blocked_socket_families:
+      - family: AF_VSOCK
+        action: errno
+`)
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal(yamlData, &cfg))
+
+	applyDefaults(&cfg)
+
+	require.Len(t, cfg.Sandbox.Seccomp.BlockedSocketFamilies, 1,
+		"non-empty should override defaults entirely")
+	require.Equal(t, "AF_VSOCK", cfg.Sandbox.Seccomp.BlockedSocketFamilies[0].Family)
+}
+
+// TestSandboxSeccompSocketFamilyConfig_OmittedWhenSeccompDisabled verifies that
+// defaults are not applied when both seccomp and the unix_sockets wrapper are
+// explicitly disabled (seccompActive is false in that case).
+func TestSandboxSeccompSocketFamilyConfig_OmittedWhenSeccompDisabled(t *testing.T) {
+	yamlData := []byte(`
+sandbox:
+  seccomp:
+    enabled: false
+  unix_sockets:
+    enabled: false
+`)
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal(yamlData, &cfg))
+	applyDefaults(&cfg)
+
+	require.Nil(t, cfg.Sandbox.Seccomp.BlockedSocketFamilies,
+		"defaults must not be applied when seccomp is disabled")
+}
+
+// TestSandboxSeccompSocketFamilyConfig_ParseYAML verifies full YAML round-trip
+// for a non-trivial blocked_socket_families list.
+func TestSandboxSeccompSocketFamilyConfig_ParseYAML(t *testing.T) {
+	yamlData := []byte(`
+sandbox:
+  seccomp:
+    enabled: true
+    blocked_socket_families:
+      - family: AF_ALG
+        action: errno
+      - family: AF_VSOCK
+        action: kill
+`)
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal(yamlData, &cfg))
+
+	require.Len(t, cfg.Sandbox.Seccomp.BlockedSocketFamilies, 2)
+	require.Equal(t, "AF_ALG", cfg.Sandbox.Seccomp.BlockedSocketFamilies[0].Family)
+	require.Equal(t, "errno", cfg.Sandbox.Seccomp.BlockedSocketFamilies[0].Action)
+	require.Equal(t, "AF_VSOCK", cfg.Sandbox.Seccomp.BlockedSocketFamilies[1].Family)
+	require.Equal(t, "kill", cfg.Sandbox.Seccomp.BlockedSocketFamilies[1].Action)
+}
+
+func TestSandboxSeccompSocketFamily_RejectsUnknownName(t *testing.T) {
+	cfg := &Config{}
+	cfg.Sandbox.FUSE.Audit.Mode = "monitor" // satisfy existing FUSE validator
+	cfg.Sandbox.Seccomp.Enabled = true
+	cfg.Sandbox.Seccomp.BlockedSocketFamilies = []SandboxSeccompSocketFamilyConfig{
+		{Family: "AF_NOT_REAL", Action: "errno"},
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatalf("expected error for unknown family name")
+	}
+	if !strings.Contains(err.Error(), "AF_NOT_REAL") {
+		t.Errorf("error should mention bad name; got %v", err)
+	}
+}
+
+func TestSandboxSeccompSocketFamily_RejectsBadAction(t *testing.T) {
+	cfg := &Config{}
+	cfg.Sandbox.FUSE.Audit.Mode = "monitor"
+	cfg.Sandbox.Seccomp.Enabled = true
+	cfg.Sandbox.Seccomp.BlockedSocketFamilies = []SandboxSeccompSocketFamilyConfig{
+		{Family: "AF_ALG", Action: "deny"}, // "deny" is not in the OnBlockAction enum
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Errorf("expected error for invalid action")
+	}
+}
+
+func TestSandboxSeccompSocketFamily_AcceptsNumericFamily(t *testing.T) {
+	cfg := &Config{}
+	cfg.Sandbox.FUSE.Audit.Mode = "monitor"
+	cfg.Sandbox.Seccomp.Enabled = true
+	cfg.Sandbox.Seccomp.BlockedSocketFamilies = []SandboxSeccompSocketFamilyConfig{
+		{Family: "38", Action: "errno"},
+	}
+	if err := validateConfig(cfg); err != nil {
+		t.Errorf("numeric family should be accepted; got %v", err)
 	}
 }

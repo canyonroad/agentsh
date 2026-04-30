@@ -3,6 +3,7 @@
 package unix
 
 import (
+	"context"
 	"os"
 	"runtime"
 	"sync"
@@ -10,6 +11,8 @@ import (
 	"testing"
 
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
+	"github.com/agentsh/agentsh/pkg/types"
+	libseccomp "github.com/seccomp/libseccomp-golang"
 	"github.com/stretchr/testify/require"
 	gounix "golang.org/x/sys/unix"
 )
@@ -309,4 +312,78 @@ func TestResolveTGIDFromProc_Nonexistent(t *testing.T) {
 	_, err := resolveTGIDFromProc(0x7FFFFFFF)
 	require.ErrorIs(t, err, gounix.ESRCH,
 		"non-existent TID must surface as ESRCH (not a generic os.ErrNotExist)")
+}
+
+// blocklistTestEmitter is a thread-safe in-memory audit sink for blocklist unit tests.
+type blocklistTestEmitter struct {
+	mu     sync.Mutex
+	events []types.Event
+}
+
+func (e *blocklistTestEmitter) AppendEvent(_ context.Context, ev types.Event) error {
+	e.mu.Lock()
+	e.events = append(e.events, ev)
+	e.mu.Unlock()
+	return nil
+}
+
+func (e *blocklistTestEmitter) Publish(ev types.Event) {
+	e.mu.Lock()
+	e.events = append(e.events, ev)
+	e.mu.Unlock()
+}
+
+func (e *blocklistTestEmitter) Events() []types.Event {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]types.Event, len(e.events))
+	copy(out, e.events)
+	return out
+}
+
+// TestHandleFamilyBlockNotify_EmitsEngineField verifies that handleFamilyBlockNotify
+// emits Fields["engine"]="seccomp" so SIEM consumers can differentiate the
+// seccomp engine from the ptrace engine (which emits engine="ptrace").
+//
+// We use notifIDValidFn (already a test seam) to skip the kernel TOCTOU check.
+// NotifRespondDeny with fd=-1 returns EBADF but the code handles that gracefully
+// (slog.Warn only), so the event is still emitted before the deny call.
+func TestHandleFamilyBlockNotify_EmitsEngineField(t *testing.T) {
+	// Stub notifIDValidFn so the TOCTOU check passes without a real fd.
+	restoreValid := swapNotifIDValidFn(t, func(int, uint64) error { return nil })
+	defer restoreValid()
+
+	bf := seccompkg.BlockedFamily{
+		Family: gounix.AF_ALG,
+		Name:   "AF_ALG",
+		Action: seccompkg.OnBlockLog,
+	}
+	req := &libseccomp.ScmpNotifReq{
+		ID:  42,
+		Pid: 1234,
+		Data: libseccomp.ScmpNotifData{
+			Syscall: libseccomp.ScmpSyscall(gounix.SYS_SOCKET),
+		},
+	}
+
+	sink := &blocklistTestEmitter{}
+	// fd=-1: NotifRespondDeny will fail with EBADF, but that's handled gracefully.
+	handleFamilyBlockNotify(context.Background(), -1, req, bf, "sess-test", sink)
+
+	evts := sink.Events()
+	// AppendEvent and Publish both called — deduplicate by taking first.
+	require.NotEmpty(t, evts, "expected at least one event from handleFamilyBlockNotify")
+
+	ev := evts[0]
+	require.Equal(t, "seccomp_socket_family_blocked", ev.Type)
+	require.Equal(t, "seccomp", ev.Source)
+
+	engine, ok := ev.Fields["engine"]
+	require.True(t, ok, "Fields[\"engine\"] must be present in seccomp family-block event")
+	require.Equal(t, "seccomp", engine, "Fields[\"engine\"] must be \"seccomp\"")
+
+	// Verify the full shape matches the ptrace engine (modulo engine value).
+	require.Equal(t, "AF_ALG", ev.Fields["family_name"])
+	require.Equal(t, "denied", ev.Fields["outcome"])
+	require.Equal(t, string(seccompkg.OnBlockLog), ev.Fields["action"])
 }

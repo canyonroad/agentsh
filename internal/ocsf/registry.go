@@ -75,9 +75,10 @@ var pendingTypes = map[string]struct{}{
 	"dns_query":    {},
 	"dns_redirect": {},
 	// Detection Finding (2004) — Task 21
-	"command_policy":            {},
-	"seccomp_blocked":           {},
-	"agent_detected":            {},
+	"command_policy":                {},
+	"seccomp_blocked":               {},
+	"seccomp_socket_family_blocked": {},
+	"agent_detected":                {},
 	"taint_created":             {},
 	"taint_propagated":          {},
 	"taint_removed":             {},

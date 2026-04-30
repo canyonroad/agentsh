@@ -22,9 +22,23 @@ import (
 
 // BlockListConfig maps seccomp syscall numbers to the on-block action that
 // should be taken when a block-listed syscall traps via USER_NOTIF.
+// FamilyByKey maps (syscall_nr<<32)|af_family → BlockedFamily for log/log_and_kill
+// socket-family rules that also route through the notify handler.
 // A nil receiver is treated as an empty configuration.
 type BlockListConfig struct {
-	ActionByNr map[uint32]seccompkg.OnBlockAction
+	ActionByNr  map[uint32]seccompkg.OnBlockAction
+	FamilyByKey map[uint64]seccompkg.BlockedFamily
+}
+
+// FamilyBlockListed returns the BlockedFamily for the (syscallNr, af_family) pair
+// if it is registered for notify-mode dispatch. Nil receiver returns (_, false).
+func (c *BlockListConfig) FamilyBlockListed(syscallNr uint32, afFamily uint64) (seccompkg.BlockedFamily, bool) {
+	if c == nil || len(c.FamilyByKey) == 0 {
+		return seccompkg.BlockedFamily{}, false
+	}
+	key := uint64(syscallNr)<<32 | afFamily
+	bf, ok := c.FamilyByKey[key]
+	return bf, ok
 }
 
 // notifIDValidFn is a test seam wrapping seccomp.NotifIDValid so unit tests
@@ -304,5 +318,100 @@ func buildSeccompBlockedEvent(
 			"outcome":    outcome,
 			"arch":       runtime.GOARCH,
 		},
+	}
+}
+
+// handleFamilyBlockNotify processes a seccomp notification for a socket/socketpair
+// call whose address-family is in the blocked-family map (log or log_and_kill
+// actions). It mirrors handleBlockListNotify but emits a
+// "seccomp.socket_family_blocked" event type with family-specific fields, and
+// responds with EAFNOSUPPORT (the canonical errno for unsupported address families).
+// For log_and_kill it also SIGKILLs the tracee via pidfd.
+func handleFamilyBlockNotify(
+	ctx context.Context,
+	fd int,
+	req *seccomp.ScmpNotifReq,
+	bf seccompkg.BlockedFamily,
+	sessID string,
+	emit Emitter,
+) {
+	if req == nil {
+		return
+	}
+
+	// TOCTOU check — same convention as handleBlockListNotify.
+	if err := notifIDValidFn(fd, req.ID); err != nil {
+		slog.Debug("seccomp family-block: notif id no longer valid",
+			"session_id", sessID, "pid", req.Pid, "error", err)
+		if derr := NotifRespondDeny(fd, req.ID, int32(unix.EAFNOSUPPORT)); derr != nil && !isENOENT(derr) {
+			slog.Warn("seccomp family-block: deny response failed after invalid id",
+				"session_id", sessID, "pid", req.Pid, "error", derr)
+		}
+		return
+	}
+
+	syscallNr := uint32(req.Data.Syscall)
+	scName := resolveSyscallName(syscallNr)
+	tid := int(req.Pid)
+
+	// For log_and_kill: resolve TGID and SIGKILL before responding.
+	outcome := "denied"
+	if bf.Action == seccompkg.OnBlockLogAndKill {
+		targetPID := tid
+		if tgid, err := resolveTGIDFn(tid); err == nil {
+			targetPID = tgid
+		} else if errors.Is(err, unix.ESRCH) {
+			slog.Debug("seccomp family-block: TGID resolution ESRCH (target already exited)",
+				"session_id", sessID, "tid", tid, "family", bf.Name)
+			targetPID = -1
+		} else {
+			slog.Warn("seccomp family-block: TGID resolution failed; falling back to TID",
+				"session_id", sessID, "tid", tid, "family", bf.Name, "error", err)
+		}
+
+		if targetPID == -1 {
+			outcome = "killed"
+		} else {
+			outcome = attemptKill(fd, req.ID, targetPID, sessID, scName)
+		}
+	}
+
+	// Emit audit event (guarded; nil emitter skips).
+	if emit != nil {
+		ev := types.Event{
+			ID:        fmt.Sprintf("seccomp-%d-%d", tid, time.Now().UnixNano()),
+			Timestamp: time.Now().UTC(),
+			Type:      "seccomp_socket_family_blocked",
+			SessionID: sessID,
+			Source:    "seccomp",
+			PID:       tid,
+			Fields: map[string]any{
+				"family_name":   bf.Name,
+				"family_number": bf.Family,
+				"syscall":       scName,
+				"syscall_nr":    syscallNr,
+				"action":        string(bf.Action),
+				"outcome":       outcome,
+				"arch":          runtime.GOARCH,
+				"engine":        "seccomp",
+			},
+		}
+		if err := emit.AppendEvent(context.Background(), ev); err != nil {
+			slog.Warn("seccomp family-block: AppendEvent failed",
+				"session_id", sessID, "tid", tid, "family", bf.Name, "error", err)
+		}
+		emit.Publish(ev)
+	}
+
+	// Respond deny with EAFNOSUPPORT. ENOENT after a successful kill is expected.
+	_ = ctx
+	if err := NotifRespondDeny(fd, req.ID, int32(unix.EAFNOSUPPORT)); err != nil {
+		if isENOENT(err) {
+			slog.Debug("seccomp family-block: deny response hit ENOENT (target already gone)",
+				"session_id", sessID, "tid", tid, "family", bf.Name)
+			return
+		}
+		slog.Warn("seccomp family-block: deny response failed",
+			"session_id", sessID, "tid", tid, "family", bf.Name, "error", err)
 	}
 }

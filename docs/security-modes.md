@@ -185,6 +185,7 @@ Ptrace mode exposes Prometheus metrics at the `/metrics` endpoint:
 | Filesystem (fine-grained) | FUSE | ptrace | FUSE | Landlock | No |
 | Unix sockets (path-based) | seccomp | ptrace | Landlock | Landlock | No |
 | Unix sockets (abstract) | seccomp | No | No | No | No |
+| Socket family blocking (AF_ALG, AF_VSOCK, …) | seccomp | ptrace | No | No | No |
 | Signal interception | seccomp | ptrace | No* | No* | No* |
 | Network (kernel) | eBPF | ptrace | Landlock** | Landlock** | No |
 | Resource limits | cgroups | cgroups | cgroups | cgroups | cgroups |

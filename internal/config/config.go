@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	seccompPkg "github.com/agentsh/agentsh/internal/seccomp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -486,6 +487,13 @@ type SandboxSeccompConfig struct {
 	Syscalls    SandboxSeccompSyscallConfig     `yaml:"syscalls"`
 	Execve      ExecveConfig                    `yaml:"execve"`
 	FileMonitor SandboxSeccompFileMonitorConfig `yaml:"file_monitor"`
+
+	// BlockedSocketFamilies lists AF_* families whose socket/socketpair calls
+	// are intercepted. A nil value (field omitted in YAML) means "apply
+	// defaults"; a non-nil empty slice means "explicitly block nothing"
+	// (opt-out). Populated via applyDefaults from
+	// seccomp.DefaultBlockedFamilies when nil.
+	BlockedSocketFamilies []SandboxSeccompSocketFamilyConfig `yaml:"blocked_socket_families"`
 }
 
 // SandboxSeccompUnixConfig configures unix socket monitoring via seccomp.
@@ -509,6 +517,19 @@ type SandboxSeccompFileMonitorConfig struct {
 	InterceptMetadata  *bool `yaml:"intercept_metadata"`
 	OpenatEmulation    *bool `yaml:"openat_emulation"`
 	BlockIOUring       *bool `yaml:"block_io_uring"`
+}
+
+// SandboxSeccompSocketFamilyConfig describes one blocked socket family entry.
+// Family is an AF_* name (e.g. "AF_ALG") or a numeric string (e.g. "38").
+// Action is one of: errno (default), kill, log, log_and_kill.
+//
+// When blocked_socket_families is omitted from YAML the field is nil and
+// applyDefaults fills it from seccomp.DefaultBlockedFamilies. When the
+// operator sets blocked_socket_families: [] the field is a non-nil empty
+// slice and applyDefaults leaves it untouched (opt-out of all defaults).
+type SandboxSeccompSocketFamilyConfig struct {
+	Family string `yaml:"family"` // AF_* name or numeric string
+	Action string `yaml:"action"` // errno|kill|log|log_and_kill (defaults to errno)
 }
 
 // FileMonitorBoolWithDefault returns the value of a *bool field, or defaultVal if nil.
@@ -1617,6 +1638,21 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		}
 	}
 
+	// Apply default blocked socket families when seccomp is active and the
+	// operator has not set the field. nil means "unset → apply defaults";
+	// a non-nil empty slice means "explicit opt-out → leave empty".
+	if seccompActive && cfg.Sandbox.Seccomp.BlockedSocketFamilies == nil {
+		defaults := seccompPkg.DefaultBlockedFamilies()
+		families := make([]SandboxSeccompSocketFamilyConfig, 0, len(defaults))
+		for _, bf := range defaults {
+			families = append(families, SandboxSeccompSocketFamilyConfig{
+				Family: bf.Name,
+				Action: string(bf.Action),
+			})
+		}
+		cfg.Sandbox.Seccomp.BlockedSocketFamilies = families
+	}
+
 	// Enable file_monitor by default when seccomp is explicitly enabled,
 	// so openat(O_WRONLY) and other file syscalls are intercepted and
 	// policy-enforced. Without this, only O_CREAT (new file creation)
@@ -2195,6 +2231,17 @@ func validateConfig(cfg *Config) error {
 	// Validate WTP (Watchtower Transport Protocol) config
 	if err := cfg.Audit.Watchtower.validate(); err != nil {
 		return err
+	}
+	// Validate blocked_socket_families entries.
+	for i, e := range cfg.Sandbox.Seccomp.BlockedSocketFamilies {
+		if _, _, ok := seccompPkg.ParseFamily(e.Family); !ok {
+			return fmt.Errorf("sandbox.seccomp.blocked_socket_families[%d].family: %q is not a valid AF_* name or number", i, e.Family)
+		}
+		if e.Action != "" {
+			if _, ok := seccompPkg.ParseOnBlock(e.Action); !ok {
+				return fmt.Errorf("sandbox.seccomp.blocked_socket_families[%d].action: %q is not valid (allowed: errno, kill, log, log_and_kill)", i, e.Action)
+			}
+		}
 	}
 	return nil
 }

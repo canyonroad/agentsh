@@ -226,6 +226,22 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		syscallNr := int32(req.Data.Syscall)
 		slog.Debug("ServeNotifyWithExecve: received notification", "session_id", sessID, "syscall_nr", syscallNr, "pid", req.Pid, "count", notifCount)
 
+		// Family dispatch FIRST for socket(2)/socketpair(2) — more specific than
+		// the generic syscall blocklist. If the operator configured both a generic
+		// on_block action for "socket" AND a per-family action for e.g. AF_ALG,
+		// the more-specific family rule must win. We check family before the
+		// generic blocklist only for these two syscalls; all others fall through
+		// to the generic check below unchanged.
+		// nil-safe: FamilyBlockListed returns (_, false) on a nil receiver or empty map.
+		if uint32(syscallNr) == uint32(unix.SYS_SOCKET) || uint32(syscallNr) == uint32(unix.SYS_SOCKETPAIR) {
+			if bf, ok := blockList.FamilyBlockListed(uint32(req.Data.Syscall), req.Data.Args[0]); ok {
+				slog.Debug("ServeNotifyWithExecve: routing to family-block handler (pre-blocklist)",
+					"session_id", sessID, "pid", req.Pid, "syscall_nr", syscallNr, "family", bf.Family)
+				handleFamilyBlockNotify(ctx, int(scmpFD), req, bf, sessID, emit)
+				continue
+			}
+		}
+
 		// Block-list dispatch (log / log_and_kill modes). Silent modes (errno, kill)
 		// never reach here — the kernel executes them without a notify trap.
 		// nil-safe: IsBlockListed returns (_, false) on a nil receiver.
@@ -260,6 +276,7 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 
 		// Existing unix socket handling
 		ctxReq := ExtractContext(req)
+
 		if !isUnixSocketSyscall(ctxReq.Syscall) {
 			slog.Debug("ServeNotifyWithExecve: non-unix syscall, allowing", "session_id", sessID, "syscall", ctxReq.Syscall)
 			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {
