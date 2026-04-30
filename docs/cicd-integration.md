@@ -39,7 +39,7 @@ jobs:
         run: |
           agentsh server &
           sleep 2
-          SESSION=$(agentsh session create --workspace . --policy ci-agent | jq -r '.id')
+          SESSION=$(agentsh session create --workspace . --policy ci-agent --json | jq -r '.id')
           echo "id=$SESSION" >> $GITHUB_OUTPUT
 
       - name: Run AI agent
@@ -87,7 +87,7 @@ ai-agent-task:
     - export PATH="$HOME/.local/bin:$PATH"
     - agentsh server &
     - sleep 2
-    - export AGENTSH_SESSION=$(agentsh session create --workspace . --policy ci-agent | jq -r '.id')
+    - export AGENTSH_SESSION=$(agentsh session create --workspace . --policy ci-agent --json | jq -r '.id')
   script:
     - agentsh exec $AGENTSH_SESSION -- your-agent-cli "do the task"
   after_script:
@@ -160,7 +160,7 @@ done
 echo "agentsh server ready"
 
 # Create a session for the workspace
-export AGENTSH_SESSION=$(agentsh session create --workspace /workspace --policy default | jq -r '.id')
+export AGENTSH_SESSION=$(agentsh session create --workspace /workspace --policy default --json | jq -r '.id')
 
 # Execute the main command through the shell shim
 exec agentsh-shell-shim "$@"
@@ -365,7 +365,7 @@ jobs:
           else
             POLICY="ci-generated"
           fi
-          SESSION=$(agentsh session create --workspace . --policy $POLICY | jq -r '.id')
+          SESSION=$(agentsh session create --workspace . --policy $POLICY --json | jq -r '.id')
           echo "id=$SESSION" >> $GITHUB_OUTPUT
 
       - name: Run build and tests
