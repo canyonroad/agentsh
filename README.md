@@ -131,7 +131,7 @@ See [macOS Build Guide](docs/macos-build.md) for detailed macOS build instructio
 ./bin/agentsh server --config configs/server-config.yaml
 
 # Create a session and run a command (shell output)
-SID=$(./bin/agentsh session create --workspace . | jq -r .id)
+SID=$(./bin/agentsh session create --workspace . --json | jq -r .id)
 ./bin/agentsh exec "$SID" -- ls -la
 
 # Structured output for agents
@@ -148,7 +148,7 @@ SID=$(./bin/agentsh session create --workspace . | jq -r .id)
 - Run commands via agentsh, not directly in bash/zsh.
 - Use: `agentsh exec $SID -- <your-command-here>`
 - For structured output: `agentsh exec --output json --events summary $SID -- <your-command-here>`
-- Get session ID first: `SID=$(agentsh session create --workspace . | jq -r .id)`
+- Get session ID first: `SID=$(agentsh session create --workspace . --json | jq -r .id)`
 ```
 
 ---
@@ -295,7 +295,7 @@ command_rules:
 ./bin/agentsh server --config configs/server-config.yaml
 
 # Create a session pinned to a policy
-SID=$(./bin/agentsh session create --workspace /workspace --policy default | jq -r .id)
+SID=$(./bin/agentsh session create --workspace /workspace --policy default --json | jq -r .id)
 
 # Exec commands; responses include decision + guidance when blocked/approved
 ./bin/agentsh exec "$SID" -- rm -rf /workspace/tmp
@@ -336,7 +336,7 @@ The fastest way to "get it" is to run something that spawns subprocesses and tou
 
 ```bash
 # 1) Create a session in your repo/workspace
-SID=$(agentsh session create --workspace . | jq -r .id)
+SID=$(agentsh session create --workspace . --json | jq -r .id)
 
 # 2) Run something simple (human-friendly output)
 agentsh exec "$SID" -- uname -a
