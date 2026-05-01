@@ -49,6 +49,8 @@ func newInflightTestStore(t *testing.T, router transport.Dialer, mapper compact.
 		AllowStubMapper:         allowStub,
 		Dialer:                  router,
 		EmitExtendedLossReasons: emitExtended,
+		BackoffInitial:          10 * time.Millisecond,
+		BackoffMax:              50 * time.Millisecond,
 		Logger:                  slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
@@ -298,6 +300,8 @@ func TestStore_AckRegressionAfterGC_EmitsTransportLoss(t *testing.T) {
 		AllowStubMapper:         true,
 		Dialer:                  router,
 		EmitExtendedLossReasons: true,
+		BackoffInitial:          10 * time.Millisecond,
+		BackoffMax:              50 * time.Millisecond,
 		Logger:                  slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
@@ -356,6 +360,8 @@ func TestStore_AckRegressionAfterGC_NoTransportLoss_WhenFlagOff(t *testing.T) {
 		AllowStubMapper:         true,
 		Dialer:                  router,
 		EmitExtendedLossReasons: false,
+		BackoffInitial:          10 * time.Millisecond,
+		BackoffMax:              50 * time.Millisecond,
 		Logger:                  slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {

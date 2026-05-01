@@ -65,6 +65,8 @@ func TestStore_TransportLossInflightSlot_RetiredByBatchAck(t *testing.T) {
 		Dialer:                  router,
 		EmitExtendedLossReasons: true,
 		MaxInflight:             1,
+		BackoffInitial:          10 * time.Millisecond,
+		BackoffMax:              50 * time.Millisecond,
 		Logger:                  slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
