@@ -72,6 +72,8 @@ func TestStore_CompressionRoundTrip(t *testing.T) {
 				BatchMaxAge:     50 * time.Millisecond,
 				AllowStubMapper: true,
 				Dialer:          srv.DialerFor(),
+				BackoffInitial:  10 * time.Millisecond,
+				BackoffMax:      50 * time.Millisecond,
 				CompressionAlgo: tc.algo,
 				ZstdLevel:       3,
 				GzipLevel:       6,
@@ -157,6 +159,8 @@ func TestStore_CompressionSizeEnvelope(t *testing.T) {
 		Dialer:          srv.DialerFor(),
 		CompressionAlgo: "zstd",
 		ZstdLevel:       3,
+		BackoffInitial:  10 * time.Millisecond,
+		BackoffMax:      50 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("watchtower.New: %v", err)
@@ -230,6 +234,8 @@ func TestStore_CompressionWireShapeConformance(t *testing.T) {
 		Dialer:          srv.DialerFor(),
 		CompressionAlgo: "zstd",
 		ZstdLevel:       3,
+		BackoffInitial:  10 * time.Millisecond,
+		BackoffMax:      50 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("watchtower.New: %v", err)
