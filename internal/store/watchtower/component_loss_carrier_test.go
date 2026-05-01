@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -18,12 +19,21 @@ import (
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
+func skipLossCarrierOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("integration test skipped on Windows: active WAL readers can race segment seal/rename with ERROR_SHARING_VIOLATION")
+	}
+}
+
 // TestStore_OverflowEmitsTransportLossOnWire exercises WAL overflow
 // (configured via tiny WALMaxTotalSize), asserts the testserver
 // receives a ClientMessage{TransportLoss{reason: OVERFLOW}} AND the
 // session does NOT restart (pre-spec regression: overflow caused
 // ErrRecordLossEncountered → session teardown).
 func TestStore_OverflowEmitsTransportLossOnWire(t *testing.T) {
+	skipLossCarrierOnWindows(t)
+
 	// SuppressBatchAck: without it, the testserver acks every
 	// EventBatch as it arrives, the agent advances persistedAck, and
 	// the WAL GCs fully-acked sealed segments via
@@ -110,6 +120,8 @@ func TestStore_OverflowEmitsTransportLossOnWire(t *testing.T) {
 // segment), asserts a TransportLoss{reason: CRC_CORRUPTION} reaches the
 // wire AND the session does NOT fail-closed.
 func TestStore_CRCCorruptionEmitsTransportLossOnWire(t *testing.T) {
+	skipLossCarrierOnWindows(t)
+
 	// SuppressBatchAck: without it, the testserver acks every
 	// EventBatch as it arrives, the agent advances persistedAck, and
 	// the WAL GCs fully-acked sealed segments via

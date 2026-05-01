@@ -249,7 +249,7 @@ archives:
       - config.yml
       - default-policy.yml
       - src: configs/policies/*.yaml
-        dst: policies
+        dst: configs/policies
         strip_parent: true
       - src: build/envshim/linux_{{ .Arch }}/*
         dst: .
@@ -277,7 +277,7 @@ archives:
       - config.yml
       - default-policy.yml
       - src: configs/policies/*.yaml
-        dst: policies
+        dst: configs/policies
         strip_parent: true
 
   - id: agentsh-windows
@@ -291,7 +291,7 @@ archives:
       - config.yml
       - default-policy.yml
       - src: configs/policies/*.yaml
-        dst: policies
+        dst: configs/policies
         strip_parent: true
 
 checksum:

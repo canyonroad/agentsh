@@ -198,6 +198,7 @@ jobs:
             README.md \
             LICENSE \
             config.yml \
+            configs/policies \
             default-policy.yml
           SCRIPT
           chmod +x /tmp/alpine-build.sh
@@ -382,8 +383,8 @@ jobs:
           # Default config and policies (used as fallback when no user/system config exists)
           cp config.yml "build/AgentSH.app/Contents/Resources/"
           cp default-policy.yml "build/AgentSH.app/Contents/Resources/"
-          mkdir -p "build/AgentSH.app/Contents/Resources/policies"
-          cp configs/policies/*.yaml "build/AgentSH.app/Contents/Resources/policies/"
+          mkdir -p "build/AgentSH.app/Contents/Resources/configs/policies"
+          cp configs/policies/*.yaml "build/AgentSH.app/Contents/Resources/configs/policies/"
 
           echo "=== App bundle structure ==="
           find build/AgentSH.app -type f | sort

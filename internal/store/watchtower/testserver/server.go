@@ -479,12 +479,10 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 				return nil
 			}
 			// Normal case: one BatchAck per EventBatch, pointing at
-			// the last event's (generation, sequence). If the
-			// EventBatch is empty (e.g. a compressed batch we do not
-			// inspect, or a Heartbeat-style empty frame), the ack
-			// points at (0, 0) which the Transport's
-			// applyServerAckTuple helper treats as a no-op under the
-			// steady-state cursor.
+			// the batch envelope's (generation, to_sequence). The
+			// Transport tracks inflight EventBatch frames by this same
+			// tuple, and compressed batches expose their high watermark
+			// only through the envelope.
 			//
 			// SuppressBatchAck escape hatch: skip the per-batch ack
 			// entirely so the agent's persistedAck stays pinned at
@@ -494,17 +492,8 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 			if h.s.opts.SuppressBatchAck {
 				continue
 			}
-			var (
-				lastSeq uint64
-				lastGen uint32
-			)
-			if u := x.EventBatch.GetUncompressed(); u != nil {
-				if events := u.GetEvents(); len(events) > 0 {
-					last := events[len(events)-1]
-					lastSeq = last.GetSequence()
-					lastGen = last.GetGeneration()
-				}
-			}
+			lastSeq := x.EventBatch.GetToSequence()
+			lastGen := x.EventBatch.GetGeneration()
 			// BatchAckDelay overrides AckDelay for the per-batch ack
 			// path when set. This lets tests keep the session
 			// handshake fast (so EventBatch sends can flow) while
