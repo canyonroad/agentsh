@@ -3,9 +3,11 @@ package watchtower_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/agentsh/agentsh/internal/store/watchtower/testserver"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"github.com/agentsh/agentsh/pkg/types"
+	"google.golang.org/protobuf/proto"
 )
 
 // skipOnWindowsCIIfSlow centralizes the rationale for skipping these
@@ -35,6 +38,41 @@ func skipOnWindowsCIIfSlow(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("integration test skipped on Windows: end-to-end gRPC+WAL timing is unreliable on Windows CI runners; unit tests + wire goldens cover the compression path on this platform")
 	}
+}
+
+// dumpReceivedBatchSummary returns a human-readable summary of every
+// EventBatch the testserver has recorded: index, [from..to] sequence
+// range, compression enum, and payload byte size. Intended ONLY for
+// instrumenting CI flakes (e.g. "missing seq N in observed batches" —
+// the dump shows which batch boundaries were observed and where the
+// hole lives). Not part of any production code path.
+func dumpReceivedBatchSummary(srv *testserver.Server) string {
+	batches := srv.Batches()
+	if len(batches) == 0 {
+		return "no batches received"
+	}
+	parts := make([]string, 0, len(batches))
+	for i, b := range batches {
+		var bodyBytes int
+		switch {
+		case b.GetCompressedPayload() != nil:
+			bodyBytes = len(b.GetCompressedPayload())
+		case b.GetUncompressed() != nil:
+			bodyBytes = proto.Size(b.GetUncompressed())
+		}
+		parts = append(parts, fmt.Sprintf(
+			"#%d[%d..%d c=%v %dB]",
+			i, b.GetFromSequence(), b.GetToSequence(), b.GetCompression(), bodyBytes,
+		))
+	}
+	return strings.Join(parts, " ")
+}
+
+// debugLogger returns a slog.Logger that streams DEBUG-level events
+// to stderr. Used only by integration tests that need a transport-level
+// trace under CI flakes.
+func debugLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 // TestStore_CompressionRoundTrip drives a Transport configured for each
@@ -77,7 +115,7 @@ func TestStore_CompressionRoundTrip(t *testing.T) {
 				CompressionAlgo: tc.algo,
 				ZstdLevel:       3,
 				GzipLevel:       6,
-				Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+				Logger:          debugLogger(),
 			})
 			if err != nil {
 				t.Fatalf("watchtower.New: %v", err)
@@ -110,7 +148,7 @@ func TestStore_CompressionRoundTrip(t *testing.T) {
 				time.Sleep(50 * time.Millisecond)
 			}
 			if err := srv.AssertReplayObserved(1, total); err != nil {
-				t.Fatalf("AssertReplayObserved after deadline: %v", err)
+				t.Fatalf("AssertReplayObserved after deadline: %v\nReceived batches: %s", err, dumpReceivedBatchSummary(srv))
 			}
 
 			// Confirm at least one batch was actually compressed (not silently
@@ -161,6 +199,7 @@ func TestStore_CompressionSizeEnvelope(t *testing.T) {
 		ZstdLevel:       3,
 		BackoffInitial:  10 * time.Millisecond,
 		BackoffMax:      50 * time.Millisecond,
+		Logger:          debugLogger(),
 	})
 	if err != nil {
 		t.Fatalf("watchtower.New: %v", err)
@@ -196,7 +235,7 @@ func TestStore_CompressionSizeEnvelope(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if err := srv.AssertReplayObserved(1, total); err != nil {
-		t.Fatalf("AssertReplayObserved: %v", err)
+		t.Fatalf("AssertReplayObserved: %v\nReceived batches: %s", err, dumpReceivedBatchSummary(srv))
 	}
 
 	for i, b := range srv.Batches() {
@@ -236,6 +275,7 @@ func TestStore_CompressionWireShapeConformance(t *testing.T) {
 		ZstdLevel:       3,
 		BackoffInitial:  10 * time.Millisecond,
 		BackoffMax:      50 * time.Millisecond,
+		Logger:          debugLogger(),
 	})
 	if err != nil {
 		t.Fatalf("watchtower.New: %v", err)
@@ -267,7 +307,7 @@ func TestStore_CompressionWireShapeConformance(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if err := srv.AssertReplayObserved(1, total); err != nil {
-		t.Fatalf("AssertReplayObserved: %v", err)
+		t.Fatalf("AssertReplayObserved: %v\nReceived batches: %s", err, dumpReceivedBatchSummary(srv))
 	}
 
 	for i, b := range srv.Batches() {
