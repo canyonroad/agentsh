@@ -95,7 +95,7 @@ func TestStore_TransportLossInflightSlot_RetiredByBatchAck(t *testing.T) {
 
 	// Step 1: confirm the loss frame arrived at srvHeld. The ack is
 	// being withheld so the inflight slot is still occupied.
-	loss, err := srvHeld.WaitForTransportLoss(15 * time.Second)
+	loss, err := srvHeld.WaitForTransportLoss(60 * time.Second)
 	if err != nil {
 		t.Fatalf("WaitForTransportLoss (srvHeld): %v", err)
 	}

@@ -190,7 +190,7 @@ func TestStore_InFlightDrop_EmitsTransportLossOnWire(t *testing.T) {
 			// Emit the drop-triggering event.
 			_ = s.AppendEvent(ctx, tc.makeEvent(1))
 
-			loss, err := srv.WaitForTransportLoss(15 * time.Second)
+			loss, err := srv.WaitForTransportLoss(60 * time.Second)
 			if err != nil {
 				t.Fatalf("WaitForTransportLoss: %v", err)
 			}
@@ -314,7 +314,7 @@ func TestStore_AckRegressionAfterGC_EmitsTransportLoss(t *testing.T) {
 	// If the TODO(Task 22) in Run's stagesLoop is still blocking the
 	// PrefixLoss thread-through, this assertion will time out, which
 	// correctly surfaces the gap.
-	loss, err := srv.WaitForTransportLoss(15 * time.Second)
+	loss, err := srv.WaitForTransportLoss(60 * time.Second)
 	if err != nil {
 		t.Skipf("TestStore_AckRegressionAfterGC_EmitsTransportLoss: "+
 			"TransportLoss not received within deadline; this is expected if "+

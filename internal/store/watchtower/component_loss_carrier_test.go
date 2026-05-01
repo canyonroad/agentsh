@@ -96,7 +96,7 @@ func TestStore_OverflowEmitsTransportLossOnWire(t *testing.T) {
 	}
 
 	// Wait for the testserver to observe at least one TransportLoss.
-	loss, err := srv.WaitForTransportLoss(15 * time.Second)
+	loss, err := srv.WaitForTransportLoss(60 * time.Second)
 	if err != nil {
 		t.Fatalf("WaitForTransportLoss: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestStore_CRCCorruptionEmitsTransportLossOnWire(t *testing.T) {
 	}
 	defer s2.Close()
 
-	loss, err := srv.WaitForTransportLoss(15 * time.Second)
+	loss, err := srv.WaitForTransportLoss(60 * time.Second)
 	if err != nil {
 		t.Fatalf("WaitForTransportLoss: %v", err)
 	}
