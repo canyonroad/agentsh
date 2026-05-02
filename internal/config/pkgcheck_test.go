@@ -497,3 +497,32 @@ func TestApplyFailMode_PreservesExplicitProviderOnFailure(t *testing.T) {
 		t.Errorf("empty OnFailure should be filled with degraded→warn; got %q", cfg.Providers["snyk"].OnFailure)
 	}
 }
+
+func TestPackagePrivacyConfig_ValidateRejectsAllEmptyEntries(t *testing.T) {
+	cfg := PackagePrivacyConfig{ExternalScanRegistries: []string{"", "  "}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("all-empty entries must be rejected")
+	}
+	if !strings.Contains(err.Error(), "external_scan_registries") {
+		t.Errorf("error should mention external_scan_registries; got %v", err)
+	}
+}
+
+func TestPackagePrivacyConfig_ValidateAcceptsExplicitEmptyList(t *testing.T) {
+	cfg := PackagePrivacyConfig{ExternalScanRegistries: nil} // explicit disable
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("nil/empty list is valid (disables filter); got %v", err)
+	}
+	cfg2 := PackagePrivacyConfig{ExternalScanRegistries: []string{}} // explicit []
+	if err := cfg2.Validate(); err != nil {
+		t.Errorf("explicit [] is valid; got %v", err)
+	}
+}
+
+func TestPackagePrivacyConfig_ValidateAcceptsMixedEntries(t *testing.T) {
+	cfg := PackagePrivacyConfig{ExternalScanRegistries: []string{"registry.npmjs.org", ""}}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("at least one non-empty entry is valid; got %v", err)
+	}
+}

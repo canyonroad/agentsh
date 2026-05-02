@@ -60,6 +60,21 @@ func (p PackagePrivacyConfig) Validate() error {
 			return fmt.Errorf("invalid denylist pattern %q: %w", pat, err)
 		}
 	}
+	// If the operator provided ExternalScanRegistries entries but every
+	// one is empty/whitespace, that's a config error — the resulting
+	// allowlist is empty (which disables filtering) without the operator
+	// expressing that intent. To explicitly disable, use the empty list `[]`.
+	if len(p.ExternalScanRegistries) > 0 {
+		nonEmpty := 0
+		for _, r := range p.ExternalScanRegistries {
+			if strings.TrimSpace(r) != "" {
+				nonEmpty++
+			}
+		}
+		if nonEmpty == 0 {
+			return fmt.Errorf("external_scan_registries: provided %d entries but all are empty/whitespace; use [] to disable the filter explicitly", len(p.ExternalScanRegistries))
+		}
+	}
 	return nil
 }
 
