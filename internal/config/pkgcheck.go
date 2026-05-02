@@ -398,6 +398,11 @@ func ResolveFailMode(cfg *PackageChecksConfig) string {
 //
 // External providers are those listed in externalProviderNames. Other
 // providers (osv, depsdev, local) keep whatever OnFailure the user set.
+//
+// Per-provider explicit `on_failure` always wins: if a provider already
+// has a non-empty OnFailure, it is preserved. Fail mode only fills in
+// providers that did not configure on_failure themselves, so an operator
+// can override the global mode for a single provider.
 func ApplyFailMode(cfg *PackageChecksConfig, mode string) {
 	target := ""
 	switch mode {
@@ -415,6 +420,10 @@ func ApplyFailMode(cfg *PackageChecksConfig, mode string) {
 	for _, name := range externalProviderNames {
 		p, ok := cfg.Providers[name]
 		if !ok || !p.Enabled {
+			continue
+		}
+		if p.OnFailure != "" {
+			// Operator explicitly set on_failure on this provider — keep it.
 			continue
 		}
 		p.OnFailure = target

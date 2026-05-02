@@ -2,9 +2,11 @@ package pkgcheck_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,14 +16,30 @@ import (
 )
 
 func TestIntegration_SocketDownDegradesToOSV(t *testing.T) {
-	// Socket: returns 500 every call.
+	// Capture request bodies so we can assert the privacy filter actually
+	// stripped @acme/internal before the providers were called.
+	var (
+		socketBodies [][]byte
+		osvBodies    [][]byte
+		bodyMu       sync.Mutex
+	)
+	captureBody := func(target *[][]byte, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodyMu.Lock()
+		*target = append(*target, body)
+		bodyMu.Unlock()
+	}
+
+	// Socket: returns 500 every call (after capturing the body).
 	socketSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captureBody(&socketBodies, r)
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer socketSrv.Close()
 
 	// OSV: returns one critical vuln for lodash.
 	osvSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captureBody(&osvBodies, r)
 		_, _ = w.Write([]byte(`{"results":[{"vulns":[{"id":"GHSA-xxxx","summary":"sample","severity":[{"type":"CVSS_V3","score":"9.8"}]}]}]}`))
 	}))
 	defer osvSrv.Close()
@@ -83,5 +101,22 @@ func TestIntegration_SocketDownDegradesToOSV(t *testing.T) {
 	}
 	if len(verdict.Skipped) != 1 {
 		t.Errorf("verdict should carry 1 skipped, got %d", len(verdict.Skipped))
+	}
+
+	// Privacy contract: @acme/internal must NOT appear in any external
+	// provider's request payload. lodash should appear in both.
+	bodyMu.Lock()
+	defer bodyMu.Unlock()
+	for i, body := range socketBodies {
+		s := string(body)
+		if strings.Contains(s, "@acme") || strings.Contains(s, "internal") {
+			t.Errorf("socket request %d leaked @acme/internal: %s", i, s)
+		}
+	}
+	for i, body := range osvBodies {
+		s := string(body)
+		if strings.Contains(s, "@acme") || strings.Contains(s, "internal-tool") {
+			t.Errorf("osv request %d leaked @acme/internal: %s", i, s)
+		}
 	}
 }

@@ -477,3 +477,23 @@ func TestApplyFailMode_UnknownModeIsNoOp(t *testing.T) {
 		t.Errorf("unknown mode must leave OnFailure untouched; got %q", cfg.Providers["socket"].OnFailure)
 	}
 }
+
+func TestApplyFailMode_PreservesExplicitProviderOnFailure(t *testing.T) {
+	// User explicitly sets socket.on_failure: deny but no global fail_mode.
+	// applyDefaults sets FailMode to "degraded" → ApplyFailMode runs with "warn".
+	// The explicit "deny" must survive.
+	cfg := PackageChecksConfig{
+		FailMode: "degraded", // came from defaulting
+		Providers: map[string]ProviderConfig{
+			"socket": {Enabled: true, OnFailure: "deny"}, // explicit user choice
+			"snyk":   {Enabled: true},                    // empty → fills with warn
+		},
+	}
+	ApplyFailMode(&cfg, "degraded")
+	if cfg.Providers["socket"].OnFailure != "deny" {
+		t.Errorf("explicit deny must survive default-degraded fail mode; got %q", cfg.Providers["socket"].OnFailure)
+	}
+	if cfg.Providers["snyk"].OnFailure != "warn" {
+		t.Errorf("empty OnFailure should be filled with degraded→warn; got %q", cfg.Providers["snyk"].OnFailure)
+	}
+}
