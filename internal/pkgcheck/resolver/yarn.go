@@ -61,8 +61,10 @@ func (r *yarnResolver) CanResolve(command string, args []string) bool {
 
 func (r *yarnResolver) Resolve(ctx context.Context, workDir string, command []string) (*pkgcheck.InstallPlan, error) {
 	var packages []string
+	var args []string
 	if len(command) > 1 {
-		packages = extractPkgArgs(command[1:])
+		args = command[1:]
+		packages = extractPkgArgs(args)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
@@ -81,7 +83,29 @@ func (r *yarnResolver) Resolve(ctx context.Context, workDir string, command []st
 		return nil, fmt.Errorf("yarn dry-run failed: %w", err)
 	}
 
-	return parseYarnDryRunOutput(out, packages)
+	plan, err := parseYarnDryRunOutput(out, packages)
+	if err != nil {
+		return nil, err
+	}
+	plan.Registry = r.detectRegistry(args)
+	return plan, nil
+}
+
+// detectRegistry scans the install command args for an explicit --registry
+// flag and returns its value. Falls back to the public npm registry.
+// yarn 1.x supports --registry; yarn 2+ uses different config but
+// the CLI flag still works for overrides.
+func (r *yarnResolver) detectRegistry(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--registry" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(a, "--registry=") {
+			return strings.TrimPrefix(a, "--registry=")
+		}
+	}
+	return "registry.npmjs.org"
 }
 
 // yarnDryRunOutput represents yarn's JSON output structure.

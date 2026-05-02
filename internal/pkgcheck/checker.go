@@ -122,11 +122,12 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 	}
 
 	// 6. Evaluate findings against policy rules.
-	verdict := c.eval.Evaluate(findings, plan.Ecosystem)
-
-	// Copy privacy-skipped packages onto verdict so callers can see which
-	// packages were not externally scanned.
-	verdict.Skipped = skipped
+	verdict := c.eval.EvaluateWithContext(EvalContext{
+		Findings:       findings,
+		Ecosystem:      plan.Ecosystem,
+		ProviderErrors: providerErrs,
+		Skipped:        skipped,
+	})
 
 	// If any provider needs approval and verdict is weaker, upgrade to approve.
 	if hasFailAction && strictestFailAction == VerdictApprove && verdict.Action.weight() < VerdictApprove.weight() {
@@ -142,7 +143,15 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 	}
 
 	// 8. Enrich summary with package list; append provider failure reason if present.
-	verdict.Summary = buildCheckerSummary(intent, plan, verdict)
+	// Capture any "degraded:" prefix EvaluateWithContext added before
+	// buildCheckerSummary regenerates the summary line.
+	degradedPrefix := ""
+	if strings.HasPrefix(verdict.Summary, "degraded:") {
+		if semi := strings.Index(verdict.Summary, "; "); semi >= 0 {
+			degradedPrefix = verdict.Summary[:semi+2]
+		}
+	}
+	verdict.Summary = degradedPrefix + buildCheckerSummary(intent, plan, verdict)
 	if hasFailAction && strictestFailSummary != "" {
 		verdict.Summary = verdict.Summary + "; " + strictestFailSummary
 	}

@@ -349,6 +349,45 @@ func (f *fakeResolver) Resolve(_ context.Context, _ string, _ []string) (*Instal
 	return f.plan, nil
 }
 
+// TestChecker_WarnProviderErrorProducesDegradedSummary proves that a provider
+// failing with on_failure="warn" causes the verdict summary to start with
+// "degraded:" so callers can distinguish a partial scan from a full clean scan.
+func TestChecker_WarnProviderErrorProducesDegradedSummary(t *testing.T) {
+	resolver := &mockResolver{
+		name:       "npm-resolver",
+		canResolve: true,
+		plan: &InstallPlan{
+			Tool:      "npm",
+			Ecosystem: EcosystemNPM,
+			Direct: []PackageRef{
+				{Name: "lodash", Version: "4.17.21", Direct: true},
+			},
+		},
+	}
+	provider := &mockProvider{
+		name: "flaky-provider",
+		err:  assert.AnError,
+	}
+	rules := []policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	}
+
+	checker := newTestChecker(
+		[]Resolver{resolver},
+		map[string]ProviderEntry{
+			"flaky-provider": {Provider: provider, Timeout: 5 * time.Second, OnFailure: "warn"},
+		},
+		rules,
+	)
+
+	verdict, err := checker.Check(context.Background(), "npm", []string{"install", "lodash"}, t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, verdict)
+	assert.Equal(t, VerdictAllow, verdict.Action)
+	// The summary must start with "degraded:" to signal partial scan.
+	assert.True(t, len(verdict.Summary) > 0 && verdict.Summary[:9] == "degraded:", "expected summary to start with 'degraded:', got: %q", verdict.Summary)
+}
+
 // TestChecker_RegistryPropagationAllowsPublicPackages proves that packages
 // without an explicit Registry on the PackageRef still pass the privacy filter
 // when the plan's Registry matches the allowlist. Without AllPackagesWithRegistry,

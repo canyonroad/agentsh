@@ -66,8 +66,10 @@ func (r *npmResolver) CanResolve(command string, args []string) bool {
 func (r *npmResolver) Resolve(ctx context.Context, workDir string, command []string) (*pkgcheck.InstallPlan, error) {
 	// Extract package args (skip the subcommand, filter flags)
 	var packages []string
+	var args []string
 	if len(command) > 1 {
-		packages = extractPkgArgs(command[1:])
+		args = command[1:]
+		packages = extractPkgArgs(args)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
@@ -86,7 +88,27 @@ func (r *npmResolver) Resolve(ctx context.Context, workDir string, command []str
 		return nil, fmt.Errorf("npm dry-run failed: %w", err)
 	}
 
-	return parseNPMDryRunOutput(out, packages)
+	plan, err := parseNPMDryRunOutput(out, packages)
+	if err != nil {
+		return nil, err
+	}
+	plan.Registry = r.detectRegistry(args)
+	return plan, nil
+}
+
+// detectRegistry scans the install command args for an explicit --registry
+// flag and returns its value. Falls back to the public npm registry.
+func (r *npmResolver) detectRegistry(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--registry" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(a, "--registry=") {
+			return strings.TrimPrefix(a, "--registry=")
+		}
+	}
+	return "registry.npmjs.org"
 }
 
 // npmDryRunOutput represents the JSON output from npm install --json.

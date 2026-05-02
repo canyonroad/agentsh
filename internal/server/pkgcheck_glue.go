@@ -177,6 +177,9 @@ func buildResolvers(cfgMap map[string]config.ResolverConfig) ([]pkgcheck.Resolve
 
 	out := make([]pkgcheck.Resolver, 0, len(cfgMap))
 	for name, rc := range cfgMap {
+		if err := rc.Validate(); err != nil {
+			return nil, fmt.Errorf("pkgcheck resolver %q: %w", name, err)
+		}
 		r, err := buildResolver(name, rc)
 		if err != nil {
 			return nil, err

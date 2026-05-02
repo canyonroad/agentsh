@@ -1,6 +1,10 @@
 package config
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // PackageChecksConfig configures package install security checks.
 type PackageChecksConfig struct {
@@ -66,6 +70,18 @@ type ResolverConfig struct {
 	// Each element is a single token (no shell splitting is performed).
 	DryRunArgs    []string      `yaml:"dry_run_args" json:"dry_run_args"`
 	Timeout       time.Duration `yaml:"timeout"`
+}
+
+// Validate returns an error if the configuration is malformed. In
+// particular, DryRunCommand must be a binary path with no embedded
+// whitespace; multi-token commands should be split into DryRunCommand
+// (binary) plus DryRunArgs (the rest).
+func (r ResolverConfig) Validate() error {
+	if strings.ContainsAny(r.DryRunCommand, " \t") {
+		return fmt.Errorf("dry_run_command must be a binary path without spaces; "+
+			"split arguments into dry_run_args. Got: %q", r.DryRunCommand)
+	}
+	return nil
 }
 
 // SkillcheckConfig configures the skillcheck daemon that scans Claude Code

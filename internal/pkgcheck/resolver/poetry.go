@@ -81,6 +81,10 @@ func (r *poetryResolver) Resolve(ctx context.Context, workDir string, command []
 		return nil, fmt.Errorf("poetry dry-run failed: %w", err)
 	}
 
+	// TODO: poetry has no equivalent CLI registry override flag; the registry is
+	// configured via [[tool.poetry.source]] in pyproject.toml. Reading that file
+	// to detect a custom source URL is future work. For now the plan always carries
+	// "pypi.org" regardless of the project's source configuration.
 	return parsePoetryDryRunOutput(out, packages)
 }
 

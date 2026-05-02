@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -146,6 +147,36 @@ func TestApplyDefaults_PackageChecksPrivacy(t *testing.T) {
 	applyDefaults(cfg)
 	if len(cfg.PackageChecks.Privacy.ExternalScanRegistries) == 0 {
 		t.Error("default Privacy.ExternalScanRegistries should be set after applyDefaults")
+	}
+}
+
+func TestResolverConfig_Validate_RejectsSpaciousCommand(t *testing.T) {
+	rc := ResolverConfig{
+		DryRunCommand: "npm install --package-lock-only --ignore-scripts",
+	}
+	err := rc.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for DryRunCommand with spaces, got nil")
+	}
+	if !strings.Contains(err.Error(), "dry_run_args") {
+		t.Errorf("error should mention dry_run_args; got: %v", err)
+	}
+}
+
+func TestResolverConfig_Validate_AcceptsBinaryOnly(t *testing.T) {
+	rc := ResolverConfig{
+		DryRunCommand: "/usr/local/bin/npm",
+		DryRunArgs:    []string{"install", "--package-lock-only", "--ignore-scripts"},
+	}
+	if err := rc.Validate(); err != nil {
+		t.Errorf("expected no error for binary-only DryRunCommand, got: %v", err)
+	}
+}
+
+func TestResolverConfig_Validate_AcceptsEmpty(t *testing.T) {
+	rc := ResolverConfig{}
+	if err := rc.Validate(); err != nil {
+		t.Errorf("expected no error for empty DryRunCommand, got: %v", err)
 	}
 }
 

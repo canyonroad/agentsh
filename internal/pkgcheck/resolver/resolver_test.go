@@ -809,3 +809,110 @@ func TestPoetryResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
 	assert.Equal(t, "/Program Files/poetry/poetry.exe", r.binary)
 	assert.Empty(t, r.prefixArgs)
 }
+
+// --- Registry detection tests ---
+
+func TestNPMResolver_DetectRegistry(t *testing.T) {
+	r := &npmResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default (no flag)", []string{"install", "lodash"}, "registry.npmjs.org"},
+		{"--registry space", []string{"install", "--registry", "https://internal.example/"}, "https://internal.example/"},
+		{"--registry=", []string{"install", "--registry=https://x/"}, "https://x/"},
+		{"--registry last", []string{"--registry", "https://r/"}, "https://r/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.detectRegistry(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestPNPMResolver_DetectRegistry(t *testing.T) {
+	r := &pnpmResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", []string{"add", "react"}, "registry.npmjs.org"},
+		{"--registry space", []string{"add", "--registry", "https://internal.example/"}, "https://internal.example/"},
+		{"--registry=", []string{"add", "--registry=https://x/"}, "https://x/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.detectRegistry(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestYarnResolver_DetectRegistry(t *testing.T) {
+	r := &yarnResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", []string{"add", "typescript"}, "registry.npmjs.org"},
+		{"--registry space", []string{"add", "--registry", "https://internal.example/"}, "https://internal.example/"},
+		{"--registry=", []string{"add", "--registry=https://x/"}, "https://x/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.detectRegistry(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestPipResolver_DetectRegistry(t *testing.T) {
+	r := &pipResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", []string{"install", "requests"}, "pypi.org"},
+		{"--index-url space", []string{"install", "--index-url", "https://internal/simple"}, "https://internal/simple"},
+		{"--index-url=", []string{"install", "--index-url=https://internal/simple"}, "https://internal/simple"},
+		{"-i space", []string{"install", "-i", "https://internal/simple"}, "https://internal/simple"},
+		// --extra-index-url → ambiguous origin, return ""
+		{"--extra-index-url space", []string{"install", "requests", "--extra-index-url", "https://internal/simple"}, ""},
+		{"--extra-index-url=", []string{"install", "requests", "--extra-index-url=https://internal/simple"}, ""},
+		// --index-url plus --extra-index-url → still ambiguous
+		{"index-url + extra", []string{"install", "--index-url", "https://primary/", "--extra-index-url", "https://extra/"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.detectRegistry(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestUVResolver_DetectRegistry(t *testing.T) {
+	r := &uvResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", []string{"pip", "install", "flask"}, "pypi.org"},
+		{"--index-url space", []string{"pip", "install", "--index-url", "https://internal/simple"}, "https://internal/simple"},
+		{"--index-url=", []string{"pip", "install", "--index-url=https://internal/simple"}, "https://internal/simple"},
+		// --extra-index-url → ambiguous origin, return ""
+		{"--extra-index-url space", []string{"pip", "install", "flask", "--extra-index-url", "https://internal/simple"}, ""},
+		{"--extra-index-url=", []string{"pip", "install", "flask", "--extra-index-url=https://internal/simple"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.detectRegistry(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

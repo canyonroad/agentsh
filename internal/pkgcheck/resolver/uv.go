@@ -65,8 +65,10 @@ func (r *uvResolver) CanResolve(command string, args []string) bool {
 
 func (r *uvResolver) Resolve(ctx context.Context, workDir string, command []string) (*pkgcheck.InstallPlan, error) {
 	var packages []string
+	var args []string
 	if len(command) > 1 {
-		packages = extractPkgArgs(command[1:])
+		args = command[1:]
+		packages = extractPkgArgs(args)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
@@ -85,7 +87,46 @@ func (r *uvResolver) Resolve(ctx context.Context, workDir string, command []stri
 		return nil, fmt.Errorf("uv dry-run failed: %w", err)
 	}
 
-	return parseUVDryRunOutput(out, packages)
+	plan, err := parseUVDryRunOutput(out, packages)
+	if err != nil {
+		return nil, err
+	}
+	plan.Registry = r.detectRegistry(args)
+	return plan, nil
+}
+
+// detectRegistry scans the uv pip install command args for registry override flags.
+//
+// --index-url sets the primary registry; return it directly.
+// --extra-index-url means "also use this registry", so the package may have
+// come from EITHER the primary or the extra registry. We can't tell which, so
+// we return "" (unknown) to let the privacy filter fail closed rather than
+// accidentally claiming the package came from a known-public registry.
+func (r *uvResolver) detectRegistry(args []string) string {
+	hasExtra := false
+	primary := "pypi.org"
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--index-url" && i+1 < len(args):
+			primary = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--index-url="):
+			primary = strings.TrimPrefix(a, "--index-url=")
+		case a == "--extra-index-url" && i+1 < len(args):
+			hasExtra = true
+			i++
+		case strings.HasPrefix(a, "--extra-index-url="):
+			hasExtra = true
+		}
+	}
+
+	if hasExtra {
+		// Package origin is ambiguous — return "" so privacy filter fails closed.
+		return ""
+	}
+	return primary
 }
 
 // parseUVDryRunOutput parses uv's --dry-run text output into an InstallPlan.

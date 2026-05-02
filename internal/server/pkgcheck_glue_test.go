@@ -98,6 +98,22 @@ func TestBuildResolvers_UnknownNameRejected(t *testing.T) {
 	}
 }
 
+// TestBuildResolvers_SpacedDryRunCommandRejected verifies that a DryRunCommand
+// containing spaces fails at resolver-build time with a message pointing to
+// dry_run_args, so users with the old "npm install --package-lock-only" config
+// shape get a clear migration hint.
+func TestBuildResolvers_SpacedDryRunCommandRejected(t *testing.T) {
+	_, err := buildResolvers(map[string]config.ResolverConfig{
+		"npm": {DryRunCommand: "npm install --package-lock-only --ignore-scripts"},
+	})
+	if err == nil {
+		t.Fatal("expected error for DryRunCommand with spaces")
+	}
+	if !strings.Contains(err.Error(), "dry_run_args") {
+		t.Errorf("error should mention dry_run_args; got: %v", err)
+	}
+}
+
 // TestBuildProviderEntry_DefaultOnFailureIsWarn verifies that an empty
 // OnFailure in the config is normalized to "warn".
 func TestBuildProviderEntry_DefaultOnFailureIsWarn(t *testing.T) {
