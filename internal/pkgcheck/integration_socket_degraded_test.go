@@ -115,7 +115,7 @@ func TestIntegration_SocketDownDegradesToOSV(t *testing.T) {
 	}
 	for i, body := range osvBodies {
 		s := string(body)
-		if strings.Contains(s, "@acme") || strings.Contains(s, "internal-tool") {
+		if strings.Contains(s, "@acme") || strings.Contains(s, "/internal") {
 			t.Errorf("osv request %d leaked @acme/internal: %s", i, s)
 		}
 	}

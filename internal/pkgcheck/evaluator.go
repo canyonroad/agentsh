@@ -218,19 +218,13 @@ func mapAction(action string) VerdictAction {
 }
 
 // noFindingsVerdict returns a verdict when there are no findings.
-// It applies the last rule as the default.
+// A clean scan with no findings is always Allow regardless of the rule list
+// shape. Rules match facts; when there are no facts there is nothing to
+// evaluate, so the result is unconditionally Allow.
 func (e *Evaluator) noFindingsVerdict() *Verdict {
-	action := VerdictAllow
-	// Use the last rule's action as default, but only if it's a catch-all
-	// (empty match). This prevents filtered-out Options rules from shifting
-	// the default behavior.
-	if len(e.rules) > 0 {
-		last := e.rules[len(e.rules)-1]
-		action = mapAction(last.Action)
-	}
 	return &Verdict{
-		Action:  action,
-		Summary: fmt.Sprintf("no findings, default action: %s", action),
+		Action:  VerdictAllow,
+		Summary: "no findings",
 	}
 }
 

@@ -456,6 +456,18 @@ func TestNewEvaluatorAllRulesFilteredFailsClosed(t *testing.T) {
 	assert.Equal(t, VerdictBlock, verdict.Action, "all rules filtered, fail-closed deny injected")
 }
 
+func TestEvaluator_NoFindings_AlwaysAllowEvenWithDenyLastRule(t *testing.T) {
+	// Last rule is deny — but with no findings the verdict must still be allow.
+	rules := []policy.PackageRule{
+		{Match: policy.PackageMatch{FindingType: "malware"}, Action: "deny"},
+	}
+	ev := NewEvaluator(rules)
+	v := ev.Evaluate(nil, EcosystemNPM)
+	if v.Action != VerdictAllow {
+		t.Errorf("no findings should always Allow; got %s", v.Action)
+	}
+}
+
 func TestEvaluator_EvaluateWithContext_AnnotatesDegraded(t *testing.T) {
 	ev := NewEvaluator([]policy.PackageRule{
 		{Match: policy.PackageMatch{}, Action: "allow"},

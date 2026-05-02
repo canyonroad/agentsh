@@ -40,7 +40,11 @@ type PrivacyFilter struct {
 func NewPrivacyFilter(cfg PrivacyConfig) *PrivacyFilter {
 	allowed := make(map[string]struct{}, len(cfg.ExternalScanRegistries))
 	for _, r := range cfg.ExternalScanRegistries {
-		allowed[normalizeRegistry(r)] = struct{}{}
+		n := normalizeRegistry(r)
+		if n == "" {
+			continue // empty entry is meaningless; ignore rather than match-all-empty-registry
+		}
+		allowed[n] = struct{}{}
 	}
 	return &PrivacyFilter{
 		allowedRegistries: allowed,

@@ -84,6 +84,25 @@ func TestPrivacyFilter_EmptyRegistryFailsClosed(t *testing.T) {
 	}
 }
 
+func TestPrivacyFilter_EmptyAllowlistEntryIsIgnored(t *testing.T) {
+	pf := NewPrivacyFilter(PrivacyConfig{
+		ExternalScanRegistries: []string{"registry.npmjs.org", ""},
+	})
+	// A package with empty Registry must NOT be treated as allowed
+	// just because the allowlist contains an empty entry.
+	in := []PackageRef{
+		{Name: "lodash", Version: "1", Registry: "registry.npmjs.org"},
+		{Name: "private", Version: "1", Registry: ""},
+	}
+	scan, skip := pf.Partition(in)
+	if len(scan) != 1 || scan[0].Name != "lodash" {
+		t.Errorf("scan should be lodash only; got %+v", scan)
+	}
+	if len(skip) != 1 || skip[0].Reason != SkipReasonPrivateRegistry {
+		t.Errorf("private package must be skipped; got %+v", skip)
+	}
+}
+
 func TestPrivacyFilter_EmptyDenylistPatternIsIgnored(t *testing.T) {
 	pf := NewPrivacyFilter(PrivacyConfig{
 		PrivateScopeDenylist: []string{""},
