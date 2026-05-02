@@ -74,6 +74,35 @@ func containsRule(rules []policy.PackageRule, want policy.PackageRule) bool {
 	return false
 }
 
+func TestCompileBlockOnRules_NoCatchAll(t *testing.T) {
+	// CompileBlockOnRules must NOT append a catch-all allow rule.
+	// CompileBlockOn (the public wrapper) should still end with one.
+	cfg := BlockOnConfig{
+		Malware:       "any",
+		Vulnerability: "critical",
+	}
+
+	rules := CompileBlockOnRules(cfg)
+	if len(rules) == 0 {
+		t.Fatal("expected at least one rule from CompileBlockOnRules")
+	}
+	last := rules[len(rules)-1]
+	if last.Match.FindingType == "" && last.Action == "allow" {
+		t.Errorf("CompileBlockOnRules must NOT end with a catch-all allow rule; got %+v", last)
+	}
+
+	// CompileBlockOn should still end with a catch-all.
+	allRules := CompileBlockOn(cfg)
+	lastAll := allRules[len(allRules)-1]
+	if lastAll.Match.FindingType != "" || lastAll.Action != "allow" {
+		t.Errorf("CompileBlockOn must still end with a catch-all allow rule; got %+v", lastAll)
+	}
+	// CompileBlockOn should have exactly one more rule than CompileBlockOnRules.
+	if len(allRules) != len(rules)+1 {
+		t.Errorf("CompileBlockOn len=%d, CompileBlockOnRules len=%d; expected exactly 1 more", len(allRules), len(rules))
+	}
+}
+
 func TestBlockOnConfig_ValidateRejectsTypos(t *testing.T) {
 	cfg := BlockOnConfig{Vulnerability: "critcal"}
 	if err := cfg.Validate(); err == nil {

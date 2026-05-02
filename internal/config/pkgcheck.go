@@ -270,14 +270,19 @@ func blockOnContains(haystack []string, needle string) bool {
 	return false
 }
 
-// CompileBlockOn translates the BlockOnConfig shorthand into a list of
-// policy.PackageRule entries (first-match-wins) ending in a catch-all allow.
+// CompileBlockOnRules translates the BlockOnConfig shorthand into a list of
+// typed policy.PackageRule entries (first-match-wins) WITHOUT a trailing
+// catch-all allow rule.
+//
+// Use this variant when merging block_on rules with an operator policy engine
+// that may deliberately omit a catch-all (fail-closed intent). Adding a
+// catch-all in that context would silently override the operator's default-deny.
 //
 // For each finding type we emit deny rules for severities at or above the
 // threshold, warn rules for severities below the threshold but still
 // noteworthy (currently: high vulns become warn even when threshold is
-// critical), and rely on the catch-all allow for everything else.
-func CompileBlockOn(b BlockOnConfig) []policy.PackageRule {
+// critical).
+func CompileBlockOnRules(b BlockOnConfig) []policy.PackageRule {
 	var rules []policy.PackageRule
 
 	// Malware: any (deny all severities) or critical (deny only critical).
@@ -316,7 +321,7 @@ func CompileBlockOn(b BlockOnConfig) []policy.PackageRule {
 		)
 	}
 
-	// License / reputation / provenance: any → deny; never → no rule (catch-all allows).
+	// License / reputation / provenance: any → deny; never → no rule.
 	for _, kv := range []struct{ ft, mode string }{
 		{"license", b.License}, {"reputation", b.Reputation}, {"provenance", b.Provenance},
 	} {
@@ -329,13 +334,23 @@ func CompileBlockOn(b BlockOnConfig) []policy.PackageRule {
 		}
 	}
 
-	// Catch-all allow.
-	rules = append(rules, policy.PackageRule{
+	return rules
+}
+
+// CompileBlockOn translates the BlockOnConfig shorthand into a list of
+// policy.PackageRule entries (first-match-wins) ending in a catch-all allow.
+//
+// Use this variant when block_on is the sole rule source — the catch-all allow
+// ensures unmatched findings pass through rather than hitting the evaluator's
+// default-deny. When merging with an operator policy engine, use
+// CompileBlockOnRules instead so the engine's catch-all (or deliberate
+// omission of one) is not shadowed.
+func CompileBlockOn(b BlockOnConfig) []policy.PackageRule {
+	return append(CompileBlockOnRules(b), policy.PackageRule{
 		Match:  policy.PackageMatch{},
 		Action: "allow",
 		Reason: "block_on default allow",
 	})
-	return rules
 }
 
 // externalProviderNames lists provider names that send package data to a

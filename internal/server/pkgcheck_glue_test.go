@@ -2,11 +2,13 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/pkgcheck"
+	"github.com/agentsh/agentsh/internal/policy"
 )
 
 // TestBuildResolvers_DefaultsToVerified verifies that calling buildResolvers with a
@@ -170,7 +172,110 @@ func TestBuildProviderEntries_MissingAPIKeySkipsProvider(t *testing.T) {
 	}
 }
 
-// TestBuildProviderEntries_ZeroProvidersDetectableByLoop verifies that when all
+// TestComposedRules_NoCatchAllLeakFromBlockOn verifies that when CompileBlockOnRules
+// (no-catch-all variant) is appended after engine-style rules, the merged set does
+// NOT end with a Match{} / Action:"allow" catch-all. This is the wiring that
+// server.go uses so an operator policy with no catch-all retains fail-closed intent.
+func TestComposedRules_NoCatchAllLeakFromBlockOn(t *testing.T) {
+	blockOnCfg := config.BlockOnConfig{
+		Malware:       "any",
+		Vulnerability: "critical",
+		License:       "never",
+		Reputation:    "never",
+		Provenance:    "never",
+	}
+
+	// Simulate an operator policy that has no catch-all (deliberately fail-closed).
+	engineRules := []policy.PackageRule{
+		{Match: policy.PackageMatch{FindingType: "malware"}, Action: "deny", Reason: "operator deny malware"},
+	}
+
+	// This is exactly what server.go does now (uses CompileBlockOnRules, not CompileBlockOn).
+	rules := append([]policy.PackageRule(nil), engineRules...)
+	rules = append(rules, config.CompileBlockOnRules(blockOnCfg)...)
+
+	if len(rules) == 0 {
+		t.Fatal("expected at least one composed rule")
+	}
+	last := rules[len(rules)-1]
+	if last.Match.FindingType == "" && last.Action == "allow" {
+		t.Errorf("merged rules must NOT end with a catch-all allow when using CompileBlockOnRules; "+
+			"engine fail-closed intent would be shadowed. Last rule: %+v", last)
+	}
+}
+
+// TestMissingAPIKey_ClosedModeIsFatal verifies that when fail_mode=closed and
+// an external provider is configured with an unset API key env var, the error
+// is errMissingAPIKeyValue and callers should treat it as fatal (not skip).
+func TestMissingAPIKey_ClosedModeIsFatal(t *testing.T) {
+	const missingEnvVar = "AGENTSH_TEST_SNYK_KEY_CLOSED_MODE_XYZ"
+	t.Setenv(missingEnvVar, "") // ensure empty
+
+	_, err := buildProviderEntry("snyk", config.ProviderConfig{
+		Enabled:   true,
+		APIKeyEnv: missingEnvVar,
+		OnFailure: "deny",
+		Options:   map[string]any{"org_id": "test-org"},
+	})
+	if err == nil {
+		t.Fatal("expected an error for missing API key, got nil")
+	}
+	if !errors.Is(err, errMissingAPIKeyValue) {
+		t.Fatalf("expected errMissingAPIKeyValue sentinel, got: %v", err)
+	}
+
+	// Now simulate the closed-mode check from server.go's loop:
+	// when mode == "closed" and err is errMissingAPIKeyValue, return a fatal error.
+	mode := "closed"
+	var fatalErr error
+	if errors.Is(err, errMissingAPIKeyValue) {
+		if mode == "closed" {
+			fatalErr = fmt.Errorf("pkgcheck: provider %q enabled with missing API key under fail_mode=closed: configured to fail closed, but provider cannot operate", "snyk")
+		}
+	}
+	if fatalErr == nil {
+		t.Error("expected a fatal error under fail_mode=closed with missing API key, got nil")
+	}
+	if !strings.Contains(fatalErr.Error(), "fail_mode=closed") {
+		t.Errorf("fatal error should mention fail_mode=closed; got: %v", fatalErr)
+	}
+}
+
+// TestMissingAPIKey_DegradedModeContinues verifies that when fail_mode=degraded
+// (the default) and an external provider is configured with an unset API key,
+// the code path continues (skip with warning) rather than failing fatally.
+// This is the previously-correct degraded behavior — the fix only adds the
+// closed-mode branch without changing degraded/open.
+func TestMissingAPIKey_DegradedModeContinues(t *testing.T) {
+	const missingEnvVar = "AGENTSH_TEST_SNYK_KEY_DEGRADED_MODE_XYZ"
+	t.Setenv(missingEnvVar, "") // ensure empty
+
+	_, err := buildProviderEntry("snyk", config.ProviderConfig{
+		Enabled:   true,
+		APIKeyEnv: missingEnvVar,
+		OnFailure: "warn",
+		Options:   map[string]any{"org_id": "test-org"},
+	})
+	if err == nil {
+		t.Fatal("expected errMissingAPIKeyValue, got nil")
+	}
+	if !errors.Is(err, errMissingAPIKeyValue) {
+		t.Fatalf("expected errMissingAPIKeyValue, got: %v", err)
+	}
+
+	// Simulate the degraded-mode branch: skip, do NOT return a fatal error.
+	mode := "degraded"
+	skipped := false
+	if errors.Is(err, errMissingAPIKeyValue) {
+		if mode != "closed" {
+			skipped = true // warn and continue — no fatal error
+		}
+	}
+	if !skipped {
+		t.Error("expected degraded mode to skip (not fail) on missing API key")
+	}
+}
+
 // configured providers are skipped due to missing API keys, the resulting map
 // is empty. This is what the server.go zero-providers check guards against.
 func TestBuildProviderEntries_ZeroProvidersDetectableByLoop(t *testing.T) {

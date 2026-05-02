@@ -538,11 +538,13 @@ func New(cfg *config.Config) (*Server, error) {
 			if err != nil {
 				// A missing env-var value is a soft misconfiguration: the operator
 				// has named the key correctly but the value is absent (CI / dev).
-				// Skip with a warning so the server still starts.
-				// Any other error (unknown provider name, missing api_key_env field,
-				// missing org_id, etc.) is a YAML-level misconfiguration the operator
-				// must fix — fail hard so it is not silently ignored.
+				// Under fail_mode=closed, however, an operator's intent is to fail
+				// closed on any provider failure — silently disabling a configured
+				// provider would undermine that intent, so we treat it as fatal.
 				if errors.Is(err, errMissingAPIKeyValue) {
+					if mode == "closed" {
+						return nil, fmt.Errorf("pkgcheck: provider %q enabled with missing API key under fail_mode=closed: configured to fail closed, but provider cannot operate", name)
+					}
 					slog.Warn("pkgcheck: skipping provider (API key env var unset)", "name", name, "error", err)
 					continue
 				}
@@ -560,13 +562,12 @@ func New(cfg *config.Config) (*Server, error) {
 			return nil, fmt.Errorf("package_checks.enabled=true but no providers were initialized — at least one provider must be configured and have its API key (if required) set")
 		}
 
-		// Compose evaluator rules: engine.PackageRules() runs first
-		// (operator's policy file overrides), then block_on shorthand
-		// rules. Engine catch-all (if any) sits between the two; the
-		// final catch-all allow at the end of CompileBlockOn covers
-		// findings neither rule set named explicitly.
+		// Compose rules: engine.PackageRules() takes precedence, then block_on
+		// shorthand fills in the remaining finding types. We use the no-catch-all
+		// variant here so that an operator's policy file can deliberately omit
+		// a catch-all rule and rely on the evaluator's default-deny.
 		rules := append([]policy.PackageRule(nil), engine.PackageRules()...)
-		rules = append(rules, config.CompileBlockOn(cfg.PackageChecks.BlockOn)...)
+		rules = append(rules, config.CompileBlockOnRules(cfg.PackageChecks.BlockOn)...)
 
 		pkgChecker := pkgcheck.NewChecker(pkgcheck.CheckerConfig{
 			Scope:     cfg.PackageChecks.Scope,
