@@ -3,40 +3,53 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 )
 
 const (
-	defaultSnykBaseURL = "https://api.snyk.io"
-	defaultSnykTimeout = 30 * time.Second
+	defaultSnykBaseURL    = "https://api.snyk.io"
+	defaultSnykTimeout    = 30 * time.Second
+	defaultSnykConcurrency = 16
 )
 
 // SnykConfig configures the Snyk vulnerability and license provider.
 type SnykConfig struct {
-	BaseURL string
-	Timeout time.Duration
-	APIKey  string
-	OrgID   string
+	BaseURL     string
+	Timeout     time.Duration
+	APIKey      string
+	OrgID       string
+	Concurrency int // max concurrent per-package fetches; default 16
 }
 
 // snykProvider queries the Snyk API for vulnerability and license findings.
 type snykProvider struct {
-	baseURL string
-	client  *http.Client
-	apiKey  string
-	orgID   string
+	baseURL     string
+	client      *retryClient
+	breaker     *circuitBreaker
+	apiKey      string
+	orgID       string
+	timeout     time.Duration
+	concurrency int
 }
 
 // NewSnykProvider returns a CheckProvider that queries Snyk for vulnerabilities
 // and license issues.
 func NewSnykProvider(cfg SnykConfig) pkgcheck.CheckProvider {
+	return newSnykProviderForTest(cfg, circuitBreakerConfig{})
+}
+
+// newSnykProviderForTest constructs a snykProvider with a custom breaker
+// config, allowing tests to inject short thresholds and windows.
+func newSnykProviderForTest(cfg SnykConfig, breakerCfg circuitBreakerConfig) *snykProvider {
 	baseURL := cfg.BaseURL
 	if baseURL == "" {
 		baseURL = defaultSnykBaseURL
@@ -45,11 +58,23 @@ func NewSnykProvider(cfg SnykConfig) pkgcheck.CheckProvider {
 	if timeout == 0 {
 		timeout = defaultSnykTimeout
 	}
+	concurrency := cfg.Concurrency
+	if concurrency <= 0 {
+		concurrency = defaultSnykConcurrency
+	}
 	return &snykProvider{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: timeout},
-		apiKey:  cfg.APIKey,
-		orgID:   cfg.OrgID,
+		client: newRetryClient(retryConfig{
+			MaxAttempts:       3,
+			BaseBackoff:       200 * time.Millisecond,
+			MaxBackoff:        2 * time.Second,
+			RespectRetryAfter: true,
+		}),
+		breaker:     newCircuitBreaker(breakerCfg),
+		apiKey:      cfg.APIKey,
+		orgID:       cfg.OrgID,
+		timeout:     timeout,
+		concurrency: concurrency,
 	}
 }
 
@@ -67,18 +92,18 @@ type snykIssuesResponse struct {
 }
 
 type snykIssue struct {
-	ID         string          `json:"id"`
-	Type       string          `json:"type"`
-	Attributes snykAttributes  `json:"attributes"`
+	ID         string         `json:"id"`
+	Type       string         `json:"type"`
+	Attributes snykAttributes `json:"attributes"`
 }
 
 type snykAttributes struct {
-	Title       string       `json:"title"`
-	Description string       `json:"description,omitempty"`
-	Severity    string       `json:"severity"`
-	Type        string       `json:"type"`
-	CVSS        *snykCVSS    `json:"cvss,omitempty"`
-	Slots       *snykSlots   `json:"slots,omitempty"`
+	Title       string     `json:"title"`
+	Description string     `json:"description,omitempty"`
+	Severity    string     `json:"severity"`
+	Type        string     `json:"type"`
+	CVSS        *snykCVSS  `json:"cvss,omitempty"`
+	Slots       *snykSlots `json:"slots,omitempty"`
 }
 
 type snykCVSS struct {
@@ -96,6 +121,12 @@ type snykReference struct {
 	Title string `json:"title,omitempty"`
 }
 
+// pkgResult holds the per-package outcome from the concurrent fan-out.
+type pkgResult struct {
+	findings []pkgcheck.Finding
+	err      error
+}
+
 func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest) (*pkgcheck.CheckResponse, error) {
 	if p.apiKey == "" {
 		return nil, fmt.Errorf("snyk: API key is required")
@@ -107,27 +138,81 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 	start := time.Now()
 	ecosystem := mapEcosystemSnyk(req.Ecosystem)
 
+	n := len(req.Packages)
+	results := make([]pkgResult, n)
+
+	// Semaphore channel for bounded concurrency.
+	sem := make(chan struct{}, p.concurrency)
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+
+	for i, pkg := range req.Packages {
+		i, pkg := i, pkg // capture
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			// Apply per-request timeout only on the HTTP call, NOT on callWithBreaker.
+			reqCtx := ctx
+			var cancel context.CancelFunc
+			if p.timeout > 0 {
+				reqCtx, cancel = context.WithTimeout(ctx, p.timeout)
+				defer cancel()
+			}
+
+			var findings []pkgcheck.Finding
+			err := callWithBreaker(p.breaker, ctx, func() error {
+				var ferr error
+				findings, ferr = p.fetchIssues(reqCtx, ecosystem, pkg)
+				return ferr
+			})
+			results[i] = pkgResult{findings: findings, err: err}
+		}()
+	}
+	wg.Wait()
+
+	// Merge results; detect auth errors and breaker-open conditions.
 	var allFindings []pkgcheck.Finding
 	var partial bool
 	var errCount int
+	var breakerErr error
 
-	for _, pkg := range req.Packages {
-		findings, err := p.fetchIssues(ctx, ecosystem, pkg)
-		if err != nil {
+	for _, r := range results {
+		if r.err != nil {
+			// Auth errors are fail-fast — return immediately.
+			if isSnykAuthError(r.err) {
+				return nil, fmt.Errorf("snyk: authentication failed: %w", r.err)
+			}
 			errCount++
 			partial = true
-			// Check for authentication errors -- return immediately.
-			if isSnykAuthError(err) {
-				return nil, fmt.Errorf("snyk: authentication failed: %w", err)
+			if errors.Is(r.err, errBreakerOpen) {
+				breakerErr = r.err
 			}
 			continue
 		}
-		allFindings = append(allFindings, findings...)
+		allFindings = append(allFindings, r.findings...)
 	}
 
 	// If ALL packages failed, return an error instead of a partial empty response.
-	if errCount > 0 && errCount == len(req.Packages) {
+	if errCount > 0 && errCount == n {
+		if breakerErr != nil {
+			return &pkgcheck.CheckResponse{
+				Provider: p.Name(),
+				Metadata: pkgcheck.ResponseMetadata{
+					Duration: time.Since(start),
+					Partial:  true,
+					Error:    "circuit breaker open",
+				},
+			}, breakerErr
+		}
 		return nil, fmt.Errorf("snyk: all %d packages failed checks", errCount)
+	}
+
+	errMsg := ""
+	if breakerErr != nil {
+		errMsg = "circuit breaker open"
 	}
 
 	return &pkgcheck.CheckResponse{
@@ -136,6 +221,7 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 		Metadata: pkgcheck.ResponseMetadata{
 			Duration: time.Since(start),
 			Partial:  partial,
+			Error:    errMsg,
 		},
 	}, nil
 }
@@ -290,6 +376,6 @@ func (e *snykAuthError) Error() string {
 
 // isSnykAuthError checks if an error is a Snyk authentication error (401/403).
 func isSnykAuthError(err error) bool {
-	_, ok := err.(*snykAuthError)
-	return ok
+	var authErr *snykAuthError
+	return errors.As(err, &authErr)
 }
