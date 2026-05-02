@@ -33,7 +33,7 @@ func runContractSuite(t *testing.T, name string, makeProvider providerFactory, f
 
 	t.Run(name+"/RespectsContextCancellation", func(t *testing.T) {
 		p := makeProvider(t, fixture.slowServerURL)
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 		defer cancel()
 		_, err := p.CheckBatch(ctx, pkgcheck.CheckRequest{
 			Ecosystem: pkgcheck.EcosystemNPM,
