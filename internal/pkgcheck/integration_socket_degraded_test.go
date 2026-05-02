@@ -58,7 +58,7 @@ func TestIntegration_SocketDownDegradesToOSV(t *testing.T) {
 	findings, errs, skipped := o.CheckAllWithPrivacy(context.Background(), req)
 
 	if len(skipped) != 1 {
-		t.Errorf("want 1 skipped (@acme), got %d", len(skipped))
+		t.Fatalf("want 1 skipped (@acme), got %d", len(skipped))
 	}
 	if skipped[0].Reason != pkgcheck.SkipReasonPrivateScopeDenylist {
 		t.Errorf("want denylist reason, got %s", skipped[0].Reason)

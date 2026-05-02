@@ -117,12 +117,16 @@ func parsePoetryDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Ins
 	plan := &pkgcheck.InstallPlan{
 		Tool:      "poetry",
 		Ecosystem: pkgcheck.EcosystemPyPI,
-		// Poetry source registries are configured in pyproject.toml's
-		// [[tool.poetry.source]] blocks, which we do not parse. Leaving
-		// Registry empty makes the privacy filter fail closed — operators
-		// using a public PyPI Poetry project must explicitly include
-		// "pypi.org" in external_scan_registries to enable scanning.
-		Registry:   "",
+		// Default to public PyPI. Poetry's [[tool.poetry.source]] blocks
+		// in pyproject.toml can redirect to a private registry, but we
+		// do not parse pyproject.toml. Operators using a private Poetry
+		// source must:
+		//   1. Add their private registry URL to ExternalScanRegistries
+		//      so private packages reach external providers, OR
+		//   2. Set external_scan_registries: [] to disable the privacy
+		//      filter entirely if all their dependencies are private.
+		// This matches pip/uv defaulting behavior.
+		Registry:   "pypi.org",
 		ResolvedAt: time.Now(),
 	}
 

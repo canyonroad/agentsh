@@ -150,6 +150,26 @@ func TestApplyDefaults_PackageChecksPrivacy(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_BlockOn_PerFieldDefaults(t *testing.T) {
+	cfg := &Config{
+		PackageChecks: PackageChecksConfig{
+			BlockOn: BlockOnConfig{
+				License: "any", // user only set this; others should get defaults
+			},
+		},
+	}
+	applyDefaults(cfg)
+	if cfg.PackageChecks.BlockOn.Malware != "any" {
+		t.Errorf("Malware default missing; got %q", cfg.PackageChecks.BlockOn.Malware)
+	}
+	if cfg.PackageChecks.BlockOn.Vulnerability != "critical" {
+		t.Errorf("Vulnerability default missing; got %q", cfg.PackageChecks.BlockOn.Vulnerability)
+	}
+	if cfg.PackageChecks.BlockOn.License != "any" {
+		t.Errorf("License should be preserved; got %q", cfg.PackageChecks.BlockOn.License)
+	}
+}
+
 func TestResolverConfig_Validate_RejectsLegacyCommandString(t *testing.T) {
 	rc := ResolverConfig{
 		DryRunCommand: "npm install --package-lock-only --ignore-scripts",

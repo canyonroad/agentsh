@@ -1950,13 +1950,24 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		cfg.PackageChecks.Privacy.ExternalScanRegistries = pkgDefaults.Privacy.ExternalScanRegistries
 	}
 	// PrivateScopeDenylist defaults to nil intentionally (no scope blocked by default).
-	// BlockOn defaults: apply when all fields are empty (YAML omitted the block_on section).
-	if cfg.PackageChecks.BlockOn.Malware == "" &&
-		cfg.PackageChecks.BlockOn.Vulnerability == "" &&
-		cfg.PackageChecks.BlockOn.License == "" &&
-		cfg.PackageChecks.BlockOn.Reputation == "" &&
-		cfg.PackageChecks.BlockOn.Provenance == "" {
-		cfg.PackageChecks.BlockOn = pkgDefaults.BlockOn
+	// BlockOn: per-field defaults so partial YAML doesn't silently disable
+	// the malware/vulnerability defaults when the user only set license.
+	// A user who explicitly wants to opt out of a default sets the field to
+	// "never" (a valid BlockOnConfig value that produces no rule).
+	if cfg.PackageChecks.BlockOn.Malware == "" {
+		cfg.PackageChecks.BlockOn.Malware = pkgDefaults.BlockOn.Malware
+	}
+	if cfg.PackageChecks.BlockOn.Vulnerability == "" {
+		cfg.PackageChecks.BlockOn.Vulnerability = pkgDefaults.BlockOn.Vulnerability
+	}
+	if cfg.PackageChecks.BlockOn.License == "" {
+		cfg.PackageChecks.BlockOn.License = pkgDefaults.BlockOn.License
+	}
+	if cfg.PackageChecks.BlockOn.Reputation == "" {
+		cfg.PackageChecks.BlockOn.Reputation = pkgDefaults.BlockOn.Reputation
+	}
+	if cfg.PackageChecks.BlockOn.Provenance == "" {
+		cfg.PackageChecks.BlockOn.Provenance = pkgDefaults.BlockOn.Provenance
 	}
 
 	// Policy socket defaults (macOS system extension IPC)
