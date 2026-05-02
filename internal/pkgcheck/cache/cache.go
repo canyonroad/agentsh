@@ -30,11 +30,30 @@ type Config struct {
 	Dir string
 	// MaxSizeMB is the maximum size of the cache file in megabytes (reserved for future use).
 	MaxSizeMB int
-	// DefaultTTL is the default time-to-live for cache entries.
+
+	// CleanTTL is the lifetime of an entry where the provider returned no findings.
+	// When zero, falls back to DefaultTTL (and then to 24h if that is also zero).
+	CleanTTL time.Duration
+	// FoundTTL is the lifetime of an entry with one or more findings.
+	// A zero value means "never expire" (findings for a (name, version) are permanent).
+	FoundTTL time.Duration
+	// NotFoundTTL is the lifetime of an entry where the provider has no data
+	// (e.g., 404 from /test/...). Typically used for private packages.
+	// When zero, falls back to 1h.
+	NotFoundTTL time.Duration
+
+	// DefaultTTL is retained for backwards compatibility with callers that have
+	// not migrated to the explicit per-result-class TTLs above. It is used
+	// when CleanTTL is zero.
 	DefaultTTL time.Duration
-	// TTLByType allows overriding the TTL for specific FindingType values.
+	// TTLByType is retained for backwards compatibility. It is consulted only
+	// for found entries; if a finding type matches and FoundTTL is zero,
+	// the matched value is used instead of "never expire."
 	TTLByType map[string]time.Duration
 }
+
+// neverExpires marks a cache entry as effectively permanent.
+var neverExpires = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // entry is a single cached result with an expiry timestamp.
 type entry struct {
@@ -94,44 +113,78 @@ func (c *Cache) Get(key Key) ([]pkgcheck.Finding, bool) {
 }
 
 // Put stores findings under the given key with a TTL derived from the findings.
-// The TTL is the maximum TTLByType value among all finding types in the batch,
-// falling back to DefaultTTL when no finding type matches.
+// Empty findings (clean) use CleanTTL; non-empty findings (found) use FoundTTL
+// (0 = never expire). Falls back to DefaultTTL / TTLByType for backwards
+// compatibility with callers that have not migrated to the new fields.
 func (c *Cache) Put(key Key, findings []pkgcheck.Finding) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	stored := deepCopyFindings(findings)
-
-	ttl := c.computeTTL(findings)
-
-	c.entries[key.String()] = entry{
-		Findings:  stored,
-		ExpiresAt: time.Now().Add(ttl),
-	}
+	expiry := c.computeExpiry(findings)
+	c.entries[key.String()] = entry{Findings: stored, ExpiresAt: expiry}
 }
 
-// computeTTL returns the maximum TTLByType value among all finding types,
-// falling back to DefaultTTL when no match is found.
-func (c *Cache) computeTTL(findings []pkgcheck.Finding) time.Duration {
-	if len(c.cfg.TTLByType) == 0 {
-		return c.cfg.DefaultTTL
-	}
+// PutNotFound stores a "provider has no data on this package" sentinel
+// with the configured NotFoundTTL.
+func (c *Cache) PutNotFound(key Key) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	maxTTL := time.Duration(0)
-	found := false
-	for _, f := range findings {
-		if ttl, ok := c.cfg.TTLByType[string(f.Type)]; ok {
-			if !found || ttl > maxTTL {
-				maxTTL = ttl
-				found = true
+	ttl := c.cfg.NotFoundTTL
+	if ttl <= 0 {
+		ttl = 1 * time.Hour
+	}
+	c.entries[key.String()] = entry{Findings: nil, ExpiresAt: time.Now().Add(ttl)}
+}
+
+// computeExpiry returns the absolute expiry timestamp for a Put.
+//   - empty findings → CleanTTL (or DefaultTTL fallback, 24h ultimate fallback)
+//   - non-empty       → FoundTTL (0 = neverExpires); falls back to TTLByType match,
+//     then DefaultTTL, then neverExpires
+func (c *Cache) computeExpiry(findings []pkgcheck.Finding) time.Time {
+	now := time.Now()
+	if len(findings) == 0 {
+		ttl := c.cfg.CleanTTL
+		if ttl <= 0 {
+			ttl = c.cfg.DefaultTTL
+		}
+		if ttl <= 0 {
+			ttl = 24 * time.Hour
+		}
+		return now.Add(ttl)
+	}
+	if c.cfg.FoundTTL == 0 {
+		// Found entries persist indefinitely by default.
+		// Honor TTLByType only if explicitly configured.
+		if len(c.cfg.TTLByType) > 0 {
+			best := time.Duration(0)
+			matched := false
+			for _, f := range findings {
+				if t, ok := c.cfg.TTLByType[string(f.Type)]; ok {
+					if !matched || t > best {
+						best = t
+						matched = true
+					}
+				}
+			}
+			if matched {
+				return now.Add(best)
+			}
+			// TTLByType was configured but no type matched: fall back to DefaultTTL.
+			if c.cfg.DefaultTTL > 0 {
+				return now.Add(c.cfg.DefaultTTL)
 			}
 		}
+		// If the caller has not opted into the new CleanTTL/FoundTTL API (i.e., they
+		// only set DefaultTTL), honour DefaultTTL for found entries too so that
+		// existing callers are not broken.
+		if c.cfg.CleanTTL == 0 && c.cfg.DefaultTTL > 0 {
+			return now.Add(c.cfg.DefaultTTL)
+		}
+		return neverExpires
 	}
-
-	if !found {
-		return c.cfg.DefaultTTL
-	}
-	return maxTTL
+	return now.Add(c.cfg.FoundTTL)
 }
 
 // Close flushes all entries to disk.
