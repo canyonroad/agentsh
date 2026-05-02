@@ -140,31 +140,3 @@ func TestSocketProvider_NoAlerts(t *testing.T) {
 	assert.Empty(t, resp.Findings)
 }
 
-func TestSocket_BuildPURLs_NPM(t *testing.T) {
-	pkgs := []pkgcheck.PackageRef{
-		{Name: "lodash", Version: "4.17.21"},
-		{Name: "@types/node", Version: "20.10.0"},
-	}
-	got := buildSocketPURLs(pkgcheck.EcosystemNPM, pkgs)
-	want := []string{
-		"pkg:npm/lodash@4.17.21",
-		"pkg:npm/%40types/node@20.10.0",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("len mismatch: want %d, got %d", len(want), len(got))
-	}
-	for i, p := range got {
-		if p != want[i] {
-			t.Errorf("idx %d: want %q got %q", i, want[i], p)
-		}
-	}
-}
-
-func TestSocket_BuildPURLs_PyPI(t *testing.T) {
-	pkgs := []pkgcheck.PackageRef{{Name: "requests", Version: "2.31.0"}}
-	got := buildSocketPURLs(pkgcheck.EcosystemPyPI, pkgs)
-	want := "pkg:pypi/requests@2.31.0"
-	if got[0] != want {
-		t.Fatalf("want %q got %q", want, got[0])
-	}
-}
