@@ -64,6 +64,7 @@ func (c *retryClient) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	var lastErr error
+	cancelled := false
 	for attempt := 1; attempt <= c.cfg.MaxAttempts; attempt++ {
 		if bodyBytes != nil {
 			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -77,6 +78,7 @@ func (c *retryClient) Do(req *http.Request) (*http.Response, error) {
 			}
 			if !c.sleep(attempt, nil, req) {
 				lastErr = req.Context().Err()
+				cancelled = true
 				break
 			}
 			continue
@@ -95,10 +97,16 @@ func (c *retryClient) Do(req *http.Request) (*http.Response, error) {
 		}
 		if !c.sleep(attempt, resp, req) {
 			lastErr = req.Context().Err()
+			cancelled = true
 			break
 		}
 	}
 
+	if cancelled {
+		// Don't classify a cancellation as "max attempts exceeded" — callers
+		// using errors.Is(err, errMaxAttempts) should be able to distinguish.
+		return nil, fmt.Errorf("retryClient: aborted: %w", lastErr)
+	}
 	return nil, fmt.Errorf("retryClient: gave up after %d attempts: %w", c.cfg.MaxAttempts, errors.Join(errMaxAttempts, lastErr))
 }
 
@@ -148,6 +156,11 @@ type circuitBreakerConfig struct {
 
 // circuitBreaker tracks consecutive provider failures and short-circuits
 // while open. Safe for concurrent use.
+//
+// As of this commit the breaker is unwired by design — it is consumed by the
+// Socket and Snyk providers introduced in later changes (provider/socket.go
+// and provider/snyk.go). Each provider holds its own breaker instance so that
+// failures of one provider do not isolate the other.
 type circuitBreaker struct {
 	cfg circuitBreakerConfig
 

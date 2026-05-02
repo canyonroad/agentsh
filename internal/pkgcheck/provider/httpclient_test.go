@@ -119,6 +119,10 @@ func TestRetryClient_AbortsOnContextCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected error chain to include context.Canceled, got: %v", err)
 	}
+	// Cancellation must NOT be classified as max-attempts exhaustion.
+	if errors.Is(err, errMaxAttempts) {
+		t.Errorf("cancellation should not wrap errMaxAttempts, got: %v", err)
+	}
 	// Should abort well before doing 5 attempts × 200ms+ each.
 	if elapsed > 600*time.Millisecond {
 		t.Errorf("retry loop did not abort promptly on ctx cancel; elapsed=%v", elapsed)
