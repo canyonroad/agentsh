@@ -2222,6 +2222,11 @@ func validateConfig(cfg *Config) error {
 			return fmt.Errorf("invalid package_checks.registries[%q].trust %q (must be \"check_full\", \"check_local_only\", or \"trusted\")", name, r.Trust)
 		}
 	}
+	// Validate denylist globs in package_checks.privacy so malformed
+	// patterns fail at startup rather than silently fail open at runtime.
+	if err := cfg.PackageChecks.Privacy.Validate(); err != nil {
+		return fmt.Errorf("package_checks.privacy: %w", err)
+	}
 	// Landlock network self-lockout check: if the user disables outbound TCP
 	// under Landlock but the sandbox proxy is enabled, agents can never reach
 	// the proxy (which listens on localhost TCP). Fail fast at startup rather

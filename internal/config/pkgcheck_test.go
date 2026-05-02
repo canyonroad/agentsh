@@ -232,3 +232,13 @@ func TestPackagePrivacyConfig_ValidateAcceptsGoodPatterns(t *testing.T) {
 		t.Errorf("expected no error; got %v", err)
 	}
 }
+
+func TestValidateConfig_RejectsBadPrivacyDenylistGlob(t *testing.T) {
+	// Use the package-level Validate() directly — exercising validateConfig
+	// requires a fully-formed Config that's harder to set up here.
+	cfg := PackagePrivacyConfig{PrivateScopeDenylist: []string{"[unclosed"}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("invalid denylist glob must be rejected by Privacy.Validate")
+	}
+}
