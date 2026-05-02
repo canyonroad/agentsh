@@ -167,7 +167,16 @@ func (p *socketProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckReque
 		// Decode inside the breaker'd block: a malformed 200 is a provider
 		// failure, not a happy path. Otherwise a sustained stream of bad
 		// responses would never trip the breaker.
-		if err := json.NewDecoder(resp.Body).Decode(&socketResp); err != nil {
+		//
+		// Use ReadAll + Unmarshal rather than NewDecoder.Decode — Decode
+		// accepts a valid JSON value followed by trailing garbage, so a
+		// body like `{"packages":[]} junk` would be silently treated as
+		// success. Unmarshal is strict and errors on trailing data.
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("socket: read response: %w", err)
+		}
+		if err := json.Unmarshal(respBody, &socketResp); err != nil {
 			return fmt.Errorf("socket: decode response: %w", err)
 		}
 		return nil

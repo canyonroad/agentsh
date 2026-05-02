@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,5 +278,26 @@ func TestSocketProvider_MalformedResponseTripsBreaker(t *testing.T) {
 	}
 	if resp == nil || !resp.Metadata.Partial || resp.Metadata.Error != "circuit breaker open" {
 		t.Errorf("response should be Partial with circuit breaker open marker; got %+v", resp)
+	}
+}
+
+func TestSocketProvider_RejectsTrailingGarbageOnSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Valid JSON followed by garbage. Strict Unmarshal must reject this.
+		_, _ = w.Write([]byte(`{"packages":[]} not-json`))
+	}))
+	defer srv.Close()
+
+	p := NewSocketProvider(SocketConfig{BaseURL: srv.URL, APIKey: "test", Timeout: 2 * time.Second})
+	_, err := p.CheckBatch(context.Background(), pkgcheck.CheckRequest{
+		Ecosystem: pkgcheck.EcosystemNPM,
+		Packages:  []pkgcheck.PackageRef{{Name: "foo", Version: "1"}},
+	})
+	if err == nil {
+		t.Fatal("expected decode error from trailing garbage; got nil")
+	}
+	if !strings.Contains(err.Error(), "decode") {
+		t.Errorf("expected decode error, got: %v", err)
 	}
 }
