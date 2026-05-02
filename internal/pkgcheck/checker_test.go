@@ -435,3 +435,66 @@ func TestChecker_RegistryPropagationAllowsPublicPackages(t *testing.T) {
 	// No packages should be skipped.
 	assert.Empty(t, verdict.Skipped, "no packages should be skipped for a public-registry install")
 }
+
+// TestCheckerDenyOnFailure_PreservesFindings proves that when a provider fails
+// with on_failure="deny" the partial findings collected from other (successful)
+// providers are attached to the block verdict rather than dropped.
+func TestCheckerDenyOnFailure_PreservesFindings(t *testing.T) {
+	resolver := &mockResolver{
+		name:       "npm-resolver",
+		canResolve: true,
+		plan: &InstallPlan{
+			Tool:      "npm",
+			Ecosystem: EcosystemNPM,
+			Direct: []PackageRef{
+				{Name: "lodash", Version: "4.17.21", Direct: true},
+			},
+		},
+	}
+	// Provider A succeeds and returns a finding.
+	goodProvider := &mockProvider{
+		name:         "good-provider",
+		capabilities: []FindingType{FindingVulnerability},
+		findings: []Finding{
+			{
+				Type:     FindingVulnerability,
+				Provider: "good-provider",
+				Package:  PackageRef{Name: "lodash", Version: "4.17.21"},
+				Severity: SeverityHigh,
+				Title:    "Prototype Pollution",
+			},
+		},
+	}
+	// Provider B fails and its on_failure=deny triggers a block verdict.
+	denyProvider := &mockProvider{
+		name: "deny-provider",
+		err:  assert.AnError,
+	}
+	rules := []policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	}
+
+	checker := newTestChecker(
+		[]Resolver{resolver},
+		map[string]ProviderEntry{
+			"good-provider": {Provider: goodProvider, Timeout: 5 * time.Second, OnFailure: "warn"},
+			"deny-provider": {Provider: denyProvider, Timeout: 5 * time.Second, OnFailure: "deny"},
+		},
+		rules,
+	)
+
+	verdict, err := checker.Check(context.Background(), "npm", []string{"install", "lodash"}, t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, verdict)
+	assert.Equal(t, VerdictBlock, verdict.Action)
+	// The finding from the successful provider must be preserved on the block verdict.
+	assert.NotEmpty(t, verdict.Findings, "block verdict must carry findings collected before the deny decision")
+	found := false
+	for _, f := range verdict.Findings {
+		if f.Provider == "good-provider" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "good-provider finding should be present in the block verdict")
+}

@@ -365,7 +365,9 @@ func ApplyFailMode(cfg *PackageChecksConfig, mode string) {
 	case "degraded":
 		target = "warn"
 	default:
-		target = "warn"
+		// unknown mode — caller should have validated via validateConfig;
+		// leave config untouched rather than silently mapping to warn.
+		return
 	}
 	for _, name := range externalProviderNames {
 		p, ok := cfg.Providers[name]

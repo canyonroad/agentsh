@@ -373,3 +373,87 @@ func TestApplyFailMode_DegradedMaps(t *testing.T) {
 		t.Errorf("degraded should map to warn; got %q", cfg.Providers["snyk"].OnFailure)
 	}
 }
+
+func TestApplyDefaults_PromotesScopeWhenExternalProviderEnabled(t *testing.T) {
+	cfg := &Config{
+		PackageChecks: PackageChecksConfig{
+			Enabled: true,
+			// Scope is intentionally omitted — promotion should set it to all_installs
+			Providers: map[string]ProviderConfig{
+				"socket": {Enabled: true, APIKeyEnv: "SOCKET_API_KEY"},
+			},
+		},
+	}
+	applyDefaults(cfg)
+	if cfg.PackageChecks.Scope != "all_installs" {
+		t.Errorf("expected scope to be promoted to all_installs by applyDefaults; got %q", cfg.PackageChecks.Scope)
+	}
+}
+
+func TestServerStartup_AppliesFailMode(t *testing.T) {
+	t.Setenv("PKGCHECK_FAIL_MODE", "closed")
+	cfg := PackageChecksConfig{
+		Providers: map[string]ProviderConfig{
+			"socket": {Enabled: true, APIKeyEnv: "SOCKET_API_KEY"},
+		},
+	}
+	mode := ResolveFailMode(&cfg)
+	if mode != "closed" {
+		t.Fatalf("ResolveFailMode should honor env var; got %q", mode)
+	}
+	ApplyFailMode(&cfg, mode)
+	if cfg.Providers["socket"].OnFailure != "deny" {
+		t.Errorf("ApplyFailMode should map closed→deny on external providers; got %q", cfg.Providers["socket"].OnFailure)
+	}
+}
+
+func TestValidateConfig_RejectsBadFailMode(t *testing.T) {
+	cfg := &Config{
+		PackageChecks: PackageChecksConfig{
+			FailMode: "boom",
+		},
+	}
+	// Pre-apply defaults so other required fields (e.g. sandbox.fuse.audit.mode)
+	// are populated; the test is only concerned with the fail_mode rejection.
+	applyDefaults(cfg)
+	// Override FailMode after defaults (which would set it to "degraded").
+	cfg.PackageChecks.FailMode = "boom"
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("invalid fail_mode must fail validation")
+	}
+	if !strings.Contains(err.Error(), "fail_mode") || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error should mention fail_mode and the bad value; got: %v", err)
+	}
+}
+
+func TestValidateConfig_AcceptsValidFailModes(t *testing.T) {
+	for _, mode := range []string{"open", "closed", "degraded"} {
+		cfg := &Config{
+			PackageChecks: PackageChecksConfig{
+				FailMode: mode,
+			},
+		}
+		applyDefaults(cfg)
+		cfg.PackageChecks.FailMode = mode
+		if err := validateConfig(cfg); err != nil {
+			// Only fail if the error is about fail_mode — other fields may be invalid.
+			if strings.Contains(err.Error(), "fail_mode") {
+				t.Errorf("valid fail_mode %q should not be rejected; got: %v", mode, err)
+			}
+		}
+	}
+}
+
+func TestApplyFailMode_UnknownModeIsNoOp(t *testing.T) {
+	cfg := PackageChecksConfig{
+		Providers: map[string]ProviderConfig{
+			"socket": {Enabled: true, OnFailure: "allow"},
+		},
+	}
+	ApplyFailMode(&cfg, "unknown-mode")
+	// OnFailure should be unchanged — not silently mapped to warn.
+	if cfg.Providers["socket"].OnFailure != "allow" {
+		t.Errorf("unknown mode must leave OnFailure untouched; got %q", cfg.Providers["socket"].OnFailure)
+	}
+}

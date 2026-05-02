@@ -514,6 +514,11 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Initialize package checker (optional).
 	if cfg.PackageChecks.Enabled {
+		// Resolve and apply fail mode so Snyk/Socket OnFailure reflects
+		// the operator's policy before provider entries are constructed.
+		mode := config.ResolveFailMode(&cfg.PackageChecks)
+		config.ApplyFailMode(&cfg.PackageChecks, mode)
+
 		providerEntries := make(map[string]pkgcheck.ProviderEntry)
 		for name, provCfg := range cfg.PackageChecks.Providers {
 			if !provCfg.Enabled {

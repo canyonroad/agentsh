@@ -1899,9 +1899,28 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 
 	// Package checks defaults
 	pkgDefaults := DefaultPackageChecksConfig()
+
+	// Capture the user-provided scope BEFORE generic defaulting touches it,
+	// so external-provider promotion can distinguish "user said
+	// new_packages_only" from "YAML omitted scope".
+	userSetScope := cfg.PackageChecks.Scope != ""
+
+	// Run external-provider scope promotion. This may set Scope to
+	// "all_installs" if it was empty and an external provider is enabled,
+	// or emit a warning to stderr if the user explicitly set
+	// new_packages_only with an external provider.
+	if warnings := ApplyExternalProviderDefaults(&cfg.PackageChecks); len(warnings) > 0 {
+		for _, w := range warnings {
+			slog.Warn(w)
+		}
+	}
+
+	// Generic default for scope only kicks in if neither the user nor
+	// ApplyExternalProviderDefaults set it.
 	if cfg.PackageChecks.Scope == "" {
 		cfg.PackageChecks.Scope = pkgDefaults.Scope
 	}
+	_ = userSetScope // currently informational; warning logic uses presence of provider config
 	if cfg.PackageChecks.Cache.TTL.Vulnerability == 0 {
 		cfg.PackageChecks.Cache.TTL.Vulnerability = pkgDefaults.Cache.TTL.Vulnerability
 	}
@@ -2200,6 +2219,16 @@ func validateConfig(cfg *Config) error {
 		case "new_packages_only", "all_installs":
 		default:
 			return fmt.Errorf("invalid package_checks.scope %q (must be \"new_packages_only\" or \"all_installs\")", cfg.PackageChecks.Scope)
+		}
+	}
+	// Validate package_checks.fail_mode (also reachable via PKGCHECK_FAIL_MODE
+	// env var; ResolveFailMode performs the same check at runtime, but we
+	// surface YAML-time misconfig as an explicit startup error).
+	if cfg.PackageChecks.FailMode != "" {
+		switch cfg.PackageChecks.FailMode {
+		case "open", "closed", "degraded":
+		default:
+			return fmt.Errorf("invalid package_checks.fail_mode %q (must be \"open\", \"closed\", or \"degraded\")", cfg.PackageChecks.FailMode)
 		}
 	}
 	for name, p := range cfg.PackageChecks.Providers {

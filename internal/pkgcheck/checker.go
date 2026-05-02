@@ -115,9 +115,10 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 	// Apply strictest failure action.
 	if hasFailAction && strictestFailAction == VerdictBlock {
 		return &Verdict{
-			Action:  VerdictBlock,
-			Summary: strictestFailSummary,
-			Skipped: skipped,
+			Action:   VerdictBlock,
+			Findings: findings, // preserve any findings collected before the block decision
+			Skipped:  skipped,
+			Summary:  strictestFailSummary,
 		}, nil
 	}
 
