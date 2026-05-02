@@ -92,7 +92,27 @@ func (r *npmResolver) Resolve(ctx context.Context, workDir string, command []str
 	if err != nil {
 		return nil, err
 	}
-	plan.Registry = r.detectRegistry(args)
+	planRegistry := r.detectRegistry(args)
+	plan.Registry = planRegistry
+	explicitFlag := r.hasRegistryFlag(args)
+	// Scoped packages may resolve from a private registry per .npmrc scope
+	// directives. Without an explicit --registry CLI flag we cannot prove the
+	// resolved origin, so leave Registry empty and let the privacy filter fail
+	// closed (over-skip rather than risk leaking the package name externally).
+	for i := range plan.Direct {
+		if isScopedPackage(plan.Direct[i].Name) && !explicitFlag {
+			plan.Direct[i].Registry = ""
+		} else {
+			plan.Direct[i].Registry = planRegistry
+		}
+	}
+	for i := range plan.Transitive {
+		if isScopedPackage(plan.Transitive[i].Name) && !explicitFlag {
+			plan.Transitive[i].Registry = ""
+		} else {
+			plan.Transitive[i].Registry = planRegistry
+		}
+	}
 	return plan, nil
 }
 
@@ -254,6 +274,26 @@ func pkgBaseName(spec string) string {
 		}
 	}
 	return spec
+}
+
+// isScopedPackage reports whether name is a scoped npm package (e.g. @acme/foo).
+// Scoped packages can be routed to a private registry via .npmrc
+// "scope:registry" directives that we cannot read. Without an explicit
+// --registry CLI flag we cannot prove the resolved origin, so callers
+// leave Registry empty for scoped packages (fail closed).
+func isScopedPackage(name string) bool {
+	return strings.HasPrefix(name, "@") && strings.Contains(name, "/")
+}
+
+// hasRegistryFlag reports whether the args slice contains an explicit
+// --registry flag (with or without =).
+func (r *npmResolver) hasRegistryFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--registry" || strings.HasPrefix(a, "--registry=") {
+			return true
+		}
+	}
+	return false
 }
 
 // trimWindowsScriptExt strips .cmd and .bat extensions (case-insensitive)

@@ -1,10 +1,12 @@
 package server
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/pkgcheck"
 )
 
 // TestBuildResolvers_DefaultsToVerified verifies that calling buildResolvers with a
@@ -141,5 +143,66 @@ func TestBuildProviderEntry_ExplicitOnFailurePreserved(t *testing.T) {
 	}
 	if entry.OnFailure != "deny" {
 		t.Errorf("expected OnFailure=%q, got %q", "deny", entry.OnFailure)
+	}
+}
+
+// TestBuildProviderEntries_MissingAPIKeySkipsProvider verifies that a provider
+// configured with api_key_env pointing to an unset variable is skipped
+// (returns errMissingAPIKeyValue) rather than causing a fatal error.
+// This underpins Fix 3: if ALL providers are skipped this way, the caller
+// must detect the empty map and fail loudly.
+func TestBuildProviderEntries_MissingAPIKeySkipsProvider(t *testing.T) {
+	// Use an env var that is guaranteed not to be set.
+	const missingEnvVar = "AGENTSH_TEST_SNYK_KEY_DEFINITELY_NOT_SET_XYZ"
+	t.Setenv(missingEnvVar, "") // ensure it's empty
+
+	_, err := buildProviderEntry("snyk", config.ProviderConfig{
+		Enabled:    true,
+		APIKeyEnv:  missingEnvVar,
+		OnFailure:  "warn",
+		Options:    map[string]any{"org_id": "test-org"},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing API key, got nil")
+	}
+	if !errors.Is(err, errMissingAPIKeyValue) {
+		t.Errorf("expected errMissingAPIKeyValue, got: %v", err)
+	}
+}
+
+// TestBuildProviderEntries_ZeroProvidersDetectableByLoop verifies that when all
+// configured providers are skipped due to missing API keys, the resulting map
+// is empty. This is what the server.go zero-providers check guards against.
+func TestBuildProviderEntries_ZeroProvidersDetectableByLoop(t *testing.T) {
+	const missingEnvVar = "AGENTSH_TEST_SNYK_KEY_DEFINITELY_NOT_SET_XYZ"
+	t.Setenv(missingEnvVar, "") // ensure empty
+
+	cfgProviders := map[string]config.ProviderConfig{
+		"snyk": {
+			Enabled:   true,
+			APIKeyEnv: missingEnvVar,
+			Options:   map[string]any{"org_id": "test-org"},
+		},
+	}
+
+	providerEntries := make(map[string]pkgcheck.ProviderEntry)
+	for name, provCfg := range cfgProviders {
+		if !provCfg.Enabled {
+			continue
+		}
+		entry, err := buildProviderEntry(name, provCfg)
+		if err != nil {
+			if errors.Is(err, errMissingAPIKeyValue) {
+				continue // soft skip — this is the expected path
+			}
+			t.Fatalf("unexpected hard error: %v", err)
+		}
+		providerEntries[name] = entry
+	}
+
+	// All providers were skipped → empty map.
+	// This is the condition server.go's zero-providers check catches.
+	if len(providerEntries) != 0 {
+		t.Errorf("expected 0 provider entries, got %d", len(providerEntries))
 	}
 }

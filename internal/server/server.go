@@ -541,6 +541,10 @@ func New(cfg *config.Config) (*Server, error) {
 			return nil, fmt.Errorf("pkgcheck: resolvers misconfigured: %w", err)
 		}
 
+		if len(providerEntries) == 0 {
+			return nil, fmt.Errorf("package_checks.enabled=true but no providers were initialized — at least one provider must be configured and have its API key (if required) set")
+		}
+
 		pkgChecker := pkgcheck.NewChecker(pkgcheck.CheckerConfig{
 			Scope:     cfg.PackageChecks.Scope,
 			Resolvers: resolvers,

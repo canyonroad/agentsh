@@ -916,3 +916,121 @@ func TestUVResolver_DetectRegistry(t *testing.T) {
 		})
 	}
 }
+
+// --- Scoped package fail-closed tests (Fix 1) ---
+
+func TestIsScopedPackage(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"@acme/foo", true},
+		{"@types/node", true},
+		{"@babel/core", true},
+		{"lodash", false},
+		{"express", false},
+		{"@missingslash", false}, // @ but no /
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isScopedPackage(tt.name))
+		})
+	}
+}
+
+func TestNPMResolver_HasRegistryFlag(t *testing.T) {
+	r := &npmResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"no flag", []string{"install", "@acme/foo"}, false},
+		{"--registry space", []string{"install", "--registry", "https://r/"}, true},
+		{"--registry=", []string{"install", "--registry=https://r/"}, true},
+		{"empty", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, r.hasRegistryFlag(tt.args))
+		})
+	}
+}
+
+func TestPNPMResolver_HasRegistryFlag(t *testing.T) {
+	r := &pnpmResolver{}
+	assert.False(t, r.hasRegistryFlag([]string{"add", "@acme/foo"}))
+	assert.True(t, r.hasRegistryFlag([]string{"add", "--registry", "https://r/"}))
+	assert.True(t, r.hasRegistryFlag([]string{"add", "--registry=https://r/"}))
+}
+
+func TestYarnResolver_HasRegistryFlag(t *testing.T) {
+	r := &yarnResolver{}
+	assert.False(t, r.hasRegistryFlag([]string{"add", "@acme/foo"}))
+	assert.True(t, r.hasRegistryFlag([]string{"add", "--registry", "https://r/"}))
+	assert.True(t, r.hasRegistryFlag([]string{"add", "--registry=https://r/"}))
+}
+
+// TestNPMResolver_ScopedPackageRegistryFailsClosed verifies that scoped packages
+// parsed from npm dry-run output get an empty Registry when no --registry flag is
+// present, while unscoped packages get the default registry.
+func TestNPMResolver_ScopedPackageRegistryFailsClosed(t *testing.T) {
+	json := `{"added":[
+		{"name":"@acme/foo","version":"1.2.3"},
+		{"name":"lodash","version":"4.17.21"}
+	]}`
+	plan, err := parseNPMDryRunOutput([]byte(json), []string{"@acme/foo", "lodash"})
+	require.NoError(t, err)
+
+	r := &npmResolver{}
+	planRegistry := r.detectRegistry([]string{"install", "@acme/foo", "lodash"})
+	explicitFlag := r.hasRegistryFlag([]string{"install", "@acme/foo", "lodash"})
+
+	for i := range plan.Direct {
+		if isScopedPackage(plan.Direct[i].Name) && !explicitFlag {
+			plan.Direct[i].Registry = ""
+		} else {
+			plan.Direct[i].Registry = planRegistry
+		}
+	}
+
+	byName := make(map[string]pkgcheck.PackageRef)
+	for _, p := range plan.Direct {
+		byName[p.Name] = p
+	}
+
+	// @acme/foo should have empty Registry (fail closed — could be private)
+	if byName["@acme/foo"].Registry != "" {
+		t.Errorf("expected empty Registry for @acme/foo, got %q", byName["@acme/foo"].Registry)
+	}
+	// lodash should have default registry
+	if byName["lodash"].Registry != "registry.npmjs.org" {
+		t.Errorf("expected registry.npmjs.org for lodash, got %q", byName["lodash"].Registry)
+	}
+}
+
+// TestNPMResolver_ScopedPackageWithExplicitFlagGetsRegistry verifies that scoped
+// packages DO receive the registry when --registry is explicitly set on the CLI.
+func TestNPMResolver_ScopedPackageWithExplicitFlagGetsRegistry(t *testing.T) {
+	json := `{"added":[{"name":"@acme/foo","version":"1.2.3"}]}`
+	plan, err := parseNPMDryRunOutput([]byte(json), []string{"@acme/foo"})
+	require.NoError(t, err)
+
+	r := &npmResolver{}
+	args := []string{"install", "--registry=https://internal.example/", "@acme/foo"}
+	planRegistry := r.detectRegistry(args)
+	explicitFlag := r.hasRegistryFlag(args)
+
+	for i := range plan.Direct {
+		if isScopedPackage(plan.Direct[i].Name) && !explicitFlag {
+			plan.Direct[i].Registry = ""
+		} else {
+			plan.Direct[i].Registry = planRegistry
+		}
+	}
+
+	if plan.Direct[0].Registry != "https://internal.example/" {
+		t.Errorf("expected https://internal.example/, got %q", plan.Direct[0].Registry)
+	}
+}

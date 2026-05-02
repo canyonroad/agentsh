@@ -17,6 +17,14 @@ type CheckProvider interface {
 	CheckBatch(ctx context.Context, req CheckRequest) (*CheckResponse, error)
 }
 
+// LocalProvider is an optional interface implemented by providers that run
+// entirely in-process, without making any external network calls. The
+// orchestrator skips privacy filtering for local providers so that private
+// packages still receive license/metadata checks.
+type LocalProvider interface {
+	IsLocal() bool
+}
+
 // CheckRequest describes what to check.
 type CheckRequest struct {
 	Ecosystem Ecosystem    `json:"ecosystem" yaml:"ecosystem"`

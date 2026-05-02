@@ -91,8 +91,35 @@ func (r *pnpmResolver) Resolve(ctx context.Context, workDir string, command []st
 	if err != nil {
 		return nil, err
 	}
-	plan.Registry = r.detectRegistry(args)
+	planRegistry := r.detectRegistry(args)
+	plan.Registry = planRegistry
+	explicitFlag := r.hasRegistryFlag(args)
+	for i := range plan.Direct {
+		if isScopedPackage(plan.Direct[i].Name) && !explicitFlag {
+			plan.Direct[i].Registry = ""
+		} else {
+			plan.Direct[i].Registry = planRegistry
+		}
+	}
+	for i := range plan.Transitive {
+		if isScopedPackage(plan.Transitive[i].Name) && !explicitFlag {
+			plan.Transitive[i].Registry = ""
+		} else {
+			plan.Transitive[i].Registry = planRegistry
+		}
+	}
 	return plan, nil
+}
+
+// hasRegistryFlag reports whether the args slice contains an explicit
+// --registry flag (with or without =).
+func (r *pnpmResolver) hasRegistryFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--registry" || strings.HasPrefix(a, "--registry=") {
+			return true
+		}
+	}
+	return false
 }
 
 // detectRegistry scans the install command args for an explicit --registry
