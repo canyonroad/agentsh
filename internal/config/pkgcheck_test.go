@@ -242,3 +242,75 @@ func TestValidateConfig_RejectsBadPrivacyDenylistGlob(t *testing.T) {
 		t.Fatal("invalid denylist glob must be rejected by Privacy.Validate")
 	}
 }
+
+func TestApplyExternalProviderDefaults_PromotesScope(t *testing.T) {
+	cfg := PackageChecksConfig{
+		Enabled: true,
+		Scope:   "", // unset — should be promoted
+		Providers: map[string]ProviderConfig{
+			"socket": {Enabled: true, APIKeyEnv: "SOCKET_API_KEY"},
+		},
+	}
+	warnings := ApplyExternalProviderDefaults(&cfg)
+	if cfg.Scope != "all_installs" {
+		t.Errorf("expected scope to be promoted to all_installs, got %q", cfg.Scope)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("no warnings expected when scope was empty; got %v", warnings)
+	}
+}
+
+func TestApplyExternalProviderDefaults_WarnsOnExplicitNarrowScope(t *testing.T) {
+	cfg := PackageChecksConfig{
+		Enabled: true,
+		Scope:   "new_packages_only",
+		Providers: map[string]ProviderConfig{
+			"snyk": {Enabled: true, APIKeyEnv: "SNYK_TOKEN"},
+		},
+	}
+	warnings := ApplyExternalProviderDefaults(&cfg)
+	if cfg.Scope != "new_packages_only" {
+		t.Errorf("user-set scope should not be overwritten")
+	}
+	if len(warnings) == 0 {
+		t.Fatal("expected validation warning")
+	}
+	if !strings.Contains(warnings[0], "snyk") || !strings.Contains(warnings[0], "all_installs") {
+		t.Errorf("warning should mention provider and recommend all_installs, got %q", warnings[0])
+	}
+}
+
+func TestApplyExternalProviderDefaults_NoExternalProviderNoOp(t *testing.T) {
+	cfg := PackageChecksConfig{
+		Enabled: true,
+		Scope:   "",
+		Providers: map[string]ProviderConfig{
+			"osv": {Enabled: true},
+		},
+	}
+	warnings := ApplyExternalProviderDefaults(&cfg)
+	if cfg.Scope != "" {
+		t.Errorf("scope should remain empty when no external provider is enabled")
+	}
+	if len(warnings) != 0 {
+		t.Errorf("no warnings expected, got %v", warnings)
+	}
+}
+
+func TestApplyExternalProviderDefaults_DisabledExternalNoPromote(t *testing.T) {
+	cfg := PackageChecksConfig{
+		Enabled: true,
+		Scope:   "",
+		Providers: map[string]ProviderConfig{
+			"snyk":   {Enabled: false},
+			"socket": {Enabled: false},
+		},
+	}
+	warnings := ApplyExternalProviderDefaults(&cfg)
+	if cfg.Scope != "" {
+		t.Errorf("disabled external providers should not trigger promotion; got scope=%q", cfg.Scope)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("no warnings expected; got %v", warnings)
+	}
+}

@@ -285,3 +285,42 @@ func CompileBlockOn(b BlockOnConfig) []policy.PackageRule {
 	})
 	return rules
 }
+
+// externalProviderNames lists provider names that send package data to a
+// third-party API and therefore benefit from privacy filtering and
+// scope=all_installs.
+var externalProviderNames = []string{"snyk", "socket"}
+
+// ApplyExternalProviderDefaults adjusts cfg in-place when one or more
+// external providers are enabled:
+//   - if Scope is unset, promote to "all_installs"
+//   - if Scope is "new_packages_only", emit a validation warning naming
+//     the external provider(s) and recommending "all_installs"
+//
+// Returns a list of human-readable warnings the caller should surface.
+func ApplyExternalProviderDefaults(cfg *PackageChecksConfig) []string {
+	var enabledExternal []string
+	for _, name := range externalProviderNames {
+		p, ok := cfg.Providers[name]
+		if ok && p.Enabled {
+			enabledExternal = append(enabledExternal, name)
+		}
+	}
+	if len(enabledExternal) == 0 {
+		return nil
+	}
+	switch cfg.Scope {
+	case "":
+		cfg.Scope = "all_installs"
+		return nil
+	case "new_packages_only":
+		return []string{
+			fmt.Sprintf(
+				"pkgcheck: %s configured but scope=new_packages_only — bare `npm install` and `npm ci` will not be intercepted, "+
+					"so supply-chain attacks via lockfile installs will not be blocked. Set scope: all_installs for full coverage.",
+				strings.Join(enabledExternal, ", "),
+			),
+		}
+	}
+	return nil
+}
