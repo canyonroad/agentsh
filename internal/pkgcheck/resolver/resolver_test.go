@@ -3,6 +3,7 @@ package resolver
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 	"time"
@@ -1032,5 +1033,110 @@ func TestNPMResolver_ScopedPackageWithExplicitFlagGetsRegistry(t *testing.T) {
 
 	if plan.Direct[0].Registry != "https://internal.example/" {
 		t.Errorf("expected https://internal.example/, got %q", plan.Direct[0].Registry)
+	}
+}
+
+// --- Extract registry/index-url flag tests (Fix A) ---
+
+func TestNPMResolver_ExtractRegistryFlags(t *testing.T) {
+	r := &npmResolver{}
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"install", "lodash"}, nil},
+		{[]string{"install", "--registry", "https://internal/", "lodash"}, []string{"--registry", "https://internal/"}},
+		{[]string{"install", "--registry=https://x/", "lodash"}, []string{"--registry=https://x/"}},
+		{nil, nil},
+	}
+	for _, c := range cases {
+		got := r.extractRegistryFlags(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("input %v: got %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPNPMResolver_ExtractRegistryFlags(t *testing.T) {
+	r := &pnpmResolver{}
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"add", "react"}, nil},
+		{[]string{"add", "--registry", "https://internal/", "react"}, []string{"--registry", "https://internal/"}},
+		{[]string{"add", "--registry=https://x/", "react"}, []string{"--registry=https://x/"}},
+	}
+	for _, c := range cases {
+		got := r.extractRegistryFlags(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("input %v: got %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestYarnResolver_ExtractRegistryFlags(t *testing.T) {
+	r := &yarnResolver{}
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"add", "typescript"}, nil},
+		{[]string{"add", "--registry", "https://internal/", "typescript"}, []string{"--registry", "https://internal/"}},
+		{[]string{"add", "--registry=https://x/", "typescript"}, []string{"--registry=https://x/"}},
+	}
+	for _, c := range cases {
+		got := r.extractRegistryFlags(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("input %v: got %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPipResolver_ExtractIndexURLFlags(t *testing.T) {
+	r := &pipResolver{}
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"install", "requests"}, nil},
+		{[]string{"install", "--index-url", "https://internal/simple", "requests"}, []string{"--index-url", "https://internal/simple"}},
+		{[]string{"install", "--index-url=https://internal/simple", "requests"}, []string{"--index-url=https://internal/simple"}},
+		{[]string{"install", "-i", "https://internal/simple", "requests"}, []string{"-i", "https://internal/simple"}},
+		{[]string{"install", "--extra-index-url", "https://extra/simple", "requests"}, []string{"--extra-index-url", "https://extra/simple"}},
+		{[]string{"install", "--extra-index-url=https://extra/simple", "requests"}, []string{"--extra-index-url=https://extra/simple"}},
+		{
+			[]string{"install", "--index-url", "https://primary/", "--extra-index-url", "https://extra/", "requests"},
+			[]string{"--index-url", "https://primary/", "--extra-index-url", "https://extra/"},
+		},
+	}
+	for _, c := range cases {
+		got := r.extractIndexURLFlags(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("input %v: got %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestUVResolver_ExtractIndexURLFlags(t *testing.T) {
+	r := &uvResolver{}
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"pip", "install", "flask"}, nil},
+		{[]string{"pip", "install", "--index-url", "https://internal/simple", "flask"}, []string{"--index-url", "https://internal/simple"}},
+		{[]string{"pip", "install", "--index-url=https://internal/simple", "flask"}, []string{"--index-url=https://internal/simple"}},
+		{[]string{"pip", "install", "--extra-index-url", "https://extra/simple", "flask"}, []string{"--extra-index-url", "https://extra/simple"}},
+		{
+			[]string{"pip", "install", "--index-url", "https://primary/", "--extra-index-url", "https://extra/", "flask"},
+			[]string{"--index-url", "https://primary/", "--extra-index-url", "https://extra/"},
+		},
+	}
+	for _, c := range cases {
+		got := r.extractIndexURLFlags(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("input %v: got %v, want %v", c.in, got, c.want)
+		}
 	}
 }

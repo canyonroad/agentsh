@@ -70,8 +70,11 @@ func (r *yarnResolver) Resolve(ctx context.Context, workDir string, command []st
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 
-	// yarn add --mode update-lockfile <packages>
+	// yarn add --mode update-lockfile [--registry <url>] <packages>
+	// Forward any --registry flag from the original command so the dry-run
+	// resolves against the same registry the actual install will use.
 	cmdArgs := []string{"add", "--mode", "update-lockfile"}
+	cmdArgs = append(cmdArgs, r.extractRegistryFlags(command)...)
 	cmdArgs = append(cmdArgs, packages...)
 	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
@@ -105,6 +108,25 @@ func (r *yarnResolver) Resolve(ctx context.Context, workDir string, command []st
 		}
 	}
 	return plan, nil
+}
+
+// extractRegistryFlags returns the subset of args that influence which
+// registry packages resolve from. Pass these to the dry-run so the
+// resolver hits the same source the actual install will.
+func (r *yarnResolver) extractRegistryFlags(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--registry" && i+1 < len(args) {
+			out = append(out, a, args[i+1])
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "--registry=") {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // hasRegistryFlag reports whether the args slice contains an explicit

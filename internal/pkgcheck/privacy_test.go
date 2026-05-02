@@ -117,3 +117,33 @@ func TestPrivacyFilter_DenylistMatchesUnscopedPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestPrivacyFilter_NormalizesRegistryURLs(t *testing.T) {
+	pf := NewPrivacyFilter(PrivacyConfig{
+		ExternalScanRegistries: []string{"registry.npmjs.org"},
+	})
+	in := []PackageRef{
+		{Name: "lodash", Version: "1", Registry: "https://registry.npmjs.org/"},
+		{Name: "express", Version: "1", Registry: "registry.npmjs.org"},
+		{Name: "react", Version: "1", Registry: "REGISTRY.NPMJS.ORG"},
+	}
+	scan, skip := pf.Partition(in)
+	if len(scan) != 3 {
+		t.Errorf("all three URL forms should match the allowlist; scan=%v skip=%v", scan, skip)
+	}
+}
+
+func TestNormalizeRegistry(t *testing.T) {
+	cases := map[string]string{
+		"registry.npmjs.org":             "registry.npmjs.org",
+		"https://registry.npmjs.org/":    "registry.npmjs.org",
+		"https://registry.npmjs.org":     "registry.npmjs.org",
+		"http://Registry.NPMJS.org/path": "registry.npmjs.org",
+		"":                               "",
+	}
+	for in, want := range cases {
+		if got := normalizeRegistry(in); got != want {
+			t.Errorf("normalizeRegistry(%q)=%q, want %q", in, got, want)
+		}
+	}
+}

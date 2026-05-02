@@ -69,8 +69,12 @@ func (r *pipResolver) Resolve(ctx context.Context, workDir string, command []str
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 
-	// pip install --dry-run --report - <packages>
+	// pip install --dry-run --report - [--index-url <url>] [--extra-index-url <url>] <packages>
+	// Forward any --index-url / -i / --extra-index-url flags from the original
+	// command so the dry-run resolves against the same index the actual install
+	// will use.
 	cmdArgs := []string{"install", "--dry-run", "--report", "-"}
+	cmdArgs = append(cmdArgs, r.extractIndexURLFlags(command)...)
 	cmdArgs = append(cmdArgs, packages...)
 	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
@@ -88,6 +92,30 @@ func (r *pipResolver) Resolve(ctx context.Context, workDir string, command []str
 	}
 	plan.Registry = r.detectRegistry(args)
 	return plan, nil
+}
+
+// extractIndexURLFlags returns the subset of args that influence which
+// index/registry packages resolve from (--index-url, -i, --extra-index-url).
+// Pass these to the dry-run so the resolver hits the same source the actual
+// install will use.
+func (r *pipResolver) extractIndexURLFlags(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case (a == "--index-url" || a == "-i") && i+1 < len(args):
+			out = append(out, a, args[i+1])
+			i++
+		case strings.HasPrefix(a, "--index-url="):
+			out = append(out, a)
+		case a == "--extra-index-url" && i+1 < len(args):
+			out = append(out, a, args[i+1])
+			i++
+		case strings.HasPrefix(a, "--extra-index-url="):
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // detectRegistry scans the pip install command args for registry override flags.

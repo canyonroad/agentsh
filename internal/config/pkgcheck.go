@@ -19,6 +19,11 @@ type PackageChecksConfig struct {
 
 // PackagePrivacyConfig configures the upstream privacy filter applied
 // before any external (Snyk / Socket / etc.) provider is invoked.
+//
+// LIMITATION: registry detection is CLI-flag-only. If your installs
+// rely on .npmrc / pip.conf / env-var registry overrides, ALSO list
+// those registries in ExternalScanRegistries — otherwise private
+// packages may be treated as public and sent to external providers.
 type PackagePrivacyConfig struct {
 	// ExternalScanRegistries lists registries whose packages may be sent
 	// to external providers. An empty list means "no registry filter."

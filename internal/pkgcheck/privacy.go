@@ -1,11 +1,23 @@
 package pkgcheck
 
 import (
+	"net/url"
 	"path"
 	"strings"
 )
 
 // PrivacyConfig configures the privacy filter.
+//
+// LIMITATION: the privacy filter compares against PackageRef.Registry,
+// which is populated by package-manager resolvers. Resolvers do NOT
+// currently parse `.npmrc`, `~/.config/pip/pip.conf`, or environment
+// variables that override the default registry — they only honor
+// CLI flags (--registry, --index-url, etc.). Operators whose
+// installs use config-file or env-var registry overrides must
+// explicitly include those registries in `external_scan_registries`,
+// or omit the public-registry defaults to keep private packages
+// behind the privacy gate. Scoped npm packages fail closed for this
+// reason (see resolver/npm.go).
 type PrivacyConfig struct {
 	// ExternalScanRegistries lists registries whose packages may be sent to
 	// external providers. An empty list means "do not filter by registry."
@@ -28,7 +40,7 @@ type PrivacyFilter struct {
 func NewPrivacyFilter(cfg PrivacyConfig) *PrivacyFilter {
 	allowed := make(map[string]struct{}, len(cfg.ExternalScanRegistries))
 	for _, r := range cfg.ExternalScanRegistries {
-		allowed[r] = struct{}{}
+		allowed[normalizeRegistry(r)] = struct{}{}
 	}
 	return &PrivacyFilter{
 		allowedRegistries: allowed,
@@ -52,7 +64,7 @@ func NewPrivacyFilter(cfg PrivacyConfig) *PrivacyFilter {
 func (f *PrivacyFilter) Partition(pkgs []PackageRef) (scan []PackageRef, skip []SkippedPackage) {
 	for _, p := range pkgs {
 		if len(f.allowedRegistries) > 0 {
-			if _, ok := f.allowedRegistries[p.Registry]; !ok {
+			if _, ok := f.allowedRegistries[normalizeRegistry(p.Registry)]; !ok {
 				skip = append(skip, SkippedPackage{Package: p, Reason: SkipReasonPrivateRegistry})
 				continue
 			}
@@ -95,4 +107,24 @@ func (f *PrivacyFilter) matchesDenylist(name string) bool {
 		}
 	}
 	return false
+}
+
+// normalizeRegistry reduces a registry URL or host string to a canonical
+// form for comparison. The privacy allowlist is keyed on hostnames; a
+// caller-configured value of "registry.npmjs.org" matches packages whose
+// resolved registry is "https://registry.npmjs.org/" (or any equivalent
+// scheme/path variant).
+func normalizeRegistry(s string) string {
+	if s == "" {
+		return ""
+	}
+	// If it parses as a URL with a host, return the host.
+	if strings.Contains(s, "://") {
+		if u, err := url.Parse(s); err == nil && u.Host != "" {
+			return strings.ToLower(u.Host)
+		}
+	}
+	// Otherwise treat the whole string as a host; trim trailing slash,
+	// lowercase.
+	return strings.ToLower(strings.TrimRight(s, "/"))
 }
