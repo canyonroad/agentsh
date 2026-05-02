@@ -527,3 +527,45 @@ func TestSnykProvider_RejectsTrailingGarbageOnSuccess(t *testing.T) {
 		t.Fatal("expected decode error from trailing garbage; got nil")
 	}
 }
+
+func TestSnykProvider_PartialBatchReturnsProviderError(t *testing.T) {
+	// Packages whose name starts with "fail" return 400 (non-retryable),
+	// others return 200. errCount > 0 but errCount < n → partial. Provider
+	// must return a non-nil error so the orchestrator can apply on_failure
+	// policy.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "fail") {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	p := newSnykProviderForTest(SnykConfig{
+		BaseURL:     srv.URL,
+		APIKey:      "tk",
+		OrgID:       "org",
+		Concurrency: 4,
+	}, circuitBreakerConfig{Threshold: 100, Window: time.Second, OpenPeriod: 100 * time.Millisecond})
+
+	resp, err := p.CheckBatch(context.Background(), pkgcheck.CheckRequest{
+		Ecosystem: pkgcheck.EcosystemNPM,
+		Packages: []pkgcheck.PackageRef{
+			{Name: "ok1", Version: "1"},
+			{Name: "fail1", Version: "1"},
+			{Name: "ok2", Version: "1"},
+			{Name: "fail2", Version: "1"},
+		},
+	})
+	if err == nil {
+		t.Fatal("partial batch must return a provider error so on_failure policy applies")
+	}
+	if resp == nil {
+		t.Fatal("response should still be returned alongside the error")
+	}
+	if !resp.Metadata.Partial {
+		t.Error("response Metadata.Partial should be true")
+	}
+}

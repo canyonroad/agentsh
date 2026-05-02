@@ -256,7 +256,7 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 		errMsg = "circuit breaker open"
 	}
 
-	return &pkgcheck.CheckResponse{
+	resp := &pkgcheck.CheckResponse{
 		Provider: p.Name(),
 		Findings: allFindings,
 		Metadata: pkgcheck.ResponseMetadata{
@@ -264,7 +264,18 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 			Partial:  partial,
 			Error:    errMsg,
 		},
-	}, nil
+	}
+	if partial {
+		// Surface the partial outcome as a provider error so the orchestrator
+		// applies the configured on_failure policy. Without this the verdict
+		// looks clean to the caller even though some packages weren't scanned.
+		why := errMsg
+		if why == "" {
+			why = fmt.Sprintf("%d/%d packages failed", errCount, n)
+		}
+		return resp, fmt.Errorf("snyk: partial batch: %s", why)
+	}
+	return resp, nil
 }
 
 func (p *snykProvider) fetchIssues(ctx context.Context, ecosystem string, pkg pkgcheck.PackageRef) ([]pkgcheck.Finding, error) {
