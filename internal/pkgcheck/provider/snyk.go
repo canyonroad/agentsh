@@ -163,8 +163,18 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 			continue
 		}
 
+		// Acquire a semaphore slot, but bail out promptly if the batch is
+		// cancelled while we're waiting (e.g., all current workers are hung).
+		select {
+		case sem <- struct{}{}:
+		case <-batchCtx.Done():
+			mu.Lock()
+			errCount++
+			mu.Unlock()
+			continue
+		}
+
 		wg.Add(1)
-		sem <- struct{}{}
 		i, pkg := i, pkg // capture
 		go func() {
 			defer wg.Done()

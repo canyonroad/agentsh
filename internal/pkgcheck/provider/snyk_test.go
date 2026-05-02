@@ -460,3 +460,54 @@ func TestSnykProvider_FindingsOrderMatchesInputOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestSnykProvider_SchedulingBailsOnCancelDuringSemaphoreWait(t *testing.T) {
+	// Server handler is ctx-aware: it responds quickly when the client
+	// cancels its request, but takes 2s otherwise. Concurrency=2 so 30 of
+	// 32 packages are queued waiting on the semaphore. When the caller
+	// cancels at ~50ms, scheduling must bail without waiting for queued
+	// HTTP work — the new select{sem, batchCtx.Done()} is what we're testing.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(2 * time.Second):
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	p := NewSnykProvider(SnykConfig{
+		BaseURL:     srv.URL,
+		APIKey:      "test",
+		OrgID:       "org",
+		Concurrency: 2,
+		Timeout:     30 * time.Second,
+	})
+
+	pkgs := make([]pkgcheck.PackageRef, 32)
+	for i := range pkgs {
+		pkgs[i] = pkgcheck.PackageRef{Name: fmt.Sprintf("pkg-%d", i), Version: "1"}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, _ = p.CheckBatch(ctx, pkgcheck.CheckRequest{
+		Ecosystem: pkgcheck.EcosystemNPM,
+		Packages:  pkgs,
+	})
+	elapsed := time.Since(start)
+	// Without the fix: scheduling was blocked on `sem <- struct{}{}` for the
+	// 30 queued packages, so cancel at 50ms still had to wait for in-flight
+	// 2s server delays.
+	// With the fix: scheduling bails immediately and CheckBatch returns
+	// soon after the in-flight workers' ctx-aware responses.
+	if elapsed > 1*time.Second {
+		t.Errorf("scheduling did not bail promptly on cancel; elapsed=%v", elapsed)
+	}
+}
