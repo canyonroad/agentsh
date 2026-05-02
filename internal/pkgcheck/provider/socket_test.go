@@ -237,3 +237,45 @@ func TestSocketProvider_BreakerOpensAfterRepeatedFailures(t *testing.T) {
 	assert.Equal(t, hitsAfterTwoCalls, serverHits, "third call must not hit the server")
 }
 
+
+func TestSocketProvider_MalformedResponseTripsBreaker(t *testing.T) {
+	// Server always returns 200 with garbage body — every CheckBatch fails
+	// with a decode error. Decode is now inside callWithBreaker, so two
+	// failures should trip a threshold-2 breaker.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("not json {{"))
+	}))
+	defer srv.Close()
+
+	p := newSocketProviderForTest(SocketConfig{
+		BaseURL: srv.URL,
+		APIKey:  "test",
+		Timeout: 2 * time.Second,
+	}, circuitBreakerConfig{
+		Threshold:  2,
+		Window:     time.Second,
+		OpenPeriod: 200 * time.Millisecond,
+	})
+
+	for i := 0; i < 2; i++ {
+		_, err := p.CheckBatch(context.Background(), pkgcheck.CheckRequest{
+			Ecosystem: pkgcheck.EcosystemNPM,
+			Packages:  []pkgcheck.PackageRef{{Name: "foo", Version: "1"}},
+		})
+		if err == nil {
+			t.Fatalf("iteration %d: expected decode error", i)
+		}
+	}
+	// Third call must short-circuit via the breaker.
+	resp, err := p.CheckBatch(context.Background(), pkgcheck.CheckRequest{
+		Ecosystem: pkgcheck.EcosystemNPM,
+		Packages:  []pkgcheck.PackageRef{{Name: "foo", Version: "1"}},
+	})
+	if err == nil || !errors.Is(err, errBreakerOpen) {
+		t.Fatalf("third call should be short-circuited by breaker; got err=%v", err)
+	}
+	if resp == nil || !resp.Metadata.Partial || resp.Metadata.Error != "circuit breaker open" {
+		t.Errorf("response should be Partial with circuit breaker open marker; got %+v", resp)
+	}
+}

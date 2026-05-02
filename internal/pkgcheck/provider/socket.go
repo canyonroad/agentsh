@@ -144,7 +144,7 @@ func (p *socketProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckReque
 		defer cancel()
 	}
 
-	var respBody []byte
+	var socketResp socketResponse
 	err = callWithBreaker(p.breaker, ctx, nil, func() error {
 		httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, p.baseURL+"/v0/scan/batch", bytes.NewReader(body))
 		if err != nil {
@@ -164,9 +164,11 @@ func (p *socketProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckReque
 			return fmt.Errorf("socket: unexpected status %d: %s", resp.StatusCode, string(rb))
 		}
 
-		respBody, err = io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("socket: read response: %w", err)
+		// Decode inside the breaker'd block: a malformed 200 is a provider
+		// failure, not a happy path. Otherwise a sustained stream of bad
+		// responses would never trip the breaker.
+		if err := json.NewDecoder(resp.Body).Decode(&socketResp); err != nil {
+			return fmt.Errorf("socket: decode response: %w", err)
 		}
 		return nil
 	})
@@ -183,11 +185,6 @@ func (p *socketProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckReque
 			}, err
 		}
 		return nil, err
-	}
-
-	var socketResp socketResponse
-	if err := json.Unmarshal(respBody, &socketResp); err != nil {
-		return nil, fmt.Errorf("socket: decode response: %w", err)
 	}
 
 	findings := p.mapFindings(req.Packages, &socketResp)
