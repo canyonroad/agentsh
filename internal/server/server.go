@@ -560,11 +560,19 @@ func New(cfg *config.Config) (*Server, error) {
 			return nil, fmt.Errorf("package_checks.enabled=true but no providers were initialized — at least one provider must be configured and have its API key (if required) set")
 		}
 
+		// Compose evaluator rules: engine.PackageRules() runs first
+		// (operator's policy file overrides), then block_on shorthand
+		// rules. Engine catch-all (if any) sits between the two; the
+		// final catch-all allow at the end of CompileBlockOn covers
+		// findings neither rule set named explicitly.
+		rules := append([]policy.PackageRule(nil), engine.PackageRules()...)
+		rules = append(rules, config.CompileBlockOn(cfg.PackageChecks.BlockOn)...)
+
 		pkgChecker := pkgcheck.NewChecker(pkgcheck.CheckerConfig{
 			Scope:     cfg.PackageChecks.Scope,
 			Resolvers: resolvers,
 			Providers: providerEntries,
-			Rules:     engine.PackageRules(),
+			Rules:     rules,
 			Allowlist: pkgcheck.NewAllowlist(30 * time.Second),
 			Privacy: pkgcheck.PrivacyConfig{
 				ExternalScanRegistries: cfg.PackageChecks.Privacy.ExternalScanRegistries,
