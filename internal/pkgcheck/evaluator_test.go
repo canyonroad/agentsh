@@ -1,6 +1,8 @@
 package pkgcheck
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/policy"
@@ -452,4 +454,61 @@ func TestNewEvaluatorAllRulesFilteredFailsClosed(t *testing.T) {
 	verdict := ev.Evaluate(findings, EcosystemNPM)
 	require.NotNil(t, verdict)
 	assert.Equal(t, VerdictBlock, verdict.Action, "all rules filtered, fail-closed deny injected")
+}
+
+func TestEvaluator_EvaluateWithContext_AnnotatesDegraded(t *testing.T) {
+	ev := NewEvaluator([]policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	})
+	v := ev.EvaluateWithContext(EvalContext{
+		Findings:  nil,
+		Ecosystem: EcosystemNPM,
+		ProviderErrors: []ProviderError{
+			{Provider: "socket", Err: errors.New("timeout"), OnFailure: "warn"},
+		},
+		Skipped: []SkippedPackage{
+			{Package: PackageRef{Name: "@acme/x"}, Reason: SkipReasonPrivateScopeDenylist},
+		},
+	})
+	if !strings.HasPrefix(v.Summary, "degraded:") {
+		t.Errorf("want summary prefixed degraded:, got %q", v.Summary)
+	}
+	if len(v.Skipped) != 1 {
+		t.Errorf("want 1 skipped, got %d", len(v.Skipped))
+	}
+}
+
+func TestEvaluator_EvaluateWithContext_NoErrorsNoDegradedPrefix(t *testing.T) {
+	ev := NewEvaluator([]policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	})
+	v := ev.EvaluateWithContext(EvalContext{
+		Findings:  nil,
+		Ecosystem: EcosystemNPM,
+		Skipped:   []SkippedPackage{{Package: PackageRef{Name: "x"}, Reason: SkipReasonPrivateRegistry}},
+	})
+	if strings.HasPrefix(v.Summary, "degraded:") {
+		t.Errorf("no errors should not produce degraded prefix; got %q", v.Summary)
+	}
+	if len(v.Skipped) != 1 {
+		t.Errorf("want 1 skipped, got %d", len(v.Skipped))
+	}
+}
+
+func TestEvaluator_EvaluateWithContext_NonWarnErrorsDoNotAnnotate(t *testing.T) {
+	ev := NewEvaluator([]policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	})
+	// OnFailure: "deny" — caller has chosen fail-closed; the verdict is
+	// already going to surface that error elsewhere. Don't double-annotate.
+	v := ev.EvaluateWithContext(EvalContext{
+		Findings:  nil,
+		Ecosystem: EcosystemNPM,
+		ProviderErrors: []ProviderError{
+			{Provider: "socket", Err: errors.New("boom"), OnFailure: "deny"},
+		},
+	})
+	if strings.HasPrefix(v.Summary, "degraded:") {
+		t.Errorf("non-warn error should not prefix degraded:; got %q", v.Summary)
+	}
 }

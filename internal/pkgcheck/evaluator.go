@@ -248,3 +248,36 @@ func stringInSlice(s string, slice []string) bool {
 func buildSummary(action VerdictAction, findings []Finding) string {
 	return fmt.Sprintf("%d finding(s), overall action: %s", len(findings), action)
 }
+
+// EvalContext bundles all inputs the evaluator needs to produce a complete Verdict.
+type EvalContext struct {
+	Findings       []Finding
+	Ecosystem      Ecosystem
+	ProviderErrors []ProviderError
+	Skipped        []SkippedPackage
+}
+
+// EvaluateWithContext runs the rule engine and decorates the resulting Verdict
+// with skipped-package info and a "degraded:" summary prefix when one or more
+// providers failed with OnFailure == "warn" (the degraded fail-mode).
+//
+// Errors with OnFailure other than "warn" are not annotated here — the
+// upstream Checker logic surfaces them through other channels (block, approve).
+func (e *Evaluator) EvaluateWithContext(c EvalContext) *Verdict {
+	v := e.Evaluate(c.Findings, c.Ecosystem)
+	if v == nil {
+		v = &Verdict{Action: VerdictAllow}
+	}
+	v.Skipped = append([]SkippedPackage(nil), c.Skipped...)
+
+	var degraded []string
+	for _, perr := range c.ProviderErrors {
+		if perr.OnFailure == "warn" {
+			degraded = append(degraded, perr.Provider)
+		}
+	}
+	if len(degraded) > 0 {
+		v.Summary = "degraded: " + strings.Join(degraded, ",") + " unavailable; " + v.Summary
+	}
+	return v
+}
