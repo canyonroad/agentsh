@@ -303,3 +303,39 @@ func TestRetryClient_CtxCancelOnFinalAttemptIsNotMaxAttempts(t *testing.T) {
 		t.Errorf("ctx cancel on final attempt must not be classified as max-attempts; got %v", err)
 	}
 }
+
+func TestCallWithBreaker_DoesNotRecordCallerCancellation(t *testing.T) {
+	cb := newCircuitBreaker(circuitBreakerConfig{
+		Threshold:  2,
+		Window:     time.Second,
+		OpenPeriod: 100 * time.Millisecond,
+	})
+	// Record one real failure so we're one short of opening.
+	_ = callWithBreaker(cb, func() error { return errors.New("real failure") })
+
+	// Now return a ctx-cancel error N times — the breaker must NOT open.
+	for i := 0; i < 5; i++ {
+		err := callWithBreaker(cb, func() error { return context.Canceled })
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("iteration %d: want context.Canceled, got %v", i, err)
+		}
+	}
+	if !cb.Allow() {
+		t.Fatal("breaker must not have opened from caller-driven cancellations")
+	}
+}
+
+func TestCallWithBreaker_DoesNotRecordDeadlineExceeded(t *testing.T) {
+	cb := newCircuitBreaker(circuitBreakerConfig{
+		Threshold:  2,
+		Window:     time.Second,
+		OpenPeriod: 100 * time.Millisecond,
+	})
+	_ = callWithBreaker(cb, func() error { return errors.New("real failure") })
+	for i := 0; i < 5; i++ {
+		_ = callWithBreaker(cb, func() error { return context.DeadlineExceeded })
+	}
+	if !cb.Allow() {
+		t.Fatal("breaker must not have opened from caller-driven deadline-exceeded")
+	}
+}

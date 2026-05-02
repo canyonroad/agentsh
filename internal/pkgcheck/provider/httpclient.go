@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -255,6 +256,12 @@ var errBreakerOpen = errors.New("circuit breaker open")
 // Provider implementations use this as their single invocation site for
 // CheckBatch's outbound HTTP work, so a sustained-failure provider stops
 // taking the network round-trip cost on every install.
+//
+// Caller-driven context cancellation and deadline-exceeded errors are treated
+// as neutral outcomes: they do not record a failure (which would let a tight
+// caller timeout open the breaker for unrelated subsequent calls) and do not
+// record a success either. Genuine remote/provider failures (transport errors,
+// 5xx, etc.) still record a failure.
 func callWithBreaker(b *circuitBreaker, fn func() error) error {
 	if b == nil {
 		return fn()
@@ -263,9 +270,18 @@ func callWithBreaker(b *circuitBreaker, fn func() error) error {
 		return errBreakerOpen
 	}
 	if err := fn(); err != nil {
+		if isCallerCancellation(err) {
+			return err
+		}
 		b.RecordFailure()
 		return err
 	}
 	b.RecordSuccess()
 	return nil
+}
+
+// isCallerCancellation reports whether err is a context cancellation or
+// deadline-exceeded that should not count toward breaker health.
+func isCallerCancellation(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
