@@ -165,3 +165,25 @@ func TestPrivacyFilter_PathDistinguishesRegistries(t *testing.T) {
 		t.Errorf("team-b should be skipped with private_registry; skip=%v", skip)
 	}
 }
+
+func TestPrivacyFilter_DefaultsAllowPyPISimpleIndex(t *testing.T) {
+	// Mirror of the production default allowlist. The pip-default index URL
+	// `https://pypi.org/simple/` must match so explicit --index-url on
+	// public PyPI doesn't get skipped.
+	pf := NewPrivacyFilter(PrivacyConfig{
+		ExternalScanRegistries: []string{"registry.npmjs.org", "pypi.org", "pypi.org/simple"},
+	})
+	in := []PackageRef{
+		{Name: "lodash", Version: "1", Registry: "registry.npmjs.org"},
+		{Name: "requests", Version: "1", Registry: "pypi.org"},
+		{Name: "flask", Version: "1", Registry: "https://pypi.org/simple/"},
+		{Name: "django", Version: "1", Registry: "https://pypi.org/simple"},
+	}
+	scan, skip := pf.Partition(in)
+	if len(skip) != 0 {
+		t.Errorf("all four public-registry forms should match; skip=%+v", skip)
+	}
+	if len(scan) != 4 {
+		t.Errorf("want 4 scanned; got %d", len(scan))
+	}
+}

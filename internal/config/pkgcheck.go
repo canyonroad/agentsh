@@ -186,8 +186,17 @@ func DefaultPackageChecksConfig() PackageChecksConfig {
 		},
 		Resolvers: nil,
 		Privacy: PackagePrivacyConfig{
-			ExternalScanRegistries: []string{"registry.npmjs.org", "pypi.org"},
-			PrivateScopeDenylist:   nil,
+			ExternalScanRegistries: []string{
+				"registry.npmjs.org",
+				"pypi.org",
+				// pip's default --index-url; users running `pip install
+				// --index-url https://pypi.org/simple` should still hit
+				// the allowlist. We can't simply strip the path during
+				// normalization because that would conflate distinct
+				// paths on a shared private host.
+				"pypi.org/simple",
+			},
+			PrivateScopeDenylist: nil,
 		},
 	}
 }
