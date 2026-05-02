@@ -248,3 +248,50 @@ func TestCallWithBreaker_NilBreakerPassesThrough(t *testing.T) {
 		t.Errorf("fn should have run; calls=%d", calls)
 	}
 }
+
+func TestRetryClient_CtxCancelOnFinalAttemptIsNotMaxAttempts(t *testing.T) {
+	// Server always returns 500 so every attempt is a retry trigger.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	// MaxAttempts=2 with backoff long enough to give the cancel goroutine
+	// time to fire between the second attempt's client.Do and the final
+	// return. We pace ourselves with an HTTP handler delay so the second
+	// attempt is in flight when cancel() runs.
+	srvHits := make(chan struct{}, 4)
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srvHits <- struct{}{}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv2.Close()
+
+	c := newRetryClient(retryConfig{
+		MaxAttempts: 2,
+		BaseBackoff: 50 * time.Millisecond,
+		MaxBackoff:  100 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv2.URL, nil)
+
+	go func() {
+		// Wait for the second attempt's request to land at the server,
+		// then cancel. By the time the loop reaches the final return,
+		// ctx.Err() is set.
+		<-srvHits
+		<-srvHits
+		cancel()
+	}()
+
+	_, err := c.Do(req)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled in chain, got %v", err)
+	}
+	if errors.Is(err, errMaxAttempts) {
+		t.Errorf("ctx cancel on final attempt must not be classified as max-attempts; got %v", err)
+	}
+}

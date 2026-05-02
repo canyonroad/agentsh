@@ -72,6 +72,14 @@ func (c *retryClient) Do(req *http.Request) (*http.Response, error) {
 
 		resp, err := c.client.Do(req)
 		if err != nil {
+			// If the failure is due to context cancellation, treat it as
+			// an abort regardless of which attempt we are on — never wrap
+			// it as max-attempts exhaustion.
+			if ctxErr := req.Context().Err(); ctxErr != nil {
+				lastErr = ctxErr
+				cancelled = true
+				break
+			}
 			lastErr = err
 			if attempt == c.cfg.MaxAttempts {
 				break
@@ -106,6 +114,13 @@ func (c *retryClient) Do(req *http.Request) (*http.Response, error) {
 		// Don't classify a cancellation as "max attempts exceeded" — callers
 		// using errors.Is(err, errMaxAttempts) should be able to distinguish.
 		return nil, fmt.Errorf("retryClient: aborted: %w", lastErr)
+	}
+	// Even if the loop exited via the final-attempt break path, the context
+	// may have been cancelled in the meantime (e.g., the final attempt's
+	// request returned a 5xx, then ctx was cancelled before we hit this
+	// return). Surface that as a cancellation rather than max-attempts.
+	if ctxErr := req.Context().Err(); ctxErr != nil {
+		return nil, fmt.Errorf("retryClient: aborted: %w", ctxErr)
 	}
 	return nil, fmt.Errorf("retryClient: gave up after %d attempts: %w", c.cfg.MaxAttempts, errors.Join(errMaxAttempts, lastErr))
 }
