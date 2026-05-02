@@ -94,6 +94,13 @@ func (o *Orchestrator) CheckAll(ctx context.Context, req CheckRequest) ([]Findin
 			mu.Lock()
 			defer mu.Unlock()
 
+			// Always merge findings if a response was returned, even on error:
+			// partial-success providers (e.g. Snyk fan-out with some packages
+			// failing) return (resp, err) where resp.Findings holds the
+			// findings for the packages that did succeed.
+			if resp != nil && len(resp.Findings) > 0 {
+				findings = append(findings, resp.Findings...)
+			}
 			if err != nil {
 				errs = append(errs, ProviderError{
 					Provider:  name,
@@ -101,10 +108,6 @@ func (o *Orchestrator) CheckAll(ctx context.Context, req CheckRequest) ([]Findin
 					OnFailure: entry.OnFailure,
 				})
 				return
-			}
-
-			if resp != nil && len(resp.Findings) > 0 {
-				findings = append(findings, resp.Findings...)
 			}
 		}(name, entry)
 	}
@@ -202,6 +205,11 @@ func (o *Orchestrator) CheckAllWithPrivacy(ctx context.Context, req CheckRequest
 			mu.Lock()
 			defer mu.Unlock()
 
+			// Merge findings even on error so partial-success providers
+			// don't lose the packages that did get scanned.
+			if resp != nil && len(resp.Findings) > 0 {
+				findings = append(findings, resp.Findings...)
+			}
 			if err != nil {
 				errs = append(errs, ProviderError{
 					Provider:  name,
@@ -209,10 +217,6 @@ func (o *Orchestrator) CheckAllWithPrivacy(ctx context.Context, req CheckRequest
 					OnFailure: entry.OnFailure,
 				})
 				return
-			}
-
-			if resp != nil && len(resp.Findings) > 0 {
-				findings = append(findings, resp.Findings...)
 			}
 		}(name, entry)
 	}

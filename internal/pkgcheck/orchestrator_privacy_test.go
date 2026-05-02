@@ -2,6 +2,7 @@ package pkgcheck
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -220,5 +221,37 @@ func TestOrchestrator_AllSkippedSkipsExternalEvenWithLocalProvider(t *testing.T)
 	}
 	if len(local.last) != 1 {
 		t.Errorf("local should still see the full list; got last=%+v", local.last)
+	}
+}
+
+type respWithErrProvider struct {
+	name     string
+	findings []Finding
+	err      error
+}
+
+func (r *respWithErrProvider) Name() string                { return r.name }
+func (r *respWithErrProvider) Capabilities() []FindingType { return nil }
+func (r *respWithErrProvider) CheckBatch(ctx context.Context, req CheckRequest) (*CheckResponse, error) {
+	return &CheckResponse{Provider: r.name, Findings: r.findings}, r.err
+}
+
+func TestOrchestrator_PreservesFindingsWhenProviderReturnsError(t *testing.T) {
+	finding := Finding{Type: FindingVulnerability, Provider: "x", Title: "partial-found"}
+	rp := &respWithErrProvider{name: "x", findings: []Finding{finding}, err: errors.New("partial: 1 of 2 packages failed")}
+	o := NewOrchestrator(OrchestratorConfig{
+		Providers: map[string]ProviderEntry{
+			"x": {Provider: rp, Timeout: time.Second, OnFailure: "warn"},
+		},
+	})
+	findings, errs := o.CheckAll(context.Background(), CheckRequest{
+		Ecosystem: EcosystemNPM,
+		Packages:  []PackageRef{{Name: "ok", Version: "1"}, {Name: "fail", Version: "1"}},
+	})
+	if len(findings) != 1 {
+		t.Errorf("partial findings must be preserved alongside the error; got %d findings", len(findings))
+	}
+	if len(errs) != 1 {
+		t.Errorf("provider error must still be recorded; got %d errs", len(errs))
 	}
 }

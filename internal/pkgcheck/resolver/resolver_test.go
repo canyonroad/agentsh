@@ -699,10 +699,13 @@ func TestYarnResolver_PlanCarriesRegistry(t *testing.T) {
 	assert.Equal(t, "registry.npmjs.org", plan.Registry)
 }
 
-func TestPoetryResolver_PlanCarriesRegistry(t *testing.T) {
+func TestPoetryResolver_PlanCarriesEmptyRegistryFailClosed(t *testing.T) {
+	// Poetry source registries live in pyproject.toml; we don't parse it.
+	// The resolver leaves Registry empty so the privacy filter fails closed
+	// — operators using public PyPI must allowlist "pypi.org" explicitly.
 	plan, err := parsePoetryDryRunOutput([]byte(`{"added":[{"name":"django","version":"5.0.1"}]}`), []string{"django"})
 	require.NoError(t, err)
-	assert.Equal(t, "pypi.org", plan.Registry)
+	assert.Equal(t, "", plan.Registry)
 }
 
 // --- DryRunArgs explicit-fields tests ---

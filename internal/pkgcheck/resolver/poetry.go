@@ -115,9 +115,14 @@ func parsePoetryDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Ins
 	}
 
 	plan := &pkgcheck.InstallPlan{
-		Tool:       "poetry",
-		Ecosystem:  pkgcheck.EcosystemPyPI,
-		Registry:   "pypi.org",
+		Tool:      "poetry",
+		Ecosystem: pkgcheck.EcosystemPyPI,
+		// Poetry source registries are configured in pyproject.toml's
+		// [[tool.poetry.source]] blocks, which we do not parse. Leaving
+		// Registry empty makes the privacy filter fail closed — operators
+		// using a public PyPI Poetry project must explicitly include
+		// "pypi.org" in external_scan_registries to enable scanning.
+		Registry:   "",
 		ResolvedAt: time.Now(),
 	}
 
