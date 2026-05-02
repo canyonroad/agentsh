@@ -285,3 +285,55 @@ func TestCheckerProviderFailureApproveUpgrades(t *testing.T) {
 	assert.Equal(t, VerdictApprove, verdict.Action)
 	assert.Contains(t, verdict.Summary, "on_failure=approve")
 }
+
+func TestChecker_PrivacyFilterSurfacesSkipped(t *testing.T) {
+	// A PrivacyFilter that excludes @private/* packages.
+	// The fake provider records what it receives.
+	// Only the public package should reach the provider;
+	// the private one should appear in Verdict.Skipped.
+	rp := &recordingProvider{name: "fake"}
+
+	resolver := &mockResolver{
+		name:       "npm-resolver",
+		canResolve: true,
+		plan: &InstallPlan{
+			Tool:      "npm",
+			Ecosystem: EcosystemNPM,
+			Direct: []PackageRef{
+				{Name: "lodash", Version: "4.17.21", Registry: "registry.npmjs.org", Direct: true},
+				{Name: "@private/utils", Version: "1.0.0", Registry: "registry.npmjs.org", Direct: true},
+			},
+		},
+	}
+
+	rules := []policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	}
+
+	checker := NewChecker(CheckerConfig{
+		Scope:     "new_packages_only",
+		Resolvers: []Resolver{resolver},
+		Providers: map[string]ProviderEntry{
+			"fake": {Provider: rp, Timeout: 5 * time.Second, OnFailure: "warn"},
+		},
+		Rules:     rules,
+		Allowlist: NewAllowlist(30 * time.Second),
+		Privacy: PrivacyConfig{
+			ExternalScanRegistries: []string{"registry.npmjs.org"},
+			PrivateScopeDenylist:   []string{"@private"},
+		},
+	})
+
+	verdict, err := checker.Check(context.Background(), "npm", []string{"install", "lodash", "@private/utils"}, t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, verdict)
+
+	// The fake provider should have received only lodash (not @private/utils).
+	require.Len(t, rp.last, 1, "provider should receive only non-skipped packages")
+	assert.Equal(t, "lodash", rp.last[0].Name)
+
+	// The verdict should report the skipped package.
+	require.Len(t, verdict.Skipped, 1, "verdict should report skipped packages")
+	assert.Equal(t, "@private/utils", verdict.Skipped[0].Package.Name)
+	assert.Equal(t, SkipReasonPrivateScopeDenylist, verdict.Skipped[0].Reason)
+}

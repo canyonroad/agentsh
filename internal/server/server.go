@@ -519,10 +519,12 @@ func New(cfg *config.Config) (*Server, error) {
 			if !provCfg.Enabled {
 				continue
 			}
-			// Concrete provider wiring will be added in a follow-up;
-			// for now only the skeleton is set up.
-			_ = name
-			_ = provCfg
+			entry, err := buildProviderEntry(name, provCfg)
+			if err != nil {
+				slog.Warn("pkgcheck: skipping provider", "name", name, "error", err)
+				continue
+			}
+			providerEntries[name] = entry
 		}
 
 		pkgChecker := pkgcheck.NewChecker(pkgcheck.CheckerConfig{
@@ -530,6 +532,9 @@ func New(cfg *config.Config) (*Server, error) {
 			Providers: providerEntries,
 			Rules:     engine.PackageRules(),
 			Allowlist: pkgcheck.NewAllowlist(30 * time.Second),
+			// TODO(T16): populate Privacy from cfg.PackageChecks.Privacy
+			// once the YAML field is plumbed through in T16.
+			Privacy: pkgcheck.PrivacyConfig{},
 		})
 		app.SetPackageChecker(pkgChecker)
 	}

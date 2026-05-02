@@ -15,6 +15,10 @@ type CheckerConfig struct {
 	Providers map[string]ProviderEntry
 	Rules     []policy.PackageRule
 	Allowlist *Allowlist
+	// Privacy configures which packages are sent to external providers.
+	// An empty PrivacyConfig (the zero value) means no filtering — all
+	// packages are sent. T16 will plumb the YAML field through server.go.
+	Privacy PrivacyConfig
 }
 
 // Checker is the single entry point for package install checks.
@@ -28,10 +32,12 @@ type Checker struct {
 
 // NewChecker creates a new Checker wired to the given config.
 func NewChecker(cfg CheckerConfig) *Checker {
+	pf := NewPrivacyFilter(cfg.Privacy)
 	return &Checker{
 		cfg: cfg,
 		orch: NewOrchestrator(OrchestratorConfig{
-			Providers: cfg.Providers,
+			Providers:     cfg.Providers,
+			PrivacyFilter: pf,
 		}),
 		eval: NewEvaluator(cfg.Rules),
 	}
@@ -68,8 +74,8 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 		return nil, fmt.Errorf("resolve install plan: %w", err)
 	}
 
-	// 4. Run all providers in parallel.
-	findings, providerErrs := c.orch.CheckAll(ctx, CheckRequest{
+	// 4. Run all providers in parallel, applying privacy filtering.
+	findings, providerErrs, skipped := c.orch.CheckAllWithPrivacy(ctx, CheckRequest{
 		Ecosystem: plan.Ecosystem,
 		Packages:  plan.AllPackages(),
 	})
@@ -111,11 +117,16 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 		return &Verdict{
 			Action:  VerdictBlock,
 			Summary: strictestFailSummary,
+			Skipped: skipped,
 		}, nil
 	}
 
 	// 6. Evaluate findings against policy rules.
 	verdict := c.eval.Evaluate(findings, plan.Ecosystem)
+
+	// Copy privacy-skipped packages onto verdict so callers can see which
+	// packages were not externally scanned.
+	verdict.Skipped = skipped
 
 	// If any provider needs approval and verdict is weaker, upgrade to approve.
 	if hasFailAction && strictestFailAction == VerdictApprove && verdict.Action.weight() < VerdictApprove.weight() {
