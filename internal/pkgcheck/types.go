@@ -149,12 +149,33 @@ type PackageVerdict struct {
 	Findings []Finding     `json:"findings,omitempty" yaml:"findings,omitempty"`
 }
 
+// SkipReason describes why a package was excluded from external scanning.
+type SkipReason string
+
+const (
+	// SkipReasonPrivateRegistry indicates the package was resolved from a
+	// registry not on the external-scan allowlist.
+	SkipReasonPrivateRegistry SkipReason = "private_registry"
+
+	// SkipReasonPrivateScopeDenylist indicates the package matched a scope
+	// or prefix on the privacy denylist.
+	SkipReasonPrivateScopeDenylist SkipReason = "private_scope_denylist"
+)
+
+// SkippedPackage records a package that was not externally scanned
+// because of privacy rules.
+type SkippedPackage struct {
+	Package PackageRef `json:"package" yaml:"package"`
+	Reason  SkipReason `json:"reason" yaml:"reason"`
+}
+
 // Verdict holds the overall result of checking an install plan.
 type Verdict struct {
 	Action   VerdictAction             `json:"action" yaml:"action"`
 	Findings []Finding                 `json:"findings,omitempty" yaml:"findings,omitempty"`
 	Summary  string                    `json:"summary" yaml:"summary"`
 	Packages map[string]PackageVerdict `json:"packages,omitempty" yaml:"packages,omitempty"`
+	Skipped  []SkippedPackage          `json:"skipped,omitempty" yaml:"skipped,omitempty"`
 }
 
 // HighestAction returns the most restrictive action across all package verdicts.
