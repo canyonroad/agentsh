@@ -137,3 +137,57 @@ func TestRetryClient_GivesUp_WrapsErrMaxAttempts(t *testing.T) {
 		t.Fatalf("expected error chain to include errMaxAttempts, got: %v", err)
 	}
 }
+
+func TestCircuitBreaker_OpensAfterConsecutiveFailures(t *testing.T) {
+	cb := newCircuitBreaker(circuitBreakerConfig{
+		Threshold:  3,
+		Window:     time.Second,
+		OpenPeriod: 100 * time.Millisecond,
+	})
+
+	if !cb.Allow() {
+		t.Fatal("breaker should start closed")
+	}
+	cb.RecordFailure()
+	cb.RecordFailure()
+	if !cb.Allow() {
+		t.Fatal("breaker should still be closed after 2 failures")
+	}
+	cb.RecordFailure()
+	if cb.Allow() {
+		t.Fatal("breaker should be open after 3 failures")
+	}
+}
+
+func TestCircuitBreaker_ClosesAfterOpenPeriod(t *testing.T) {
+	cb := newCircuitBreaker(circuitBreakerConfig{
+		Threshold:  2,
+		Window:     time.Second,
+		OpenPeriod: 50 * time.Millisecond,
+	})
+	cb.RecordFailure()
+	cb.RecordFailure()
+	if cb.Allow() {
+		t.Fatal("breaker should be open")
+	}
+	time.Sleep(80 * time.Millisecond)
+	if !cb.Allow() {
+		t.Fatal("breaker should re-close after open period")
+	}
+}
+
+func TestCircuitBreaker_SuccessResetsFailures(t *testing.T) {
+	cb := newCircuitBreaker(circuitBreakerConfig{
+		Threshold:  3,
+		Window:     time.Second,
+		OpenPeriod: 100 * time.Millisecond,
+	})
+	cb.RecordFailure()
+	cb.RecordFailure()
+	cb.RecordSuccess()
+	cb.RecordFailure()
+	cb.RecordFailure()
+	if !cb.Allow() {
+		t.Fatal("breaker should still be closed: success reset failure count")
+	}
+}

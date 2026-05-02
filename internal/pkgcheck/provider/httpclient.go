@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -137,3 +138,78 @@ func (c *retryClient) backoff(attempt int) time.Duration {
 
 // errMaxAttempts is exposed for tests that want to assert "gave up".
 var errMaxAttempts = errors.New("max retry attempts exceeded")
+
+// circuitBreakerConfig controls breaker behavior.
+type circuitBreakerConfig struct {
+	Threshold  int           // consecutive failures before opening
+	Window     time.Duration // window in which Threshold failures must occur
+	OpenPeriod time.Duration // how long the breaker stays open
+}
+
+// circuitBreaker tracks consecutive provider failures and short-circuits
+// while open. Safe for concurrent use.
+type circuitBreaker struct {
+	cfg circuitBreakerConfig
+
+	mu             sync.Mutex
+	failures       int
+	firstFailureAt time.Time
+	openedAt       time.Time
+}
+
+func newCircuitBreaker(cfg circuitBreakerConfig) *circuitBreaker {
+	if cfg.Threshold <= 0 {
+		cfg.Threshold = 3
+	}
+	if cfg.Window <= 0 {
+		cfg.Window = 60 * time.Second
+	}
+	if cfg.OpenPeriod <= 0 {
+		cfg.OpenPeriod = 60 * time.Second
+	}
+	return &circuitBreaker{cfg: cfg}
+}
+
+// Allow reports whether a call may proceed.
+func (b *circuitBreaker) Allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.openedAt.IsZero() {
+		return true
+	}
+	if time.Since(b.openedAt) >= b.cfg.OpenPeriod {
+		// Re-close.
+		b.openedAt = time.Time{}
+		b.failures = 0
+		return true
+	}
+	return false
+}
+
+// RecordSuccess resets the failure counter.
+func (b *circuitBreaker) RecordSuccess() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.failures = 0
+	b.firstFailureAt = time.Time{}
+}
+
+// RecordFailure increments the failure counter and opens the breaker if the
+// threshold is crossed within the window.
+func (b *circuitBreaker) RecordFailure() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	now := time.Now()
+	if b.failures == 0 || now.Sub(b.firstFailureAt) > b.cfg.Window {
+		b.failures = 1
+		b.firstFailureAt = now
+	} else {
+		b.failures++
+	}
+
+	if b.failures >= b.cfg.Threshold {
+		b.openedAt = now
+	}
+}
