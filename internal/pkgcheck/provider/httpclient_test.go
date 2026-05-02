@@ -256,13 +256,23 @@ func TestRetryClient_CtxCancelOnFinalAttemptIsNotMaxAttempts(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// MaxAttempts=2 with backoff long enough to give the cancel goroutine
-	// time to fire between the second attempt's client.Do and the final
-	// return. We pace ourselves with an HTTP handler delay so the second
-	// attempt is in flight when cancel() runs.
+	// We need the cancellation to land BEFORE Do reaches its final return.
+	// A timing-based goroutine is racy; instead, the handler blocks the
+	// second (final) response on a channel that the test closes only after
+	// cancel() has been called. This makes the ordering deterministic:
+	//   1. First request → 500 (no block).
+	//   2. Loop sleeps backoff, second request lands.
+	//   3. Test closes secondReady, handler returns 500.
+	//   4. Loop reaches final-return, ctx.Err() is non-nil → aborted, not max.
 	srvHits := make(chan struct{}, 4)
+	secondReady := make(chan struct{})
+	var hitCount int32
 	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hitCount, 1)
 		srvHits <- struct{}{}
+		if n == 2 {
+			<-secondReady
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv2.Close()
@@ -276,12 +286,10 @@ func TestRetryClient_CtxCancelOnFinalAttemptIsNotMaxAttempts(t *testing.T) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv2.URL, nil)
 
 	go func() {
-		// Wait for the second attempt's request to land at the server,
-		// then cancel. By the time the loop reaches the final return,
-		// ctx.Err() is set.
-		<-srvHits
-		<-srvHits
-		cancel()
+		<-srvHits         // first attempt landed at server
+		<-srvHits         // second (final) attempt landed; handler is blocked
+		cancel()          // ensure ctx is cancelled before final return reads ctx.Err()
+		close(secondReady) // unblock handler so client.Do returns 500
 	}()
 
 	_, err := c.Do(req)
