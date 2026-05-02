@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -87,5 +88,52 @@ func TestRetryClient_GivesUpAfterMaxAttempts(t *testing.T) {
 	if err == nil {
 		resp.Body.Close()
 		t.Fatal("expected error after max attempts, got nil")
+	}
+}
+
+func TestRetryClient_AbortsOnContextCancellation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := newRetryClient(retryConfig{
+		MaxAttempts: 5,
+		BaseBackoff: 200 * time.Millisecond,
+		MaxBackoff:  500 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+
+	start := time.Now()
+	_, err := c.Do(req)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected error chain to include context.Canceled, got: %v", err)
+	}
+	// Should abort well before doing 5 attempts × 200ms+ each.
+	if elapsed > 600*time.Millisecond {
+		t.Errorf("retry loop did not abort promptly on ctx cancel; elapsed=%v", elapsed)
+	}
+}
+
+func TestRetryClient_GivesUp_WrapsErrMaxAttempts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	c := newRetryClient(retryConfig{MaxAttempts: 2, BaseBackoff: 1 * time.Millisecond, MaxBackoff: 5 * time.Millisecond})
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+	_, err := c.Do(req)
+	if !errors.Is(err, errMaxAttempts) {
+		t.Fatalf("expected error chain to include errMaxAttempts, got: %v", err)
 	}
 }

@@ -74,7 +74,10 @@ func (c *retryClient) Do(req *http.Request) (*http.Response, error) {
 			if attempt == c.cfg.MaxAttempts {
 				break
 			}
-			c.sleep(attempt, nil, req)
+			if !c.sleep(attempt, nil, req) {
+				lastErr = req.Context().Err()
+				break
+			}
 			continue
 		}
 
@@ -89,15 +92,18 @@ func (c *retryClient) Do(req *http.Request) (*http.Response, error) {
 		if attempt == c.cfg.MaxAttempts {
 			break
 		}
-		c.sleep(attempt, resp, req)
+		if !c.sleep(attempt, resp, req) {
+			lastErr = req.Context().Err()
+			break
+		}
 	}
 
-	return nil, fmt.Errorf("retryClient: gave up after %d attempts: %w", c.cfg.MaxAttempts, lastErr)
+	return nil, fmt.Errorf("retryClient: gave up after %d attempts: %w", c.cfg.MaxAttempts, errors.Join(errMaxAttempts, lastErr))
 }
 
 // sleep applies Retry-After (when configured and present) or exponential
 // backoff with jitter. Honors context cancellation.
-func (c *retryClient) sleep(attempt int, resp *http.Response, req *http.Request) {
+func (c *retryClient) sleep(attempt int, resp *http.Response, req *http.Request) bool {
 	wait := c.backoff(attempt)
 	if c.cfg.RespectRetryAfter && resp != nil {
 		if h := resp.Header.Get("Retry-After"); h != "" {
@@ -112,14 +118,16 @@ func (c *retryClient) sleep(attempt int, resp *http.Response, req *http.Request)
 
 	select {
 	case <-time.After(wait):
+		return true
 	case <-req.Context().Done():
+		return false
 	}
 }
 
 // backoff returns exponential-with-jitter backoff for the given attempt.
 func (c *retryClient) backoff(attempt int) time.Duration {
 	exp := time.Duration(1<<uint(attempt-1)) * c.cfg.BaseBackoff
-	if exp > c.cfg.MaxBackoff {
+	if exp <= 0 || exp > c.cfg.MaxBackoff {
 		exp = c.cfg.MaxBackoff
 	}
 	// Full jitter: random in [0, exp].
