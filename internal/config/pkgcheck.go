@@ -5,6 +5,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/agentsh/agentsh/internal/policy"
 )
 
 // PackageChecksConfig configures package install security checks.
@@ -199,4 +201,87 @@ func DefaultPackageChecksConfig() PackageChecksConfig {
 			PrivateScopeDenylist: nil,
 		},
 	}
+}
+
+// BlockOnConfig is the per-finding-type severity-threshold shorthand:
+//
+//	malware:       any | critical | never
+//	vulnerability: critical | high | medium | never
+//	license:       any | never
+//	reputation:    any | never
+//	provenance:    any | never
+type BlockOnConfig struct {
+	Malware       string `yaml:"malware" json:"malware"`
+	Vulnerability string `yaml:"vulnerability" json:"vulnerability"`
+	License       string `yaml:"license" json:"license"`
+	Reputation    string `yaml:"reputation" json:"reputation"`
+	Provenance    string `yaml:"provenance" json:"provenance"`
+}
+
+// CompileBlockOn translates the BlockOnConfig shorthand into a list of
+// policy.PackageRule entries (first-match-wins) ending in a catch-all allow.
+//
+// For each finding type we emit deny rules for severities at or above the
+// threshold, warn rules for severities below the threshold but still
+// noteworthy (currently: high vulns become warn even when threshold is
+// critical), and rely on the catch-all allow for everything else.
+func CompileBlockOn(b BlockOnConfig) []policy.PackageRule {
+	var rules []policy.PackageRule
+
+	// Malware: any (deny all severities) or critical (deny only critical).
+	switch b.Malware {
+	case "any":
+		rules = append(rules, policy.PackageRule{
+			Match:  policy.PackageMatch{FindingType: "malware"},
+			Action: "deny",
+			Reason: "block_on.malware=any",
+		})
+	case "critical":
+		rules = append(rules, policy.PackageRule{
+			Match:  policy.PackageMatch{FindingType: "malware", Severity: "critical"},
+			Action: "deny",
+			Reason: "block_on.malware=critical",
+		})
+	}
+
+	// Vulnerability thresholds.
+	switch b.Vulnerability {
+	case "medium":
+		rules = append(rules,
+			policy.PackageRule{Match: policy.PackageMatch{FindingType: "vulnerability", Severity: "critical"}, Action: "deny"},
+			policy.PackageRule{Match: policy.PackageMatch{FindingType: "vulnerability", Severity: "high"}, Action: "deny"},
+			policy.PackageRule{Match: policy.PackageMatch{FindingType: "vulnerability", Severity: "medium"}, Action: "deny"},
+		)
+	case "high":
+		rules = append(rules,
+			policy.PackageRule{Match: policy.PackageMatch{FindingType: "vulnerability", Severity: "critical"}, Action: "deny"},
+			policy.PackageRule{Match: policy.PackageMatch{FindingType: "vulnerability", Severity: "high"}, Action: "deny"},
+		)
+	case "critical":
+		rules = append(rules,
+			policy.PackageRule{Match: policy.PackageMatch{FindingType: "vulnerability", Severity: "critical"}, Action: "deny"},
+			policy.PackageRule{Match: policy.PackageMatch{FindingType: "vulnerability", Severity: "high"}, Action: "warn"},
+		)
+	}
+
+	// License / reputation / provenance: any → deny; never → no rule (catch-all allows).
+	for _, kv := range []struct{ ft, mode string }{
+		{"license", b.License}, {"reputation", b.Reputation}, {"provenance", b.Provenance},
+	} {
+		if kv.mode == "any" {
+			rules = append(rules, policy.PackageRule{
+				Match:  policy.PackageMatch{FindingType: kv.ft},
+				Action: "deny",
+				Reason: "block_on." + kv.ft + "=any",
+			})
+		}
+	}
+
+	// Catch-all allow.
+	rules = append(rules, policy.PackageRule{
+		Match:  policy.PackageMatch{},
+		Action: "allow",
+		Reason: "block_on default allow",
+	})
+	return rules
 }
