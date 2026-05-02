@@ -19,7 +19,9 @@ type PipResolverConfig struct {
 }
 
 type pipResolver struct {
-	cfg PipResolverConfig
+	cfg        PipResolverConfig
+	binary     string
+	prefixArgs []string
 }
 
 // NewPipResolver creates a resolver for pip install commands.
@@ -30,7 +32,16 @@ func NewPipResolver(cfg PipResolverConfig) pkgcheck.Resolver {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	return &pipResolver{cfg: cfg}
+	// Split the command string into binary + args. Allows users to configure
+	// a full invocation like "pip install --dry-run" rather than just the binary path.
+	parts := strings.Fields(cfg.DryRunCommand)
+	binary := cfg.DryRunCommand
+	var prefixArgs []string
+	if len(parts) > 1 {
+		binary = parts[0]
+		prefixArgs = parts[1:]
+	}
+	return &pipResolver{cfg: cfg, binary: binary, prefixArgs: prefixArgs}
 }
 
 func (r *pipResolver) Name() string { return "pip" }
@@ -61,8 +72,9 @@ func (r *pipResolver) Resolve(ctx context.Context, workDir string, command []str
 	// pip install --dry-run --report - <packages>
 	cmdArgs := []string{"install", "--dry-run", "--report", "-"}
 	cmdArgs = append(cmdArgs, packages...)
+	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
-	cmd := exec.CommandContext(ctx, r.cfg.DryRunCommand, cmdArgs...)
+	cmd := exec.CommandContext(ctx, r.binary, allArgs...)
 	cmd.Dir = workDir
 
 	out, err := cmd.Output()
@@ -105,6 +117,7 @@ func parsePipDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Instal
 	plan := &pkgcheck.InstallPlan{
 		Tool:       "pip",
 		Ecosystem:  pkgcheck.EcosystemPyPI,
+		Registry:   "pypi.org",
 		ResolvedAt: time.Now(),
 	}
 

@@ -19,7 +19,9 @@ type PNPMResolverConfig struct {
 }
 
 type pnpmResolver struct {
-	cfg PNPMResolverConfig
+	cfg        PNPMResolverConfig
+	binary     string
+	prefixArgs []string
 }
 
 // NewPNPMResolver creates a resolver for pnpm add commands.
@@ -30,7 +32,16 @@ func NewPNPMResolver(cfg PNPMResolverConfig) pkgcheck.Resolver {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	return &pnpmResolver{cfg: cfg}
+	// Split the command string into binary + args. Allows users to configure
+	// a full invocation like "pnpm add --lockfile-only" rather than just the binary path.
+	parts := strings.Fields(cfg.DryRunCommand)
+	binary := cfg.DryRunCommand
+	var prefixArgs []string
+	if len(parts) > 1 {
+		binary = parts[0]
+		prefixArgs = parts[1:]
+	}
+	return &pnpmResolver{cfg: cfg, binary: binary, prefixArgs: prefixArgs}
 }
 
 func (r *pnpmResolver) Name() string { return "pnpm" }
@@ -66,8 +77,9 @@ func (r *pnpmResolver) Resolve(ctx context.Context, workDir string, command []st
 	// pnpm add --lockfile-only --ignore-scripts <packages>
 	cmdArgs := []string{"add", "--lockfile-only", "--ignore-scripts"}
 	cmdArgs = append(cmdArgs, packages...)
+	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
-	cmd := exec.CommandContext(ctx, r.cfg.DryRunCommand, cmdArgs...)
+	cmd := exec.CommandContext(ctx, r.binary, allArgs...)
 	cmd.Dir = workDir
 
 	out, err := cmd.Output()
@@ -106,6 +118,7 @@ func parsePNPMDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Insta
 	plan := &pkgcheck.InstallPlan{
 		Tool:       "pnpm",
 		Ecosystem:  pkgcheck.EcosystemNPM,
+		Registry:   "registry.npmjs.org",
 		ResolvedAt: time.Now(),
 	}
 

@@ -665,3 +665,99 @@ func TestNPMResolver_CustomConfig(t *testing.T) {
 	assert.Equal(t, "/custom/npm", r.cfg.DryRunCommand)
 	assert.Equal(t, 60*time.Second, r.cfg.Timeout)
 }
+
+// --- Registry field tests ---
+
+func TestNPMResolver_PlanCarriesRegistry(t *testing.T) {
+	plan, err := parseNPMDryRunOutput([]byte(`{"added":[{"name":"express","version":"4.18.2"}]}`), []string{"express"})
+	require.NoError(t, err)
+	assert.Equal(t, "registry.npmjs.org", plan.Registry)
+}
+
+func TestPipResolver_PlanCarriesRegistry(t *testing.T) {
+	plan, err := parsePipDryRunOutput([]byte(`{"install":[{"metadata":{"name":"flask","version":"3.0.0"},"requested":true}]}`), []string{"flask"})
+	require.NoError(t, err)
+	assert.Equal(t, "pypi.org", plan.Registry)
+}
+
+func TestUVResolver_PlanCarriesRegistry(t *testing.T) {
+	plan, err := parseUVDryRunOutput([]byte("Would install flask-3.0.0\n"), []string{"flask"})
+	require.NoError(t, err)
+	assert.Equal(t, "pypi.org", plan.Registry)
+}
+
+func TestPNPMResolver_PlanCarriesRegistry(t *testing.T) {
+	plan, err := parsePNPMDryRunOutput([]byte(`{"added":[{"name":"react","version":"18.2.0"}]}`), []string{"react"})
+	require.NoError(t, err)
+	assert.Equal(t, "registry.npmjs.org", plan.Registry)
+}
+
+func TestYarnResolver_PlanCarriesRegistry(t *testing.T) {
+	plan, err := parseYarnDryRunOutput([]byte(`{"added":[{"name":"typescript","version":"5.3.3"}]}`), []string{"typescript"})
+	require.NoError(t, err)
+	assert.Equal(t, "registry.npmjs.org", plan.Registry)
+}
+
+func TestPoetryResolver_PlanCarriesRegistry(t *testing.T) {
+	plan, err := parsePoetryDryRunOutput([]byte(`{"added":[{"name":"django","version":"5.0.1"}]}`), []string{"django"})
+	require.NoError(t, err)
+	assert.Equal(t, "pypi.org", plan.Registry)
+}
+
+// --- DryRunCommand multi-token parsing tests ---
+
+func TestNPMResolver_MultiTokenDryRunCommand(t *testing.T) {
+	r := NewNPMResolver(NPMResolverConfig{
+		DryRunCommand: "npx npm --prefix /tmp",
+	}).(*npmResolver)
+	assert.Equal(t, "npx", r.binary)
+	assert.Equal(t, []string{"npm", "--prefix", "/tmp"}, r.prefixArgs)
+}
+
+func TestNPMResolver_SingleTokenDryRunCommand(t *testing.T) {
+	r := NewNPMResolver(NPMResolverConfig{
+		DryRunCommand: "/usr/local/bin/npm",
+	}).(*npmResolver)
+	assert.Equal(t, "/usr/local/bin/npm", r.binary)
+	assert.Empty(t, r.prefixArgs)
+}
+
+func TestPipResolver_MultiTokenDryRunCommand(t *testing.T) {
+	r := NewPipResolver(PipResolverConfig{
+		DryRunCommand: "python -m pip",
+	}).(*pipResolver)
+	assert.Equal(t, "python", r.binary)
+	assert.Equal(t, []string{"-m", "pip"}, r.prefixArgs)
+}
+
+func TestUVResolver_MultiTokenDryRunCommand(t *testing.T) {
+	r := NewUVResolver(UVResolverConfig{
+		DryRunCommand: "/usr/local/bin/uv --quiet",
+	}).(*uvResolver)
+	assert.Equal(t, "/usr/local/bin/uv", r.binary)
+	assert.Equal(t, []string{"--quiet"}, r.prefixArgs)
+}
+
+func TestPNPMResolver_MultiTokenDryRunCommand(t *testing.T) {
+	r := NewPNPMResolver(PNPMResolverConfig{
+		DryRunCommand: "pnpm --store-dir /tmp",
+	}).(*pnpmResolver)
+	assert.Equal(t, "pnpm", r.binary)
+	assert.Equal(t, []string{"--store-dir", "/tmp"}, r.prefixArgs)
+}
+
+func TestYarnResolver_MultiTokenDryRunCommand(t *testing.T) {
+	r := NewYarnResolver(YarnResolverConfig{
+		DryRunCommand: "yarn --cwd /tmp",
+	}).(*yarnResolver)
+	assert.Equal(t, "yarn", r.binary)
+	assert.Equal(t, []string{"--cwd", "/tmp"}, r.prefixArgs)
+}
+
+func TestPoetryResolver_MultiTokenDryRunCommand(t *testing.T) {
+	r := NewPoetryResolver(PoetryResolverConfig{
+		DryRunCommand: "poetry --no-ansi",
+	}).(*poetryResolver)
+	assert.Equal(t, "poetry", r.binary)
+	assert.Equal(t, []string{"--no-ansi"}, r.prefixArgs)
+}

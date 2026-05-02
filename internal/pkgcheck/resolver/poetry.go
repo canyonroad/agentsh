@@ -19,7 +19,9 @@ type PoetryResolverConfig struct {
 }
 
 type poetryResolver struct {
-	cfg PoetryResolverConfig
+	cfg        PoetryResolverConfig
+	binary     string
+	prefixArgs []string
 }
 
 // NewPoetryResolver creates a resolver for poetry add commands.
@@ -30,7 +32,16 @@ func NewPoetryResolver(cfg PoetryResolverConfig) pkgcheck.Resolver {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	return &poetryResolver{cfg: cfg}
+	// Split the command string into binary + args. Allows users to configure
+	// a full invocation like "poetry add --dry-run" rather than just the binary path.
+	parts := strings.Fields(cfg.DryRunCommand)
+	binary := cfg.DryRunCommand
+	var prefixArgs []string
+	if len(parts) > 1 {
+		binary = parts[0]
+		prefixArgs = parts[1:]
+	}
+	return &poetryResolver{cfg: cfg, binary: binary, prefixArgs: prefixArgs}
 }
 
 func (r *poetryResolver) Name() string { return "poetry" }
@@ -62,8 +73,9 @@ func (r *poetryResolver) Resolve(ctx context.Context, workDir string, command []
 	// poetry add --dry-run <packages>
 	cmdArgs := []string{"add", "--dry-run"}
 	cmdArgs = append(cmdArgs, packages...)
+	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
-	cmd := exec.CommandContext(ctx, r.cfg.DryRunCommand, cmdArgs...)
+	cmd := exec.CommandContext(ctx, r.binary, allArgs...)
 	cmd.Dir = workDir
 
 	out, err := cmd.Output()
@@ -103,6 +115,7 @@ func parsePoetryDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Ins
 	plan := &pkgcheck.InstallPlan{
 		Tool:       "poetry",
 		Ecosystem:  pkgcheck.EcosystemPyPI,
+		Registry:   "pypi.org",
 		ResolvedAt: time.Now(),
 	}
 

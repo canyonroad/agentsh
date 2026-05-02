@@ -7,30 +7,28 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 )
 
-// TestBuildResolvers_DefaultsToSix verifies that calling buildResolvers with a
-// nil map returns all six built-in resolvers so that package_checks.enabled:
-// true with no explicit resolvers: block still works.
-func TestBuildResolvers_DefaultsToSix(t *testing.T) {
+// TestBuildResolvers_DefaultsToVerified verifies that calling buildResolvers with a
+// nil map returns only the three verified built-in resolvers (npm, pip, uv).
+// pnpm, yarn, and poetry are excluded from defaults because their parsers are
+// placeholders. They remain available via explicit config.
+func TestBuildResolvers_DefaultsToVerified(t *testing.T) {
 	resolvers, err := buildResolvers(nil)
 	if err != nil {
 		t.Fatalf("buildResolvers(nil) unexpected error: %v", err)
 	}
-	if len(resolvers) != 6 {
-		t.Fatalf("expected 6 default resolvers, got %d", len(resolvers))
+	if len(resolvers) != 3 {
+		t.Fatalf("expected 3 default resolvers, got %d", len(resolvers))
 	}
 
 	want := map[string]bool{
-		"npm":    false,
-		"pnpm":   false,
-		"yarn":   false,
-		"pip":    false,
-		"uv":     false,
-		"poetry": false,
+		"npm": false,
+		"pip": false,
+		"uv":  false,
 	}
 	for _, r := range resolvers {
 		name := r.Name()
 		if _, ok := want[name]; !ok {
-			t.Errorf("unexpected resolver name %q", name)
+			t.Errorf("unexpected resolver name %q in defaults", name)
 			continue
 		}
 		want[name] = true
@@ -42,15 +40,32 @@ func TestBuildResolvers_DefaultsToSix(t *testing.T) {
 	}
 }
 
-// TestBuildResolvers_EmptyMapDefaultsToSix verifies that an empty (non-nil) map
-// also falls through to the default six resolvers.
-func TestBuildResolvers_EmptyMapDefaultsToSix(t *testing.T) {
+// TestBuildResolvers_EmptyMapDefaultsToVerified verifies that an empty (non-nil) map
+// also falls through to the default three verified resolvers.
+func TestBuildResolvers_EmptyMapDefaultsToVerified(t *testing.T) {
 	resolvers, err := buildResolvers(map[string]config.ResolverConfig{})
 	if err != nil {
 		t.Fatalf("buildResolvers({}) unexpected error: %v", err)
 	}
-	if len(resolvers) != 6 {
-		t.Fatalf("expected 6 default resolvers, got %d", len(resolvers))
+	if len(resolvers) != 3 {
+		t.Fatalf("expected 3 default resolvers, got %d", len(resolvers))
+	}
+}
+
+// TestBuildResolvers_PnpmYarnPoetryAvailableExplicitly verifies that pnpm, yarn,
+// and poetry are still constructable via explicit config even though they are
+// not in the default set.
+func TestBuildResolvers_PnpmYarnPoetryAvailableExplicitly(t *testing.T) {
+	resolvers, err := buildResolvers(map[string]config.ResolverConfig{
+		"pnpm":   {},
+		"yarn":   {},
+		"poetry": {},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resolvers) != 3 {
+		t.Fatalf("expected 3 resolvers, got %d", len(resolvers))
 	}
 }
 

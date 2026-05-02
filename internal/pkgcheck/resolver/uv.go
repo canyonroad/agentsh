@@ -20,7 +20,9 @@ type UVResolverConfig struct {
 }
 
 type uvResolver struct {
-	cfg UVResolverConfig
+	cfg        UVResolverConfig
+	binary     string
+	prefixArgs []string
 }
 
 // NewUVResolver creates a resolver for uv pip install and uv add commands.
@@ -31,7 +33,16 @@ func NewUVResolver(cfg UVResolverConfig) pkgcheck.Resolver {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	return &uvResolver{cfg: cfg}
+	// Split the command string into binary + args. Allows users to configure
+	// a full invocation like "uv pip install --dry-run" rather than just the binary path.
+	parts := strings.Fields(cfg.DryRunCommand)
+	binary := cfg.DryRunCommand
+	var prefixArgs []string
+	if len(parts) > 1 {
+		binary = parts[0]
+		prefixArgs = parts[1:]
+	}
+	return &uvResolver{cfg: cfg, binary: binary, prefixArgs: prefixArgs}
 }
 
 func (r *uvResolver) Name() string { return "uv" }
@@ -66,8 +77,9 @@ func (r *uvResolver) Resolve(ctx context.Context, workDir string, command []stri
 	// uv pip install --dry-run <packages>
 	cmdArgs := []string{"pip", "install", "--dry-run"}
 	cmdArgs = append(cmdArgs, packages...)
+	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
-	cmd := exec.CommandContext(ctx, r.cfg.DryRunCommand, cmdArgs...)
+	cmd := exec.CommandContext(ctx, r.binary, allArgs...)
 	cmd.Dir = workDir
 
 	out, err := cmd.Output()
@@ -98,6 +110,7 @@ func parseUVDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Install
 	plan := &pkgcheck.InstallPlan{
 		Tool:       "uv",
 		Ecosystem:  pkgcheck.EcosystemPyPI,
+		Registry:   "pypi.org",
 		ResolvedAt: time.Now(),
 	}
 

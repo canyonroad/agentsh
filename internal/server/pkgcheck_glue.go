@@ -152,24 +152,26 @@ func optInt(opts map[string]any, key string, defaultVal int) int {
 	return defaultVal
 }
 
-// defaultResolverNames is the ordered list of all built-in resolver names.
-var defaultResolverNames = []string{"npm", "pnpm", "yarn", "pip", "uv", "poetry"}
+// defaultResolverNames is the ordered list of verified built-in resolver names.
+// pnpm, yarn, and poetry are excluded from defaults because their parsers
+// have not been verified against real CLI output (parsers are placeholder JSON
+// formats that do not match actual tool output). Enable them explicitly via
+// package_checks.resolvers.pnpm: {}, .yarn: {}, or .poetry: {}.
+var defaultResolverNames = []string{"npm", "pip", "uv"}
 
 // buildResolvers constructs pkgcheck.Resolver instances from the resolved
-// configuration map. If cfgMap is nil or empty, all six built-in resolvers
-// are returned with their internal defaults (so package_checks.enabled: true
-// with no resolvers: key still works). Unknown resolver names are fatal.
+// configuration map. If cfgMap is nil or empty, only verified resolvers
+// (npm, pip, uv) are returned with their internal defaults. Unknown resolver
+// names are fatal.
 func buildResolvers(cfgMap map[string]config.ResolverConfig) ([]pkgcheck.Resolver, error) {
 	if len(cfgMap) == 0 {
-		// Default: all six resolvers with zero-value config (each uses its own
-		// internal defaults for DryRunCommand and Timeout).
+		// Default: verified resolvers only with zero-value config (each uses its
+		// own internal defaults for DryRunCommand and Timeout). pnpm, yarn, and
+		// poetry are omitted because their output parsers are placeholders.
 		return []pkgcheck.Resolver{
 			resolver.NewNPMResolver(resolver.NPMResolverConfig{}),
-			resolver.NewPNPMResolver(resolver.PNPMResolverConfig{}),
-			resolver.NewYarnResolver(resolver.YarnResolverConfig{}),
 			resolver.NewPipResolver(resolver.PipResolverConfig{}),
 			resolver.NewUVResolver(resolver.UVResolverConfig{}),
-			resolver.NewPoetryResolver(resolver.PoetryResolverConfig{}),
 		}, nil
 	}
 

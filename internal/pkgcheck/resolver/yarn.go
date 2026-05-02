@@ -19,7 +19,9 @@ type YarnResolverConfig struct {
 }
 
 type yarnResolver struct {
-	cfg YarnResolverConfig
+	cfg        YarnResolverConfig
+	binary     string
+	prefixArgs []string
 }
 
 // NewYarnResolver creates a resolver for yarn add commands.
@@ -30,7 +32,16 @@ func NewYarnResolver(cfg YarnResolverConfig) pkgcheck.Resolver {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	return &yarnResolver{cfg: cfg}
+	// Split the command string into binary + args. Allows users to configure
+	// a full invocation like "yarn add --mode update-lockfile" rather than just the binary path.
+	parts := strings.Fields(cfg.DryRunCommand)
+	binary := cfg.DryRunCommand
+	var prefixArgs []string
+	if len(parts) > 1 {
+		binary = parts[0]
+		prefixArgs = parts[1:]
+	}
+	return &yarnResolver{cfg: cfg, binary: binary, prefixArgs: prefixArgs}
 }
 
 func (r *yarnResolver) Name() string { return "yarn" }
@@ -62,8 +73,9 @@ func (r *yarnResolver) Resolve(ctx context.Context, workDir string, command []st
 	// yarn add --mode update-lockfile <packages>
 	cmdArgs := []string{"add", "--mode", "update-lockfile"}
 	cmdArgs = append(cmdArgs, packages...)
+	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
-	cmd := exec.CommandContext(ctx, r.cfg.DryRunCommand, cmdArgs...)
+	cmd := exec.CommandContext(ctx, r.binary, allArgs...)
 	cmd.Dir = workDir
 
 	out, err := cmd.Output()
@@ -102,6 +114,7 @@ func parseYarnDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Insta
 	plan := &pkgcheck.InstallPlan{
 		Tool:       "yarn",
 		Ecosystem:  pkgcheck.EcosystemNPM,
+		Registry:   "registry.npmjs.org",
 		ResolvedAt: time.Now(),
 	}
 

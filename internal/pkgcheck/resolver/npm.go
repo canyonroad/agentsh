@@ -19,7 +19,9 @@ type NPMResolverConfig struct {
 }
 
 type npmResolver struct {
-	cfg NPMResolverConfig
+	cfg        NPMResolverConfig
+	binary     string
+	prefixArgs []string
 }
 
 // NewNPMResolver creates a resolver for npm install commands.
@@ -30,7 +32,17 @@ func NewNPMResolver(cfg NPMResolverConfig) pkgcheck.Resolver {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	return &npmResolver{cfg: cfg}
+	// Split the command string into binary + args. Allows users to configure
+	// a full invocation like "npm install --package-lock-only --ignore-scripts"
+	// rather than just the binary path.
+	parts := strings.Fields(cfg.DryRunCommand)
+	binary := cfg.DryRunCommand
+	var prefixArgs []string
+	if len(parts) > 1 {
+		binary = parts[0]
+		prefixArgs = parts[1:]
+	}
+	return &npmResolver{cfg: cfg, binary: binary, prefixArgs: prefixArgs}
 }
 
 func (r *npmResolver) Name() string { return "npm" }
@@ -67,8 +79,9 @@ func (r *npmResolver) Resolve(ctx context.Context, workDir string, command []str
 	// npm install --package-lock-only --ignore-scripts --json <packages>
 	cmdArgs := []string{"install", "--package-lock-only", "--ignore-scripts", "--json"}
 	cmdArgs = append(cmdArgs, packages...)
+	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
-	cmd := exec.CommandContext(ctx, r.cfg.DryRunCommand, cmdArgs...)
+	cmd := exec.CommandContext(ctx, r.binary, allArgs...)
 	cmd.Dir = workDir
 
 	out, err := cmd.Output()
@@ -106,6 +119,7 @@ func parseNPMDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Instal
 	plan := &pkgcheck.InstallPlan{
 		Tool:       "npm",
 		Ecosystem:  pkgcheck.EcosystemNPM,
+		Registry:   "registry.npmjs.org",
 		ResolvedAt: time.Now(),
 	}
 
