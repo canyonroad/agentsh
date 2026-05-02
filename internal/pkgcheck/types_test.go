@@ -190,12 +190,31 @@ func TestInstallPlan_AllPackages_Empty(t *testing.T) {
 }
 
 func TestSkippedPackage_ReasonString(t *testing.T) {
-	s := SkippedPackage{
-		Package: PackageRef{Name: "@acme/internal", Version: "1.0.0"},
-		Reason:  SkipReasonPrivateRegistry,
+	tests := []struct {
+		name   string
+		reason SkipReason
+		want   string
+	}{
+		{
+			name:   "private registry",
+			reason: SkipReasonPrivateRegistry,
+			want:   "private_registry",
+		},
+		{
+			name:   "private scope denylist",
+			reason: SkipReasonPrivateScopeDenylist,
+			want:   "private_scope_denylist",
+		},
 	}
-	if s.Reason != "private_registry" {
-		t.Fatalf("want private_registry, got %s", s.Reason)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := SkippedPackage{
+				Package: PackageRef{Name: "@acme/internal", Version: "1.0.0"},
+				Reason:  tt.reason,
+			}
+			assert.Equal(t, tt.want, string(s.Reason))
+		})
 	}
 }
 
@@ -207,7 +226,6 @@ func TestVerdict_SkippedSurfaced(t *testing.T) {
 			Reason:  SkipReasonPrivateRegistry,
 		}},
 	}
-	if len(v.Skipped) != 1 {
-		t.Fatalf("want 1 skipped, got %d", len(v.Skipped))
-	}
+	assert.Len(t, v.Skipped, 1)
+	assert.Equal(t, SkipReasonPrivateRegistry, v.Skipped[0].Reason)
 }
