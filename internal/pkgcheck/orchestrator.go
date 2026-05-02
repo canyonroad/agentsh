@@ -28,7 +28,8 @@ func (e ProviderError) Error() string {
 
 // OrchestratorConfig holds configuration for the check orchestrator.
 type OrchestratorConfig struct {
-	Providers map[string]ProviderEntry
+	Providers     map[string]ProviderEntry
+	PrivacyFilter *PrivacyFilter // optional; nil means no filtering
 }
 
 // Orchestrator fans out check requests to all enabled providers in parallel,
@@ -44,7 +45,10 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	for k, v := range cfg.Providers {
 		providers[k] = v
 	}
-	return &Orchestrator{cfg: OrchestratorConfig{Providers: providers}}
+	return &Orchestrator{cfg: OrchestratorConfig{
+		Providers:     providers,
+		PrivacyFilter: cfg.PrivacyFilter,
+	}}
 }
 
 // CheckAll dispatches the request to all configured providers in parallel and
@@ -107,4 +111,18 @@ func (o *Orchestrator) CheckAll(ctx context.Context, req CheckRequest) ([]Findin
 
 	wg.Wait()
 	return findings, errs
+}
+
+// CheckAllWithPrivacy applies the configured PrivacyFilter (if any) before
+// dispatching the request to all providers. Returns merged findings, provider
+// errors, and the list of packages that were not externally scanned.
+func (o *Orchestrator) CheckAllWithPrivacy(ctx context.Context, req CheckRequest) ([]Finding, []ProviderError, []SkippedPackage) {
+	var skipped []SkippedPackage
+	if o.cfg.PrivacyFilter != nil {
+		scan, skip := o.cfg.PrivacyFilter.Partition(req.Packages)
+		req.Packages = scan
+		skipped = skip
+	}
+	findings, errs := o.CheckAll(ctx, req)
+	return findings, errs, skipped
 }
