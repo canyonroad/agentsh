@@ -43,9 +43,15 @@ func NewPrivacyFilter(cfg PrivacyConfig) *PrivacyFilter {
 // Decision order: registry rule first (if an allowlist is configured),
 // then scope/prefix denylist. A package skipped for "private_registry"
 // is never re-classified to "private_scope_denylist."
+//
+// Fail-closed semantics: when the allowlist is non-empty, packages with
+// an empty Registry are treated as private (skipped), not waved through.
+// Missing registry metadata can mean an unresolved or internal package
+// whose origin is unknown to us — sending its name to a third-party API
+// would leak information about internal architecture.
 func (f *PrivacyFilter) Partition(pkgs []PackageRef) (scan []PackageRef, skip []SkippedPackage) {
 	for _, p := range pkgs {
-		if len(f.allowedRegistries) > 0 && p.Registry != "" {
+		if len(f.allowedRegistries) > 0 {
 			if _, ok := f.allowedRegistries[p.Registry]; !ok {
 				skip = append(skip, SkippedPackage{Package: p, Reason: SkipReasonPrivateRegistry})
 				continue

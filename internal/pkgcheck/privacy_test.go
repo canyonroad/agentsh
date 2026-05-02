@@ -67,3 +67,19 @@ func TestPrivacyFilter_RegistryRuleTakesPriority(t *testing.T) {
 		t.Fatalf("want private_registry, got %+v", skip)
 	}
 }
+
+func TestPrivacyFilter_EmptyRegistryFailsClosed(t *testing.T) {
+	pf := NewPrivacyFilter(PrivacyConfig{
+		ExternalScanRegistries: []string{"registry.npmjs.org"},
+	})
+	in := []PackageRef{
+		{Name: "lodash", Version: "4.17.21", Registry: ""}, // resolver did not populate Registry
+	}
+	scan, skip := pf.Partition(in)
+	if len(scan) != 0 {
+		t.Errorf("empty Registry must not bypass the allowlist; scan=%+v", scan)
+	}
+	if len(skip) != 1 || skip[0].Reason != SkipReasonPrivateRegistry {
+		t.Errorf("want skip with private_registry reason; got %+v", skip)
+	}
+}
