@@ -141,6 +141,14 @@ func TestDefaultPackageChecksConfig_HasPrivacyDefaults(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_PackageChecksPrivacy(t *testing.T) {
+	cfg := &Config{} // empty — no YAML privacy block
+	applyDefaults(cfg)
+	if len(cfg.PackageChecks.Privacy.ExternalScanRegistries) == 0 {
+		t.Error("default Privacy.ExternalScanRegistries should be set after applyDefaults")
+	}
+}
+
 func TestPackageChecksConfig_InConfig(t *testing.T) {
 	yamlInput := `
 package_checks:

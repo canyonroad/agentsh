@@ -189,6 +189,40 @@ func TestInstallPlan_AllPackages_Empty(t *testing.T) {
 	assert.Empty(t, all)
 }
 
+func TestInstallPlan_AllPackagesWithRegistry(t *testing.T) {
+	plan := InstallPlan{
+		Registry: "registry.npmjs.org",
+		Direct:   []PackageRef{{Name: "lodash", Version: "1"}, {Name: "weird", Version: "1", Registry: "explicit.example"}},
+		Transitive: []PackageRef{{Name: "underscore", Version: "1"}},
+	}
+	out := plan.AllPackagesWithRegistry()
+	if len(out) != 3 {
+		t.Fatalf("want 3 packages, got %d", len(out))
+	}
+	if out[0].Registry != "registry.npmjs.org" {
+		t.Errorf("direct[0] should inherit plan registry, got %q", out[0].Registry)
+	}
+	if out[1].Registry != "explicit.example" {
+		t.Errorf("explicit registry must be preserved, got %q", out[1].Registry)
+	}
+	if out[2].Registry != "registry.npmjs.org" {
+		t.Errorf("transitive[0] should inherit plan registry, got %q", out[2].Registry)
+	}
+}
+
+func TestInstallPlan_AllPackagesWithRegistry_EmptyPlanRegistry(t *testing.T) {
+	plan := InstallPlan{
+		Direct: []PackageRef{{Name: "lodash", Version: "1"}},
+	}
+	out := plan.AllPackagesWithRegistry()
+	if len(out) != 1 {
+		t.Fatalf("want 1 package, got %d", len(out))
+	}
+	if out[0].Registry != "" {
+		t.Errorf("empty plan.Registry must NOT make up a value; got %q", out[0].Registry)
+	}
+}
+
 func TestSkippedPackage_ReasonString(t *testing.T) {
 	tests := []struct {
 		name   string

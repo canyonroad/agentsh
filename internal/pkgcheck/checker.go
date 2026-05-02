@@ -77,7 +77,7 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 	// 4. Run all providers in parallel, applying privacy filtering.
 	findings, providerErrs, skipped := c.orch.CheckAllWithPrivacy(ctx, CheckRequest{
 		Ecosystem: plan.Ecosystem,
-		Packages:  plan.AllPackages(),
+		Packages:  plan.AllPackagesWithRegistry(),
 	})
 
 	// 5. Handle provider errors: collect all, then apply strictest action.

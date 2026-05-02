@@ -50,6 +50,26 @@ func (p InstallPlan) AllPackages() []PackageRef {
 	return all
 }
 
+// AllPackagesWithRegistry returns every direct and transitive package, with
+// the InstallPlan's Registry value copied onto any PackageRef that has an
+// empty Registry. The PrivacyFilter relies on PackageRef.Registry for the
+// allowlist check; without this propagation a default-public-registry
+// install would be classified as private and skipped.
+func (p InstallPlan) AllPackagesWithRegistry() []PackageRef {
+	all := p.AllPackages()
+	if p.Registry == "" {
+		return all
+	}
+	out := make([]PackageRef, len(all))
+	for i, pkg := range all {
+		if pkg.Registry == "" {
+			pkg.Registry = p.Registry
+		}
+		out[i] = pkg
+	}
+	return out
+}
+
 // FindingType classifies the kind of issue found during a package check.
 type FindingType string
 

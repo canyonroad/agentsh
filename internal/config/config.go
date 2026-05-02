@@ -1920,6 +1920,14 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.PackageChecks.Providers == nil {
 		cfg.PackageChecks.Providers = pkgDefaults.Providers
 	}
+	// Privacy block defaults: an unset list (nil) inherits the
+	// public-registry allowlist so the privacy gate is on by default.
+	// Use == nil rather than len(...) == 0 so users can explicitly disable
+	// the filter by setting external_scan_registries: [] in YAML.
+	if cfg.PackageChecks.Privacy.ExternalScanRegistries == nil {
+		cfg.PackageChecks.Privacy.ExternalScanRegistries = pkgDefaults.Privacy.ExternalScanRegistries
+	}
+	// PrivateScopeDenylist defaults to nil intentionally (no scope blocked by default).
 
 	// Policy socket defaults (macOS system extension IPC)
 	if cfg.PolicySocket.Path == "" {

@@ -337,3 +337,62 @@ func TestChecker_PrivacyFilterSurfacesSkipped(t *testing.T) {
 	assert.Equal(t, "@private/utils", verdict.Skipped[0].Package.Name)
 	assert.Equal(t, SkipReasonPrivateScopeDenylist, verdict.Skipped[0].Reason)
 }
+
+// fakeResolver returns a fixed InstallPlan.
+type fakeResolver struct {
+	plan *InstallPlan
+}
+
+func (f *fakeResolver) Name() string                          { return "fake-resolver" }
+func (f *fakeResolver) CanResolve(_ string, _ []string) bool  { return true }
+func (f *fakeResolver) Resolve(_ context.Context, _ string, _ []string) (*InstallPlan, error) {
+	return f.plan, nil
+}
+
+// TestChecker_RegistryPropagationAllowsPublicPackages proves that packages
+// without an explicit Registry on the PackageRef still pass the privacy filter
+// when the plan's Registry matches the allowlist. Without AllPackagesWithRegistry,
+// the fail-closed rule would skip every package and the provider would never fire.
+func TestChecker_RegistryPropagationAllowsPublicPackages(t *testing.T) {
+	rp := &recordingProvider{name: "fake"}
+
+	resolver := &fakeResolver{
+		plan: &InstallPlan{
+			Tool:      "npm",
+			Ecosystem: EcosystemNPM,
+			Registry:  "registry.npmjs.org", // plan-level registry, NOT on the refs
+			Direct: []PackageRef{
+				{Name: "lodash", Version: "4.17.21", Direct: true}, // no Registry field
+			},
+		},
+	}
+
+	rules := []policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	}
+
+	checker := NewChecker(CheckerConfig{
+		Scope:     "new_packages_only",
+		Resolvers: []Resolver{resolver},
+		Providers: map[string]ProviderEntry{
+			"fake": {Provider: rp, Timeout: 5 * time.Second, OnFailure: "warn"},
+		},
+		Rules:     rules,
+		Allowlist: NewAllowlist(30 * time.Second),
+		Privacy: PrivacyConfig{
+			ExternalScanRegistries: []string{"registry.npmjs.org"},
+		},
+	})
+
+	verdict, err := checker.Check(context.Background(), "npm", []string{"install", "lodash"}, t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, verdict)
+
+	// The provider must have received lodash — not skipped due to empty Registry.
+	require.Len(t, rp.last, 1, "provider should receive the package (registry propagated from plan)")
+	assert.Equal(t, "lodash", rp.last[0].Name)
+	assert.Equal(t, "registry.npmjs.org", rp.last[0].Registry, "registry should be populated from plan")
+
+	// No packages should be skipped.
+	assert.Empty(t, verdict.Skipped, "no packages should be skipped for a public-registry install")
+}
