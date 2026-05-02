@@ -407,3 +407,56 @@ func TestSnykProvider_AuthErrorDoesNotPoisonBreaker(t *testing.T) {
 		}
 	}
 }
+
+func TestSnykProvider_FindingsOrderMatchesInputOrder(t *testing.T) {
+	// Different per-package response delays force concurrent workers to
+	// complete in a different order than they started. The merged findings
+	// must still come out in input order.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The package name is in the URL path: /rest/orgs/{org}/packages/npm%2F{name}/issues
+		var sleepMs time.Duration
+		if strings.Contains(r.URL.Path, "fast") {
+			sleepMs = 5 * time.Millisecond
+		} else {
+			sleepMs = 60 * time.Millisecond
+		}
+		time.Sleep(sleepMs)
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		// One finding per package, with the package name embedded in the title
+		// so we can assert ordering at the finding level.
+		_, _ = w.Write([]byte(`{"data":[{
+			"id":"X",
+			"type":"issue",
+			"attributes":{"title":"` + r.URL.Path + `","severity":"low","type":"package_vulnerability"}
+		}]}`))
+	}))
+	defer srv.Close()
+
+	p := NewSnykProvider(SnykConfig{
+		BaseURL:     srv.URL,
+		APIKey:      "test",
+		OrgID:       "org",
+		Concurrency: 4,
+	})
+	resp, err := p.CheckBatch(context.Background(), pkgcheck.CheckRequest{
+		Ecosystem: pkgcheck.EcosystemNPM,
+		Packages: []pkgcheck.PackageRef{
+			{Name: "slow-1", Version: "1"},
+			{Name: "fast-1", Version: "1"},
+			{Name: "slow-2", Version: "1"},
+			{Name: "fast-2", Version: "1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Findings) != 4 {
+		t.Fatalf("want 4 findings, got %d", len(resp.Findings))
+	}
+	wantOrder := []string{"slow-1", "fast-1", "slow-2", "fast-2"}
+	for i, want := range wantOrder {
+		if resp.Findings[i].Package.Name != want {
+			t.Errorf("findings[%d]: want package %q, got %q", i, want, resp.Findings[i].Package.Name)
+		}
+	}
+}

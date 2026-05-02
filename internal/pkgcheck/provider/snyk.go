@@ -140,18 +140,21 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 
 	var (
 		mu         sync.Mutex
-		allFindings []pkgcheck.Finding
 		errCount   int
 		breakerErr error
 		authErr    error // first auth error wins; non-nil short-circuits result
 	)
+
+	// Findings are stored per package index so the final order matches the
+	// input order regardless of worker completion order.
+	perPkgFindings := make([][]pkgcheck.Finding, n)
 
 	// Semaphore channel for bounded concurrency.
 	sem := make(chan struct{}, p.concurrency)
 
 	var wg sync.WaitGroup
 
-	for _, pkg := range req.Packages {
+	for i, pkg := range req.Packages {
 		// Stop scheduling new work once batch is cancelled (e.g., auth failure).
 		if batchCtx.Err() != nil {
 			mu.Lock()
@@ -162,7 +165,7 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 
 		wg.Add(1)
 		sem <- struct{}{}
-		pkg := pkg // capture
+		i, pkg := i, pkg // capture
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -203,10 +206,19 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 				}
 				return
 			}
-			allFindings = append(allFindings, findings...)
+			perPkgFindings[i] = findings
 		}()
 	}
 	wg.Wait()
+
+	// Merge per-package findings in input order. perPkgFindings[i] is nil
+	// for packages whose worker errored, which is fine — we skip nil entries.
+	var allFindings []pkgcheck.Finding
+	for _, fs := range perPkgFindings {
+		if len(fs) > 0 {
+			allFindings = append(allFindings, fs...)
+		}
+	}
 
 	if authErr != nil {
 		return nil, fmt.Errorf("snyk: authentication failed: %w", authErr)
