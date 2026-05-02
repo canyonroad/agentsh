@@ -206,6 +206,35 @@ func TestSnykProvider_RetriesOn5xx(t *testing.T) {
 	assert.Equal(t, 3, attempts, "expected 3 server hits (2 failures + 1 success)")
 }
 
+func TestSnyk_Contract(t *testing.T) {
+	cleanSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer cleanSrv.Close()
+
+	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer slowSrv.Close()
+
+	factory := func(t *testing.T, baseURL string) pkgcheck.CheckProvider {
+		return NewSnykProvider(SnykConfig{
+			BaseURL:     baseURL,
+			APIKey:      "test",
+			OrgID:       "test",
+			Timeout:     2 * time.Second,
+			Concurrency: 4,
+		})
+	}
+	runContractSuite(t, "snyk", factory, contractFixture{
+		cleanServerURL: cleanSrv.URL,
+		slowServerURL:  slowSrv.URL,
+	})
+}
+
 func TestSnykProvider_BreakerOpensAfterRepeatedFailures(t *testing.T) {
 	serverHits := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

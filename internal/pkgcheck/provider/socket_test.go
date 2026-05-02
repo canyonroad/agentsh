@@ -169,6 +169,33 @@ func TestSocketProvider_RetriesOn5xx(t *testing.T) {
 	assert.Equal(t, 3, attempts, "expected 3 server hits (2 failures + 1 success)")
 }
 
+func TestSocket_Contract(t *testing.T) {
+	cleanSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"packages":[]}`))
+	}))
+	defer cleanSrv.Close()
+
+	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"packages":[]}`))
+	}))
+	defer slowSrv.Close()
+
+	factory := func(t *testing.T, baseURL string) pkgcheck.CheckProvider {
+		return NewSocketProvider(SocketConfig{
+			BaseURL: baseURL,
+			APIKey:  "test",
+			Timeout: 2 * time.Second,
+		})
+	}
+	runContractSuite(t, "socket", factory, contractFixture{
+		cleanServerURL: cleanSrv.URL,
+		slowServerURL:  slowSrv.URL,
+	})
+}
+
 func TestSocketProvider_BreakerOpensAfterRepeatedFailures(t *testing.T) {
 	serverHits := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
