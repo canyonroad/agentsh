@@ -1950,6 +1950,14 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		cfg.PackageChecks.Privacy.ExternalScanRegistries = pkgDefaults.Privacy.ExternalScanRegistries
 	}
 	// PrivateScopeDenylist defaults to nil intentionally (no scope blocked by default).
+	// BlockOn defaults: apply when all fields are empty (YAML omitted the block_on section).
+	if cfg.PackageChecks.BlockOn.Malware == "" &&
+		cfg.PackageChecks.BlockOn.Vulnerability == "" &&
+		cfg.PackageChecks.BlockOn.License == "" &&
+		cfg.PackageChecks.BlockOn.Reputation == "" &&
+		cfg.PackageChecks.BlockOn.Provenance == "" {
+		cfg.PackageChecks.BlockOn = pkgDefaults.BlockOn
+	}
 
 	// Policy socket defaults (macOS system extension IPC)
 	if cfg.PolicySocket.Path == "" {
@@ -2258,6 +2266,11 @@ func validateConfig(cfg *Config) error {
 	// patterns fail at startup rather than silently fail open at runtime.
 	if err := cfg.PackageChecks.Privacy.Validate(); err != nil {
 		return fmt.Errorf("package_checks.privacy: %w", err)
+	}
+	// Validate block_on shorthand enum values so a typo like
+	// vulnerability=critcal doesn't silently compile to a permissive policy.
+	if err := cfg.PackageChecks.BlockOn.Validate(); err != nil {
+		return fmt.Errorf("package_checks.%w", err)
 	}
 	// Landlock network self-lockout check: if the user disables outbound TCP
 	// under Landlock but the sandbox proxy is enabled, agents can never reach

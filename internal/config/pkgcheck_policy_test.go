@@ -73,3 +73,24 @@ func containsRule(rules []policy.PackageRule, want policy.PackageRule) bool {
 	}
 	return false
 }
+
+func TestBlockOnConfig_ValidateRejectsTypos(t *testing.T) {
+	cfg := BlockOnConfig{Vulnerability: "critcal"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("typo must be rejected")
+	}
+}
+
+func TestBlockOnConfig_ValidateAcceptsAllValidCombinations(t *testing.T) {
+	cases := []BlockOnConfig{
+		{Malware: "any", Vulnerability: "critical", License: "never", Reputation: "never", Provenance: "never"},
+		{Malware: "critical", Vulnerability: "high"},
+		{Malware: "never", Vulnerability: "medium", License: "any"},
+		{}, // all empty is fine
+	}
+	for _, c := range cases {
+		if err := c.Validate(); err != nil {
+			t.Errorf("config %+v: unexpected error %v", c, err)
+		}
+	}
+}

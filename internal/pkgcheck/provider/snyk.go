@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/pkgcheck"
@@ -138,11 +139,16 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 	batchCtx, cancelBatch := context.WithCancel(ctx)
 	defer cancelBatch()
 
+	// authErr is stored atomically so that a concurrent worker observing the
+	// batchCtx cancellation cannot race with the worker that set the error.
+	// CompareAndSwap ensures exactly one auth error is recorded; the pointer
+	// indirection is required because atomic.Pointer needs a concrete type.
+	var authErr atomic.Pointer[error]
+
 	var (
 		mu         sync.Mutex
 		errCount   int
 		breakerErr error
-		authErr    error // first auth error wins; non-nil short-circuits result
 	)
 
 	// Findings are stored per package index so the final order matches the
@@ -207,9 +213,16 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 			defer mu.Unlock()
 			if err != nil {
 				errCount++
-				if isSnykAuthError(err) && authErr == nil {
-					authErr = err
-					cancelBatch() // signal other workers to bail
+				if isSnykAuthError(err) {
+					// Store atomically BEFORE cancelling so concurrent workers
+					// observing the cancellation cannot beat us to the merged
+					// result. CompareAndSwap ensures only the first auth error
+					// wins; subsequent ones are dropped (any auth error serves
+					// as the fail-fast signal).
+					e := err
+					if authErr.CompareAndSwap(nil, &e) {
+						cancelBatch() // signal other workers to bail
+					}
 				}
 				if errors.Is(err, errBreakerOpen) {
 					breakerErr = err
@@ -230,8 +243,8 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 		}
 	}
 
-	if authErr != nil {
-		return nil, fmt.Errorf("snyk: authentication failed: %w", authErr)
+	if ae := authErr.Load(); ae != nil {
+		return nil, fmt.Errorf("snyk: authentication failed: %w", *ae)
 	}
 
 	partial := errCount > 0

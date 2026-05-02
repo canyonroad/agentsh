@@ -26,6 +26,9 @@ type PackageChecksConfig struct {
 	//   "degraded" — fall back to OSV findings, annotate the verdict.
 	// The env var PKGCHECK_FAIL_MODE overrides this at runtime.
 	FailMode string `yaml:"fail_mode" json:"fail_mode"`
+	// BlockOn is the per-finding-type severity-threshold shorthand that
+	// compiles to a list of policy rules via CompileBlockOn.
+	BlockOn BlockOnConfig `yaml:"block_on" json:"block_on"`
 }
 
 // PackagePrivacyConfig configures the upstream privacy filter applied
@@ -209,6 +212,13 @@ func DefaultPackageChecksConfig() PackageChecksConfig {
 			},
 			PrivateScopeDenylist: nil,
 		},
+		BlockOn: BlockOnConfig{
+			Malware:       "any",
+			Vulnerability: "critical",
+			License:       "never",
+			Reputation:    "never",
+			Provenance:    "never",
+		},
 	}
 }
 
@@ -225,6 +235,39 @@ type BlockOnConfig struct {
 	License       string `yaml:"license" json:"license"`
 	Reputation    string `yaml:"reputation" json:"reputation"`
 	Provenance    string `yaml:"provenance" json:"provenance"`
+}
+
+// Validate ensures every field in BlockOnConfig holds an enum value from its
+// documented set. Empty strings are permitted (treated as "no rule for this
+// finding type"). Unknown values fail loudly so a typo like "critcal" doesn't
+// compile to permissive policy.
+func (b BlockOnConfig) Validate() error {
+	for _, kv := range []struct {
+		name  string
+		value string
+		valid []string
+	}{
+		{"malware", b.Malware, []string{"", "any", "critical", "never"}},
+		{"vulnerability", b.Vulnerability, []string{"", "critical", "high", "medium", "never"}},
+		{"license", b.License, []string{"", "any", "never"}},
+		{"reputation", b.Reputation, []string{"", "any", "never"}},
+		{"provenance", b.Provenance, []string{"", "any", "never"}},
+	} {
+		if !blockOnContains(kv.valid, kv.value) {
+			return fmt.Errorf("block_on.%s=%q invalid (must be one of %v)", kv.name, kv.value, kv.valid)
+		}
+	}
+	return nil
+}
+
+// blockOnContains reports whether needle is in haystack.
+func blockOnContains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // CompileBlockOn translates the BlockOnConfig shorthand into a list of
