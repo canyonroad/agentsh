@@ -192,31 +192,37 @@ func buildResolver(name string, rc config.ResolverConfig) (pkgcheck.Resolver, er
 	case "npm":
 		return resolver.NewNPMResolver(resolver.NPMResolverConfig{
 			DryRunCommand: rc.DryRunCommand,
+			DryRunArgs:    rc.DryRunArgs,
 			Timeout:       rc.Timeout,
 		}), nil
 	case "pnpm":
 		return resolver.NewPNPMResolver(resolver.PNPMResolverConfig{
 			DryRunCommand: rc.DryRunCommand,
+			DryRunArgs:    rc.DryRunArgs,
 			Timeout:       rc.Timeout,
 		}), nil
 	case "yarn":
 		return resolver.NewYarnResolver(resolver.YarnResolverConfig{
 			DryRunCommand: rc.DryRunCommand,
+			DryRunArgs:    rc.DryRunArgs,
 			Timeout:       rc.Timeout,
 		}), nil
 	case "pip":
 		return resolver.NewPipResolver(resolver.PipResolverConfig{
 			DryRunCommand: rc.DryRunCommand,
+			DryRunArgs:    rc.DryRunArgs,
 			Timeout:       rc.Timeout,
 		}), nil
 	case "uv":
 		return resolver.NewUVResolver(resolver.UVResolverConfig{
 			DryRunCommand: rc.DryRunCommand,
+			DryRunArgs:    rc.DryRunArgs,
 			Timeout:       rc.Timeout,
 		}), nil
 	case "poetry":
 		return resolver.NewPoetryResolver(resolver.PoetryResolverConfig{
 			DryRunCommand: rc.DryRunCommand,
+			DryRunArgs:    rc.DryRunArgs,
 			Timeout:       rc.Timeout,
 		}), nil
 	default:

@@ -704,60 +704,108 @@ func TestPoetryResolver_PlanCarriesRegistry(t *testing.T) {
 	assert.Equal(t, "pypi.org", plan.Registry)
 }
 
-// --- DryRunCommand multi-token parsing tests ---
+// --- DryRunArgs explicit-fields tests ---
 
-func TestNPMResolver_MultiTokenDryRunCommand(t *testing.T) {
+func TestNPMResolver_DryRunArgs(t *testing.T) {
 	r := NewNPMResolver(NPMResolverConfig{
-		DryRunCommand: "npx npm --prefix /tmp",
+		DryRunCommand: "npx",
+		DryRunArgs:    []string{"npm", "--prefix", "/tmp"},
 	}).(*npmResolver)
 	assert.Equal(t, "npx", r.binary)
 	assert.Equal(t, []string{"npm", "--prefix", "/tmp"}, r.prefixArgs)
 }
 
-func TestNPMResolver_SingleTokenDryRunCommand(t *testing.T) {
+func TestNPMResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
 	r := NewNPMResolver(NPMResolverConfig{
-		DryRunCommand: "/usr/local/bin/npm",
+		DryRunCommand: "/Program Files/node/npm.cmd",
+		DryRunArgs:    []string{"install", "--package-lock-only"},
 	}).(*npmResolver)
-	assert.Equal(t, "/usr/local/bin/npm", r.binary)
-	assert.Empty(t, r.prefixArgs)
+	assert.Equal(t, "/Program Files/node/npm.cmd", r.binary)
+	assert.Equal(t, []string{"install", "--package-lock-only"}, r.prefixArgs)
 }
 
-func TestPipResolver_MultiTokenDryRunCommand(t *testing.T) {
+func TestPipResolver_DryRunArgs(t *testing.T) {
 	r := NewPipResolver(PipResolverConfig{
-		DryRunCommand: "python -m pip",
+		DryRunCommand: "python",
+		DryRunArgs:    []string{"-m", "pip"},
 	}).(*pipResolver)
 	assert.Equal(t, "python", r.binary)
 	assert.Equal(t, []string{"-m", "pip"}, r.prefixArgs)
 }
 
-func TestUVResolver_MultiTokenDryRunCommand(t *testing.T) {
+func TestPipResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
+	r := NewPipResolver(PipResolverConfig{
+		DryRunCommand: "/Program Files/Python312/python.exe",
+		DryRunArgs:    []string{"-m", "pip"},
+	}).(*pipResolver)
+	assert.Equal(t, "/Program Files/Python312/python.exe", r.binary)
+	assert.Equal(t, []string{"-m", "pip"}, r.prefixArgs)
+}
+
+func TestUVResolver_DryRunArgs(t *testing.T) {
 	r := NewUVResolver(UVResolverConfig{
-		DryRunCommand: "/usr/local/bin/uv --quiet",
+		DryRunCommand: "/usr/local/bin/uv",
+		DryRunArgs:    []string{"--quiet"},
 	}).(*uvResolver)
 	assert.Equal(t, "/usr/local/bin/uv", r.binary)
 	assert.Equal(t, []string{"--quiet"}, r.prefixArgs)
 }
 
-func TestPNPMResolver_MultiTokenDryRunCommand(t *testing.T) {
+func TestUVResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
+	r := NewUVResolver(UVResolverConfig{
+		DryRunCommand: "/Program Files/uv/uv.exe",
+	}).(*uvResolver)
+	assert.Equal(t, "/Program Files/uv/uv.exe", r.binary)
+	assert.Empty(t, r.prefixArgs)
+}
+
+func TestPNPMResolver_DryRunArgs(t *testing.T) {
 	r := NewPNPMResolver(PNPMResolverConfig{
-		DryRunCommand: "pnpm --store-dir /tmp",
+		DryRunCommand: "pnpm",
+		DryRunArgs:    []string{"--store-dir", "/tmp"},
 	}).(*pnpmResolver)
 	assert.Equal(t, "pnpm", r.binary)
 	assert.Equal(t, []string{"--store-dir", "/tmp"}, r.prefixArgs)
 }
 
-func TestYarnResolver_MultiTokenDryRunCommand(t *testing.T) {
+func TestPNPMResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
+	r := NewPNPMResolver(PNPMResolverConfig{
+		DryRunCommand: "/Program Files/pnpm/pnpm.cmd",
+	}).(*pnpmResolver)
+	assert.Equal(t, "/Program Files/pnpm/pnpm.cmd", r.binary)
+	assert.Empty(t, r.prefixArgs)
+}
+
+func TestYarnResolver_DryRunArgs(t *testing.T) {
 	r := NewYarnResolver(YarnResolverConfig{
-		DryRunCommand: "yarn --cwd /tmp",
+		DryRunCommand: "yarn",
+		DryRunArgs:    []string{"--cwd", "/tmp"},
 	}).(*yarnResolver)
 	assert.Equal(t, "yarn", r.binary)
 	assert.Equal(t, []string{"--cwd", "/tmp"}, r.prefixArgs)
 }
 
-func TestPoetryResolver_MultiTokenDryRunCommand(t *testing.T) {
+func TestYarnResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
+	r := NewYarnResolver(YarnResolverConfig{
+		DryRunCommand: "/Program Files/yarn/bin/yarn.cmd",
+	}).(*yarnResolver)
+	assert.Equal(t, "/Program Files/yarn/bin/yarn.cmd", r.binary)
+	assert.Empty(t, r.prefixArgs)
+}
+
+func TestPoetryResolver_DryRunArgs(t *testing.T) {
 	r := NewPoetryResolver(PoetryResolverConfig{
-		DryRunCommand: "poetry --no-ansi",
+		DryRunCommand: "poetry",
+		DryRunArgs:    []string{"--no-ansi"},
 	}).(*poetryResolver)
 	assert.Equal(t, "poetry", r.binary)
 	assert.Equal(t, []string{"--no-ansi"}, r.prefixArgs)
+}
+
+func TestPoetryResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
+	r := NewPoetryResolver(PoetryResolverConfig{
+		DryRunCommand: "/Program Files/poetry/poetry.exe",
+	}).(*poetryResolver)
+	assert.Equal(t, "/Program Files/poetry/poetry.exe", r.binary)
+	assert.Empty(t, r.prefixArgs)
 }

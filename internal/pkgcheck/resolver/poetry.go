@@ -14,8 +14,13 @@ import (
 
 // PoetryResolverConfig configures the poetry resolver.
 type PoetryResolverConfig struct {
-	DryRunCommand string        // path to poetry binary; defaults to "poetry"
-	Timeout       time.Duration // timeout for dry-run execution
+	// DryRunCommand is the path to the poetry binary; defaults to "poetry".
+	// For additional args to prepend to the resolver-specific args, use DryRunArgs.
+	DryRunCommand string
+	// DryRunArgs contains args to prepend to the resolver-specific args.
+	// Each element is a single token (no shell splitting is performed).
+	DryRunArgs []string
+	Timeout    time.Duration // timeout for dry-run execution
 }
 
 type poetryResolver struct {
@@ -32,16 +37,9 @@ func NewPoetryResolver(cfg PoetryResolverConfig) pkgcheck.Resolver {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	// Split the command string into binary + args. Allows users to configure
-	// a full invocation like "poetry add --dry-run" rather than just the binary path.
-	parts := strings.Fields(cfg.DryRunCommand)
-	binary := cfg.DryRunCommand
-	var prefixArgs []string
-	if len(parts) > 1 {
-		binary = parts[0]
-		prefixArgs = parts[1:]
-	}
-	return &poetryResolver{cfg: cfg, binary: binary, prefixArgs: prefixArgs}
+	// DryRunCommand is the binary path only; DryRunArgs carries any prefix args.
+	// No shell splitting is performed so paths with spaces are preserved verbatim.
+	return &poetryResolver{cfg: cfg, binary: cfg.DryRunCommand, prefixArgs: cfg.DryRunArgs}
 }
 
 func (r *poetryResolver) Name() string { return "poetry" }
