@@ -511,3 +511,19 @@ func TestSnykProvider_SchedulingBailsOnCancelDuringSemaphoreWait(t *testing.T) {
 		t.Errorf("scheduling did not bail promptly on cancel; elapsed=%v", elapsed)
 	}
 }
+
+func TestSnykProvider_RejectsTrailingGarbageOnSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":[]} not-json`))
+	}))
+	defer srv.Close()
+	p := NewSnykProvider(SnykConfig{BaseURL: srv.URL, APIKey: "test", OrgID: "org", Concurrency: 1})
+	_, err := p.CheckBatch(context.Background(), pkgcheck.CheckRequest{
+		Ecosystem: pkgcheck.EcosystemNPM,
+		Packages:  []pkgcheck.PackageRef{{Name: "foo", Version: "1"}},
+	})
+	if err == nil {
+		t.Fatal("expected decode error from trailing garbage; got nil")
+	}
+}

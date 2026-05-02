@@ -298,7 +298,15 @@ func (p *snykProvider) fetchIssues(ctx context.Context, ecosystem string, pkg pk
 	}
 
 	var issuesResp snykIssuesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&issuesResp); err != nil {
+	// Use ReadAll + Unmarshal rather than NewDecoder.Decode — Decode accepts
+	// a valid JSON value followed by trailing garbage, so a body like
+	// `{"data":[]} junk` would silently parse as a successful empty response.
+	// Unmarshal is strict and errors on trailing data.
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("snyk: read response: %w", err)
+	}
+	if err := json.Unmarshal(respBody, &issuesResp); err != nil {
 		return nil, fmt.Errorf("snyk: decode response: %w", err)
 	}
 
