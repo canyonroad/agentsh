@@ -220,6 +220,33 @@ func mapSocketAlert(alert socketAlert) (pkgcheck.FindingType, pkgcheck.Severity)
 	return findingType, severity
 }
 
+// buildSocketPURLs converts a list of PackageRef to PURL strings (per spec
+// https://github.com/package-url/purl-spec) for Socket's batch endpoint.
+//
+// The package name is path-escaped so that `@scope/name` becomes
+// `%40scope/name`, complying with PURL grammar which forbids a literal `@`
+// in the name segment (it is reserved as the version separator).
+func buildSocketPURLs(eco pkgcheck.Ecosystem, pkgs []pkgcheck.PackageRef) []string {
+	ecoStr := mapEcosystemSocket(eco)
+	out := make([]string, 0, len(pkgs))
+	for _, p := range pkgs {
+		// Percent-encode only the leading `@` in scoped names like `@scope/pkg`.
+		// url.PathEscape does not encode `@` (it is a valid path char), so we
+		// replace it manually to satisfy the PURL name-segment grammar.
+		name := p.Name
+		if strings.HasPrefix(name, "@") && strings.Contains(name, "/") {
+			parts := strings.SplitN(name, "/", 2)
+			name = "%40" + parts[0][1:] + "/" + parts[1]
+		}
+		purl := "pkg:" + ecoStr + "/" + name
+		if p.Version != "" {
+			purl += "@" + p.Version
+		}
+		out = append(out, purl)
+	}
+	return out
+}
+
 // mapEcosystemSocket converts our Ecosystem type to the Socket ecosystem string.
 func mapEcosystemSocket(eco pkgcheck.Ecosystem) string {
 	switch eco {
