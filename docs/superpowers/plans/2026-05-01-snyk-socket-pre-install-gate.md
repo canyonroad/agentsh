@@ -1,5 +1,14 @@
 # Snyk and Socket Pre-Install Gating Implementation Plan
 
+> **PIVOT (2026-05-01, mid-execution):** During T5 we discovered that `internal/pkgcheck/provider/socket.go` and `snyk.go` already exist in the codebase from prior PRs (`a703bc06`, `90cf4934`). The original plan assumed both were greenfield. After T1-T4 landed (foundation types + retry/breaker infra), tasks T5-T10 were re-scoped from "create from scratch" to **"enhance existing providers with retry+breaker integration."** Specifically:
+>
+> - T5 was reverted (`buildSocketPURLs` is dead code — existing Socket uses `/v0/scan/batch`, not `/v0/purl`).
+> - T6/T7/T9/T10 dropped in favor of two new tasks: **T6'** (wire `retryClient` + `callWithBreaker` into existing `socketProvider.CheckBatch`) and **T7'** (same for `snykProvider`, plus add bounded concurrency to its sequential fan-out).
+> - **T8'** wires both existing providers into the shared contract suite from T2.
+> - Tasks T11-T20 stand essentially as written. Config defaults (T16) just need to ensure the existing `socket`/`snyk` provider entries exist in the providers map — they currently do not appear in `DefaultPackageChecksConfig()`.
+>
+> The original task descriptions below are kept for historical context but are NOT the source of truth past T4.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add Snyk and Socket as pluggable `CheckProvider` implementations so intercepted package installs can be gated pre-execution against supply-chain attacks, with degraded-fallback behavior, privacy filtering for private packages, and rule-engine-driven verdict policy.
