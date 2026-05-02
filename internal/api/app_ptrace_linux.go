@@ -5,6 +5,9 @@ package api
 import (
 	"context"
 	"log/slog"
+	"os"
+	"strconv"
+	"strings"
 
 	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
@@ -108,6 +111,58 @@ func (a *App) initPtraceTracer() {
 		}
 	}()
 	slog.Info("ptrace tracer started", "attach_mode", cfg.AttachMode)
+
+	// attach_mode: "pid" — attach to the configured target so PTRACE_O_TRACEFORK
+	// catches all its descendants. Without this wiring, the AttachMode field is
+	// parsed and validated but the runtime never calls AttachPID — the tracer
+	// runs with zero tracees and policy enforcement silently no-ops.
+	//
+	// Useful for hosts where the agentsh server is not the ancestor of the
+	// process tree being governed (OpenComputer's osb-agent, generic Docker
+	// exec setups, sidecar deployments, etc.).
+	if cfg.AttachMode == "pid" {
+		targetPID := cfg.TargetPID
+		if targetPID == 0 && cfg.TargetPIDFile != "" {
+			b, err := os.ReadFile(cfg.TargetPIDFile)
+			if err != nil {
+				slog.Error("ptrace: failed to read target_pid_file",
+					"path", cfg.TargetPIDFile, "error", err)
+				if cfg.OnAttachFailure == "fail_closed" {
+					a.ptraceFailed.Store(true)
+				}
+			} else {
+				n, parseErr := strconv.Atoi(strings.TrimSpace(string(b)))
+				if parseErr != nil || n <= 0 {
+					slog.Error("ptrace: target_pid_file does not contain a valid pid",
+						"path", cfg.TargetPIDFile, "error", parseErr, "raw", string(b))
+					if cfg.OnAttachFailure == "fail_closed" {
+						a.ptraceFailed.Store(true)
+					}
+				} else {
+					targetPID = n
+				}
+			}
+		}
+		if targetPID > 0 {
+			go func(pid int) {
+				if err := tr.AttachPID(pid); err != nil {
+					slog.Error("ptrace: AttachPID failed", "pid", pid, "error", err)
+					if cfg.OnAttachFailure == "fail_closed" {
+						a.ptraceFailed.Store(true)
+					}
+					return
+				}
+				if err := tr.WaitAttached(pid); err != nil {
+					slog.Error("ptrace: WaitAttached failed", "pid", pid, "error", err)
+					if cfg.OnAttachFailure == "fail_closed" {
+						a.ptraceFailed.Store(true)
+					}
+					return
+				}
+				slog.Info("ptrace: attached to target PID", "pid", pid)
+			}(targetPID)
+		}
+	}
 }
 
 // resolveFamilyCheckerForPtrace resolves the FamilyChecker to install on the
