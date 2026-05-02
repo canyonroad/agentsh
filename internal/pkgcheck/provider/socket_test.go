@@ -121,7 +121,8 @@ func TestSocketProvider_ServerError(t *testing.T) {
 		Packages:  []pkgcheck.PackageRef{{Name: "express", Version: "4.18.0"}},
 	})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unexpected status 403")
+	assert.Contains(t, err.Error(), "authentication failed")
+	assert.Contains(t, err.Error(), "403")
 }
 
 func TestSocketProvider_NoAlerts(t *testing.T) {
@@ -299,5 +300,39 @@ func TestSocketProvider_RejectsTrailingGarbageOnSuccess(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "decode") {
 		t.Errorf("expected decode error, got: %v", err)
+	}
+}
+
+func TestSocketProvider_AuthErrorDoesNotPoisonBreaker(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	}))
+	defer srv.Close()
+
+	p := newSocketProviderForTest(SocketConfig{
+		BaseURL: srv.URL,
+		APIKey:  "bad",
+		Timeout: 2 * time.Second,
+	}, circuitBreakerConfig{
+		Threshold:  2,
+		Window:     time.Second,
+		OpenPeriod: 200 * time.Millisecond,
+	})
+
+	for i := 0; i < 3; i++ {
+		_, err := p.CheckBatch(context.Background(), pkgcheck.CheckRequest{
+			Ecosystem: pkgcheck.EcosystemNPM,
+			Packages:  []pkgcheck.PackageRef{{Name: "foo", Version: "1"}},
+		})
+		if err == nil {
+			t.Fatalf("iteration %d: expected error", i)
+		}
+		if !strings.Contains(err.Error(), "authentication failed") {
+			t.Fatalf("iteration %d: want authentication failure, got %v", i, err)
+		}
+		if errors.Is(err, errBreakerOpen) {
+			t.Fatalf("iteration %d: auth error must not open breaker; got %v", i, err)
+		}
 	}
 }

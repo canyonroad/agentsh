@@ -80,8 +80,13 @@ func (f *PrivacyFilter) matchesDenylist(name string) bool {
 				}
 			}
 		} else {
-			// Plain prefix: matches "@acme" against "@acme/billing" and "@acme".
-			if name == pat || strings.HasPrefix(name, pat+"/") {
+			// Plain prefix match. Examples:
+			//   "@acme" matches "@acme" and "@acme/billing".
+			//   "internal-" matches "internal-tool", "internal-foo".
+			// Privacy semantics are fail-safe: an over-broad prefix produces
+			// over-skip (private), not under-skip (leak), so we err on the
+			// HasPrefix side. Users who need stricter semantics use globs.
+			if strings.HasPrefix(name, pat) {
 				return true
 			}
 		}

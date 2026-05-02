@@ -83,3 +83,26 @@ func TestPrivacyFilter_EmptyRegistryFailsClosed(t *testing.T) {
 		t.Errorf("want skip with private_registry reason; got %+v", skip)
 	}
 }
+
+func TestPrivacyFilter_DenylistMatchesUnscopedPrefix(t *testing.T) {
+	pf := NewPrivacyFilter(PrivacyConfig{
+		PrivateScopeDenylist: []string{"internal-"},
+	})
+	in := []PackageRef{
+		{Name: "internal-tool", Version: "1"},
+		{Name: "internal-foo", Version: "1"},
+		{Name: "external-thing", Version: "1"},
+	}
+	scan, skip := pf.Partition(in)
+	if len(scan) != 1 || scan[0].Name != "external-thing" {
+		t.Fatalf("scan = %+v, want external-thing only", scan)
+	}
+	if len(skip) != 2 {
+		t.Fatalf("skip = %+v, want 2 entries", skip)
+	}
+	for _, s := range skip {
+		if s.Reason != SkipReasonPrivateScopeDenylist {
+			t.Errorf("want denylist reason for %s, got %s", s.Package.Name, s.Reason)
+		}
+	}
+}

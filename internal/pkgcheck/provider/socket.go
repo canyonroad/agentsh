@@ -145,7 +145,7 @@ func (p *socketProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckReque
 	}
 
 	var socketResp socketResponse
-	err = callWithBreaker(p.breaker, ctx, nil, func() error {
+	err = callWithBreaker(p.breaker, ctx, isSocketAuthError, func() error {
 		httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, p.baseURL+"/v0/scan/batch", bytes.NewReader(body))
 		if err != nil {
 			return fmt.Errorf("socket: create request: %w", err)
@@ -161,6 +161,9 @@ func (p *socketProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckReque
 
 		if resp.StatusCode != http.StatusOK {
 			rb, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				return &socketAuthError{status: resp.StatusCode, body: string(rb)}
+			}
 			return fmt.Errorf("socket: unexpected status %d: %s", resp.StatusCode, string(rb))
 		}
 
@@ -283,4 +286,22 @@ func mapEcosystemSocket(eco pkgcheck.Ecosystem) string {
 	default:
 		return string(eco)
 	}
+}
+
+// socketAuthError marks a 401/403 response from Socket.dev. It is treated as
+// neutral by the circuit breaker: a misconfigured API key would otherwise
+// poison the breaker and cause subsequent calls to surface "circuit breaker
+// open" instead of the real authentication failure.
+type socketAuthError struct {
+	status int
+	body   string
+}
+
+func (e *socketAuthError) Error() string {
+	return fmt.Sprintf("socket: authentication failed: status %d: %s", e.status, e.body)
+}
+
+func isSocketAuthError(err error) bool {
+	var sae *socketAuthError
+	return errors.As(err, &sae)
 }
