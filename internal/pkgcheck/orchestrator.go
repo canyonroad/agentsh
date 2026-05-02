@@ -160,6 +160,14 @@ func (o *Orchestrator) CheckAllWithPrivacy(ctx context.Context, req CheckRequest
 	}
 
 	for name, entry := range o.cfg.Providers {
+		// When the privacy filter has skipped every package, external
+		// providers have nothing to do — calling them would fire empty
+		// HTTP requests at remote APIs. Skip them. Local providers still
+		// run on the full original list (license/metadata checks remain
+		// useful for private packages).
+		if len(req.Packages) == 0 && !isLocalProvider(entry.Provider) {
+			continue
+		}
 		wg.Add(1)
 		go func(name string, entry ProviderEntry) {
 			defer wg.Done()

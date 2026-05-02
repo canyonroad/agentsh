@@ -62,12 +62,34 @@ func (p InstallPlan) AllPackagesWithRegistry() []PackageRef {
 	}
 	out := make([]PackageRef, len(all))
 	for i, pkg := range all {
-		if pkg.Registry == "" {
+		// Scoped packages (@scope/name) may resolve from a private registry
+		// per .npmrc-style config that we don't parse. The resolver
+		// deliberately leaves PackageRef.Registry empty for those, so the
+		// privacy filter fails closed. Don't overwrite that intentional
+		// empty with the plan-level default.
+		if pkg.Registry == "" && !isScopedName(pkg.Name) {
 			pkg.Registry = p.Registry
 		}
 		out[i] = pkg
 	}
 	return out
+}
+
+// isScopedName reports whether name looks like a scoped npm package
+// (e.g. "@acme/foo"). Scoped packages may originate from a private
+// registry that we cannot verify without parsing tool-local config,
+// so the resolver leaves their Registry empty by default and we must
+// not paper over that empty.
+func isScopedName(name string) bool {
+	if len(name) < 2 || name[0] != '@' {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		if name[i] == '/' {
+			return true
+		}
+	}
+	return false
 }
 
 // FindingType classifies the kind of issue found during a package check.

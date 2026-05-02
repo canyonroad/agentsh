@@ -192,3 +192,33 @@ func TestOrchestrator_AllSkippedLocalProviderStillInvoked(t *testing.T) {
 		t.Errorf("local provider should see both packages, got %d: %+v", len(local.last), local.last)
 	}
 }
+
+func TestOrchestrator_AllSkippedSkipsExternalEvenWithLocalProvider(t *testing.T) {
+	external := &recordingProvider{name: "fake-external"}
+	local := &localRecordingProvider{recordingProvider: recordingProvider{name: "fake-local"}}
+	o := NewOrchestrator(OrchestratorConfig{
+		Providers: map[string]ProviderEntry{
+			"external": {Provider: external, Timeout: time.Second, OnFailure: "warn"},
+			"local":    {Provider: local, Timeout: time.Second, OnFailure: "warn"},
+		},
+		PrivacyFilter: NewPrivacyFilter(PrivacyConfig{
+			ExternalScanRegistries: []string{"registry.npmjs.org"},
+		}),
+	})
+	req := CheckRequest{
+		Ecosystem: EcosystemNPM,
+		Packages: []PackageRef{
+			{Name: "internal", Version: "0.1", Registry: "artifactory.acme.local"},
+		},
+	}
+	_, _, skipped := o.CheckAllWithPrivacy(context.Background(), req)
+	if len(skipped) != 1 {
+		t.Fatalf("want 1 skipped, got %d", len(skipped))
+	}
+	if external.last != nil {
+		t.Errorf("external must not be invoked when scan list is empty, even with local present; got last=%+v", external.last)
+	}
+	if len(local.last) != 1 {
+		t.Errorf("local should still see the full list; got last=%+v", local.last)
+	}
+}
