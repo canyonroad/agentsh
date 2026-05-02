@@ -157,10 +157,10 @@ type circuitBreakerConfig struct {
 // circuitBreaker tracks consecutive provider failures and short-circuits
 // while open. Safe for concurrent use.
 //
-// As of this commit the breaker is unwired by design — it is consumed by the
-// Socket and Snyk providers introduced in later changes (provider/socket.go
-// and provider/snyk.go). Each provider holds its own breaker instance so that
-// failures of one provider do not isolate the other.
+// Use callWithBreaker as the default invocation site for provider HTTP work;
+// the Socket and Snyk providers introduced later wrap their CheckBatch calls
+// with it. Each provider holds its own breaker instance so that failures of
+// one provider do not isolate the other.
 type circuitBreaker struct {
 	cfg circuitBreakerConfig
 
@@ -225,4 +225,32 @@ func (b *circuitBreaker) RecordFailure() {
 	if b.failures >= b.cfg.Threshold {
 		b.openedAt = now
 	}
+}
+
+// errBreakerOpen is returned by callWithBreaker when the breaker is open.
+// Callers can detect short-circuited calls via errors.Is(err, errBreakerOpen).
+var errBreakerOpen = errors.New("circuit breaker open")
+
+// callWithBreaker runs fn under the protection of a circuit breaker.
+//
+// If the breaker is open, fn is not invoked and errBreakerOpen is returned.
+// Otherwise fn is invoked, and its outcome is recorded on the breaker:
+// errors trip a RecordFailure, success records a RecordSuccess.
+//
+// Provider implementations use this as their single invocation site for
+// CheckBatch's outbound HTTP work, so a sustained-failure provider stops
+// taking the network round-trip cost on every install.
+func callWithBreaker(b *circuitBreaker, fn func() error) error {
+	if b == nil {
+		return fn()
+	}
+	if !b.Allow() {
+		return errBreakerOpen
+	}
+	if err := fn(); err != nil {
+		b.RecordFailure()
+		return err
+	}
+	b.RecordSuccess()
+	return nil
 }

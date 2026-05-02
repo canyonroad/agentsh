@@ -195,3 +195,56 @@ func TestCircuitBreaker_SuccessResetsFailures(t *testing.T) {
 		t.Fatal("breaker should still be closed: success reset failure count")
 	}
 }
+
+func TestCallWithBreaker_ShortCircuitsWhenOpen(t *testing.T) {
+	cb := newCircuitBreaker(circuitBreakerConfig{
+		Threshold:  2,
+		Window:     time.Second,
+		OpenPeriod: 100 * time.Millisecond,
+	})
+
+	// Trip the breaker by recording two failures.
+	calls := 0
+	failing := func() error { calls++; return errors.New("boom") }
+	_ = callWithBreaker(cb, failing)
+	_ = callWithBreaker(cb, failing)
+	if calls != 2 {
+		t.Fatalf("want 2 fn invocations, got %d", calls)
+	}
+
+	// Now the breaker is open — fn must not be called.
+	err := callWithBreaker(cb, failing)
+	if !errors.Is(err, errBreakerOpen) {
+		t.Errorf("expected errBreakerOpen, got %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("fn must not have been invoked while breaker is open; calls=%d", calls)
+	}
+}
+
+func TestCallWithBreaker_RecordsSuccessAndError(t *testing.T) {
+	cb := newCircuitBreaker(circuitBreakerConfig{
+		Threshold:  3,
+		Window:     time.Second,
+		OpenPeriod: 100 * time.Millisecond,
+	})
+	if err := callWithBreaker(cb, func() error { return nil }); err != nil {
+		t.Fatalf("success path returned error: %v", err)
+	}
+	want := errors.New("boom")
+	got := callWithBreaker(cb, func() error { return want })
+	if !errors.Is(got, want) {
+		t.Errorf("error path should return fn's error, got %v", got)
+	}
+}
+
+func TestCallWithBreaker_NilBreakerPassesThrough(t *testing.T) {
+	calls := 0
+	err := callWithBreaker(nil, func() error { calls++; return nil })
+	if err != nil {
+		t.Errorf("nil breaker should not error, got %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("fn should have run; calls=%d", calls)
+	}
+}
