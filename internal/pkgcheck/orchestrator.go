@@ -116,12 +116,19 @@ func (o *Orchestrator) CheckAll(ctx context.Context, req CheckRequest) ([]Findin
 // CheckAllWithPrivacy applies the configured PrivacyFilter (if any) before
 // dispatching the request to all providers. Returns merged findings, provider
 // errors, and the list of packages that were not externally scanned.
+//
+// If the filter leaves no packages eligible for external scanning, providers
+// are not invoked at all — this avoids spurious API-key / transport errors
+// from a fan-out over an empty list when every input package was skipped.
 func (o *Orchestrator) CheckAllWithPrivacy(ctx context.Context, req CheckRequest) ([]Finding, []ProviderError, []SkippedPackage) {
 	var skipped []SkippedPackage
 	if o.cfg.PrivacyFilter != nil {
 		scan, skip := o.cfg.PrivacyFilter.Partition(req.Packages)
 		req.Packages = scan
 		skipped = skip
+	}
+	if len(req.Packages) == 0 {
+		return nil, nil, skipped
 	}
 	findings, errs := o.CheckAll(ctx, req)
 	return findings, errs, skipped

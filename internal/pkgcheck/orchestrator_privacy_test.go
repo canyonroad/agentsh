@@ -62,3 +62,40 @@ func TestOrchestrator_CheckAllStillWorksWithoutPrivacyFilter(t *testing.T) {
 		t.Fatalf("backward-compat CheckAll should pass packages through unchanged")
 	}
 }
+
+func TestOrchestrator_AllSkippedDoesNotInvokeProviders(t *testing.T) {
+	rp := &recordingProvider{name: "fake"}
+	calls := 0
+	rp2 := &recordingProvider{name: "fake-with-counter"}
+	_ = rp2 // unused but kept for symmetry; recordingProvider records calls already
+	o := NewOrchestrator(OrchestratorConfig{
+		Providers: map[string]ProviderEntry{
+			"fake": {Provider: rp, Timeout: time.Second, OnFailure: "warn"},
+		},
+		PrivacyFilter: NewPrivacyFilter(PrivacyConfig{
+			ExternalScanRegistries: []string{"registry.npmjs.org"},
+			PrivateScopeDenylist:   []string{"@acme"},
+		}),
+	})
+	req := CheckRequest{
+		Ecosystem: EcosystemNPM,
+		Packages: []PackageRef{
+			{Name: "@acme/x", Version: "1", Registry: "registry.npmjs.org"},
+			{Name: "internal", Version: "0.1", Registry: "artifactory.acme.local"},
+		},
+	}
+	findings, errs, skipped := o.CheckAllWithPrivacy(context.Background(), req)
+	if findings != nil {
+		t.Errorf("findings should be nil when all packages skipped, got %+v", findings)
+	}
+	if errs != nil {
+		t.Errorf("errs should be nil when no provider was invoked, got %+v", errs)
+	}
+	if len(skipped) != 2 {
+		t.Errorf("want 2 skipped, got %d", len(skipped))
+	}
+	if rp.last != nil {
+		t.Errorf("provider must not be invoked when all packages skipped; got last=%+v", rp.last)
+	}
+	_ = calls
+}
