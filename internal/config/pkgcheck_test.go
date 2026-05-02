@@ -150,16 +150,29 @@ func TestApplyDefaults_PackageChecksPrivacy(t *testing.T) {
 	}
 }
 
-func TestResolverConfig_Validate_RejectsSpaciousCommand(t *testing.T) {
+func TestResolverConfig_Validate_RejectsLegacyCommandString(t *testing.T) {
 	rc := ResolverConfig{
 		DryRunCommand: "npm install --package-lock-only --ignore-scripts",
 	}
 	err := rc.Validate()
 	if err == nil {
-		t.Fatal("expected validation error for DryRunCommand with spaces, got nil")
+		t.Fatal("expected validation error for legacy multi-token command, got nil")
 	}
 	if !strings.Contains(err.Error(), "dry_run_args") {
 		t.Errorf("error should mention dry_run_args; got: %v", err)
+	}
+}
+
+func TestResolverConfig_Validate_AcceptsPathWithSpaces(t *testing.T) {
+	for _, p := range []string{
+		"/Program Files/nodejs/npm.cmd",
+		"C:\\Program Files\\nodejs\\npm.cmd",
+		"/usr/local/my tool/npm",
+	} {
+		rc := ResolverConfig{DryRunCommand: p}
+		if err := rc.Validate(); err != nil {
+			t.Errorf("path %q must validate cleanly (no flag-shaped tokens); got: %v", p, err)
+		}
 	}
 }
 

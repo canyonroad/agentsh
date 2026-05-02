@@ -72,14 +72,29 @@ type ResolverConfig struct {
 	Timeout       time.Duration `yaml:"timeout"`
 }
 
-// Validate returns an error if the configuration is malformed. In
-// particular, DryRunCommand must be a binary path with no embedded
-// whitespace; multi-token commands should be split into DryRunCommand
-// (binary) plus DryRunArgs (the rest).
+// Validate returns an error if the configuration is malformed.
+//
+// DryRunCommand is the binary path. Paths with spaces (e.g. Windows
+// `C:\Program Files\nodejs\npm.cmd`) are valid — the resolver preserves
+// them verbatim. The validator only rejects values that look like the
+// pre-`dry_run_args` command-string form, where additional whitespace-
+// separated tokens include a flag-shaped argument (`--foo` or `-x`),
+// which the new code can no longer interpret.
 func (r ResolverConfig) Validate() error {
-	if strings.ContainsAny(r.DryRunCommand, " \t") {
-		return fmt.Errorf("dry_run_command must be a binary path without spaces; "+
-			"split arguments into dry_run_args. Got: %q", r.DryRunCommand)
+	if r.DryRunCommand == "" {
+		return nil
+	}
+	if !strings.ContainsAny(r.DryRunCommand, " \t") {
+		return nil
+	}
+	// Heuristic: a multi-token value with a flag-shaped token after the
+	// first whitespace is the legacy command-string form.
+	for _, tok := range strings.Fields(r.DryRunCommand)[1:] {
+		if strings.HasPrefix(tok, "-") {
+			return fmt.Errorf("dry_run_command must be a binary path; "+
+				"multi-token command strings are no longer supported — "+
+				"split arguments into dry_run_args. Got: %q", r.DryRunCommand)
+		}
 	}
 	return nil
 }
