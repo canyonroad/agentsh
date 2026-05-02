@@ -206,14 +206,14 @@ func TestCallWithBreaker_ShortCircuitsWhenOpen(t *testing.T) {
 	// Trip the breaker by recording two failures.
 	calls := 0
 	failing := func() error { calls++; return errors.New("boom") }
-	_ = callWithBreaker(cb, failing)
-	_ = callWithBreaker(cb, failing)
+	_ = callWithBreaker(cb, nil, failing)
+	_ = callWithBreaker(cb, nil, failing)
 	if calls != 2 {
 		t.Fatalf("want 2 fn invocations, got %d", calls)
 	}
 
 	// Now the breaker is open — fn must not be called.
-	err := callWithBreaker(cb, failing)
+	err := callWithBreaker(cb, nil, failing)
 	if !errors.Is(err, errBreakerOpen) {
 		t.Errorf("expected errBreakerOpen, got %v", err)
 	}
@@ -228,11 +228,11 @@ func TestCallWithBreaker_RecordsSuccessAndError(t *testing.T) {
 		Window:     time.Second,
 		OpenPeriod: 100 * time.Millisecond,
 	})
-	if err := callWithBreaker(cb, func() error { return nil }); err != nil {
+	if err := callWithBreaker(cb, nil, func() error { return nil }); err != nil {
 		t.Fatalf("success path returned error: %v", err)
 	}
 	want := errors.New("boom")
-	got := callWithBreaker(cb, func() error { return want })
+	got := callWithBreaker(cb, nil, func() error { return want })
 	if !errors.Is(got, want) {
 		t.Errorf("error path should return fn's error, got %v", got)
 	}
@@ -240,7 +240,7 @@ func TestCallWithBreaker_RecordsSuccessAndError(t *testing.T) {
 
 func TestCallWithBreaker_NilBreakerPassesThrough(t *testing.T) {
 	calls := 0
-	err := callWithBreaker(nil, func() error { calls++; return nil })
+	err := callWithBreaker(nil, nil, func() error { calls++; return nil })
 	if err != nil {
 		t.Errorf("nil breaker should not error, got %v", err)
 	}
@@ -311,11 +311,11 @@ func TestCallWithBreaker_DoesNotRecordCallerCancellation(t *testing.T) {
 		OpenPeriod: 100 * time.Millisecond,
 	})
 	// Record one real failure so we're one short of opening.
-	_ = callWithBreaker(cb, func() error { return errors.New("real failure") })
+	_ = callWithBreaker(cb, nil, func() error { return errors.New("real failure") })
 
 	// Now return a ctx-cancel error N times — the breaker must NOT open.
 	for i := 0; i < 5; i++ {
-		err := callWithBreaker(cb, func() error { return context.Canceled })
+		err := callWithBreaker(cb, nil, func() error { return context.Canceled })
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("iteration %d: want context.Canceled, got %v", i, err)
 		}
@@ -331,11 +331,53 @@ func TestCallWithBreaker_DoesNotRecordDeadlineExceeded(t *testing.T) {
 		Window:     time.Second,
 		OpenPeriod: 100 * time.Millisecond,
 	})
-	_ = callWithBreaker(cb, func() error { return errors.New("real failure") })
+	_ = callWithBreaker(cb, nil, func() error { return errors.New("real failure") })
 	for i := 0; i < 5; i++ {
-		_ = callWithBreaker(cb, func() error { return context.DeadlineExceeded })
+		_ = callWithBreaker(cb, nil, func() error { return context.DeadlineExceeded })
 	}
 	if !cb.Allow() {
 		t.Fatal("breaker must not have opened from caller-driven deadline-exceeded")
+	}
+}
+
+func TestCallWithBreaker_ProviderOwnTimeoutRecordsFailure(t *testing.T) {
+	cb := newCircuitBreaker(circuitBreakerConfig{
+		Threshold:  2,
+		Window:     time.Second,
+		OpenPeriod: 100 * time.Millisecond,
+	})
+	// Caller context never gets cancelled — only a derived "provider-own"
+	// timeout fires. The breaker SHOULD record this as a failure because
+	// the slowness is the provider's, not the caller's.
+	parentCtx := context.Background()
+	deadline := func() error {
+		// Simulate a derived timeout context that fired.
+		return context.DeadlineExceeded
+	}
+	if err := callWithBreaker(cb, parentCtx, deadline); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want DeadlineExceeded, got %v", err)
+	}
+	if err := callWithBreaker(cb, parentCtx, deadline); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second call: want DeadlineExceeded, got %v", err)
+	}
+	// Two provider-own timeouts at threshold=2 must open the breaker.
+	if cb.Allow() {
+		t.Fatal("breaker should be open after two provider-own timeouts")
+	}
+}
+
+func TestCallWithBreaker_CallerCtxCancelledIsNeutral(t *testing.T) {
+	cb := newCircuitBreaker(circuitBreakerConfig{
+		Threshold:  2,
+		Window:     time.Second,
+		OpenPeriod: 100 * time.Millisecond,
+	})
+	parentCtx, cancel := context.WithCancel(context.Background())
+	cancel() // caller cancelled before fn runs
+	for i := 0; i < 5; i++ {
+		_ = callWithBreaker(cb, parentCtx, func() error { return context.Canceled })
+	}
+	if !cb.Allow() {
+		t.Fatal("breaker must not have opened from caller-driven cancellation")
 	}
 }

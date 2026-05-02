@@ -257,12 +257,14 @@ var errBreakerOpen = errors.New("circuit breaker open")
 // CheckBatch's outbound HTTP work, so a sustained-failure provider stops
 // taking the network round-trip cost on every install.
 //
-// Caller-driven context cancellation and deadline-exceeded errors are treated
-// as neutral outcomes: they do not record a failure (which would let a tight
-// caller timeout open the breaker for unrelated subsequent calls) and do not
-// record a success either. Genuine remote/provider failures (transport errors,
-// 5xx, etc.) still record a failure.
-func callWithBreaker(b *circuitBreaker, fn func() error) error {
+// callerCtx must be the original parent context — NOT a derived
+// context with the provider's own per-request timeout. We use it to
+// distinguish caller-driven cancellation/deadline (neutral, no failure
+// recorded) from a provider-own timeout firing (real provider-health
+// signal, recorded as failure). When callerCtx is nil the function falls
+// back to the previous behaviour where any context.Canceled/DeadlineExceeded
+// is treated as neutral.
+func callWithBreaker(b *circuitBreaker, callerCtx context.Context, fn func() error) error {
 	if b == nil {
 		return fn()
 	}
@@ -270,7 +272,7 @@ func callWithBreaker(b *circuitBreaker, fn func() error) error {
 		return errBreakerOpen
 	}
 	if err := fn(); err != nil {
-		if isCallerCancellation(err) {
+		if isNeutralForBreaker(callerCtx, err) {
 			return err
 		}
 		b.RecordFailure()
@@ -280,8 +282,15 @@ func callWithBreaker(b *circuitBreaker, fn func() error) error {
 	return nil
 }
 
-// isCallerCancellation reports whether err is a context cancellation or
-// deadline-exceeded that should not count toward breaker health.
-func isCallerCancellation(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+// isNeutralForBreaker reports whether err should be excluded from breaker
+// health accounting. Caller-driven cancellation/deadline (visible on
+// callerCtx itself) is neutral; provider-own timeouts are not.
+func isNeutralForBreaker(callerCtx context.Context, err error) bool {
+	if callerCtx != nil && callerCtx.Err() != nil {
+		return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	}
+	if callerCtx == nil {
+		return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	}
+	return false
 }
