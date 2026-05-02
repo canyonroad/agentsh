@@ -1920,6 +1920,9 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.PackageChecks.Providers == nil {
 		cfg.PackageChecks.Providers = pkgDefaults.Providers
 	}
+	if cfg.PackageChecks.FailMode == "" {
+		cfg.PackageChecks.FailMode = pkgDefaults.FailMode
+	}
 	// Privacy block defaults: an unset list (nil) inherits the
 	// public-registry allowlist so the privacy gate is on by default.
 	// Use == nil rather than len(...) == 0 so users can explicitly disable

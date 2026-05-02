@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -18,6 +19,13 @@ type PackageChecksConfig struct {
 	Providers  map[string]ProviderConfig      `yaml:"providers"`
 	Resolvers  map[string]ResolverConfig      `yaml:"resolvers"`
 	Privacy    PackagePrivacyConfig           `yaml:"privacy" json:"privacy"`
+	// FailMode controls how the orchestrator reacts to provider failures
+	// for external providers (Snyk / Socket / etc.). One of:
+	//   "open"     — let the install proceed when an external provider fails.
+	//   "closed"   — block the install when an external provider fails.
+	//   "degraded" — fall back to OSV findings, annotate the verdict.
+	// The env var PKGCHECK_FAIL_MODE overrides this at runtime.
+	FailMode string `yaml:"fail_mode" json:"fail_mode"`
 }
 
 // PackagePrivacyConfig configures the upstream privacy filter applied
@@ -187,6 +195,7 @@ func DefaultPackageChecksConfig() PackageChecksConfig {
 			},
 		},
 		Resolvers: nil,
+		FailMode:  "degraded",
 		Privacy: PackagePrivacyConfig{
 			ExternalScanRegistries: []string{
 				"registry.npmjs.org",
@@ -323,4 +332,47 @@ func ApplyExternalProviderDefaults(cfg *PackageChecksConfig) []string {
 		}
 	}
 	return nil
+}
+
+// ResolveFailMode returns the effective fail mode, honoring the
+// PKGCHECK_FAIL_MODE env var override. Defaults to "degraded".
+func ResolveFailMode(cfg *PackageChecksConfig) string {
+	if v := os.Getenv("PKGCHECK_FAIL_MODE"); v != "" {
+		return v
+	}
+	if cfg.FailMode != "" {
+		return cfg.FailMode
+	}
+	return "degraded"
+}
+
+// ApplyFailMode sets OnFailure on every enabled external provider to match
+// the resolved fail mode. Mapping:
+//
+//	open     → "allow"
+//	closed   → "deny"
+//	degraded → "warn"
+//
+// External providers are those listed in externalProviderNames. Other
+// providers (osv, depsdev, local) keep whatever OnFailure the user set.
+func ApplyFailMode(cfg *PackageChecksConfig, mode string) {
+	target := ""
+	switch mode {
+	case "open":
+		target = "allow"
+	case "closed":
+		target = "deny"
+	case "degraded":
+		target = "warn"
+	default:
+		target = "warn"
+	}
+	for _, name := range externalProviderNames {
+		p, ok := cfg.Providers[name]
+		if !ok || !p.Enabled {
+			continue
+		}
+		p.OnFailure = target
+		cfg.Providers[name] = p
+	}
 }

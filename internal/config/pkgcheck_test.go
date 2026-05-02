@@ -314,3 +314,62 @@ func TestApplyExternalProviderDefaults_DisabledExternalNoPromote(t *testing.T) {
 		t.Errorf("no warnings expected; got %v", warnings)
 	}
 }
+
+func TestResolveFailMode_EnvOverridesYAML(t *testing.T) {
+	cfg := PackageChecksConfig{FailMode: "closed"}
+	t.Setenv("PKGCHECK_FAIL_MODE", "open")
+	got := ResolveFailMode(&cfg)
+	if got != "open" {
+		t.Errorf("env should win, got %q", got)
+	}
+}
+
+func TestResolveFailMode_DefaultsToDegraded(t *testing.T) {
+	cfg := PackageChecksConfig{}
+	t.Setenv("PKGCHECK_FAIL_MODE", "")
+	got := ResolveFailMode(&cfg)
+	if got != "degraded" {
+		t.Errorf("default should be degraded, got %q", got)
+	}
+}
+
+func TestApplyFailMode_SetsOnFailureForExternal(t *testing.T) {
+	cfg := PackageChecksConfig{
+		FailMode: "closed",
+		Providers: map[string]ProviderConfig{
+			"socket": {Enabled: true},
+			"osv":    {Enabled: true, OnFailure: "warn"}, // should be untouched
+		},
+	}
+	ApplyFailMode(&cfg, "closed")
+	if cfg.Providers["socket"].OnFailure != "deny" {
+		t.Errorf("socket OnFailure should be deny, got %q", cfg.Providers["socket"].OnFailure)
+	}
+	if cfg.Providers["osv"].OnFailure != "warn" {
+		t.Errorf("osv OnFailure must remain warn, got %q", cfg.Providers["osv"].OnFailure)
+	}
+}
+
+func TestApplyFailMode_OpenMaps(t *testing.T) {
+	cfg := PackageChecksConfig{
+		Providers: map[string]ProviderConfig{
+			"socket": {Enabled: true},
+		},
+	}
+	ApplyFailMode(&cfg, "open")
+	if cfg.Providers["socket"].OnFailure != "allow" {
+		t.Errorf("open should map to allow; got %q", cfg.Providers["socket"].OnFailure)
+	}
+}
+
+func TestApplyFailMode_DegradedMaps(t *testing.T) {
+	cfg := PackageChecksConfig{
+		Providers: map[string]ProviderConfig{
+			"snyk": {Enabled: true},
+		},
+	}
+	ApplyFailMode(&cfg, "degraded")
+	if cfg.Providers["snyk"].OnFailure != "warn" {
+		t.Errorf("degraded should map to warn; got %q", cfg.Providers["snyk"].OnFailure)
+	}
+}
