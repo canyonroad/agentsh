@@ -536,8 +536,14 @@ func New(cfg *config.Config) (*Server, error) {
 			providerEntries[name] = entry
 		}
 
+		resolvers, err := buildResolvers(cfg.PackageChecks.Resolvers)
+		if err != nil {
+			return nil, fmt.Errorf("pkgcheck: resolvers misconfigured: %w", err)
+		}
+
 		pkgChecker := pkgcheck.NewChecker(pkgcheck.CheckerConfig{
 			Scope:     cfg.PackageChecks.Scope,
+			Resolvers: resolvers,
 			Providers: providerEntries,
 			Rules:     engine.PackageRules(),
 			Allowlist: pkgcheck.NewAllowlist(30 * time.Second),

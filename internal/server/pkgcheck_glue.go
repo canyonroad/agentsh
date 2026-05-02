@@ -8,6 +8,7 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/pkgcheck/provider"
+	"github.com/agentsh/agentsh/internal/pkgcheck/resolver"
 )
 
 // errMissingAPIKeyValue is returned by requireAPIKey when the env var name is
@@ -28,10 +29,14 @@ func buildProviderEntry(name string, provCfg config.ProviderConfig) (pkgcheck.Pr
 	if err != nil {
 		return pkgcheck.ProviderEntry{}, err
 	}
+	onFailure := provCfg.OnFailure
+	if onFailure == "" {
+		onFailure = "warn"
+	}
 	return pkgcheck.ProviderEntry{
 		Provider:  prov,
 		Timeout:   provCfg.Timeout,
-		OnFailure: provCfg.OnFailure,
+		OnFailure: onFailure,
 	}, nil
 }
 
@@ -45,6 +50,7 @@ func buildProvider(name string, provCfg config.ProviderConfig) (pkgcheck.CheckPr
 		return provider.NewExecProvider(name, provider.ExecProviderConfig{
 			Command: provCfg.Command,
 			Timeout: provCfg.Timeout,
+			Config:  provCfg.Options,
 		}), nil
 	}
 
@@ -144,4 +150,74 @@ func optInt(opts map[string]any, key string, defaultVal int) int {
 		return int(n)
 	}
 	return defaultVal
+}
+
+// defaultResolverNames is the ordered list of all built-in resolver names.
+var defaultResolverNames = []string{"npm", "pnpm", "yarn", "pip", "uv", "poetry"}
+
+// buildResolvers constructs pkgcheck.Resolver instances from the resolved
+// configuration map. If cfgMap is nil or empty, all six built-in resolvers
+// are returned with their internal defaults (so package_checks.enabled: true
+// with no resolvers: key still works). Unknown resolver names are fatal.
+func buildResolvers(cfgMap map[string]config.ResolverConfig) ([]pkgcheck.Resolver, error) {
+	if len(cfgMap) == 0 {
+		// Default: all six resolvers with zero-value config (each uses its own
+		// internal defaults for DryRunCommand and Timeout).
+		return []pkgcheck.Resolver{
+			resolver.NewNPMResolver(resolver.NPMResolverConfig{}),
+			resolver.NewPNPMResolver(resolver.PNPMResolverConfig{}),
+			resolver.NewYarnResolver(resolver.YarnResolverConfig{}),
+			resolver.NewPipResolver(resolver.PipResolverConfig{}),
+			resolver.NewUVResolver(resolver.UVResolverConfig{}),
+			resolver.NewPoetryResolver(resolver.PoetryResolverConfig{}),
+		}, nil
+	}
+
+	out := make([]pkgcheck.Resolver, 0, len(cfgMap))
+	for name, rc := range cfgMap {
+		r, err := buildResolver(name, rc)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// buildResolver constructs a single resolver by name.
+func buildResolver(name string, rc config.ResolverConfig) (pkgcheck.Resolver, error) {
+	switch name {
+	case "npm":
+		return resolver.NewNPMResolver(resolver.NPMResolverConfig{
+			DryRunCommand: rc.DryRunCommand,
+			Timeout:       rc.Timeout,
+		}), nil
+	case "pnpm":
+		return resolver.NewPNPMResolver(resolver.PNPMResolverConfig{
+			DryRunCommand: rc.DryRunCommand,
+			Timeout:       rc.Timeout,
+		}), nil
+	case "yarn":
+		return resolver.NewYarnResolver(resolver.YarnResolverConfig{
+			DryRunCommand: rc.DryRunCommand,
+			Timeout:       rc.Timeout,
+		}), nil
+	case "pip":
+		return resolver.NewPipResolver(resolver.PipResolverConfig{
+			DryRunCommand: rc.DryRunCommand,
+			Timeout:       rc.Timeout,
+		}), nil
+	case "uv":
+		return resolver.NewUVResolver(resolver.UVResolverConfig{
+			DryRunCommand: rc.DryRunCommand,
+			Timeout:       rc.Timeout,
+		}), nil
+	case "poetry":
+		return resolver.NewPoetryResolver(resolver.PoetryResolverConfig{
+			DryRunCommand: rc.DryRunCommand,
+			Timeout:       rc.Timeout,
+		}), nil
+	default:
+		return nil, fmt.Errorf("pkgcheck resolver %q: unknown resolver name (known: npm, pnpm, yarn, pip, uv, poetry)", name)
+	}
 }
