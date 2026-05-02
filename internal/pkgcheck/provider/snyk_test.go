@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -286,4 +288,48 @@ func TestSnykProvider_ConcurrentFanOut(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, maxConcurrent, 2, "expected at least 2 simultaneous in-flight requests")
+}
+
+func TestSnykProvider_AuthErrorIsFailFast(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		// Slow on first request so the test can observe early-cancel.
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"errors":[{"detail":"unauthorized"}]}`))
+	}))
+	defer srv.Close()
+
+	p := NewSnykProvider(SnykConfig{
+		BaseURL:     srv.URL,
+		APIKey:      "bad",
+		OrgID:       "org",
+		Concurrency: 8,
+	})
+
+	pkgs := make([]pkgcheck.PackageRef, 64)
+	for i := range pkgs {
+		pkgs[i] = pkgcheck.PackageRef{Name: fmt.Sprintf("pkg-%d", i), Version: "1"}
+	}
+	start := time.Now()
+	_, err := p.CheckBatch(context.Background(), pkgcheck.CheckRequest{
+		Ecosystem: pkgcheck.EcosystemNPM,
+		Packages:  pkgs,
+	})
+	elapsed := time.Since(start)
+
+	if err == nil || !strings.Contains(err.Error(), "authentication failed") {
+		t.Fatalf("want authentication failed error, got %v", err)
+	}
+	// Without fail-fast: 64 pkgs × ~3 retries each at concurrency 8 ≫ 1s.
+	// With fail-fast: ~50ms (first hit) + a small drain → well under 1s.
+	if elapsed > 1*time.Second {
+		t.Errorf("auth error must fail fast; elapsed=%v", elapsed)
+	}
+	// Most workers should bail before sending a request — assert we did
+	// not hit the server with all 64 packages.
+	if int(hits.Load()) > 32 {
+		t.Errorf("auth error must short-circuit fan-out; hits=%d (want < 32)", hits.Load())
+	}
 }

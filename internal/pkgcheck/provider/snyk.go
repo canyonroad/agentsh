@@ -121,12 +121,6 @@ type snykReference struct {
 	Title string `json:"title,omitempty"`
 }
 
-// pkgResult holds the per-package outcome from the concurrent fan-out.
-type pkgResult struct {
-	findings []pkgcheck.Finding
-	err      error
-}
-
 func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest) (*pkgcheck.CheckResponse, error) {
 	if p.apiKey == "" {
 		return nil, fmt.Errorf("snyk: API key is required")
@@ -139,61 +133,86 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 	ecosystem := mapEcosystemSnyk(req.Ecosystem)
 
 	n := len(req.Packages)
-	results := make([]pkgResult, n)
+
+	// batchCtx allows workers to cancel each other on auth errors.
+	batchCtx, cancelBatch := context.WithCancel(ctx)
+	defer cancelBatch()
+
+	var (
+		mu         sync.Mutex
+		allFindings []pkgcheck.Finding
+		errCount   int
+		breakerErr error
+		authErr    error // first auth error wins; non-nil short-circuits result
+	)
 
 	// Semaphore channel for bounded concurrency.
 	sem := make(chan struct{}, p.concurrency)
 
 	var wg sync.WaitGroup
-	wg.Add(n)
 
-	for i, pkg := range req.Packages {
-		i, pkg := i, pkg // capture
+	for _, pkg := range req.Packages {
+		// Stop scheduling new work once batch is cancelled (e.g., auth failure).
+		if batchCtx.Err() != nil {
+			mu.Lock()
+			errCount++
+			mu.Unlock()
+			continue
+		}
+
+		wg.Add(1)
 		sem <- struct{}{}
+		pkg := pkg // capture
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			// If an earlier worker already cancelled, exit immediately.
+			if batchCtx.Err() != nil {
+				mu.Lock()
+				errCount++
+				mu.Unlock()
+				return
+			}
+
 			// Apply per-request timeout only on the HTTP call, NOT on callWithBreaker.
-			reqCtx := ctx
+			reqCtx := batchCtx
 			var cancel context.CancelFunc
 			if p.timeout > 0 {
-				reqCtx, cancel = context.WithTimeout(ctx, p.timeout)
+				reqCtx, cancel = context.WithTimeout(batchCtx, p.timeout)
 				defer cancel()
 			}
 
 			var findings []pkgcheck.Finding
-			err := callWithBreaker(p.breaker, ctx, func() error {
+			err := callWithBreaker(p.breaker, batchCtx, func() error {
 				var ferr error
 				findings, ferr = p.fetchIssues(reqCtx, ecosystem, pkg)
 				return ferr
 			})
-			results[i] = pkgResult{findings: findings, err: err}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errCount++
+				if isSnykAuthError(err) && authErr == nil {
+					authErr = err
+					cancelBatch() // signal other workers to bail
+				}
+				if errors.Is(err, errBreakerOpen) {
+					breakerErr = err
+				}
+				return
+			}
+			allFindings = append(allFindings, findings...)
 		}()
 	}
 	wg.Wait()
 
-	// Merge results; detect auth errors and breaker-open conditions.
-	var allFindings []pkgcheck.Finding
-	var partial bool
-	var errCount int
-	var breakerErr error
-
-	for _, r := range results {
-		if r.err != nil {
-			// Auth errors are fail-fast — return immediately.
-			if isSnykAuthError(r.err) {
-				return nil, fmt.Errorf("snyk: authentication failed: %w", r.err)
-			}
-			errCount++
-			partial = true
-			if errors.Is(r.err, errBreakerOpen) {
-				breakerErr = r.err
-			}
-			continue
-		}
-		allFindings = append(allFindings, r.findings...)
+	if authErr != nil {
+		return nil, fmt.Errorf("snyk: authentication failed: %w", authErr)
 	}
+
+	partial := errCount > 0
 
 	// If ALL packages failed, return an error instead of a partial empty response.
 	if errCount > 0 && errCount == n {
