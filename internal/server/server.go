@@ -517,6 +517,16 @@ func New(cfg *config.Config) (*Server, error) {
 		// Resolve and apply fail mode so Snyk/Socket OnFailure reflects
 		// the operator's policy before provider entries are constructed.
 		mode := config.ResolveFailMode(&cfg.PackageChecks)
+		// Validate the resolved mode (which may have come from
+		// PKGCHECK_FAIL_MODE env var, bypassing YAML validation).
+		// A typo like "clsoed" would otherwise silently no-op via
+		// ApplyFailMode and leave the default OnFailure in place,
+		// undermining the operator's intent.
+		switch mode {
+		case "open", "closed", "degraded":
+		default:
+			return nil, fmt.Errorf("pkgcheck: invalid fail_mode %q (env PKGCHECK_FAIL_MODE or package_checks.fail_mode); must be one of open, closed, degraded", mode)
+		}
 		config.ApplyFailMode(&cfg.PackageChecks, mode)
 
 		providerEntries := make(map[string]pkgcheck.ProviderEntry)
