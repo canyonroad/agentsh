@@ -184,7 +184,7 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 			}
 
 			var findings []pkgcheck.Finding
-			err := callWithBreaker(p.breaker, batchCtx, func() error {
+			err := callWithBreaker(p.breaker, batchCtx, isSnykAuthError, func() error {
 				var ferr error
 				findings, ferr = p.fetchIssues(reqCtx, ecosystem, pkg)
 				return ferr

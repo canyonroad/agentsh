@@ -145,7 +145,7 @@ func (p *socketProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckReque
 	}
 
 	var respBody []byte
-	err = callWithBreaker(p.breaker, ctx, func() error {
+	err = callWithBreaker(p.breaker, ctx, nil, func() error {
 		httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, p.baseURL+"/v0/scan/batch", bytes.NewReader(body))
 		if err != nil {
 			return fmt.Errorf("socket: create request: %w", err)

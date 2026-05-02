@@ -264,7 +264,12 @@ var errBreakerOpen = errors.New("circuit breaker open")
 // signal, recorded as failure). When callerCtx is nil the function falls
 // back to the previous behaviour where any context.Canceled/DeadlineExceeded
 // is treated as neutral.
-func callWithBreaker(b *circuitBreaker, callerCtx context.Context, fn func() error) error {
+//
+// neutralIfErr (optional, may be nil) lets callers mark domain-specific
+// errors as neutral for breaker accounting — e.g. authentication errors
+// where N concurrent workers all see a 401 and would otherwise open the
+// breaker before the auth error reaches the caller.
+func callWithBreaker(b *circuitBreaker, callerCtx context.Context, neutralIfErr func(error) bool, fn func() error) error {
 	if b == nil {
 		return fn()
 	}
@@ -273,6 +278,9 @@ func callWithBreaker(b *circuitBreaker, callerCtx context.Context, fn func() err
 	}
 	if err := fn(); err != nil {
 		if isNeutralForBreaker(callerCtx, err) {
+			return err
+		}
+		if neutralIfErr != nil && neutralIfErr(err) {
 			return err
 		}
 		b.RecordFailure()

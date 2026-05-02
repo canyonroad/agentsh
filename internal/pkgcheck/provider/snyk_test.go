@@ -333,3 +333,48 @@ func TestSnykProvider_AuthErrorIsFailFast(t *testing.T) {
 		t.Errorf("auth error must short-circuit fan-out; hits=%d (want < 32)", hits.Load())
 	}
 }
+
+func TestSnykProvider_AuthErrorDoesNotPoisonBreaker(t *testing.T) {
+	// All requests return 401. Configure breaker with threshold=2 — without
+	// the neutral-error predicate, two concurrent auth errors would open the
+	// breaker. With the fix, auth errors are neutral and the breaker stays
+	// closed; subsequent calls return the auth error, not "circuit breaker open."
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"errors":[{"detail":"unauthorized"}]}`))
+	}))
+	defer srv.Close()
+
+	p := newSnykProviderForTest(SnykConfig{
+		BaseURL:     srv.URL,
+		APIKey:      "bad",
+		OrgID:       "org",
+		Concurrency: 4,
+	}, circuitBreakerConfig{
+		Threshold:  2,
+		Window:     time.Second,
+		OpenPeriod: 200 * time.Millisecond,
+	})
+
+	// Three back-to-back batches with bad creds. Each must surface an
+	// authentication error, never "circuit breaker open."
+	for i := 0; i < 3; i++ {
+		_, err := p.CheckBatch(context.Background(), pkgcheck.CheckRequest{
+			Ecosystem: pkgcheck.EcosystemNPM,
+			Packages: []pkgcheck.PackageRef{
+				{Name: "foo", Version: "1"},
+				{Name: "bar", Version: "1"},
+				{Name: "baz", Version: "1"},
+			},
+		})
+		if err == nil {
+			t.Fatalf("iteration %d: expected error", i)
+		}
+		if !strings.Contains(err.Error(), "authentication failed") {
+			t.Fatalf("iteration %d: want authentication error, got %v", i, err)
+		}
+		if errors.Is(err, errBreakerOpen) {
+			t.Fatalf("iteration %d: auth error must not open breaker; got %v", i, err)
+		}
+	}
+}
