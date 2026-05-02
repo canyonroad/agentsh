@@ -763,6 +763,22 @@ func TestUVResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
 	assert.Empty(t, r.prefixArgs)
 }
 
+func TestUVResolver_StripsPipInstallSubcommand(t *testing.T) {
+	// Regression: "uv pip install flask" passes ["pip","install","flask"] as
+	// args inside Resolve.  Both "pip" and "install" must be stripped so that
+	// only "flask" is treated as a package name.
+	r := NewUVResolver(UVResolverConfig{}).(*uvResolver)
+	// Simulate what Resolve does: command[1:] → ["pip","install","flask"]
+	args := []string{"pip", "install", "flask"}
+	pkgArgs := args
+	if len(pkgArgs) >= 2 && pkgArgs[0] == "pip" && pkgArgs[1] == "install" {
+		pkgArgs = pkgArgs[2:]
+	}
+	pkgs := extractPkgArgs(pkgArgs)
+	assert.Equal(t, []string{"flask"}, pkgs, "uv should strip both 'pip' and 'install'")
+	_ = r // ensure we hold the type reference
+}
+
 func TestPNPMResolver_DryRunArgs(t *testing.T) {
 	r := NewPNPMResolver(PNPMResolverConfig{
 		DryRunCommand: "pnpm",

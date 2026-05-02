@@ -218,3 +218,17 @@ package_checks:
 	assert.Equal(t, 12*time.Hour, cfg.PackageChecks.Cache.TTL.License)
 	assert.Equal(t, 15*time.Minute, cfg.PackageChecks.Cache.TTL.Malware)
 }
+
+func TestPackagePrivacyConfig_ValidateRejectsBadGlob(t *testing.T) {
+	cfg := PackagePrivacyConfig{PrivateScopeDenylist: []string{"[unclosed"}}
+	if err := cfg.Validate(); err == nil {
+		t.Error("invalid glob must fail validation")
+	}
+}
+
+func TestPackagePrivacyConfig_ValidateAcceptsGoodPatterns(t *testing.T) {
+	cfg := PackagePrivacyConfig{PrivateScopeDenylist: []string{"@acme", "@internal-*"}}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected no error; got %v", err)
+	}
+}

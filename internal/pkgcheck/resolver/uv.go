@@ -68,7 +68,15 @@ func (r *uvResolver) Resolve(ctx context.Context, workDir string, command []stri
 	var args []string
 	if len(command) > 1 {
 		args = command[1:]
-		packages = extractPkgArgs(args)
+		// uv uses a two-token subcommand ("pip install").  Strip both tokens
+		// before extracting package names so "install" is not mistaken for a
+		// package name.  CanResolve already guarantees args[0]=="pip" and
+		// args[1]=="install" when we reach this path.
+		pkgArgs := args
+		if len(pkgArgs) >= 2 && pkgArgs[0] == "pip" && pkgArgs[1] == "install" {
+			pkgArgs = pkgArgs[2:]
+		}
+		packages = extractPkgArgs(pkgArgs)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)

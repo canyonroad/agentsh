@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path"
 	"strings"
 	"time"
 )
@@ -31,6 +32,22 @@ type PackagePrivacyConfig struct {
 	// PrivateScopeDenylist lists package name prefixes / glob patterns
 	// that should NOT be sent externally even when on an allowed registry.
 	PrivateScopeDenylist []string `yaml:"private_scope_denylist" json:"private_scope_denylist"`
+}
+
+// Validate checks that all PrivateScopeDenylist entries are valid glob
+// patterns.  A malformed pattern would silently match nothing at runtime,
+// producing a fail-open privacy hole.  Call this at config-load time so
+// operators see a startup error instead of silent misbehaviour.
+func (p PackagePrivacyConfig) Validate() error {
+	for _, pat := range p.PrivateScopeDenylist {
+		if pat == "" {
+			continue
+		}
+		if _, err := path.Match(pat, "test"); err != nil {
+			return fmt.Errorf("invalid denylist pattern %q: %w", pat, err)
+		}
+	}
+	return nil
 }
 
 // PackageCacheConfig configures the on-disk check result cache.

@@ -110,21 +110,35 @@ func (f *PrivacyFilter) matchesDenylist(name string) bool {
 }
 
 // normalizeRegistry reduces a registry URL or host string to a canonical
-// form for comparison. The privacy allowlist is keyed on hostnames; a
-// caller-configured value of "registry.npmjs.org" matches packages whose
-// resolved registry is "https://registry.npmjs.org/" (or any equivalent
-// scheme/path variant).
+// form for comparison.  Path segments are preserved so that
+// "https://artifact.example/team-a/" and "https://artifact.example/team-b/"
+// are treated as distinct registries.
+//
+// Examples:
+//
+//	"https://registry.npmjs.org/"          → "registry.npmjs.org"
+//	"https://artifact.example/team-a/"     → "artifact.example/team-a"
+//	"registry.npmjs.org"                   → "registry.npmjs.org"
 func normalizeRegistry(s string) string {
 	if s == "" {
 		return ""
 	}
-	// If it parses as a URL with a host, return the host.
+	// If it parses as a URL with a host, return host + path (trailing slash stripped).
 	if strings.Contains(s, "://") {
 		if u, err := url.Parse(s); err == nil && u.Host != "" {
-			return strings.ToLower(u.Host)
+			host := strings.ToLower(u.Host)
+			path := strings.TrimRight(u.Path, "/")
+			if path == "" {
+				return host
+			}
+			return host + path
 		}
 	}
-	// Otherwise treat the whole string as a host; trim trailing slash,
-	// lowercase.
-	return strings.ToLower(strings.TrimRight(s, "/"))
+	// No scheme — treat the whole string as host-or-host+path.
+	// Trim trailing slash, lowercase the host portion only.
+	s = strings.TrimRight(s, "/")
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		return strings.ToLower(s[:i]) + s[i:]
+	}
+	return strings.ToLower(s)
 }

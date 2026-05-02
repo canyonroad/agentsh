@@ -138,12 +138,30 @@ func TestNormalizeRegistry(t *testing.T) {
 		"registry.npmjs.org":             "registry.npmjs.org",
 		"https://registry.npmjs.org/":    "registry.npmjs.org",
 		"https://registry.npmjs.org":     "registry.npmjs.org",
-		"http://Registry.NPMJS.org/path": "registry.npmjs.org",
+		"http://Registry.NPMJS.org/path": "registry.npmjs.org/path",
+		"https://artifact.example/team-a/": "artifact.example/team-a",
 		"":                               "",
 	}
 	for in, want := range cases {
 		if got := normalizeRegistry(in); got != want {
 			t.Errorf("normalizeRegistry(%q)=%q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestPrivacyFilter_PathDistinguishesRegistries(t *testing.T) {
+	pf := NewPrivacyFilter(PrivacyConfig{
+		ExternalScanRegistries: []string{"https://artifact.example/team-a/"},
+	})
+	in := []PackageRef{
+		{Name: "x", Registry: "https://artifact.example/team-a/"}, // allowed
+		{Name: "y", Registry: "https://artifact.example/team-b/"}, // private — different path
+	}
+	scan, skip := pf.Partition(in)
+	if len(scan) != 1 || scan[0].Name != "x" {
+		t.Errorf("only team-a should be allowed; scan=%v skip=%v", scan, skip)
+	}
+	if len(skip) != 1 || skip[0].Package.Name != "y" || skip[0].Reason != SkipReasonPrivateRegistry {
+		t.Errorf("team-b should be skipped with private_registry; skip=%v", skip)
 	}
 }
