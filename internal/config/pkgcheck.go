@@ -10,6 +10,18 @@ type PackageChecksConfig struct {
 	Registries map[string]RegistryTrustConfig `yaml:"registries"`
 	Providers  map[string]ProviderConfig      `yaml:"providers"`
 	Resolvers  map[string]ResolverConfig      `yaml:"resolvers"`
+	Privacy    PackagePrivacyConfig           `yaml:"privacy" json:"privacy"`
+}
+
+// PackagePrivacyConfig configures the upstream privacy filter applied
+// before any external (Snyk / Socket / etc.) provider is invoked.
+type PackagePrivacyConfig struct {
+	// ExternalScanRegistries lists registries whose packages may be sent
+	// to external providers. An empty list means "no registry filter."
+	ExternalScanRegistries []string `yaml:"external_scan_registries" json:"external_scan_registries"`
+	// PrivateScopeDenylist lists package name prefixes / glob patterns
+	// that should NOT be sent externally even when on an allowed registry.
+	PrivateScopeDenylist []string `yaml:"private_scope_denylist" json:"private_scope_denylist"`
 }
 
 // PackageCacheConfig configures the on-disk check result cache.
@@ -115,5 +127,9 @@ func DefaultPackageChecksConfig() PackageChecksConfig {
 			},
 		},
 		Resolvers: nil,
+		Privacy: PackagePrivacyConfig{
+			ExternalScanRegistries: []string{"registry.npmjs.org", "pypi.org"},
+			PrivateScopeDenylist:   nil,
+		},
 	}
 }

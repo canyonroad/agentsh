@@ -84,6 +84,17 @@ func TestPrivacyFilter_EmptyRegistryFailsClosed(t *testing.T) {
 	}
 }
 
+func TestPrivacyFilter_EmptyDenylistPatternIsIgnored(t *testing.T) {
+	pf := NewPrivacyFilter(PrivacyConfig{
+		PrivateScopeDenylist: []string{""},
+	})
+	in := []PackageRef{{Name: "lodash", Version: "1"}}
+	scan, skip := pf.Partition(in)
+	if len(scan) != 1 || len(skip) != 0 {
+		t.Errorf("empty pattern must not match anything; scan=%v skip=%v", scan, skip)
+	}
+}
+
 func TestPrivacyFilter_DenylistMatchesUnscopedPrefix(t *testing.T) {
 	pf := NewPrivacyFilter(PrivacyConfig{
 		PrivateScopeDenylist: []string{"internal-"},

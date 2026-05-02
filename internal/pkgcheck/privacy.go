@@ -68,6 +68,9 @@ func (f *PrivacyFilter) Partition(pkgs []PackageRef) (scan []PackageRef, skip []
 
 func (f *PrivacyFilter) matchesDenylist(name string) bool {
 	for _, pat := range f.denylistPatterns {
+		if pat == "" {
+			continue // empty pattern is a no-op; ignore rather than match-all
+		}
 		if strings.ContainsAny(pat, "*?[") {
 			if ok, _ := path.Match(pat, name); ok {
 				return true

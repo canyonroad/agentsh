@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -8,6 +9,14 @@ import (
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/pkgcheck/provider"
 )
+
+// errMissingAPIKeyValue is returned by requireAPIKey when the env var name is
+// configured (api_key_env is set) but the variable is currently unset or empty.
+// This is a "soft" error: the operator has wired the key name correctly but the
+// key is absent from the environment, which is acceptable in CI / local dev
+// scenarios where the provider is intentionally left key-less. The caller
+// treats it as a skip-with-warning rather than a fatal startup failure.
+var errMissingAPIKeyValue = errors.New("env var is unset or empty")
 
 // buildProviderEntry constructs a pkgcheck.ProviderEntry from a single
 // ProviderConfig. It returns an error if:
@@ -90,13 +99,16 @@ func buildProvider(name string, provCfg config.ProviderConfig) (pkgcheck.CheckPr
 }
 
 // requireAPIKey validates that an API key env var is configured and set.
+// It returns errMissingAPIKeyValue (a sentinel) when the env var name is
+// configured but the variable is currently empty — callers can test for that
+// specific error to decide whether to skip (soft) or fail hard.
 func requireAPIKey(providerName, apiKeyEnv string) (string, error) {
 	if apiKeyEnv == "" {
 		return "", fmt.Errorf("pkgcheck provider %q: api_key_env is required", providerName)
 	}
 	val := os.Getenv(apiKeyEnv)
 	if val == "" {
-		return "", fmt.Errorf("pkgcheck provider %q: env var %s is unset or empty", providerName, apiKeyEnv)
+		return "", fmt.Errorf("pkgcheck provider %q: %w: %s", providerName, errMissingAPIKeyValue, apiKeyEnv)
 	}
 	return val, nil
 }

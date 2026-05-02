@@ -134,6 +134,13 @@ func TestPackageChecksConfig_YAMLRoundTrip(t *testing.T) {
 	assert.Equal(t, 20*time.Second, decoded.Resolvers["pip"].Timeout)
 }
 
+func TestDefaultPackageChecksConfig_HasPrivacyDefaults(t *testing.T) {
+	d := DefaultPackageChecksConfig()
+	if len(d.Privacy.ExternalScanRegistries) == 0 {
+		t.Error("default Privacy.ExternalScanRegistries should be set")
+	}
+}
+
 func TestPackageChecksConfig_InConfig(t *testing.T) {
 	yamlInput := `
 package_checks:

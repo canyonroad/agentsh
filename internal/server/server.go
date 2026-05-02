@@ -521,8 +521,17 @@ func New(cfg *config.Config) (*Server, error) {
 			}
 			entry, err := buildProviderEntry(name, provCfg)
 			if err != nil {
-				slog.Warn("pkgcheck: skipping provider", "name", name, "error", err)
-				continue
+				// A missing env-var value is a soft misconfiguration: the operator
+				// has named the key correctly but the value is absent (CI / dev).
+				// Skip with a warning so the server still starts.
+				// Any other error (unknown provider name, missing api_key_env field,
+				// missing org_id, etc.) is a YAML-level misconfiguration the operator
+				// must fix — fail hard so it is not silently ignored.
+				if errors.Is(err, errMissingAPIKeyValue) {
+					slog.Warn("pkgcheck: skipping provider (API key env var unset)", "name", name, "error", err)
+					continue
+				}
+				return nil, fmt.Errorf("pkgcheck: provider %q misconfigured: %w", name, err)
 			}
 			providerEntries[name] = entry
 		}
@@ -532,9 +541,10 @@ func New(cfg *config.Config) (*Server, error) {
 			Providers: providerEntries,
 			Rules:     engine.PackageRules(),
 			Allowlist: pkgcheck.NewAllowlist(30 * time.Second),
-			// TODO(T16): populate Privacy from cfg.PackageChecks.Privacy
-			// once the YAML field is plumbed through in T16.
-			Privacy: pkgcheck.PrivacyConfig{},
+			Privacy: pkgcheck.PrivacyConfig{
+				ExternalScanRegistries: cfg.PackageChecks.Privacy.ExternalScanRegistries,
+				PrivateScopeDenylist:   cfg.PackageChecks.Privacy.PrivateScopeDenylist,
+			},
 		})
 		app.SetPackageChecker(pkgChecker)
 	}
