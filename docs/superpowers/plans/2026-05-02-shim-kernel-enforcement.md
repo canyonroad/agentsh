@@ -4,7 +4,7 @@
 
 **Goal:** Close the file/network/signal-policy gap when commands are spawned outside agentsh server's process tree (sandbox-SDK pattern: Tensorlake, E2B, Modal). The shim invokes the existing `agentsh-unixwrap` machinery on its own process before execve, so kernel filters govern the user's command even though it isn't a descendant of the agentsh server.
 
-**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. The server always returns the same populated response regardless of Mode — install/skip is the shim's decision, governed by its `mode=auto/on/off` config (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim opens the server's notify Unix socket directly (no socketpair relay), clears CLOEXEC on the fd, then launches `agentsh-unixwrap` as a **child process** via `runAndExit` (NOT `syscall.Exec`) with `AGENTSH_NOTIFY_SOCK_FD` set. **The shim always installs** when mode != off — there is no portable, unforgeable way to detect "already installed by us" (env-var markers are caller-controlled; `Seccomp:2` is true for any container default profile). Filter stacking up to the kernel's 64-filter limit covers realistic nesting depths. Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed. **IMPORTANT: the install branch runs BEFORE the `AGENTSH_IN_SESSION=1` recursion guard** — `AGENTSH_IN_SESSION` is caller-controllable, so gating install on it would let a malicious sandbox-SDK supervisor pre-set the env var and bypass enforcement. The recursion guard remains in place for the agentsh-exec proxy path only (where recursion would deadlock). Server-spawned children running the install branch install again — wasteful but safe.
+**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. The server always returns the same populated response regardless of Mode — install/skip is the shim's decision, governed by its `mode=auto/on/off` config (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim uses the **same socketpair-relay pattern** as `internal/cli/wrap_linux.go`'s `platformSetupWrap`: create an AF_UNIX SOCK_SEQPACKET socketpair, pass the child end to the wrapper as fd 3, act as relay (receive notify fd via SCM_RIGHTS, forward to server, send ACK byte back through socketpair), then wait and propagate exit code. Then launches `agentsh-unixwrap` as a **child process** via `runAndExit` (NOT `syscall.Exec`) with `AGENTSH_NOTIFY_SOCK_FD=3` set. (Direct-connect from shim to the server's notify socket does NOT work: the server's `acceptNotifyFD` never sends the ACK byte that the wrapper's `waitForACK` blocks on.) **The shim always installs** when mode != off — there is no portable, unforgeable way to detect "already installed by us" (env-var markers are caller-controlled; `Seccomp:2` is true for any container default profile). Filter stacking up to the kernel's 64-filter limit covers realistic nesting depths. Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed. **IMPORTANT: the install branch runs BEFORE the `AGENTSH_IN_SESSION=1` recursion guard** — `AGENTSH_IN_SESSION` is caller-controllable, so gating install on it would let a malicious sandbox-SDK supervisor pre-set the env var and bypass enforcement. The recursion guard remains in place for the agentsh-exec proxy path only (where recursion would deadlock). Server-spawned children running the install branch install again — wasteful but safe.
 
 **Tech Stack:** Go 1.x, Linux-only (`+build linux`), seccomp-bpf user-notify, Landlock, Unix domain sockets with SCM_RIGHTS. No new dependencies.
 
@@ -629,8 +629,16 @@ func TestInstall_AutoSilentSkipOnServerError(t *testing.T) {
 }
 
 // TestInstall_BuildsExecPlan exercises the success path: wrap-init returns
-// a notify socket, Install dials it, builds the wrapper exec plan with a
-// non-CLOEXEC fd in env. We don't actually exec; the test inspects the plan.
+// a notify socket, Install creates the socketpair relay, launches the
+// wrapper (in test: mocked), and returns ResultExec. We don't actually
+// exec; the test inspects the plan fields and asserts the relay was
+// attempted.
+//
+// NOTE for implementer: this test will need a test-injectable "launch
+// wrapper" hook on InstallParams (or a package-level var) so the test
+// can intercept the exec/relay step without actually spawning
+// agentsh-unixwrap. Model this after the acceptNotifyFDForTest seam in
+// Task 3. Document the seam in a comment noting it is test-only.
 func TestInstall_BuildsExecPlan(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "notify.sock")
@@ -678,11 +686,12 @@ func TestInstall_BuildsExecPlan(t *testing.T) {
 	if !hasFD {
 		t.Fatal("AGENTSH_NOTIFY_SOCK_FD not in env")
 	}
-	// The fd must be open and CLOEXEC must be cleared (defaults to set).
-	if res.NotifyFD <= 2 {
-		t.Fatalf("got NotifyFD=%d, want >2", res.NotifyFD)
+	// Signal fd must NOT be forwarded (shim mode strips signal env).
+	for _, e := range res.ExecEnv {
+		if strings.HasPrefix(e, "AGENTSH_SIGNAL_SOCK_FD=") {
+			t.Fatalf("AGENTSH_SIGNAL_SOCK_FD must not appear in shim mode env; got %q", e)
+		}
 	}
-	defer os.NewFile(uintptr(res.NotifyFD), "notify").Close()
 }
 ```
 
@@ -703,8 +712,20 @@ package kernelinstall
 import "fmt"
 
 // Install is unsupported on non-Linux targets.
+// ModeOn is fail-closed: "install or fail" — returning ResultSkip on a
+// non-Linux platform would silently bypass enforcement, violating the
+// ModeOn contract. Return ResultFailClosed so the caller exits 126.
 func Install(p InstallParams) (Result, error) {
-	return Result{Action: ResultSkip}, nil
+	if p.Mode == ModeOn {
+		return Result{
+			Action: ResultFailClosed,
+			Reason: "kernelinstall is not supported on this platform; mode=on requires Linux",
+		}, nil
+	}
+	return Result{
+		Action: ResultSkip,
+		Reason: "kernelinstall is not supported on this platform",
+	}, nil
 }
 
 // InstallParams declared here so the type compiles cross-platform.
@@ -725,7 +746,6 @@ type Result struct {
 	ExecPath string
 	ExecArgs []string
 	ExecEnv  []string
-	NotifyFD int
 	Reason   string
 }
 
@@ -752,14 +772,12 @@ package kernelinstall
 import (
 	"context"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/client"
 	"github.com/agentsh/agentsh/pkg/types"
-	"golang.org/x/sys/unix"
 )
 
 // InstallParams collects everything Install needs. ServerBaseURL is the
@@ -790,32 +808,90 @@ const (
 	// or when the server is unreachable.
 	ResultSkip ResultAction = iota
 	// ResultExec = launch the returned ExecPath/Args/Env as a CHILD process
-	// (use runAndExit, not syscall.Exec). The NotifyFD is open and
-	// CLOEXEC-cleared on the calling process; the child inherits it. The
-	// shim must not replace itself via syscall.Exec — see
-	// cmd/agentsh-shell-shim/main.go's existing runAndExit comment for
-	// the SDK output-capture rationale (Daytona/E2B toolboxes track the
-	// originally-spawned PID's pipes).
+	// (use runAndExit, not syscall.Exec). The shim must not replace itself
+	// via syscall.Exec — see cmd/agentsh-shell-shim/main.go's existing
+	// runAndExit comment for the SDK output-capture rationale
+	// (Daytona/E2B toolboxes track the originally-spawned PID's pipes).
+	//
+	// NOTE: Install itself drives the socketpair relay (see below) before
+	// returning ResultExec — by the time the caller sees ResultExec the
+	// relay is complete and the wrapper has already exited. The simple
+	// all-in-one API means the caller just checks the action and propagates
+	// exit code.
 	ResultExec
 	// ResultFailClosed = caller must exit 126 with the Reason.
 	ResultFailClosed
 )
 
-// Result is what Install returns. Inspect Action; only ExecPath/Args/Env/
-// NotifyFD are populated when Action == ResultExec; only Reason is
-// populated when Action == ResultFailClosed.
+// Result is what Install returns. Inspect Action; ExecPath/Args/Env are
+// returned for informational use (e.g., log lines) but the wrapper has
+// already been launched and waited on inside Install by the time the
+// caller receives ResultExec. Only Reason is populated when Action ==
+// ResultFailClosed.
+//
+// Design choice — all-in-one vs. relay bundle:
+//
+// Option A (chosen for initial cut): Install is all-in-one. It calls
+// wrap-init, creates the socketpair, forks the wrapper as a child via
+// runAndExit-style logic, drives the relay (receive notify fd via
+// SCM_RIGHTS → forward to server → send ACK byte back), waits for the
+// child, and propagates the exit code before returning. The caller sees
+// ResultExec after everything is done. Simple API; the shim's main.go
+// can't interpose between relay and wait, but there is no known use case
+// for that.
+//
+// Option B (deferred): Install returns a RelayBundle{ParentFD, NotifySocketPath,
+// WrapperCmd} and the caller drives the relay loop itself. More
+// composable if a future caller needs to multiplex multiple relays, but
+// adds complexity for no current benefit.
 type Result struct {
 	Action   ResultAction
 	ExecPath string
 	ExecArgs []string
 	ExecEnv  []string
-	NotifyFD int
 	Reason   string
 }
 
 const wrapInitTimeout = 5 * time.Second
 
 // Install is the entry point used by the shim.
+//
+// Relay protocol — this mirrors internal/cli/wrap_linux.go platformSetupWrap:
+//
+//  1. Call wrap-init to get WrapperBinary + NotifySocket path.
+//  2. Create an AF_UNIX SOCK_SEQPACKET socketpair. Parent end stays in
+//     the shim (this function); child end becomes fd 3 in the wrapper.
+//  3. Launch the wrapper as a child process (NOT syscall.Exec) with
+//     AGENTSH_NOTIFY_SOCK_FD=3 pointing at the child end.
+//  4. Shim (parent end) receives the seccomp notify fd from the wrapper
+//     via SCM_RIGHTS.
+//  5. Shim dials the server's NotifySocket and forwards the notify fd
+//     via SCM_RIGHTS (same as CLI does in agent mode).
+//  6. Shim sends the ACK byte back through the socketpair to the wrapper.
+//  7. Wrapper proceeds: Landlock install → execve the user's shell.
+//  8. Shim waits for the wrapper (child) to exit and propagates the exit
+//     code.
+//
+// Why not direct-connect shim → server notify socket?
+// The server's acceptNotifyFD (internal/api/wrap_linux.go) receives the
+// fd and starts the handler goroutine; it does NOT send an ACK byte.
+// The wrapper's waitForACK blocks until it receives that byte (sent by
+// the CLI relay in agent mode). Without an ACK the wrapper hangs forever.
+// The socketpair relay is required so the shim (not the server) sends ACK.
+//
+// Implementation strategy for the implementer — two options:
+//
+// Option A: Extract the relay loop from platformSetupWrap into a shared
+// internal/shim/wraprelay package that both internal/cli and
+// internal/shim/kernelinstall import. Cleanest separation; slightly more
+// dependencies (kernelinstall now imports internal/cli-related code).
+//
+// Option B: Duplicate the socketpair + relay + ACK logic inline in
+// install_linux.go. Less DRY but keeps the package self-contained and
+// avoids a circular-import risk if internal/cli ever imports kernelinstall.
+//
+// Both are acceptable. Option B is recommended for the initial cut (less
+// risk of import cycles). Use Option A if a third caller emerges.
 func Install(p InstallParams) (Result, error) {
 	if p.Mode == ModeOff {
 		return Result{Action: ResultSkip}, nil
@@ -839,16 +915,17 @@ func Install(p InstallParams) (Result, error) {
 		return Result{Action: ResultSkip}, nil
 	}
 
-	notifyFD, err := openNotifySocket(resp.NotifySocket)
-	if err != nil {
-		// Always fail-closed once we've committed to install — the
-		// server is expecting a connection on the listener it created.
-		return Result{}, fmt.Errorf("dial notify socket %s: %w", resp.NotifySocket, err)
-	}
-
+	// Build the wrapper environment. Strip AGENTSH_SIGNAL_SOCK_FD before
+	// merging WrapperEnv: the shim does not open SignalSocket or pass an
+	// inherited fd 4, so the wrapper would dereference a stale fd and either
+	// fail or silently lose signal enforcement. Signal-filter support in shim
+	// mode is deferred (see Open Issues / Limitations in Task 11).
 	env := append([]string{}, p.Env...)
-	env = appendOrReplace(env, "AGENTSH_NOTIFY_SOCK_FD="+strconv.Itoa(notifyFD))
+	env = appendOrReplace(env, "AGENTSH_NOTIFY_SOCK_FD=3") // child end of socketpair is always fd 3
 	for k, v := range resp.WrapperEnv {
+		if k == "AGENTSH_SIGNAL_SOCK_FD" {
+			continue // signal filter not yet supported in shim mode — see Task 11 Limitations
+		}
 		env = appendOrReplace(env, k+"="+v)
 	}
 
@@ -856,12 +933,28 @@ func Install(p InstallParams) (Result, error) {
 	wrapperArgv0 := basename(resp.WrapperBinary)
 	args := append([]string{wrapperArgv0, "--", p.RealShell}, p.ShellArgs...)
 
+	// TODO (implementer): implement the socketpair relay loop here.
+	// See the relay protocol in the Install godoc above.
+	// Canonical reference: internal/cli/wrap_linux.go platformSetupWrap.
+	// Steps:
+	//   1. unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+	//      → [parentFD, childFD]
+	//   2. Clear CLOEXEC on childFD so the wrapper inherits it.
+	//   3. Build cmd with ExtraFiles or explicit fd 3 = childFD.
+	//   4. cmd.Start()
+	//   5. Close childFD in the parent (wrapper owns it now).
+	//   6. Read notify fd from parentFD via unix.Recvmsg + SCM_RIGHTS.
+	//   7. net.Dial("unix", resp.NotifySocket) → conn.
+	//   8. Forward notify fd to conn via unix.Sendmsg + SCM_RIGHTS.
+	//   9. Write ACK byte to parentFD (wrapper's waitForACK unblocks).
+	//  10. cmd.Wait() → exitCode.
+	//  11. os.Exit(exitCode).
+	_ = strconv.Itoa // suppress unused import until relay is implemented
 	return Result{
 		Action:   ResultExec,
 		ExecPath: resp.WrapperBinary,
 		ExecArgs: args,
 		ExecEnv:  env,
-		NotifyFD: notifyFD,
 	}, nil
 }
 
@@ -886,40 +979,6 @@ func callWrapInit(p InstallParams) (types.WrapInitResponse, error) {
 		CallerUID:    p.CallerUID,
 		Mode:         "shim",
 	})
-}
-
-// openNotifySocket dials the server's notify Unix socket and returns a raw
-// fd that survives execve. The dup-then-close-File pattern is required:
-// *os.File has a finalizer that closes its fd, so we dup to escape it.
-// The wrapper inherits the open raw fd and writes the seccomp notify fd
-// back over it via SCM_RIGHTS (see agentsh-unixwrap's sendFD path).
-func openNotifySocket(path string) (int, error) {
-	conn, err := net.DialTimeout("unix", path, 2*time.Second)
-	if err != nil {
-		return -1, err
-	}
-	uc, ok := conn.(*net.UnixConn)
-	if !ok {
-		conn.Close()
-		return -1, fmt.Errorf("dialed connection is not *net.UnixConn (%T)", conn)
-	}
-	f, err := uc.File() // f is a dup of the underlying fd
-	uc.Close()
-	if err != nil {
-		return -1, fmt.Errorf("File: %w", err)
-	}
-	// Dup once more to escape the *os.File finalizer.
-	rawFD, err := unix.Dup(int(f.Fd()))
-	f.Close()
-	if err != nil {
-		return -1, fmt.Errorf("dup: %w", err)
-	}
-	// Clear CLOEXEC so the fd survives execve into the wrapper.
-	if _, err := unix.FcntlInt(uintptr(rawFD), unix.F_SETFD, 0); err != nil {
-		unix.Close(rawFD)
-		return -1, fmt.Errorf("fcntl F_SETFD 0: %w", err)
-	}
-	return rawFD, nil
 }
 
 func appendOrReplace(env []string, kv string) []string {
@@ -1014,21 +1073,25 @@ In `cmd/agentsh-shell-shim/main.go`, insert the kernelinstall block BEFORE the e
         RealShell:     realShell,
         ShellArgs:     os.Args[1:],
         Env:           os.Environ(),
+        // CallerUID is required: the server's acceptNotifyFD does a
+        // peer-credentials check against req.CallerUID. If CallerUID is 0
+        // (field absent), the server disables UID enforcement, letting any
+        // local UID connect. Pass os.Getuid() so the check is active.
+        CallerUID:     os.Getuid(),
     })
     if installErr != nil {
         fatalWithHint(126, fmt.Sprintf("agentsh-shell-shim: kernel install: %v", installErr),
             "To disable, set shim_install=off in /etc/agentsh/shim.conf")
     }
     if res.Action == kernelinstall.ResultExec {
-        // Launch agentsh-unixwrap as a CHILD process, not via syscall.Exec.
-        // Sandbox toolboxes (Daytona, E2B) capture output by reading pipes
-        // attached to the process they started (the shim). syscall.Exec
-        // would replace the shim and the toolbox would lose its output pipe.
-        // runAndExit forks the wrapper, copies pipes through, and exits with
-        // the wrapper's exit code — keeping the shim's PID alive until done.
-        // The NotifyFD has CLOEXEC cleared; the child inherits it.
-        runAndExit(res.ExecPath, "", res.ExecArgs[1:], res.ExecEnv)
-        // runAndExit calls os.Exit; the line below is unreachable.
+        // Install already drove the socketpair relay and waited for the
+        // wrapper. ResultExec just signals the caller to exit cleanly.
+        // The wrapper's exit code was propagated by Install via os.Exit.
+        // This path is not reached; os.Exit inside Install terminates the
+        // process. The block is retained for clarity (exhaustive switch on
+        // ResultAction values) and in case the API is refactored to return
+        // without exiting.
+        os.Exit(0)
     }
 }
 
@@ -1086,6 +1149,14 @@ git commit -m "feat(shim): wire kernelinstall before agentsh-exec proxy path"
 
 **Files:**
 - Create: `internal/api/seccomp_wrapper_shim_install_test.go`
+
+**Additional regression test (CallerUID):** Add a unit test in
+`internal/shim/kernelinstall/install_linux_test.go` (or a new
+`internal/api/wrap_shim_mode_test.go` addition) that asserts the shim
+sends a non-zero `CallerUID` matching `os.Getuid()`. Use an httptest
+server that captures the request body, decodes `types.WrapInitRequest`,
+and asserts `req.CallerUID == os.Getuid()`. This locks in the UID
+enforcement path so a future refactor can't accidentally zero it out.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1321,13 +1392,18 @@ env says `off`), the env var is silently ignored and the config wins.
 
 Per shim invocation, when install is required:
 
-1. Shim opens the server's notify socket directly (no relay).
-2. Sets `AGENTSH_NOTIFY_SOCK_FD=<n>`.
-3. Launches `agentsh-unixwrap` as a **child process** via `runAndExit` (NOT `syscall.Exec`). The shim stays alive as the parent, keeping its pipes open so sandbox toolboxes (Daytona, E2B) that track the spawned PID's output don't lose it when the wrapper runs.
-4. `agentsh-unixwrap` installs seccomp-notify, sends the notify fd back
-   over the socket, applies Landlock, then execve's the user's shell.
-5. The user's command runs under both filters. The wrapper's exit code
-   propagates back through the shim via `runAndExit`.
+1. Shim calls wrap-init and receives WrapperBinary + NotifySocket path.
+2. Shim creates an AF_UNIX SOCK_SEQPACKET socketpair. Parent end stays
+   in the shim; child end becomes fd 3 in the wrapper.
+3. Sets `AGENTSH_NOTIFY_SOCK_FD=3` in the wrapper environment.
+4. Launches `agentsh-unixwrap` as a **child process** via `runAndExit` (NOT `syscall.Exec`). The shim stays alive as the parent, keeping its pipes open so sandbox toolboxes (Daytona, E2B) that track the spawned PID's output don't lose it when the wrapper runs.
+5. Shim acts as relay: receives the seccomp notify fd from the wrapper
+   via SCM_RIGHTS on the parent end of the socketpair, dials the server's
+   NotifySocket, forwards the notify fd, then sends the ACK byte back
+   through the socketpair. The wrapper's `waitForACK` unblocks.
+6. `agentsh-unixwrap` applies Landlock, then execve's the user's shell.
+7. The user's command runs under both filters. The shim waits for the
+   wrapper child to exit and propagates the exit code.
 
 Nested shim invocations (`bash -c "bash -c ..."`) **install at every
 level** — filter stacking up to the kernel's 64-filter limit is allowed
@@ -1340,6 +1416,15 @@ safe choice is to always install when the shim is not in-session.
 
 ## Limitations
 
+- **Signal filter not enforced in shim mode.** When the server session
+  has signal-filter rules enabled, `WrapperEnv` includes
+  `AGENTSH_SIGNAL_SOCK_FD=4`. The shim does not open `SignalSocket` or
+  pass an inherited fd 4, so the shim's Install strips
+  `AGENTSH_SIGNAL_SOCK_FD` from the wrapper environment. Signal-rule
+  enforcement remains a server-spawned-only feature until a future
+  iteration extends the relay to handle the second socketpair (same
+  pattern, doubled). Operators relying on signal rules must use the
+  server-spawned path.
 - **Direct SDK exec** (`sb.exec("cat", [...])` without going through
   any shell) bypasses the shim. The fix on that path is to integrate
   the SDK with `agentsh exec` directly. Tracked as a separate concern.
