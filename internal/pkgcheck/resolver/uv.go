@@ -15,12 +15,19 @@ import (
 
 // UVResolverConfig configures the uv resolver.
 type UVResolverConfig struct {
-	DryRunCommand string        // path to uv binary; defaults to "uv"
-	Timeout       time.Duration // timeout for dry-run execution
+	// DryRunCommand is the path to the uv binary; defaults to "uv".
+	// For additional args to prepend to the resolver-specific args, use DryRunArgs.
+	DryRunCommand string
+	// DryRunArgs contains args to prepend to the resolver-specific args.
+	// Each element is a single token (no shell splitting is performed).
+	DryRunArgs []string
+	Timeout    time.Duration // timeout for dry-run execution
 }
 
 type uvResolver struct {
-	cfg UVResolverConfig
+	cfg        UVResolverConfig
+	binary     string
+	prefixArgs []string
 }
 
 // NewUVResolver creates a resolver for uv pip install and uv add commands.
@@ -31,7 +38,9 @@ func NewUVResolver(cfg UVResolverConfig) pkgcheck.Resolver {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	return &uvResolver{cfg: cfg}
+	// DryRunCommand is the binary path only; DryRunArgs carries any prefix args.
+	// No shell splitting is performed so paths with spaces are preserved verbatim.
+	return &uvResolver{cfg: cfg, binary: cfg.DryRunCommand, prefixArgs: cfg.DryRunArgs}
 }
 
 func (r *uvResolver) Name() string { return "uv" }
@@ -56,18 +65,33 @@ func (r *uvResolver) CanResolve(command string, args []string) bool {
 
 func (r *uvResolver) Resolve(ctx context.Context, workDir string, command []string) (*pkgcheck.InstallPlan, error) {
 	var packages []string
+	var args []string
 	if len(command) > 1 {
-		packages = extractPkgArgs(command[1:])
+		args = command[1:]
+		// uv uses a two-token subcommand ("pip install").  Strip both tokens
+		// before extracting package names so "install" is not mistaken for a
+		// package name.  CanResolve already guarantees args[0]=="pip" and
+		// args[1]=="install" when we reach this path.
+		pkgArgs := args
+		if len(pkgArgs) >= 2 && pkgArgs[0] == "pip" && pkgArgs[1] == "install" {
+			pkgArgs = pkgArgs[2:]
+		}
+		packages = extractPkgArgs(pkgArgs)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 
-	// uv pip install --dry-run <packages>
+	// uv pip install --dry-run [--index-url <url>] [--extra-index-url <url>] <packages>
+	// Forward any --index-url / --extra-index-url flags from the original
+	// command so the dry-run resolves against the same index the actual install
+	// will use.
 	cmdArgs := []string{"pip", "install", "--dry-run"}
+	cmdArgs = append(cmdArgs, r.extractIndexURLFlags(command)...)
 	cmdArgs = append(cmdArgs, packages...)
+	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
-	cmd := exec.CommandContext(ctx, r.cfg.DryRunCommand, cmdArgs...)
+	cmd := exec.CommandContext(ctx, r.binary, allArgs...)
 	cmd.Dir = workDir
 
 	out, err := cmd.Output()
@@ -75,7 +99,70 @@ func (r *uvResolver) Resolve(ctx context.Context, workDir string, command []stri
 		return nil, fmt.Errorf("uv dry-run failed: %w", err)
 	}
 
-	return parseUVDryRunOutput(out, packages)
+	plan, err := parseUVDryRunOutput(out, packages)
+	if err != nil {
+		return nil, err
+	}
+	plan.Registry = r.detectRegistry(args)
+	return plan, nil
+}
+
+// extractIndexURLFlags returns the subset of args that influence which
+// index/registry packages resolve from (--index-url, --extra-index-url).
+// Pass these to the dry-run so the resolver hits the same source the actual
+// install will use.
+func (r *uvResolver) extractIndexURLFlags(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--index-url" && i+1 < len(args):
+			out = append(out, a, args[i+1])
+			i++
+		case strings.HasPrefix(a, "--index-url="):
+			out = append(out, a)
+		case a == "--extra-index-url" && i+1 < len(args):
+			out = append(out, a, args[i+1])
+			i++
+		case strings.HasPrefix(a, "--extra-index-url="):
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// detectRegistry scans the uv pip install command args for registry override flags.
+//
+// --index-url sets the primary registry; return it directly.
+// --extra-index-url means "also use this registry", so the package may have
+// come from EITHER the primary or the extra registry. We can't tell which, so
+// we return "" (unknown) to let the privacy filter fail closed rather than
+// accidentally claiming the package came from a known-public registry.
+func (r *uvResolver) detectRegistry(args []string) string {
+	hasExtra := false
+	primary := "pypi.org"
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--index-url" && i+1 < len(args):
+			primary = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--index-url="):
+			primary = strings.TrimPrefix(a, "--index-url=")
+		case a == "--extra-index-url" && i+1 < len(args):
+			hasExtra = true
+			i++
+		case strings.HasPrefix(a, "--extra-index-url="):
+			hasExtra = true
+		}
+	}
+
+	if hasExtra {
+		// Package origin is ambiguous — return "" so privacy filter fails closed.
+		return ""
+	}
+	return primary
 }
 
 // parseUVDryRunOutput parses uv's --dry-run text output into an InstallPlan.
@@ -98,6 +185,7 @@ func parseUVDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Install
 	plan := &pkgcheck.InstallPlan{
 		Tool:       "uv",
 		Ecosystem:  pkgcheck.EcosystemPyPI,
+		Registry:   "pypi.org",
 		ResolvedAt: time.Now(),
 	}
 

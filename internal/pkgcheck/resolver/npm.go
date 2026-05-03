@@ -14,12 +14,19 @@ import (
 
 // NPMResolverConfig configures the NPM resolver.
 type NPMResolverConfig struct {
-	DryRunCommand string        // path to npm binary; defaults to "npm"
-	Timeout       time.Duration // timeout for dry-run execution
+	// DryRunCommand is the path to the npm binary; defaults to "npm".
+	// For additional args to prepend to the resolver-specific args, use DryRunArgs.
+	DryRunCommand string
+	// DryRunArgs contains args to prepend to the resolver-specific args.
+	// Each element is a single token (no shell splitting is performed).
+	DryRunArgs []string
+	Timeout    time.Duration // timeout for dry-run execution
 }
 
 type npmResolver struct {
-	cfg NPMResolverConfig
+	cfg        NPMResolverConfig
+	binary     string
+	prefixArgs []string
 }
 
 // NewNPMResolver creates a resolver for npm install commands.
@@ -30,7 +37,9 @@ func NewNPMResolver(cfg NPMResolverConfig) pkgcheck.Resolver {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	return &npmResolver{cfg: cfg}
+	// DryRunCommand is the binary path only; DryRunArgs carries any prefix args.
+	// No shell splitting is performed so paths with spaces are preserved verbatim.
+	return &npmResolver{cfg: cfg, binary: cfg.DryRunCommand, prefixArgs: cfg.DryRunArgs}
 }
 
 func (r *npmResolver) Name() string { return "npm" }
@@ -57,18 +66,24 @@ func (r *npmResolver) CanResolve(command string, args []string) bool {
 func (r *npmResolver) Resolve(ctx context.Context, workDir string, command []string) (*pkgcheck.InstallPlan, error) {
 	// Extract package args (skip the subcommand, filter flags)
 	var packages []string
+	var args []string
 	if len(command) > 1 {
-		packages = extractPkgArgs(command[1:])
+		args = command[1:]
+		packages = extractPkgArgs(args)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 
-	// npm install --package-lock-only --ignore-scripts --json <packages>
+	// npm install --package-lock-only --ignore-scripts --json [--registry <url>] <packages>
+	// Forward any --registry flag from the original command so the dry-run
+	// resolves against the same registry the actual install will use.
 	cmdArgs := []string{"install", "--package-lock-only", "--ignore-scripts", "--json"}
+	cmdArgs = append(cmdArgs, r.extractRegistryFlags(command)...)
 	cmdArgs = append(cmdArgs, packages...)
+	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
-	cmd := exec.CommandContext(ctx, r.cfg.DryRunCommand, cmdArgs...)
+	cmd := exec.CommandContext(ctx, r.binary, allArgs...)
 	cmd.Dir = workDir
 
 	out, err := cmd.Output()
@@ -76,7 +91,47 @@ func (r *npmResolver) Resolve(ctx context.Context, workDir string, command []str
 		return nil, fmt.Errorf("npm dry-run failed: %w", err)
 	}
 
-	return parseNPMDryRunOutput(out, packages)
+	plan, err := parseNPMDryRunOutput(out, packages)
+	if err != nil {
+		return nil, err
+	}
+	planRegistry := r.detectRegistry(args)
+	plan.Registry = planRegistry
+	explicitFlag := r.hasRegistryFlag(args)
+	// Scoped packages may resolve from a private registry per .npmrc scope
+	// directives. Without an explicit --registry CLI flag we cannot prove the
+	// resolved origin, so leave Registry empty and let the privacy filter fail
+	// closed (over-skip rather than risk leaking the package name externally).
+	for i := range plan.Direct {
+		if isScopedPackage(plan.Direct[i].Name) && !explicitFlag {
+			plan.Direct[i].Registry = ""
+		} else {
+			plan.Direct[i].Registry = planRegistry
+		}
+	}
+	for i := range plan.Transitive {
+		if isScopedPackage(plan.Transitive[i].Name) && !explicitFlag {
+			plan.Transitive[i].Registry = ""
+		} else {
+			plan.Transitive[i].Registry = planRegistry
+		}
+	}
+	return plan, nil
+}
+
+// detectRegistry scans the install command args for an explicit --registry
+// flag and returns its value. Falls back to the public npm registry.
+func (r *npmResolver) detectRegistry(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--registry" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(a, "--registry=") {
+			return strings.TrimPrefix(a, "--registry=")
+		}
+	}
+	return "registry.npmjs.org"
 }
 
 // npmDryRunOutput represents the JSON output from npm install --json.
@@ -106,6 +161,7 @@ func parseNPMDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Instal
 	plan := &pkgcheck.InstallPlan{
 		Tool:       "npm",
 		Ecosystem:  pkgcheck.EcosystemNPM,
+		Registry:   "registry.npmjs.org",
 		ResolvedAt: time.Now(),
 	}
 
@@ -221,6 +277,45 @@ func pkgBaseName(spec string) string {
 		}
 	}
 	return spec
+}
+
+// isScopedPackage reports whether name is a scoped npm package (e.g. @acme/foo).
+// Scoped packages can be routed to a private registry via .npmrc
+// "scope:registry" directives that we cannot read. Without an explicit
+// --registry CLI flag we cannot prove the resolved origin, so callers
+// leave Registry empty for scoped packages (fail closed).
+func isScopedPackage(name string) bool {
+	return strings.HasPrefix(name, "@") && strings.Contains(name, "/")
+}
+
+// extractRegistryFlags returns the subset of args that influence which
+// registry packages resolve from. Pass these to the dry-run so the
+// resolver hits the same source the actual install will.
+func (r *npmResolver) extractRegistryFlags(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--registry" && i+1 < len(args) {
+			out = append(out, a, args[i+1])
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "--registry=") {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// hasRegistryFlag reports whether the args slice contains an explicit
+// --registry flag (with or without =).
+func (r *npmResolver) hasRegistryFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--registry" || strings.HasPrefix(a, "--registry=") {
+			return true
+		}
+	}
+	return false
 }
 
 // trimWindowsScriptExt strips .cmd and .bat extensions (case-insensitive)

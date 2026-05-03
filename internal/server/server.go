@@ -514,22 +514,71 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Initialize package checker (optional).
 	if cfg.PackageChecks.Enabled {
+		// Resolve and apply fail mode so Snyk/Socket OnFailure reflects
+		// the operator's policy before provider entries are constructed.
+		mode := config.ResolveFailMode(&cfg.PackageChecks)
+		// Validate the resolved mode (which may have come from
+		// PKGCHECK_FAIL_MODE env var, bypassing YAML validation).
+		// A typo like "clsoed" would otherwise silently no-op via
+		// ApplyFailMode and leave the default OnFailure in place,
+		// undermining the operator's intent.
+		switch mode {
+		case "open", "closed", "degraded":
+		default:
+			return nil, fmt.Errorf("pkgcheck: invalid fail_mode %q (env PKGCHECK_FAIL_MODE or package_checks.fail_mode); must be one of open, closed, degraded", mode)
+		}
+		config.ApplyFailMode(&cfg.PackageChecks, mode)
+
 		providerEntries := make(map[string]pkgcheck.ProviderEntry)
 		for name, provCfg := range cfg.PackageChecks.Providers {
 			if !provCfg.Enabled {
 				continue
 			}
-			// Concrete provider wiring will be added in a follow-up;
-			// for now only the skeleton is set up.
-			_ = name
-			_ = provCfg
+			entry, err := buildProviderEntry(name, provCfg)
+			if err != nil {
+				// A missing env-var value is a soft misconfiguration: the operator
+				// has named the key correctly but the value is absent (CI / dev).
+				// Under fail_mode=closed, however, an operator's intent is to fail
+				// closed on any provider failure — silently disabling a configured
+				// provider would undermine that intent, so we treat it as fatal.
+				if errors.Is(err, errMissingAPIKeyValue) {
+					if mode == "closed" {
+						return nil, fmt.Errorf("pkgcheck: provider %q enabled with missing API key under fail_mode=closed: configured to fail closed, but provider cannot operate", name)
+					}
+					slog.Warn("pkgcheck: skipping provider (API key env var unset)", "name", name, "error", err)
+					continue
+				}
+				return nil, fmt.Errorf("pkgcheck: provider %q misconfigured: %w", name, err)
+			}
+			providerEntries[name] = entry
 		}
+
+		resolvers, err := buildResolvers(cfg.PackageChecks.Resolvers)
+		if err != nil {
+			return nil, fmt.Errorf("pkgcheck: resolvers misconfigured: %w", err)
+		}
+
+		if len(providerEntries) == 0 {
+			return nil, fmt.Errorf("package_checks.enabled=true but no providers were initialized — at least one provider must be configured and have its API key (if required) set")
+		}
+
+		// Compose rules: engine.PackageRules() takes precedence, then block_on
+		// shorthand fills in the remaining finding types. We use the no-catch-all
+		// variant here so that an operator's policy file can deliberately omit
+		// a catch-all rule and rely on the evaluator's default-deny.
+		rules := append([]policy.PackageRule(nil), engine.PackageRules()...)
+		rules = append(rules, config.CompileBlockOnRules(cfg.PackageChecks.BlockOn)...)
 
 		pkgChecker := pkgcheck.NewChecker(pkgcheck.CheckerConfig{
 			Scope:     cfg.PackageChecks.Scope,
+			Resolvers: resolvers,
 			Providers: providerEntries,
-			Rules:     engine.PackageRules(),
+			Rules:     rules,
 			Allowlist: pkgcheck.NewAllowlist(30 * time.Second),
+			Privacy: pkgcheck.PrivacyConfig{
+				ExternalScanRegistries: cfg.PackageChecks.Privacy.ExternalScanRegistries,
+				PrivateScopeDenylist:   cfg.PackageChecks.Privacy.PrivateScopeDenylist,
+			},
 		})
 		app.SetPackageChecker(pkgChecker)
 	}

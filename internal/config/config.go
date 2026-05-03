@@ -1899,9 +1899,28 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 
 	// Package checks defaults
 	pkgDefaults := DefaultPackageChecksConfig()
+
+	// Capture the user-provided scope BEFORE generic defaulting touches it,
+	// so external-provider promotion can distinguish "user said
+	// new_packages_only" from "YAML omitted scope".
+	userSetScope := cfg.PackageChecks.Scope != ""
+
+	// Run external-provider scope promotion. This may set Scope to
+	// "all_installs" if it was empty and an external provider is enabled,
+	// or emit a warning to stderr if the user explicitly set
+	// new_packages_only with an external provider.
+	if warnings := ApplyExternalProviderDefaults(&cfg.PackageChecks); len(warnings) > 0 {
+		for _, w := range warnings {
+			slog.Warn(w)
+		}
+	}
+
+	// Generic default for scope only kicks in if neither the user nor
+	// ApplyExternalProviderDefaults set it.
 	if cfg.PackageChecks.Scope == "" {
 		cfg.PackageChecks.Scope = pkgDefaults.Scope
 	}
+	_ = userSetScope // currently informational; warning logic uses presence of provider config
 	if cfg.PackageChecks.Cache.TTL.Vulnerability == 0 {
 		cfg.PackageChecks.Cache.TTL.Vulnerability = pkgDefaults.Cache.TTL.Vulnerability
 	}
@@ -1919,6 +1938,36 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	}
 	if cfg.PackageChecks.Providers == nil {
 		cfg.PackageChecks.Providers = pkgDefaults.Providers
+	}
+	if cfg.PackageChecks.FailMode == "" {
+		cfg.PackageChecks.FailMode = pkgDefaults.FailMode
+	}
+	// Privacy block defaults: an unset list (nil) inherits the
+	// public-registry allowlist so the privacy gate is on by default.
+	// Use == nil rather than len(...) == 0 so users can explicitly disable
+	// the filter by setting external_scan_registries: [] in YAML.
+	if cfg.PackageChecks.Privacy.ExternalScanRegistries == nil {
+		cfg.PackageChecks.Privacy.ExternalScanRegistries = pkgDefaults.Privacy.ExternalScanRegistries
+	}
+	// PrivateScopeDenylist defaults to nil intentionally (no scope blocked by default).
+	// BlockOn: per-field defaults so partial YAML doesn't silently disable
+	// the malware/vulnerability defaults when the user only set license.
+	// A user who explicitly wants to opt out of a default sets the field to
+	// "never" (a valid BlockOnConfig value that produces no rule).
+	if cfg.PackageChecks.BlockOn.Malware == "" {
+		cfg.PackageChecks.BlockOn.Malware = pkgDefaults.BlockOn.Malware
+	}
+	if cfg.PackageChecks.BlockOn.Vulnerability == "" {
+		cfg.PackageChecks.BlockOn.Vulnerability = pkgDefaults.BlockOn.Vulnerability
+	}
+	if cfg.PackageChecks.BlockOn.License == "" {
+		cfg.PackageChecks.BlockOn.License = pkgDefaults.BlockOn.License
+	}
+	if cfg.PackageChecks.BlockOn.Reputation == "" {
+		cfg.PackageChecks.BlockOn.Reputation = pkgDefaults.BlockOn.Reputation
+	}
+	if cfg.PackageChecks.BlockOn.Provenance == "" {
+		cfg.PackageChecks.BlockOn.Provenance = pkgDefaults.BlockOn.Provenance
 	}
 
 	// Policy socket defaults (macOS system extension IPC)
@@ -2191,6 +2240,16 @@ func validateConfig(cfg *Config) error {
 			return fmt.Errorf("invalid package_checks.scope %q (must be \"new_packages_only\" or \"all_installs\")", cfg.PackageChecks.Scope)
 		}
 	}
+	// Validate package_checks.fail_mode (also reachable via PKGCHECK_FAIL_MODE
+	// env var; ResolveFailMode performs the same check at runtime, but we
+	// surface YAML-time misconfig as an explicit startup error).
+	if cfg.PackageChecks.FailMode != "" {
+		switch cfg.PackageChecks.FailMode {
+		case "open", "closed", "degraded":
+		default:
+			return fmt.Errorf("invalid package_checks.fail_mode %q (must be \"open\", \"closed\", or \"degraded\")", cfg.PackageChecks.FailMode)
+		}
+	}
 	for name, p := range cfg.PackageChecks.Providers {
 		if p.OnFailure != "" {
 			switch p.OnFailure {
@@ -2213,6 +2272,16 @@ func validateConfig(cfg *Config) error {
 		default:
 			return fmt.Errorf("invalid package_checks.registries[%q].trust %q (must be \"check_full\", \"check_local_only\", or \"trusted\")", name, r.Trust)
 		}
+	}
+	// Validate denylist globs in package_checks.privacy so malformed
+	// patterns fail at startup rather than silently fail open at runtime.
+	if err := cfg.PackageChecks.Privacy.Validate(); err != nil {
+		return fmt.Errorf("package_checks.privacy: %w", err)
+	}
+	// Validate block_on shorthand enum values so a typo like
+	// vulnerability=critcal doesn't silently compile to a permissive policy.
+	if err := cfg.PackageChecks.BlockOn.Validate(); err != nil {
+		return fmt.Errorf("package_checks.%w", err)
 	}
 	// Landlock network self-lockout check: if the user disables outbound TCP
 	// under Landlock but the sandbox proxy is enabled, agents can never reach

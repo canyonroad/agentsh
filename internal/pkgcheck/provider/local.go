@@ -20,6 +20,13 @@ func (p *localProvider) Name() string {
 	return "local"
 }
 
+// IsLocal implements pkgcheck.LocalProvider. The local provider runs entirely
+// in-process and never makes network calls, so private packages should still
+// receive license/metadata checks regardless of privacy filter settings.
+func (p *localProvider) IsLocal() bool {
+	return true
+}
+
 func (p *localProvider) Capabilities() []pkgcheck.FindingType {
 	return []pkgcheck.FindingType{pkgcheck.FindingLicense}
 }

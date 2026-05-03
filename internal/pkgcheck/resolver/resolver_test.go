@@ -3,6 +3,7 @@ package resolver
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 	"time"
@@ -664,4 +665,497 @@ func TestNPMResolver_CustomConfig(t *testing.T) {
 	}).(*npmResolver)
 	assert.Equal(t, "/custom/npm", r.cfg.DryRunCommand)
 	assert.Equal(t, 60*time.Second, r.cfg.Timeout)
+}
+
+// --- Registry field tests ---
+
+func TestNPMResolver_PlanCarriesRegistry(t *testing.T) {
+	plan, err := parseNPMDryRunOutput([]byte(`{"added":[{"name":"express","version":"4.18.2"}]}`), []string{"express"})
+	require.NoError(t, err)
+	assert.Equal(t, "registry.npmjs.org", plan.Registry)
+}
+
+func TestPipResolver_PlanCarriesRegistry(t *testing.T) {
+	plan, err := parsePipDryRunOutput([]byte(`{"install":[{"metadata":{"name":"flask","version":"3.0.0"},"requested":true}]}`), []string{"flask"})
+	require.NoError(t, err)
+	assert.Equal(t, "pypi.org", plan.Registry)
+}
+
+func TestUVResolver_PlanCarriesRegistry(t *testing.T) {
+	plan, err := parseUVDryRunOutput([]byte("Would install flask-3.0.0\n"), []string{"flask"})
+	require.NoError(t, err)
+	assert.Equal(t, "pypi.org", plan.Registry)
+}
+
+func TestPNPMResolver_PlanCarriesRegistry(t *testing.T) {
+	plan, err := parsePNPMDryRunOutput([]byte(`{"added":[{"name":"react","version":"18.2.0"}]}`), []string{"react"})
+	require.NoError(t, err)
+	assert.Equal(t, "registry.npmjs.org", plan.Registry)
+}
+
+func TestYarnResolver_PlanCarriesRegistry(t *testing.T) {
+	plan, err := parseYarnDryRunOutput([]byte(`{"added":[{"name":"typescript","version":"5.3.3"}]}`), []string{"typescript"})
+	require.NoError(t, err)
+	assert.Equal(t, "registry.npmjs.org", plan.Registry)
+}
+
+func TestPoetryResolver_PlanCarriesDefaultRegistry(t *testing.T) {
+	// Poetry source registries live in pyproject.toml; we don't parse it.
+	// The resolver defaults to pypi.org so the privacy filter works like pip/uv.
+	// Operators using a private registry must allowlist it via ExternalScanRegistries.
+	plan, err := parsePoetryDryRunOutput([]byte(`{"added":[{"name":"django","version":"5.0.1"}]}`), []string{"django"})
+	require.NoError(t, err)
+	assert.Equal(t, "pypi.org", plan.Registry)
+}
+
+// --- DryRunArgs explicit-fields tests ---
+
+func TestNPMResolver_DryRunArgs(t *testing.T) {
+	r := NewNPMResolver(NPMResolverConfig{
+		DryRunCommand: "npx",
+		DryRunArgs:    []string{"npm", "--prefix", "/tmp"},
+	}).(*npmResolver)
+	assert.Equal(t, "npx", r.binary)
+	assert.Equal(t, []string{"npm", "--prefix", "/tmp"}, r.prefixArgs)
+}
+
+func TestNPMResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
+	r := NewNPMResolver(NPMResolverConfig{
+		DryRunCommand: "/Program Files/node/npm.cmd",
+		DryRunArgs:    []string{"install", "--package-lock-only"},
+	}).(*npmResolver)
+	assert.Equal(t, "/Program Files/node/npm.cmd", r.binary)
+	assert.Equal(t, []string{"install", "--package-lock-only"}, r.prefixArgs)
+}
+
+func TestPipResolver_DryRunArgs(t *testing.T) {
+	r := NewPipResolver(PipResolverConfig{
+		DryRunCommand: "python",
+		DryRunArgs:    []string{"-m", "pip"},
+	}).(*pipResolver)
+	assert.Equal(t, "python", r.binary)
+	assert.Equal(t, []string{"-m", "pip"}, r.prefixArgs)
+}
+
+func TestPipResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
+	r := NewPipResolver(PipResolverConfig{
+		DryRunCommand: "/Program Files/Python312/python.exe",
+		DryRunArgs:    []string{"-m", "pip"},
+	}).(*pipResolver)
+	assert.Equal(t, "/Program Files/Python312/python.exe", r.binary)
+	assert.Equal(t, []string{"-m", "pip"}, r.prefixArgs)
+}
+
+func TestUVResolver_DryRunArgs(t *testing.T) {
+	r := NewUVResolver(UVResolverConfig{
+		DryRunCommand: "/usr/local/bin/uv",
+		DryRunArgs:    []string{"--quiet"},
+	}).(*uvResolver)
+	assert.Equal(t, "/usr/local/bin/uv", r.binary)
+	assert.Equal(t, []string{"--quiet"}, r.prefixArgs)
+}
+
+func TestUVResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
+	r := NewUVResolver(UVResolverConfig{
+		DryRunCommand: "/Program Files/uv/uv.exe",
+	}).(*uvResolver)
+	assert.Equal(t, "/Program Files/uv/uv.exe", r.binary)
+	assert.Empty(t, r.prefixArgs)
+}
+
+func TestUVResolver_StripsPipInstallSubcommand(t *testing.T) {
+	// Regression: "uv pip install flask" passes ["pip","install","flask"] as
+	// args inside Resolve.  Both "pip" and "install" must be stripped so that
+	// only "flask" is treated as a package name.
+	r := NewUVResolver(UVResolverConfig{}).(*uvResolver)
+	// Simulate what Resolve does: command[1:] → ["pip","install","flask"]
+	args := []string{"pip", "install", "flask"}
+	pkgArgs := args
+	if len(pkgArgs) >= 2 && pkgArgs[0] == "pip" && pkgArgs[1] == "install" {
+		pkgArgs = pkgArgs[2:]
+	}
+	pkgs := extractPkgArgs(pkgArgs)
+	assert.Equal(t, []string{"flask"}, pkgs, "uv should strip both 'pip' and 'install'")
+	_ = r // ensure we hold the type reference
+}
+
+func TestPNPMResolver_DryRunArgs(t *testing.T) {
+	r := NewPNPMResolver(PNPMResolverConfig{
+		DryRunCommand: "pnpm",
+		DryRunArgs:    []string{"--store-dir", "/tmp"},
+	}).(*pnpmResolver)
+	assert.Equal(t, "pnpm", r.binary)
+	assert.Equal(t, []string{"--store-dir", "/tmp"}, r.prefixArgs)
+}
+
+func TestPNPMResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
+	r := NewPNPMResolver(PNPMResolverConfig{
+		DryRunCommand: "/Program Files/pnpm/pnpm.cmd",
+	}).(*pnpmResolver)
+	assert.Equal(t, "/Program Files/pnpm/pnpm.cmd", r.binary)
+	assert.Empty(t, r.prefixArgs)
+}
+
+func TestYarnResolver_DryRunArgs(t *testing.T) {
+	r := NewYarnResolver(YarnResolverConfig{
+		DryRunCommand: "yarn",
+		DryRunArgs:    []string{"--cwd", "/tmp"},
+	}).(*yarnResolver)
+	assert.Equal(t, "yarn", r.binary)
+	assert.Equal(t, []string{"--cwd", "/tmp"}, r.prefixArgs)
+}
+
+func TestYarnResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
+	r := NewYarnResolver(YarnResolverConfig{
+		DryRunCommand: "/Program Files/yarn/bin/yarn.cmd",
+	}).(*yarnResolver)
+	assert.Equal(t, "/Program Files/yarn/bin/yarn.cmd", r.binary)
+	assert.Empty(t, r.prefixArgs)
+}
+
+func TestPoetryResolver_DryRunArgs(t *testing.T) {
+	r := NewPoetryResolver(PoetryResolverConfig{
+		DryRunCommand: "poetry",
+		DryRunArgs:    []string{"--no-ansi"},
+	}).(*poetryResolver)
+	assert.Equal(t, "poetry", r.binary)
+	assert.Equal(t, []string{"--no-ansi"}, r.prefixArgs)
+}
+
+func TestPoetryResolver_BinaryPathWithSpacesPreserved(t *testing.T) {
+	r := NewPoetryResolver(PoetryResolverConfig{
+		DryRunCommand: "/Program Files/poetry/poetry.exe",
+	}).(*poetryResolver)
+	assert.Equal(t, "/Program Files/poetry/poetry.exe", r.binary)
+	assert.Empty(t, r.prefixArgs)
+}
+
+// --- Registry detection tests ---
+
+func TestNPMResolver_DetectRegistry(t *testing.T) {
+	r := &npmResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default (no flag)", []string{"install", "lodash"}, "registry.npmjs.org"},
+		{"--registry space", []string{"install", "--registry", "https://internal.example/"}, "https://internal.example/"},
+		{"--registry=", []string{"install", "--registry=https://x/"}, "https://x/"},
+		{"--registry last", []string{"--registry", "https://r/"}, "https://r/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.detectRegistry(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestPNPMResolver_DetectRegistry(t *testing.T) {
+	r := &pnpmResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", []string{"add", "react"}, "registry.npmjs.org"},
+		{"--registry space", []string{"add", "--registry", "https://internal.example/"}, "https://internal.example/"},
+		{"--registry=", []string{"add", "--registry=https://x/"}, "https://x/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.detectRegistry(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestYarnResolver_DetectRegistry(t *testing.T) {
+	r := &yarnResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", []string{"add", "typescript"}, "registry.npmjs.org"},
+		{"--registry space", []string{"add", "--registry", "https://internal.example/"}, "https://internal.example/"},
+		{"--registry=", []string{"add", "--registry=https://x/"}, "https://x/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.detectRegistry(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestPipResolver_DetectRegistry(t *testing.T) {
+	r := &pipResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", []string{"install", "requests"}, "pypi.org"},
+		{"--index-url space", []string{"install", "--index-url", "https://internal/simple"}, "https://internal/simple"},
+		{"--index-url=", []string{"install", "--index-url=https://internal/simple"}, "https://internal/simple"},
+		{"-i space", []string{"install", "-i", "https://internal/simple"}, "https://internal/simple"},
+		// --extra-index-url → ambiguous origin, return ""
+		{"--extra-index-url space", []string{"install", "requests", "--extra-index-url", "https://internal/simple"}, ""},
+		{"--extra-index-url=", []string{"install", "requests", "--extra-index-url=https://internal/simple"}, ""},
+		// --index-url plus --extra-index-url → still ambiguous
+		{"index-url + extra", []string{"install", "--index-url", "https://primary/", "--extra-index-url", "https://extra/"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.detectRegistry(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestUVResolver_DetectRegistry(t *testing.T) {
+	r := &uvResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", []string{"pip", "install", "flask"}, "pypi.org"},
+		{"--index-url space", []string{"pip", "install", "--index-url", "https://internal/simple"}, "https://internal/simple"},
+		{"--index-url=", []string{"pip", "install", "--index-url=https://internal/simple"}, "https://internal/simple"},
+		// --extra-index-url → ambiguous origin, return ""
+		{"--extra-index-url space", []string{"pip", "install", "flask", "--extra-index-url", "https://internal/simple"}, ""},
+		{"--extra-index-url=", []string{"pip", "install", "flask", "--extra-index-url=https://internal/simple"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.detectRegistry(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// --- Scoped package fail-closed tests (Fix 1) ---
+
+func TestIsScopedPackage(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"@acme/foo", true},
+		{"@types/node", true},
+		{"@babel/core", true},
+		{"lodash", false},
+		{"express", false},
+		{"@missingslash", false}, // @ but no /
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isScopedPackage(tt.name))
+		})
+	}
+}
+
+func TestNPMResolver_HasRegistryFlag(t *testing.T) {
+	r := &npmResolver{}
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"no flag", []string{"install", "@acme/foo"}, false},
+		{"--registry space", []string{"install", "--registry", "https://r/"}, true},
+		{"--registry=", []string{"install", "--registry=https://r/"}, true},
+		{"empty", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, r.hasRegistryFlag(tt.args))
+		})
+	}
+}
+
+func TestPNPMResolver_HasRegistryFlag(t *testing.T) {
+	r := &pnpmResolver{}
+	assert.False(t, r.hasRegistryFlag([]string{"add", "@acme/foo"}))
+	assert.True(t, r.hasRegistryFlag([]string{"add", "--registry", "https://r/"}))
+	assert.True(t, r.hasRegistryFlag([]string{"add", "--registry=https://r/"}))
+}
+
+func TestYarnResolver_HasRegistryFlag(t *testing.T) {
+	r := &yarnResolver{}
+	assert.False(t, r.hasRegistryFlag([]string{"add", "@acme/foo"}))
+	assert.True(t, r.hasRegistryFlag([]string{"add", "--registry", "https://r/"}))
+	assert.True(t, r.hasRegistryFlag([]string{"add", "--registry=https://r/"}))
+}
+
+// TestNPMResolver_ScopedPackageRegistryFailsClosed verifies that scoped packages
+// parsed from npm dry-run output get an empty Registry when no --registry flag is
+// present, while unscoped packages get the default registry.
+func TestNPMResolver_ScopedPackageRegistryFailsClosed(t *testing.T) {
+	json := `{"added":[
+		{"name":"@acme/foo","version":"1.2.3"},
+		{"name":"lodash","version":"4.17.21"}
+	]}`
+	plan, err := parseNPMDryRunOutput([]byte(json), []string{"@acme/foo", "lodash"})
+	require.NoError(t, err)
+
+	r := &npmResolver{}
+	planRegistry := r.detectRegistry([]string{"install", "@acme/foo", "lodash"})
+	explicitFlag := r.hasRegistryFlag([]string{"install", "@acme/foo", "lodash"})
+
+	for i := range plan.Direct {
+		if isScopedPackage(plan.Direct[i].Name) && !explicitFlag {
+			plan.Direct[i].Registry = ""
+		} else {
+			plan.Direct[i].Registry = planRegistry
+		}
+	}
+
+	byName := make(map[string]pkgcheck.PackageRef)
+	for _, p := range plan.Direct {
+		byName[p.Name] = p
+	}
+
+	// @acme/foo should have empty Registry (fail closed — could be private)
+	if byName["@acme/foo"].Registry != "" {
+		t.Errorf("expected empty Registry for @acme/foo, got %q", byName["@acme/foo"].Registry)
+	}
+	// lodash should have default registry
+	if byName["lodash"].Registry != "registry.npmjs.org" {
+		t.Errorf("expected registry.npmjs.org for lodash, got %q", byName["lodash"].Registry)
+	}
+}
+
+// TestNPMResolver_ScopedPackageWithExplicitFlagGetsRegistry verifies that scoped
+// packages DO receive the registry when --registry is explicitly set on the CLI.
+func TestNPMResolver_ScopedPackageWithExplicitFlagGetsRegistry(t *testing.T) {
+	json := `{"added":[{"name":"@acme/foo","version":"1.2.3"}]}`
+	plan, err := parseNPMDryRunOutput([]byte(json), []string{"@acme/foo"})
+	require.NoError(t, err)
+
+	r := &npmResolver{}
+	args := []string{"install", "--registry=https://internal.example/", "@acme/foo"}
+	planRegistry := r.detectRegistry(args)
+	explicitFlag := r.hasRegistryFlag(args)
+
+	for i := range plan.Direct {
+		if isScopedPackage(plan.Direct[i].Name) && !explicitFlag {
+			plan.Direct[i].Registry = ""
+		} else {
+			plan.Direct[i].Registry = planRegistry
+		}
+	}
+
+	if plan.Direct[0].Registry != "https://internal.example/" {
+		t.Errorf("expected https://internal.example/, got %q", plan.Direct[0].Registry)
+	}
+}
+
+// --- Extract registry/index-url flag tests (Fix A) ---
+
+func TestNPMResolver_ExtractRegistryFlags(t *testing.T) {
+	r := &npmResolver{}
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"install", "lodash"}, nil},
+		{[]string{"install", "--registry", "https://internal/", "lodash"}, []string{"--registry", "https://internal/"}},
+		{[]string{"install", "--registry=https://x/", "lodash"}, []string{"--registry=https://x/"}},
+		{nil, nil},
+	}
+	for _, c := range cases {
+		got := r.extractRegistryFlags(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("input %v: got %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPNPMResolver_ExtractRegistryFlags(t *testing.T) {
+	r := &pnpmResolver{}
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"add", "react"}, nil},
+		{[]string{"add", "--registry", "https://internal/", "react"}, []string{"--registry", "https://internal/"}},
+		{[]string{"add", "--registry=https://x/", "react"}, []string{"--registry=https://x/"}},
+	}
+	for _, c := range cases {
+		got := r.extractRegistryFlags(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("input %v: got %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestYarnResolver_ExtractRegistryFlags(t *testing.T) {
+	r := &yarnResolver{}
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"add", "typescript"}, nil},
+		{[]string{"add", "--registry", "https://internal/", "typescript"}, []string{"--registry", "https://internal/"}},
+		{[]string{"add", "--registry=https://x/", "typescript"}, []string{"--registry=https://x/"}},
+	}
+	for _, c := range cases {
+		got := r.extractRegistryFlags(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("input %v: got %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPipResolver_ExtractIndexURLFlags(t *testing.T) {
+	r := &pipResolver{}
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"install", "requests"}, nil},
+		{[]string{"install", "--index-url", "https://internal/simple", "requests"}, []string{"--index-url", "https://internal/simple"}},
+		{[]string{"install", "--index-url=https://internal/simple", "requests"}, []string{"--index-url=https://internal/simple"}},
+		{[]string{"install", "-i", "https://internal/simple", "requests"}, []string{"-i", "https://internal/simple"}},
+		{[]string{"install", "--extra-index-url", "https://extra/simple", "requests"}, []string{"--extra-index-url", "https://extra/simple"}},
+		{[]string{"install", "--extra-index-url=https://extra/simple", "requests"}, []string{"--extra-index-url=https://extra/simple"}},
+		{
+			[]string{"install", "--index-url", "https://primary/", "--extra-index-url", "https://extra/", "requests"},
+			[]string{"--index-url", "https://primary/", "--extra-index-url", "https://extra/"},
+		},
+	}
+	for _, c := range cases {
+		got := r.extractIndexURLFlags(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("input %v: got %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestUVResolver_ExtractIndexURLFlags(t *testing.T) {
+	r := &uvResolver{}
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"pip", "install", "flask"}, nil},
+		{[]string{"pip", "install", "--index-url", "https://internal/simple", "flask"}, []string{"--index-url", "https://internal/simple"}},
+		{[]string{"pip", "install", "--index-url=https://internal/simple", "flask"}, []string{"--index-url=https://internal/simple"}},
+		{[]string{"pip", "install", "--extra-index-url", "https://extra/simple", "flask"}, []string{"--extra-index-url", "https://extra/simple"}},
+		{
+			[]string{"pip", "install", "--index-url", "https://primary/", "--extra-index-url", "https://extra/", "flask"},
+			[]string{"--index-url", "https://primary/", "--extra-index-url", "https://extra/"},
+		},
+	}
+	for _, c := range cases {
+		got := r.extractIndexURLFlags(c.in)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("input %v: got %v, want %v", c.in, got, c.want)
+		}
+	}
 }

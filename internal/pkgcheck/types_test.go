@@ -188,3 +188,115 @@ func TestInstallPlan_AllPackages_Empty(t *testing.T) {
 	all := plan.AllPackages()
 	assert.Empty(t, all)
 }
+
+func TestInstallPlan_AllPackagesWithRegistry(t *testing.T) {
+	plan := InstallPlan{
+		Registry: "registry.npmjs.org",
+		Direct:   []PackageRef{{Name: "lodash", Version: "1"}, {Name: "weird", Version: "1", Registry: "explicit.example"}},
+		Transitive: []PackageRef{{Name: "underscore", Version: "1"}},
+	}
+	out := plan.AllPackagesWithRegistry()
+	if len(out) != 3 {
+		t.Fatalf("want 3 packages, got %d", len(out))
+	}
+	if out[0].Registry != "registry.npmjs.org" {
+		t.Errorf("direct[0] should inherit plan registry, got %q", out[0].Registry)
+	}
+	if out[1].Registry != "explicit.example" {
+		t.Errorf("explicit registry must be preserved, got %q", out[1].Registry)
+	}
+	if out[2].Registry != "registry.npmjs.org" {
+		t.Errorf("transitive[0] should inherit plan registry, got %q", out[2].Registry)
+	}
+}
+
+func TestInstallPlan_AllPackagesWithRegistry_EmptyPlanRegistry(t *testing.T) {
+	plan := InstallPlan{
+		Direct: []PackageRef{{Name: "lodash", Version: "1"}},
+	}
+	out := plan.AllPackagesWithRegistry()
+	if len(out) != 1 {
+		t.Fatalf("want 1 package, got %d", len(out))
+	}
+	if out[0].Registry != "" {
+		t.Errorf("empty plan.Registry must NOT make up a value; got %q", out[0].Registry)
+	}
+}
+
+func TestSkippedPackage_ReasonString(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason SkipReason
+		want   string
+	}{
+		{
+			name:   "private registry",
+			reason: SkipReasonPrivateRegistry,
+			want:   "private_registry",
+		},
+		{
+			name:   "private scope denylist",
+			reason: SkipReasonPrivateScopeDenylist,
+			want:   "private_scope_denylist",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := SkippedPackage{
+				Package: PackageRef{Name: "@acme/internal", Version: "1.0.0"},
+				Reason:  tt.reason,
+			}
+			assert.Equal(t, tt.want, string(s.Reason))
+		})
+	}
+}
+
+func TestVerdict_SkippedSurfaced(t *testing.T) {
+	v := Verdict{
+		Action: VerdictAllow,
+		Skipped: []SkippedPackage{{
+			Package: PackageRef{Name: "@acme/internal", Version: "1.0.0"},
+			Reason:  SkipReasonPrivateRegistry,
+		}},
+	}
+	assert.Len(t, v.Skipped, 1)
+	assert.Equal(t, SkipReasonPrivateRegistry, v.Skipped[0].Reason)
+}
+
+func TestInstallPlan_AllPackagesWithRegistry_ScopedPackagePreservesEmpty(t *testing.T) {
+	plan := InstallPlan{
+		Registry: "registry.npmjs.org",
+		Direct: []PackageRef{
+			{Name: "lodash", Version: "1"},                  // unscoped → inherits
+			{Name: "@acme/private", Version: "1"},           // scoped, empty Registry → kept empty
+			{Name: "@acme/public", Version: "1", Registry: "registry.npmjs.org"}, // scoped with explicit → kept
+		},
+	}
+	out := plan.AllPackagesWithRegistry()
+	if out[0].Registry != "registry.npmjs.org" {
+		t.Errorf("unscoped should inherit; got %q", out[0].Registry)
+	}
+	if out[1].Registry != "" {
+		t.Errorf("scoped with empty must NOT inherit (privacy fail-closed); got %q", out[1].Registry)
+	}
+	if out[2].Registry != "registry.npmjs.org" {
+		t.Errorf("scoped with explicit must be preserved; got %q", out[2].Registry)
+	}
+}
+
+func TestIsScopedName(t *testing.T) {
+	cases := map[string]bool{
+		"@acme/foo":      true,
+		"@scope/pkg":     true,
+		"@":              false,
+		"@noslash":       false,
+		"plain":          false,
+		"":               false,
+	}
+	for name, want := range cases {
+		if got := isScopedName(name); got != want {
+			t.Errorf("isScopedName(%q)=%v, want %v", name, got, want)
+		}
+	}
+}

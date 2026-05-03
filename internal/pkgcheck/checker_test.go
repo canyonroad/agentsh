@@ -285,3 +285,216 @@ func TestCheckerProviderFailureApproveUpgrades(t *testing.T) {
 	assert.Equal(t, VerdictApprove, verdict.Action)
 	assert.Contains(t, verdict.Summary, "on_failure=approve")
 }
+
+func TestChecker_PrivacyFilterSurfacesSkipped(t *testing.T) {
+	// A PrivacyFilter that excludes @private/* packages.
+	// The fake provider records what it receives.
+	// Only the public package should reach the provider;
+	// the private one should appear in Verdict.Skipped.
+	rp := &recordingProvider{name: "fake"}
+
+	resolver := &mockResolver{
+		name:       "npm-resolver",
+		canResolve: true,
+		plan: &InstallPlan{
+			Tool:      "npm",
+			Ecosystem: EcosystemNPM,
+			Direct: []PackageRef{
+				{Name: "lodash", Version: "4.17.21", Registry: "registry.npmjs.org", Direct: true},
+				{Name: "@private/utils", Version: "1.0.0", Registry: "registry.npmjs.org", Direct: true},
+			},
+		},
+	}
+
+	rules := []policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	}
+
+	checker := NewChecker(CheckerConfig{
+		Scope:     "new_packages_only",
+		Resolvers: []Resolver{resolver},
+		Providers: map[string]ProviderEntry{
+			"fake": {Provider: rp, Timeout: 5 * time.Second, OnFailure: "warn"},
+		},
+		Rules:     rules,
+		Allowlist: NewAllowlist(30 * time.Second),
+		Privacy: PrivacyConfig{
+			ExternalScanRegistries: []string{"registry.npmjs.org"},
+			PrivateScopeDenylist:   []string{"@private"},
+		},
+	})
+
+	verdict, err := checker.Check(context.Background(), "npm", []string{"install", "lodash", "@private/utils"}, t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, verdict)
+
+	// The fake provider should have received only lodash (not @private/utils).
+	require.Len(t, rp.last, 1, "provider should receive only non-skipped packages")
+	assert.Equal(t, "lodash", rp.last[0].Name)
+
+	// The verdict should report the skipped package.
+	require.Len(t, verdict.Skipped, 1, "verdict should report skipped packages")
+	assert.Equal(t, "@private/utils", verdict.Skipped[0].Package.Name)
+	assert.Equal(t, SkipReasonPrivateScopeDenylist, verdict.Skipped[0].Reason)
+}
+
+// fakeResolver returns a fixed InstallPlan.
+type fakeResolver struct {
+	plan *InstallPlan
+}
+
+func (f *fakeResolver) Name() string                          { return "fake-resolver" }
+func (f *fakeResolver) CanResolve(_ string, _ []string) bool  { return true }
+func (f *fakeResolver) Resolve(_ context.Context, _ string, _ []string) (*InstallPlan, error) {
+	return f.plan, nil
+}
+
+// TestChecker_WarnProviderErrorProducesDegradedSummary proves that a provider
+// failing with on_failure="warn" causes the verdict summary to start with
+// "degraded:" so callers can distinguish a partial scan from a full clean scan.
+func TestChecker_WarnProviderErrorProducesDegradedSummary(t *testing.T) {
+	resolver := &mockResolver{
+		name:       "npm-resolver",
+		canResolve: true,
+		plan: &InstallPlan{
+			Tool:      "npm",
+			Ecosystem: EcosystemNPM,
+			Direct: []PackageRef{
+				{Name: "lodash", Version: "4.17.21", Direct: true},
+			},
+		},
+	}
+	provider := &mockProvider{
+		name: "flaky-provider",
+		err:  assert.AnError,
+	}
+	rules := []policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	}
+
+	checker := newTestChecker(
+		[]Resolver{resolver},
+		map[string]ProviderEntry{
+			"flaky-provider": {Provider: provider, Timeout: 5 * time.Second, OnFailure: "warn"},
+		},
+		rules,
+	)
+
+	verdict, err := checker.Check(context.Background(), "npm", []string{"install", "lodash"}, t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, verdict)
+	assert.Equal(t, VerdictAllow, verdict.Action)
+	// The summary must start with "degraded:" to signal partial scan.
+	assert.True(t, len(verdict.Summary) > 0 && verdict.Summary[:9] == "degraded:", "expected summary to start with 'degraded:', got: %q", verdict.Summary)
+}
+
+// TestChecker_RegistryPropagationAllowsPublicPackages proves that packages
+// without an explicit Registry on the PackageRef still pass the privacy filter
+// when the plan's Registry matches the allowlist. Without AllPackagesWithRegistry,
+// the fail-closed rule would skip every package and the provider would never fire.
+func TestChecker_RegistryPropagationAllowsPublicPackages(t *testing.T) {
+	rp := &recordingProvider{name: "fake"}
+
+	resolver := &fakeResolver{
+		plan: &InstallPlan{
+			Tool:      "npm",
+			Ecosystem: EcosystemNPM,
+			Registry:  "registry.npmjs.org", // plan-level registry, NOT on the refs
+			Direct: []PackageRef{
+				{Name: "lodash", Version: "4.17.21", Direct: true}, // no Registry field
+			},
+		},
+	}
+
+	rules := []policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	}
+
+	checker := NewChecker(CheckerConfig{
+		Scope:     "new_packages_only",
+		Resolvers: []Resolver{resolver},
+		Providers: map[string]ProviderEntry{
+			"fake": {Provider: rp, Timeout: 5 * time.Second, OnFailure: "warn"},
+		},
+		Rules:     rules,
+		Allowlist: NewAllowlist(30 * time.Second),
+		Privacy: PrivacyConfig{
+			ExternalScanRegistries: []string{"registry.npmjs.org"},
+		},
+	})
+
+	verdict, err := checker.Check(context.Background(), "npm", []string{"install", "lodash"}, t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, verdict)
+
+	// The provider must have received lodash — not skipped due to empty Registry.
+	require.Len(t, rp.last, 1, "provider should receive the package (registry propagated from plan)")
+	assert.Equal(t, "lodash", rp.last[0].Name)
+	assert.Equal(t, "registry.npmjs.org", rp.last[0].Registry, "registry should be populated from plan")
+
+	// No packages should be skipped.
+	assert.Empty(t, verdict.Skipped, "no packages should be skipped for a public-registry install")
+}
+
+// TestCheckerDenyOnFailure_PreservesFindings proves that when a provider fails
+// with on_failure="deny" the partial findings collected from other (successful)
+// providers are attached to the block verdict rather than dropped.
+func TestCheckerDenyOnFailure_PreservesFindings(t *testing.T) {
+	resolver := &mockResolver{
+		name:       "npm-resolver",
+		canResolve: true,
+		plan: &InstallPlan{
+			Tool:      "npm",
+			Ecosystem: EcosystemNPM,
+			Direct: []PackageRef{
+				{Name: "lodash", Version: "4.17.21", Direct: true},
+			},
+		},
+	}
+	// Provider A succeeds and returns a finding.
+	goodProvider := &mockProvider{
+		name:         "good-provider",
+		capabilities: []FindingType{FindingVulnerability},
+		findings: []Finding{
+			{
+				Type:     FindingVulnerability,
+				Provider: "good-provider",
+				Package:  PackageRef{Name: "lodash", Version: "4.17.21"},
+				Severity: SeverityHigh,
+				Title:    "Prototype Pollution",
+			},
+		},
+	}
+	// Provider B fails and its on_failure=deny triggers a block verdict.
+	denyProvider := &mockProvider{
+		name: "deny-provider",
+		err:  assert.AnError,
+	}
+	rules := []policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	}
+
+	checker := newTestChecker(
+		[]Resolver{resolver},
+		map[string]ProviderEntry{
+			"good-provider": {Provider: goodProvider, Timeout: 5 * time.Second, OnFailure: "warn"},
+			"deny-provider": {Provider: denyProvider, Timeout: 5 * time.Second, OnFailure: "deny"},
+		},
+		rules,
+	)
+
+	verdict, err := checker.Check(context.Background(), "npm", []string{"install", "lodash"}, t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, verdict)
+	assert.Equal(t, VerdictBlock, verdict.Action)
+	// The finding from the successful provider must be preserved on the block verdict.
+	assert.NotEmpty(t, verdict.Findings, "block verdict must carry findings collected before the deny decision")
+	found := false
+	for _, f := range verdict.Findings {
+		if f.Provider == "good-provider" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "good-provider finding should be present in the block verdict")
+}

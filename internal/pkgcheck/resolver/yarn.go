@@ -14,12 +14,19 @@ import (
 
 // YarnResolverConfig configures the yarn resolver.
 type YarnResolverConfig struct {
-	DryRunCommand string        // path to yarn binary; defaults to "yarn"
-	Timeout       time.Duration // timeout for dry-run execution
+	// DryRunCommand is the path to the yarn binary; defaults to "yarn".
+	// For additional args to prepend to the resolver-specific args, use DryRunArgs.
+	DryRunCommand string
+	// DryRunArgs contains args to prepend to the resolver-specific args.
+	// Each element is a single token (no shell splitting is performed).
+	DryRunArgs []string
+	Timeout    time.Duration // timeout for dry-run execution
 }
 
 type yarnResolver struct {
-	cfg YarnResolverConfig
+	cfg        YarnResolverConfig
+	binary     string
+	prefixArgs []string
 }
 
 // NewYarnResolver creates a resolver for yarn add commands.
@@ -30,7 +37,9 @@ func NewYarnResolver(cfg YarnResolverConfig) pkgcheck.Resolver {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	return &yarnResolver{cfg: cfg}
+	// DryRunCommand is the binary path only; DryRunArgs carries any prefix args.
+	// No shell splitting is performed so paths with spaces are preserved verbatim.
+	return &yarnResolver{cfg: cfg, binary: cfg.DryRunCommand, prefixArgs: cfg.DryRunArgs}
 }
 
 func (r *yarnResolver) Name() string { return "yarn" }
@@ -52,18 +61,24 @@ func (r *yarnResolver) CanResolve(command string, args []string) bool {
 
 func (r *yarnResolver) Resolve(ctx context.Context, workDir string, command []string) (*pkgcheck.InstallPlan, error) {
 	var packages []string
+	var args []string
 	if len(command) > 1 {
-		packages = extractPkgArgs(command[1:])
+		args = command[1:]
+		packages = extractPkgArgs(args)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 
-	// yarn add --mode update-lockfile <packages>
+	// yarn add --mode update-lockfile [--registry <url>] <packages>
+	// Forward any --registry flag from the original command so the dry-run
+	// resolves against the same registry the actual install will use.
 	cmdArgs := []string{"add", "--mode", "update-lockfile"}
+	cmdArgs = append(cmdArgs, r.extractRegistryFlags(command)...)
 	cmdArgs = append(cmdArgs, packages...)
+	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
-	cmd := exec.CommandContext(ctx, r.cfg.DryRunCommand, cmdArgs...)
+	cmd := exec.CommandContext(ctx, r.binary, allArgs...)
 	cmd.Dir = workDir
 
 	out, err := cmd.Output()
@@ -71,7 +86,75 @@ func (r *yarnResolver) Resolve(ctx context.Context, workDir string, command []st
 		return nil, fmt.Errorf("yarn dry-run failed: %w", err)
 	}
 
-	return parseYarnDryRunOutput(out, packages)
+	plan, err := parseYarnDryRunOutput(out, packages)
+	if err != nil {
+		return nil, err
+	}
+	planRegistry := r.detectRegistry(args)
+	plan.Registry = planRegistry
+	explicitFlag := r.hasRegistryFlag(args)
+	for i := range plan.Direct {
+		if isScopedPackage(plan.Direct[i].Name) && !explicitFlag {
+			plan.Direct[i].Registry = ""
+		} else {
+			plan.Direct[i].Registry = planRegistry
+		}
+	}
+	for i := range plan.Transitive {
+		if isScopedPackage(plan.Transitive[i].Name) && !explicitFlag {
+			plan.Transitive[i].Registry = ""
+		} else {
+			plan.Transitive[i].Registry = planRegistry
+		}
+	}
+	return plan, nil
+}
+
+// extractRegistryFlags returns the subset of args that influence which
+// registry packages resolve from. Pass these to the dry-run so the
+// resolver hits the same source the actual install will.
+func (r *yarnResolver) extractRegistryFlags(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--registry" && i+1 < len(args) {
+			out = append(out, a, args[i+1])
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "--registry=") {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// hasRegistryFlag reports whether the args slice contains an explicit
+// --registry flag (with or without =).
+func (r *yarnResolver) hasRegistryFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--registry" || strings.HasPrefix(a, "--registry=") {
+			return true
+		}
+	}
+	return false
+}
+
+// detectRegistry scans the install command args for an explicit --registry
+// flag and returns its value. Falls back to the public npm registry.
+// yarn 1.x supports --registry; yarn 2+ uses different config but
+// the CLI flag still works for overrides.
+func (r *yarnResolver) detectRegistry(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--registry" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(a, "--registry=") {
+			return strings.TrimPrefix(a, "--registry=")
+		}
+	}
+	return "registry.npmjs.org"
 }
 
 // yarnDryRunOutput represents yarn's JSON output structure.
@@ -102,6 +185,7 @@ func parseYarnDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Insta
 	plan := &pkgcheck.InstallPlan{
 		Tool:       "yarn",
 		Ecosystem:  pkgcheck.EcosystemNPM,
+		Registry:   "registry.npmjs.org",
 		ResolvedAt: time.Now(),
 	}
 

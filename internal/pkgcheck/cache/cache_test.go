@@ -457,3 +457,56 @@ func TestFlushToDisk_FiltersExpired(t *testing.T) {
 func writeFile(path string, data []byte) error {
 	return os.WriteFile(path, data, 0600)
 }
+
+func TestCache_FoundEntriesNeverExpire(t *testing.T) {
+	dir := t.TempDir()
+	c, err := New(Config{Dir: dir, CleanTTL: 1 * time.Hour, FoundTTL: 0 /* never */, NotFoundTTL: 1 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := Key{Provider: "snyk", Ecosystem: "npm", Package: "lodash", Version: "4.17.20"}
+	c.Put(key, []pkgcheck.Finding{{Type: pkgcheck.FindingVulnerability}})
+
+	got, ok := c.Get(key)
+	if !ok {
+		t.Fatal("expected hit")
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(got))
+	}
+}
+
+func TestCache_CleanEntriesExpire(t *testing.T) {
+	dir := t.TempDir()
+	c, err := New(Config{Dir: dir, CleanTTL: 50 * time.Millisecond, FoundTTL: 0, NotFoundTTL: 1 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := Key{Provider: "socket", Ecosystem: "npm", Package: "lodash", Version: "4.17.21"}
+	c.Put(key, nil) // no findings → clean
+
+	if _, ok := c.Get(key); !ok {
+		t.Fatal("expected fresh hit")
+	}
+	time.Sleep(80 * time.Millisecond)
+	if _, ok := c.Get(key); ok {
+		t.Fatal("expected expiry after CleanTTL")
+	}
+}
+
+func TestCache_PutNotFoundUsesNotFoundTTL(t *testing.T) {
+	dir := t.TempDir()
+	c, err := New(Config{Dir: dir, CleanTTL: 24 * time.Hour, FoundTTL: 0, NotFoundTTL: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := Key{Provider: "snyk", Ecosystem: "npm", Package: "@acme/private", Version: "1.0.0"}
+	c.PutNotFound(key)
+	if _, ok := c.Get(key); !ok {
+		t.Fatal("expected fresh hit")
+	}
+	time.Sleep(80 * time.Millisecond)
+	if _, ok := c.Get(key); ok {
+		t.Fatal("expected expiry after NotFoundTTL")
+	}
+}

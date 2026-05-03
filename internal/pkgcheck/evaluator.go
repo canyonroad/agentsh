@@ -218,19 +218,13 @@ func mapAction(action string) VerdictAction {
 }
 
 // noFindingsVerdict returns a verdict when there are no findings.
-// It applies the last rule as the default.
+// A clean scan with no findings is always Allow regardless of the rule list
+// shape. Rules match facts; when there are no facts there is nothing to
+// evaluate, so the result is unconditionally Allow.
 func (e *Evaluator) noFindingsVerdict() *Verdict {
-	action := VerdictAllow
-	// Use the last rule's action as default, but only if it's a catch-all
-	// (empty match). This prevents filtered-out Options rules from shifting
-	// the default behavior.
-	if len(e.rules) > 0 {
-		last := e.rules[len(e.rules)-1]
-		action = mapAction(last.Action)
-	}
 	return &Verdict{
-		Action:  action,
-		Summary: fmt.Sprintf("no findings, default action: %s", action),
+		Action:  VerdictAllow,
+		Summary: "no findings",
 	}
 }
 
@@ -247,4 +241,37 @@ func stringInSlice(s string, slice []string) bool {
 // buildSummary generates a human-readable summary for a verdict.
 func buildSummary(action VerdictAction, findings []Finding) string {
 	return fmt.Sprintf("%d finding(s), overall action: %s", len(findings), action)
+}
+
+// EvalContext bundles all inputs the evaluator needs to produce a complete Verdict.
+type EvalContext struct {
+	Findings       []Finding
+	Ecosystem      Ecosystem
+	ProviderErrors []ProviderError
+	Skipped        []SkippedPackage
+}
+
+// EvaluateWithContext runs the rule engine and decorates the resulting Verdict
+// with skipped-package info and a "degraded:" summary prefix when one or more
+// providers failed with OnFailure == "warn" (the degraded fail-mode).
+//
+// Errors with OnFailure other than "warn" are not annotated here — the
+// upstream Checker logic surfaces them through other channels (block, approve).
+func (e *Evaluator) EvaluateWithContext(c EvalContext) *Verdict {
+	v := e.Evaluate(c.Findings, c.Ecosystem)
+	if v == nil {
+		v = &Verdict{Action: VerdictAllow}
+	}
+	v.Skipped = append([]SkippedPackage(nil), c.Skipped...)
+
+	var degraded []string
+	for _, perr := range c.ProviderErrors {
+		if perr.OnFailure == "warn" {
+			degraded = append(degraded, perr.Provider)
+		}
+	}
+	if len(degraded) > 0 {
+		v.Summary = "degraded: " + strings.Join(degraded, ",") + " unavailable; " + v.Summary
+	}
+	return v
 }

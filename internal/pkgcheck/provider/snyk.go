@@ -3,40 +3,54 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 )
 
 const (
-	defaultSnykBaseURL = "https://api.snyk.io"
-	defaultSnykTimeout = 30 * time.Second
+	defaultSnykBaseURL    = "https://api.snyk.io"
+	defaultSnykTimeout    = 30 * time.Second
+	defaultSnykConcurrency = 16
 )
 
 // SnykConfig configures the Snyk vulnerability and license provider.
 type SnykConfig struct {
-	BaseURL string
-	Timeout time.Duration
-	APIKey  string
-	OrgID   string
+	BaseURL     string
+	Timeout     time.Duration
+	APIKey      string
+	OrgID       string
+	Concurrency int // max concurrent per-package fetches; default 16
 }
 
 // snykProvider queries the Snyk API for vulnerability and license findings.
 type snykProvider struct {
-	baseURL string
-	client  *http.Client
-	apiKey  string
-	orgID   string
+	baseURL     string
+	client      *retryClient
+	breaker     *circuitBreaker
+	apiKey      string
+	orgID       string
+	timeout     time.Duration
+	concurrency int
 }
 
 // NewSnykProvider returns a CheckProvider that queries Snyk for vulnerabilities
 // and license issues.
 func NewSnykProvider(cfg SnykConfig) pkgcheck.CheckProvider {
+	return newSnykProviderForTest(cfg, circuitBreakerConfig{})
+}
+
+// newSnykProviderForTest constructs a snykProvider with a custom breaker
+// config, allowing tests to inject short thresholds and windows.
+func newSnykProviderForTest(cfg SnykConfig, breakerCfg circuitBreakerConfig) *snykProvider {
 	baseURL := cfg.BaseURL
 	if baseURL == "" {
 		baseURL = defaultSnykBaseURL
@@ -45,11 +59,23 @@ func NewSnykProvider(cfg SnykConfig) pkgcheck.CheckProvider {
 	if timeout == 0 {
 		timeout = defaultSnykTimeout
 	}
+	concurrency := cfg.Concurrency
+	if concurrency <= 0 {
+		concurrency = defaultSnykConcurrency
+	}
 	return &snykProvider{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: timeout},
-		apiKey:  cfg.APIKey,
-		orgID:   cfg.OrgID,
+		client: newRetryClient(retryConfig{
+			MaxAttempts:       3,
+			BaseBackoff:       200 * time.Millisecond,
+			MaxBackoff:        2 * time.Second,
+			RespectRetryAfter: true,
+		}),
+		breaker:     newCircuitBreaker(breakerCfg),
+		apiKey:      cfg.APIKey,
+		orgID:       cfg.OrgID,
+		timeout:     timeout,
+		concurrency: concurrency,
 	}
 }
 
@@ -67,18 +93,18 @@ type snykIssuesResponse struct {
 }
 
 type snykIssue struct {
-	ID         string          `json:"id"`
-	Type       string          `json:"type"`
-	Attributes snykAttributes  `json:"attributes"`
+	ID         string         `json:"id"`
+	Type       string         `json:"type"`
+	Attributes snykAttributes `json:"attributes"`
 }
 
 type snykAttributes struct {
-	Title       string       `json:"title"`
-	Description string       `json:"description,omitempty"`
-	Severity    string       `json:"severity"`
-	Type        string       `json:"type"`
-	CVSS        *snykCVSS    `json:"cvss,omitempty"`
-	Slots       *snykSlots   `json:"slots,omitempty"`
+	Title       string     `json:"title"`
+	Description string     `json:"description,omitempty"`
+	Severity    string     `json:"severity"`
+	Type        string     `json:"type"`
+	CVSS        *snykCVSS  `json:"cvss,omitempty"`
+	Slots       *snykSlots `json:"slots,omitempty"`
 }
 
 type snykCVSS struct {
@@ -107,37 +133,162 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 	start := time.Now()
 	ecosystem := mapEcosystemSnyk(req.Ecosystem)
 
-	var allFindings []pkgcheck.Finding
-	var partial bool
-	var errCount int
+	n := len(req.Packages)
 
-	for _, pkg := range req.Packages {
-		findings, err := p.fetchIssues(ctx, ecosystem, pkg)
-		if err != nil {
+	// batchCtx allows workers to cancel each other on auth errors.
+	batchCtx, cancelBatch := context.WithCancel(ctx)
+	defer cancelBatch()
+
+	// authErr is stored atomically so that a concurrent worker observing the
+	// batchCtx cancellation cannot race with the worker that set the error.
+	// CompareAndSwap ensures exactly one auth error is recorded; the pointer
+	// indirection is required because atomic.Pointer needs a concrete type.
+	var authErr atomic.Pointer[error]
+
+	var (
+		mu         sync.Mutex
+		errCount   int
+		breakerErr error
+	)
+
+	// Findings are stored per package index so the final order matches the
+	// input order regardless of worker completion order.
+	perPkgFindings := make([][]pkgcheck.Finding, n)
+
+	// Semaphore channel for bounded concurrency.
+	sem := make(chan struct{}, p.concurrency)
+
+	var wg sync.WaitGroup
+
+	for i, pkg := range req.Packages {
+		// Stop scheduling new work once batch is cancelled (e.g., auth failure).
+		if batchCtx.Err() != nil {
+			mu.Lock()
 			errCount++
-			partial = true
-			// Check for authentication errors -- return immediately.
-			if isSnykAuthError(err) {
-				return nil, fmt.Errorf("snyk: authentication failed: %w", err)
-			}
+			mu.Unlock()
 			continue
 		}
-		allFindings = append(allFindings, findings...)
+
+		// Acquire a semaphore slot, but bail out promptly if the batch is
+		// cancelled while we're waiting (e.g., all current workers are hung).
+		select {
+		case sem <- struct{}{}:
+		case <-batchCtx.Done():
+			mu.Lock()
+			errCount++
+			mu.Unlock()
+			continue
+		}
+
+		wg.Add(1)
+		i, pkg := i, pkg // capture
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			// If an earlier worker already cancelled, exit immediately.
+			if batchCtx.Err() != nil {
+				mu.Lock()
+				errCount++
+				mu.Unlock()
+				return
+			}
+
+			// Apply per-request timeout only on the HTTP call, NOT on callWithBreaker.
+			reqCtx := batchCtx
+			var cancel context.CancelFunc
+			if p.timeout > 0 {
+				reqCtx, cancel = context.WithTimeout(batchCtx, p.timeout)
+				defer cancel()
+			}
+
+			var findings []pkgcheck.Finding
+			err := callWithBreaker(p.breaker, batchCtx, isSnykAuthError, func() error {
+				var ferr error
+				findings, ferr = p.fetchIssues(reqCtx, ecosystem, pkg)
+				return ferr
+			})
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errCount++
+				if isSnykAuthError(err) {
+					// Store atomically BEFORE cancelling so concurrent workers
+					// observing the cancellation cannot beat us to the merged
+					// result. CompareAndSwap ensures only the first auth error
+					// wins; subsequent ones are dropped (any auth error serves
+					// as the fail-fast signal).
+					e := err
+					if authErr.CompareAndSwap(nil, &e) {
+						cancelBatch() // signal other workers to bail
+					}
+				}
+				if errors.Is(err, errBreakerOpen) {
+					breakerErr = err
+				}
+				return
+			}
+			perPkgFindings[i] = findings
+		}()
+	}
+	wg.Wait()
+
+	// Merge per-package findings in input order. perPkgFindings[i] is nil
+	// for packages whose worker errored, which is fine — we skip nil entries.
+	var allFindings []pkgcheck.Finding
+	for _, fs := range perPkgFindings {
+		if len(fs) > 0 {
+			allFindings = append(allFindings, fs...)
+		}
 	}
 
+	if ae := authErr.Load(); ae != nil {
+		return nil, fmt.Errorf("snyk: authentication failed: %w", *ae)
+	}
+
+	partial := errCount > 0
+
 	// If ALL packages failed, return an error instead of a partial empty response.
-	if errCount > 0 && errCount == len(req.Packages) {
+	if errCount > 0 && errCount == n {
+		if breakerErr != nil {
+			return &pkgcheck.CheckResponse{
+				Provider: p.Name(),
+				Metadata: pkgcheck.ResponseMetadata{
+					Duration: time.Since(start),
+					Partial:  true,
+					Error:    "circuit breaker open",
+				},
+			}, breakerErr
+		}
 		return nil, fmt.Errorf("snyk: all %d packages failed checks", errCount)
 	}
 
-	return &pkgcheck.CheckResponse{
+	errMsg := ""
+	if breakerErr != nil {
+		errMsg = "circuit breaker open"
+	}
+
+	resp := &pkgcheck.CheckResponse{
 		Provider: p.Name(),
 		Findings: allFindings,
 		Metadata: pkgcheck.ResponseMetadata{
 			Duration: time.Since(start),
 			Partial:  partial,
+			Error:    errMsg,
 		},
-	}, nil
+	}
+	if partial {
+		// Surface the partial outcome as a provider error so the orchestrator
+		// applies the configured on_failure policy. Without this the verdict
+		// looks clean to the caller even though some packages weren't scanned.
+		why := errMsg
+		if why == "" {
+			why = fmt.Sprintf("%d/%d packages failed", errCount, n)
+		}
+		return resp, fmt.Errorf("snyk: partial batch: %s", why)
+	}
+	return resp, nil
 }
 
 func (p *snykProvider) fetchIssues(ctx context.Context, ecosystem string, pkg pkgcheck.PackageRef) ([]pkgcheck.Finding, error) {
@@ -171,7 +322,15 @@ func (p *snykProvider) fetchIssues(ctx context.Context, ecosystem string, pkg pk
 	}
 
 	var issuesResp snykIssuesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&issuesResp); err != nil {
+	// Use ReadAll + Unmarshal rather than NewDecoder.Decode — Decode accepts
+	// a valid JSON value followed by trailing garbage, so a body like
+	// `{"data":[]} junk` would silently parse as a successful empty response.
+	// Unmarshal is strict and errors on trailing data.
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("snyk: read response: %w", err)
+	}
+	if err := json.Unmarshal(respBody, &issuesResp); err != nil {
 		return nil, fmt.Errorf("snyk: decode response: %w", err)
 	}
 
@@ -290,6 +449,6 @@ func (e *snykAuthError) Error() string {
 
 // isSnykAuthError checks if an error is a Snyk authentication error (401/403).
 func isSnykAuthError(err error) bool {
-	_, ok := err.(*snykAuthError)
-	return ok
+	var authErr *snykAuthError
+	return errors.As(err, &authErr)
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,13 +29,21 @@ type SocketConfig struct {
 // socketProvider queries the Socket.dev API for supply-chain security findings.
 type socketProvider struct {
 	baseURL string
-	client  *http.Client
+	client  *retryClient
+	breaker *circuitBreaker
 	apiKey  string
+	timeout time.Duration
 }
 
 // NewSocketProvider returns a CheckProvider that queries Socket.dev for malware
 // and reputation findings.
 func NewSocketProvider(cfg SocketConfig) pkgcheck.CheckProvider {
+	return newSocketProviderForTest(cfg, circuitBreakerConfig{})
+}
+
+// newSocketProviderForTest constructs a socketProvider with a custom breaker
+// config, allowing tests to inject short thresholds and windows.
+func newSocketProviderForTest(cfg SocketConfig, breakerCfg circuitBreakerConfig) *socketProvider {
 	baseURL := cfg.BaseURL
 	if baseURL == "" {
 		baseURL = defaultSocketBaseURL
@@ -45,8 +54,15 @@ func NewSocketProvider(cfg SocketConfig) pkgcheck.CheckProvider {
 	}
 	return &socketProvider{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: timeout},
+		client: newRetryClient(retryConfig{
+			MaxAttempts:       3,
+			BaseBackoff:       200 * time.Millisecond,
+			MaxBackoff:        2 * time.Second,
+			RespectRetryAfter: true,
+		}),
+		breaker: newCircuitBreaker(breakerCfg),
 		apiKey:  cfg.APIKey,
+		timeout: timeout,
 	}
 }
 
@@ -120,27 +136,67 @@ func (p *socketProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckReque
 		return nil, fmt.Errorf("socket: marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v0/scan/batch", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("socket: create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("socket: request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("socket: unexpected status %d: %s", resp.StatusCode, string(respBody))
+	// Apply a per-request context deadline to preserve the configured wall-clock cap.
+	reqCtx := ctx
+	if p.timeout > 0 {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(ctx, p.timeout)
+		defer cancel()
 	}
 
 	var socketResp socketResponse
-	if err := json.NewDecoder(resp.Body).Decode(&socketResp); err != nil {
-		return nil, fmt.Errorf("socket: decode response: %w", err)
+	err = callWithBreaker(p.breaker, ctx, isSocketAuthError, func() error {
+		httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, p.baseURL+"/v0/scan/batch", bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("socket: create request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+
+		resp, err := p.client.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("socket: request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			rb, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				return &socketAuthError{status: resp.StatusCode, body: string(rb)}
+			}
+			return fmt.Errorf("socket: unexpected status %d: %s", resp.StatusCode, string(rb))
+		}
+
+		// Decode inside the breaker'd block: a malformed 200 is a provider
+		// failure, not a happy path. Otherwise a sustained stream of bad
+		// responses would never trip the breaker.
+		//
+		// Use ReadAll + Unmarshal rather than NewDecoder.Decode — Decode
+		// accepts a valid JSON value followed by trailing garbage, so a
+		// body like `{"packages":[]} junk` would be silently treated as
+		// success. Unmarshal is strict and errors on trailing data.
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("socket: read response: %w", err)
+		}
+		if err := json.Unmarshal(respBody, &socketResp); err != nil {
+			return fmt.Errorf("socket: decode response: %w", err)
+		}
+		return nil
+	})
+
+	if err != nil {
+		if errors.Is(err, errBreakerOpen) {
+			return &pkgcheck.CheckResponse{
+				Provider: p.Name(),
+				Metadata: pkgcheck.ResponseMetadata{
+					Duration: time.Since(start),
+					Partial:  true,
+					Error:    "circuit breaker open",
+				},
+			}, err
+		}
+		return nil, err
 	}
 
 	findings := p.mapFindings(req.Packages, &socketResp)
@@ -230,4 +286,22 @@ func mapEcosystemSocket(eco pkgcheck.Ecosystem) string {
 	default:
 		return string(eco)
 	}
+}
+
+// socketAuthError marks a 401/403 response from Socket.dev. It is treated as
+// neutral by the circuit breaker: a misconfigured API key would otherwise
+// poison the breaker and cause subsequent calls to surface "circuit breaker
+// open" instead of the real authentication failure.
+type socketAuthError struct {
+	status int
+	body   string
+}
+
+func (e *socketAuthError) Error() string {
+	return fmt.Sprintf("socket: authentication failed: status %d: %s", e.status, e.body)
+}
+
+func isSocketAuthError(err error) bool {
+	var sae *socketAuthError
+	return errors.As(err, &sae)
 }

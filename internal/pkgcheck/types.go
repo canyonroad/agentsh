@@ -50,6 +50,48 @@ func (p InstallPlan) AllPackages() []PackageRef {
 	return all
 }
 
+// AllPackagesWithRegistry returns every direct and transitive package, with
+// the InstallPlan's Registry value copied onto any PackageRef that has an
+// empty Registry. The PrivacyFilter relies on PackageRef.Registry for the
+// allowlist check; without this propagation a default-public-registry
+// install would be classified as private and skipped.
+func (p InstallPlan) AllPackagesWithRegistry() []PackageRef {
+	all := p.AllPackages()
+	if p.Registry == "" {
+		return all
+	}
+	out := make([]PackageRef, len(all))
+	for i, pkg := range all {
+		// Scoped packages (@scope/name) may resolve from a private registry
+		// per .npmrc-style config that we don't parse. The resolver
+		// deliberately leaves PackageRef.Registry empty for those, so the
+		// privacy filter fails closed. Don't overwrite that intentional
+		// empty with the plan-level default.
+		if pkg.Registry == "" && !isScopedName(pkg.Name) {
+			pkg.Registry = p.Registry
+		}
+		out[i] = pkg
+	}
+	return out
+}
+
+// isScopedName reports whether name looks like a scoped npm package
+// (e.g. "@acme/foo"). Scoped packages may originate from a private
+// registry that we cannot verify without parsing tool-local config,
+// so the resolver leaves their Registry empty by default and we must
+// not paper over that empty.
+func isScopedName(name string) bool {
+	if len(name) < 2 || name[0] != '@' {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		if name[i] == '/' {
+			return true
+		}
+	}
+	return false
+}
+
 // FindingType classifies the kind of issue found during a package check.
 type FindingType string
 
@@ -149,12 +191,33 @@ type PackageVerdict struct {
 	Findings []Finding     `json:"findings,omitempty" yaml:"findings,omitempty"`
 }
 
+// SkipReason describes why a package was excluded from external scanning.
+type SkipReason string
+
+const (
+	// SkipReasonPrivateRegistry indicates the package was resolved from a
+	// registry not on the external-scan allowlist.
+	SkipReasonPrivateRegistry SkipReason = "private_registry"
+
+	// SkipReasonPrivateScopeDenylist indicates the package matched a scope
+	// or prefix on the privacy denylist.
+	SkipReasonPrivateScopeDenylist SkipReason = "private_scope_denylist"
+)
+
+// SkippedPackage records a package that was not externally scanned
+// because of privacy rules.
+type SkippedPackage struct {
+	Package PackageRef `json:"package" yaml:"package"`
+	Reason  SkipReason `json:"reason" yaml:"reason"`
+}
+
 // Verdict holds the overall result of checking an install plan.
 type Verdict struct {
 	Action   VerdictAction             `json:"action" yaml:"action"`
 	Findings []Finding                 `json:"findings,omitempty" yaml:"findings,omitempty"`
 	Summary  string                    `json:"summary" yaml:"summary"`
 	Packages map[string]PackageVerdict `json:"packages,omitempty" yaml:"packages,omitempty"`
+	Skipped  []SkippedPackage          `json:"skipped,omitempty" yaml:"skipped,omitempty"`
 }
 
 // HighestAction returns the most restrictive action across all package verdicts.

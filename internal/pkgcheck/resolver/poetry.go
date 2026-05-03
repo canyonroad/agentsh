@@ -14,12 +14,19 @@ import (
 
 // PoetryResolverConfig configures the poetry resolver.
 type PoetryResolverConfig struct {
-	DryRunCommand string        // path to poetry binary; defaults to "poetry"
-	Timeout       time.Duration // timeout for dry-run execution
+	// DryRunCommand is the path to the poetry binary; defaults to "poetry".
+	// For additional args to prepend to the resolver-specific args, use DryRunArgs.
+	DryRunCommand string
+	// DryRunArgs contains args to prepend to the resolver-specific args.
+	// Each element is a single token (no shell splitting is performed).
+	DryRunArgs []string
+	Timeout    time.Duration // timeout for dry-run execution
 }
 
 type poetryResolver struct {
-	cfg PoetryResolverConfig
+	cfg        PoetryResolverConfig
+	binary     string
+	prefixArgs []string
 }
 
 // NewPoetryResolver creates a resolver for poetry add commands.
@@ -30,7 +37,9 @@ func NewPoetryResolver(cfg PoetryResolverConfig) pkgcheck.Resolver {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	return &poetryResolver{cfg: cfg}
+	// DryRunCommand is the binary path only; DryRunArgs carries any prefix args.
+	// No shell splitting is performed so paths with spaces are preserved verbatim.
+	return &poetryResolver{cfg: cfg, binary: cfg.DryRunCommand, prefixArgs: cfg.DryRunArgs}
 }
 
 func (r *poetryResolver) Name() string { return "poetry" }
@@ -62,8 +71,9 @@ func (r *poetryResolver) Resolve(ctx context.Context, workDir string, command []
 	// poetry add --dry-run <packages>
 	cmdArgs := []string{"add", "--dry-run"}
 	cmdArgs = append(cmdArgs, packages...)
+	allArgs := append(append([]string(nil), r.prefixArgs...), cmdArgs...)
 
-	cmd := exec.CommandContext(ctx, r.cfg.DryRunCommand, cmdArgs...)
+	cmd := exec.CommandContext(ctx, r.binary, allArgs...)
 	cmd.Dir = workDir
 
 	out, err := cmd.Output()
@@ -71,6 +81,10 @@ func (r *poetryResolver) Resolve(ctx context.Context, workDir string, command []
 		return nil, fmt.Errorf("poetry dry-run failed: %w", err)
 	}
 
+	// TODO: poetry has no equivalent CLI registry override flag; the registry is
+	// configured via [[tool.poetry.source]] in pyproject.toml. Reading that file
+	// to detect a custom source URL is future work. For now the plan always carries
+	// "pypi.org" regardless of the project's source configuration.
 	return parsePoetryDryRunOutput(out, packages)
 }
 
@@ -101,8 +115,18 @@ func parsePoetryDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.Ins
 	}
 
 	plan := &pkgcheck.InstallPlan{
-		Tool:       "poetry",
-		Ecosystem:  pkgcheck.EcosystemPyPI,
+		Tool:      "poetry",
+		Ecosystem: pkgcheck.EcosystemPyPI,
+		// Default to public PyPI. Poetry's [[tool.poetry.source]] blocks
+		// in pyproject.toml can redirect to a private registry, but we
+		// do not parse pyproject.toml. Operators using a private Poetry
+		// source must:
+		//   1. Add their private registry URL to ExternalScanRegistries
+		//      so private packages reach external providers, OR
+		//   2. Set external_scan_registries: [] to disable the privacy
+		//      filter entirely if all their dependencies are private.
+		// This matches pip/uv defaulting behavior.
+		Registry:   "pypi.org",
 		ResolvedAt: time.Now(),
 	}
 
