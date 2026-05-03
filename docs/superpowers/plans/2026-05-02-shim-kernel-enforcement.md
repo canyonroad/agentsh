@@ -1245,63 +1245,11 @@ git commit -m "test(api): nested shim invocations compose filters; inner shell s
 
 ## Phase 6 — Config block + docs
 
-### Task 10: Add `sandbox.shim_install` config block
+### Task 10: ~~Add `sandbox.shim_install` config block~~ — REMOVED (roborev iter 9)
 
-**Files:**
-- Modify: `internal/config/config.go:343-365`
-- Create: a small unit test for the new block in `internal/config/config_test.go`
+**Status: dropped from plan.** A YAML `sandbox.shim_install.mode` field has no runtime path to the shim (the shim reads `/etc/agentsh/shim.conf`, not the server's YAML), so adding the YAML field would be operator-confusing — the documented setting would have no effect. The trusted source of the shim's mode is `/etc/agentsh/shim.conf` only, written by the agentsh installer/packaging (or by the operator directly). The cookbook doc (Task 11) documents `shim.conf` and the `AGENTSH_SHIM_INSTALL` env-strengthen-only override.
 
-- [ ] **Step 1: Write the failing test**
-
-Append to `internal/config/config_test.go`:
-
-```go
-func TestSandboxConfig_ShimInstall_Default(t *testing.T) {
-	var c Config
-	if err := yaml.Unmarshal([]byte("sandbox:\n  shim_install:\n    mode: on\n"), &c); err != nil {
-		t.Fatal(err)
-	}
-	if c.Sandbox.ShimInstall.Mode != "on" {
-		t.Fatalf("got %q, want %q", c.Sandbox.ShimInstall.Mode, "on")
-	}
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `go test -run TestSandboxConfig_ShimInstall_Default ./internal/config/`
-Expected: FAIL (field not defined).
-
-- [ ] **Step 3: Add the config block**
-
-In `internal/config/config.go`, add a new field to `SandboxConfig`:
-
-```go
-type SandboxConfig struct {
-	// ... existing fields ...
-	ShimInstall SandboxShimInstallConfig `yaml:"shim_install"`
-}
-
-// SandboxShimInstallConfig governs whether the shell shim installs kernel
-// filters (seccomp-notify + Landlock) on its own process before execve.
-// See docs/cookbook/sandbox-sdk-integrations.md.
-type SandboxShimInstallConfig struct {
-	// Mode is one of "auto" (default), "on", "off".
-	Mode string `yaml:"mode"`
-}
-```
-
-- [ ] **Step 4: Run tests**
-
-Run: `go test ./internal/config/`
-Expected: all PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add internal/config/config.go internal/config/config_test.go
-git commit -m "feat(config): add sandbox.shim_install.mode config block"
-```
+If a future iteration wants to thread the YAML value through, the right place is the wrap-init response: server adds an advisory `shim_install_mode` field; shim takes the strengthen-only MAX of (shim.conf, env, server-advised). That's deferred — out of scope for the initial cut.
 
 ---
 
@@ -1322,25 +1270,34 @@ sandbox SDK, the spawned commands are siblings of the agentsh server,
 not descendants. Kernel filters loaded on the agentsh server's process
 (Landlock, seccomp-notify) do not govern them.
 
-`sandbox.shim_install` closes that gap by having the shell shim install
+`shim_install` closes that gap by having the shell shim install
 the same filters on its own process before exec'ing the user's command,
 so the inherited filter follows the command into whatever process tree
 the SDK spawned it into.
 
 ## Configuration
 
-```yaml
-sandbox:
-  shim_install:
-    mode: auto    # auto | on | off  (default: auto)
+The trusted source is `/etc/agentsh/shim.conf` (root-owned, admin-managed):
+
+```
+shim_install=auto    # auto | on | off  (default: auto)
 ```
 
-- `auto` (default): shim asks the server via `wrap-init`. Installs when
-  the server reports any enforcement is configured; falls through
-  silently when nothing is configured or the server is unreachable.
-- `on`: shim must install. Any failure (server unreachable, kernel
-  rejects the filter) exits 126 with a hint pointing at this doc.
+- `auto` (default): shim calls wrap-init. Installs when the server
+  returns a populated wrapper response (the standard shape — the
+  server has no install/skip predicate). Falls through to the existing
+  agentsh-exec proxy ONLY when wrap-init itself fails (server
+  unreachable, 5xx, network error) — i.e., before the shim has
+  committed to launching the wrapper.
+- `on`: shim must install. wrap-init failures exit 126 with a hint
+  pointing at this doc.
 - `off`: shim never attempts install. Equivalent to pre-#267 behavior.
+
+Once the shim launches the wrapper as a child via `runAndExit`, the
+wrapper's exit code is terminal in BOTH `auto` and `on` mode — there
+is no fall-through after that point. On Daytona/Fargate (no-new-privs)
+the wrapper's seccomp install will EPERM and the wrapper exits
+non-zero; the shim propagates that exit code (no silent skip).
 
 The override env var is `AGENTSH_SHIM_INSTALL=auto|on|off`. The env var
 may only **strengthen** enforcement, never weaken it: the trusted source

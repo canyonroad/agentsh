@@ -56,7 +56,7 @@ shim invoked
             { agent_command: realShell, agent_args: shellArgs, mode: "shim" }
         receive: wrapper_binary, socket_path, env (BPF / Landlock cfg)
         set  AGENTSH_NOTIFY_SOCK_FD=<n>
-        execve agentsh-unixwrap -- realShell shellArgs...
+        launch agentsh-unixwrap -- realShell shellArgs... as a CHILD process (runAndExit, NOT syscall.Exec)
             (unixwrap installs seccomp → SCM_RIGHTS to server → installs Landlock → execs target)
         any failure ⇒ exit 126 (fail-closed)
 
@@ -110,7 +110,7 @@ Reuse `/api/v1/sessions/{id}/wrap-init`. Two deltas to that handler:
 ### Client-side (shim) changes
 
 - New package `internal/shim/kernelinstall` (Linux-only build tag): owns the auto-detect probe, the wrap-init RPC, building the unixwrap exec args, setting marker env vars, fail-closed exit handling.
-- `cmd/agentsh-shell-shim/main.go`: insert the new branch **before the existing `if inSession == "1"` recursion guard** (not just before the agentsh-exec proxy — before the AGENTSH_IN_SESSION check itself). This is a security requirement: `AGENTSH_IN_SESSION` is caller-controllable, so gating the install branch on it would let a malicious sandbox-SDK supervisor bypass enforcement by pre-setting the env var. When the install path applies the shim execve's `agentsh-unixwrap` directly — *not* `agentsh exec`. Intentional: we want the inherited filter to govern the user's shell, not a Go process that's about to exit.
+- `cmd/agentsh-shell-shim/main.go`: insert the new branch **before the existing `if inSession == "1"` recursion guard** (not just before the agentsh-exec proxy — before the AGENTSH_IN_SESSION check itself). This is a security requirement: `AGENTSH_IN_SESSION` is caller-controllable, so gating the install branch on it would let a malicious sandbox-SDK supervisor bypass enforcement by pre-setting the env var. When the install path applies the shim launches `agentsh-unixwrap` as a **child process** via `runAndExit` (the same fork+wait+exit-code-propagate helper the shim already uses for the agentsh-exec proxy). NOT `syscall.Exec`: process replacement loses sandbox-SDK toolbox output capture (Daytona/E2B track the spawned PID's pipes, see the existing comment in main.go around line 235). The wrapper still execve's the user's shell; only the shim→wrapper hop is fork+wait.
 - `agentsh-unixwrap` itself: zero changes. The contract it expects (env config, AGENTSH_NOTIFY_SOCK_FD, target argv) is satisfied identically by the shim and by the server's exec path.
 
 ### Config
