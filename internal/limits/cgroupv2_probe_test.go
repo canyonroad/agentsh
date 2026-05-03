@@ -389,6 +389,36 @@ func TestProbe_LeafMove_IdempotentSecondProbe(t *testing.T) {
 	}
 }
 
+// TestProbe_AlreadyDelegated_EEXISTTreatedAsFailure ensures the writability
+// probe does NOT treat EEXIST as success. A stale probe directory is no
+// proof of current writability — the kernel's permission state may have
+// changed since the prior run. Failing closed here is what prevents the
+// false-positive availability the probe is designed to catch (roborev #7691
+// finding on the original PR).
+func TestProbe_AlreadyDelegated_EEXISTTreatedAsFailure(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "cpu memory pids")
+	// Every mkdir under own returns EEXIST (simulates a host where probe
+	// dirs collide with leftovers — or, more realistically, where the
+	// kernel returns EEXIST as a misleading proxy for some other state).
+	f.mkdirErrUnder[own] = syscall.EEXIST
+	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode == ModeNested {
+		t.Fatalf("EEXIST under own must NOT be treated as proof of writability; got mode=%q", res.Mode)
+	}
+	if res.Mode != ModeTopLevel {
+		t.Fatalf("expected fallback to top-level, got mode=%q reason=%q", res.Mode, res.Reason)
+	}
+}
+
 func TestProbe_ExplicitLeafHintNotStripped(t *testing.T) {
 	// Verify that an explicit absolute ownHint ending in "leaf" is NOT
 	// rewritten — normalization only applies to auto-discovered paths.
