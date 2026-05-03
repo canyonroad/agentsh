@@ -220,7 +220,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// without paying any kernel setup cost. We deliberately do NOT use a
 	// bool install_required field — see pkg/types/sessions.go's
 	// WrapInitResponse doc comment for the wire-protocol rationale.
-	if req.Mode == "shim" && !shimInstallRequired(a.cfg) {
+	if req.Mode == "shim" && !a.shimInstallRequired() {
 		return types.WrapInitResponse{}, http.StatusOK, nil
 	}
 
@@ -655,10 +655,20 @@ func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketP
 }
 
 // shimInstallRequired reports whether shim-mode wrap-init has any kernel
-// enforcement to apply. Mirrors the gates used elsewhere in this file:
-// the seccomp wrapper requires unix_sockets.enabled, and Landlock requires
-// landlock.enabled. Either alone is sufficient to require an install.
-func shimInstallRequired(cfg *config.Config) bool {
-	unixOn := cfg.Sandbox.UnixSockets.Enabled != nil && *cfg.Sandbox.UnixSockets.Enabled
-	return unixOn || cfg.Landlock.Enabled
+// enforcement to apply. Delegates to mainFilterUsesUserNotify for the
+// seccomp-wrapper conditions (single source of truth — every feature that
+// causes wrapInitCore to populate WrapperBinary must be reflected here, or
+// the shim will silently skip an install that agent-mode would do). Adds
+// Landlock since that's also a wrapper-side install path.
+//
+// mainFilterUsesUserNotify takes execveEnabled as an argument because
+// the wrap.go path conditionally disables execve under hybrid ptrace.
+// For shim-mode the ptrace branch already returned earlier, so honor
+// the static config value here.
+func (a *App) shimInstallRequired() bool {
+	if a.cfg == nil {
+		return false
+	}
+	seccompWrapperOn := a.mainFilterUsesUserNotify(a.cfg.Sandbox.Seccomp.Execve.Enabled)
+	return seccompWrapperOn || a.cfg.Landlock.Enabled
 }

@@ -3,6 +3,7 @@
 package api
 
 import (
+	"os/exec"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -45,3 +46,45 @@ func TestWrapInit_ShimMode_NothingEnabled(t *testing.T) {
 		t.Fatalf("got NotifySocket=%q, want empty (nothing enabled)", resp.NotifySocket)
 	}
 }
+
+// TestWrapInit_ShimMode_LandlockEnabled verifies that shim-mode wrap-init
+// returns a populated WrapperBinary when Landlock is enabled — the shim
+// then installs. Pairs with TestWrapInit_ShimMode_NothingEnabled to lock
+// in the "presence of WrapperBinary == install required" wire contract.
+func TestWrapInit_ShimMode_LandlockEnabled(t *testing.T) {
+	// Resolve a wrapper binary; use /bin/true as a stand-in if
+	// agentsh-unixwrap is not on PATH (common in unit-test environments).
+	wrapperBin, err := exec.LookPath("agentsh-unixwrap")
+	if err != nil {
+		wrapperBin, err = exec.LookPath("/bin/true")
+		if err != nil {
+			t.Skip("no usable wrapper binary on PATH; skipping")
+		}
+	}
+
+	cfg := &config.Config{}
+	cfg.Landlock.Enabled = true
+	cfg.Sandbox.UnixSockets.WrapperBin = wrapperBin
+
+	app, mgr := newTestAppForWrap(t, cfg)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/bash",
+		AgentArgs:    []string{"-c", "echo hi"},
+		Mode:         "shim",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Fatalf("got code %d, want 200", code)
+	}
+	if resp.WrapperBinary == "" {
+		t.Fatal("got empty WrapperBinary; want populated (Landlock enabled)")
+	}
+}
+
