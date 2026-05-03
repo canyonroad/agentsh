@@ -115,16 +115,18 @@ Reuse `/api/v1/sessions/{id}/wrap-init`. Two deltas to that handler:
 
 ### Config
 
-```yaml
-sandbox:
-  shim_install:
-    mode: auto    # auto | on | off  (default: auto)
+The trusted source is `/etc/agentsh/shim.conf` (root-owned, admin-managed):
+
+```
+shim_install=auto    # auto | on | off  (default: auto)
 ```
 
-Env override: `AGENTSH_SHIM_INSTALL=auto|on|off`. The env var may only **strengthen** enforcement, never weaken it — a malicious sandbox-SDK supervisor could pre-set it to bypass enforcement. The trusted source is `/etc/agentsh/shim.conf` (root-owned, admin-managed); the env var is honored only if it produces a stricter effective mode in the `off < auto < on` ordering.
+Env override: `AGENTSH_SHIM_INSTALL=auto|on|off`. The env var may only **strengthen** enforcement, never weaken it — a malicious sandbox-SDK supervisor could pre-set it to bypass enforcement otherwise. The env var is honored only if it produces a stricter effective mode in the `off < auto < on` ordering.
 No marker env is needed or used — install is always attempted on every invocation that meets the decision-tree criteria (see "Why no already-filtered short-circuit" above).
 
-`auto` = "install when there's something to install and the kernel supports it"; `on` = "install or fail-closed"; `off` = "never install, fall back to today's behavior".
+`auto` = "install when wrap-init returns a populated response"; `on` = "install or fail-closed"; `off` = "never install, fall back to today's behavior".
+
+(There is intentionally NO server-side YAML config — the shim only reads `/etc/agentsh/shim.conf`. Adding a YAML field without a propagation path would be operator-confusing. A future iteration could thread a server-advised mode through the wrap-init response as a strengthen-only suggestion; deferred.)
 
 ### Failure modes
 
@@ -139,8 +141,8 @@ The table distinguishes two commitment points:
 | `wrap-init` returns 5xx | Before commit | Fall through to agentsh-exec proxy | Fail-closed, exit 126 with hint |
 | `wrap-init` returns empty `WrapperBinary`/`NotifySocket` | Before commit | Fall through to agentsh-exec proxy | Fall through (server signal: nothing to install) |
 | `agentsh-unixwrap` not on PATH | Before commit (runAndExit fails to start) | Fail-closed, exit 126 | Fail-closed, exit 126 |
-| Kernel rejects seccomp/Landlock install (ENOSYS, EPERM) | After commit (wrapper exits non-zero) | Exit 126 — no fall-through | Exit 126 — no fall-through |
-| Wrapper exits non-zero for any other reason | After commit | Exit with wrapper's code — no fall-through | Exit with wrapper's code — no fall-through |
+| Kernel rejects seccomp/Landlock install (ENOSYS, EPERM) | After commit (wrapper exits non-zero) | Propagate wrapper exit code (whatever `agentsh-unixwrap` returns on install failure — currently 1; the wrapper does not specifically return 126 on install rejection). | Same as `auto`. |
+| Wrapper exits non-zero for any other reason | After commit | Propagate wrapper's exit code | Same as `auto`. |
 
 **Key invariant:** once the shim commits to install (wrap-init returned a usable response and `runAndExit` was called), `mode=auto` is identical to `mode=on`. The "auto can fall through" behavior only applies before that commit point — i.e., when the server is unreachable or returns a non-usable response.
 
@@ -168,7 +170,7 @@ If a tight `for i in $(seq 1000); do echo $i; done` loop hurts in practice, we h
 - **Wrap-init listener lifecycle change** is the riskiest server-side delta (per-exec goroutines instead of session-scoped). Needs explicit teardown test asserting no goroutine leak after 1000 shim invocations against the same session.
 - **Per-invocation cost** (~5–10 ms/exec) — measured at design time, validate at implementation time. Cache strategy on hand if needed.
 - **Direct SDK exec** (sb.exec without bash) — documented gap, not solved here. Track separately.
-- **Daytona / Fargate (no-new-privs)** — not addressed in this design. `mode=auto` will receive a populated wrap-init response (the server has no install/skip predicate), the shim will launch `agentsh-unixwrap` via `runAndExit`, and the wrapper's `seccomp(SET_MODE_FILTER, NEW_LISTENER)` will fail with `EPERM` because of the no-new-privs baseline. The wrapper exits non-zero. Because the shim has already committed to install at this point (wrap-init returned a usable response and `runAndExit` was called), **both `mode=auto` and `mode=on` propagate the wrapper's exit code as exit 126** — there is no silent skip or fall-through in either mode. Closing this gap properly requires either an environment-side fix (operator turns off no-new-privs) or a separate enforcement path; ptrace-pid mode (#269) remains the recommendation on these environments.
+- **Daytona / Fargate restricted environments** — not addressed in this design. The verified failure mode in these environments is that `seccomp(SET_MODE_FILTER, NEW_LISTENER)` is rejected by the active kernel security policy (the precise cause varies — no_new_privs is one common factor on processes lacking `CAP_SYS_ADMIN`; other container LSM/seccomp profiles can also block the call). The shim will launch `agentsh-unixwrap` via `runAndExit`, the wrapper's seccomp install will fail, and the wrapper exits non-zero. Because the shim has already committed to install at this point (wrap-init returned a usable response and `runAndExit` was called), **both `mode=auto` and `mode=on` propagate the wrapper's exit code** — there is no silent skip or fall-through in either mode. Closing this gap properly requires either an environment-side change (operator adjusts the container security profile) or a separate enforcement path; ptrace-pid mode (#269) remains the recommendation on these environments.
 
 ## Sequencing
 
@@ -180,4 +182,4 @@ Order of operations after this design lands:
 2. `internal/shim/kernelinstall` package + decision-tree wiring in `cmd/agentsh-shell-shim/main.go`.
 3. Integration tests (sibling-process tree).
 4. End-to-end repro Dockerfile.
-5. Doc update for `sandbox.shim_install.mode`.
+5. Doc update for `shim_install=auto|on|off` in `/etc/agentsh/shim.conf`.

@@ -989,6 +989,18 @@ In `cmd/agentsh-shell-shim/main.go`, insert the kernelinstall block BEFORE the e
 // just installs again — wasteful (filter stacking) but safe. The
 // in-session guard remains in place for the agentsh-exec proxy that
 // follows it (where recursion would actually deadlock).
+//
+// IMPLEMENTATION NOTE: The current shim's main.go computes `conf`,
+// `sessID`, and `realShell` AFTER the AGENTSH_IN_SESSION guard. Moving
+// the install branch before that guard requires moving those
+// initializations up too — or computing them inline in the install
+// branch. Implementer should reorder the existing setup steps so the
+// dependencies are resolved before the install branch runs. The exact
+// reorder is mechanical; verify by running `go build ./...` after the
+// edit. If a particular initialization (e.g., session resolution from
+// a session file) has side effects that should not happen on the
+// in-session bypass path, document the trade-off and either accept
+// the side effect or replicate the relevant logic.
 {
     mode, modeErr := kernelinstall.ResolveMode(conf.ShimInstall, os.Getenv("AGENTSH_SHIM_INSTALL"))
     if modeErr != nil {
@@ -1005,7 +1017,7 @@ In `cmd/agentsh-shell-shim/main.go`, insert the kernelinstall block BEFORE the e
     })
     if installErr != nil {
         fatalWithHint(126, fmt.Sprintf("agentsh-shell-shim: kernel install: %v", installErr),
-            "To disable, set sandbox.shim_install.mode=off in /etc/agentsh/shim.conf")
+            "To disable, set shim_install=off in /etc/agentsh/shim.conf")
     }
     if res.Action == kernelinstall.ResultExec {
         // Launch agentsh-unixwrap as a CHILD process, not via syscall.Exec.
