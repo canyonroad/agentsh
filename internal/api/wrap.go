@@ -213,6 +213,17 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		}, http.StatusOK, nil
 	}
 
+	// Mode == "shim" auto-detect: when shim-mode callers ask the server
+	// what to install, return an empty response if no enforcement features
+	// are configured. The shim sees the absent WrapperBinary as the skip
+	// signal and falls back to its existing agentsh-exec proxy path
+	// without paying any kernel setup cost. We deliberately do NOT use a
+	// bool install_required field — see pkg/types/sessions.go's
+	// WrapInitResponse doc comment for the wire-protocol rationale.
+	if req.Mode == "shim" && !shimInstallRequired(a.cfg) {
+		return types.WrapInitResponse{}, http.StatusOK, nil
+	}
+
 	// Resolve wrapper binary
 	wrapperBin := strings.TrimSpace(a.cfg.Sandbox.UnixSockets.WrapperBin)
 	if wrapperBin == "" {
@@ -641,4 +652,13 @@ func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketP
 
 	slog.Info("wrap: received signal fd", "session_id", sessionID, "fd", signalFD.Fd())
 	startSignalHandlerForWrap(ctx, signalFD, sessionID, a, s)
+}
+
+// shimInstallRequired reports whether shim-mode wrap-init has any kernel
+// enforcement to apply. Mirrors the gates used elsewhere in this file:
+// the seccomp wrapper requires unix_sockets.enabled, and Landlock requires
+// landlock.enabled. Either alone is sufficient to require an install.
+func shimInstallRequired(cfg *config.Config) bool {
+	unixOn := cfg.Sandbox.UnixSockets.Enabled != nil && *cfg.Sandbox.UnixSockets.Enabled
+	return unixOn || cfg.Landlock.Enabled
 }
