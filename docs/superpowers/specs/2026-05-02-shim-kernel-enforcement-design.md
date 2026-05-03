@@ -139,7 +139,7 @@ The table distinguishes two commitment points:
 |---|---|---|---|
 | Server unreachable (before wrap-init RPC) | Before commit | Fall through to agentsh-exec proxy | Fail-closed, exit 126 |
 | `wrap-init` returns 5xx | Before commit | Fall through to agentsh-exec proxy | Fail-closed, exit 126 with hint |
-| `wrap-init` returns empty `WrapperBinary`/`NotifySocket` | Before commit | Fall through to agentsh-exec proxy | Fall through (server signal: nothing to install) |
+| `wrap-init` returns empty `WrapperBinary`/`NotifySocket` | Before commit | Fall through to agentsh-exec proxy | Fail-closed, exit 126 (mode=on means "install or fail" — an empty wrap response means we cannot install, so we must fail). |
 | `agentsh-unixwrap` not on PATH | Before commit (runAndExit fails to start) | Fail-closed, exit 126 | Fail-closed, exit 126 |
 | Kernel rejects seccomp/Landlock install (ENOSYS, EPERM) | After commit (wrapper exits non-zero) | Propagate wrapper exit code (whatever `agentsh-unixwrap` returns on install failure — currently 1; the wrapper does not specifically return 126 on install rejection). | Same as `auto`. |
 | Wrapper exits non-zero for any other reason | After commit | Propagate wrapper's exit code | Same as `auto`. |

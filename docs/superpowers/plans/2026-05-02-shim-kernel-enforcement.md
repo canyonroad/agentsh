@@ -799,62 +799,11 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
-// InstallParams collects everything Install needs. ServerBaseURL is the
-// HTTP base (e.g. "http://127.0.0.1:18080"); the session ID identifies
-// which session's policy to apply; APIKey is the X-API-Key credential
-// required by API-key-protected deployments (read from AGENTSH_API_KEY
-// in the shim wiring). RealShell + ShellArgs is the user's command
-// (whatever the shim was about to execve). Env is the environment the
-// shim would have passed to that command — Install appends marker and
-// fd-number entries and returns the merged list.
-type InstallParams struct {
-	ServerBaseURL string
-	SessionID     string
-	APIKey        string // for X-API-Key auth header (read from AGENTSH_API_KEY in the shim wiring)
-	Mode          Mode
-	RealShell     string
-	ShellArgs     []string
-	Env           []string
-	CallerUID     int
-}
-
-// ResultAction tells the caller (the shim) what to do next.
-type ResultAction int
-
-const (
-	// ResultSkip = take the existing path (agentsh-exec proxy or real
-	// shell). Returned for ModeAuto when wrap-init reports nothing to do
-	// or when the server is unreachable.
-	ResultSkip ResultAction = iota
-	// ResultExec = the wrapper has been launched, the relay is complete,
-	// and the wrapper has exited. Result.WrapperExitCode holds the exit
-	// status; the caller (cmd/agentsh-shell-shim/main.go) is responsible
-	// for `os.Exit(res.WrapperExitCode)`. Install does NOT call os.Exit
-	// itself — keeping the API testable (unit tests can assert exit
-	// codes without taking down the test process).
-	ResultExec
-	// ResultFailClosed = caller must exit 126 with the Reason.
-	ResultFailClosed
-)
-
-// Result is what Install returns. Inspect Action.
-//
-// When Action == ResultExec: the relay is done and the wrapper has
-// exited. The caller MUST `os.Exit(res.WrapperExitCode)` to propagate
-// it. (ExecPath/Args/Env are populated for log lines / debugging.)
-//
-// When Action == ResultFailClosed: only Reason is populated; caller
-// MUST fail-closed (e.g., fatalWithHint(126, res.Reason, ...)).
-//
-// When Action == ResultSkip: caller falls through to its existing path.
-type Result struct {
-	Action           ResultAction
-	ExecPath         string
-	ExecArgs         []string
-	ExecEnv          []string
-	WrapperExitCode  int    // populated only when Action == ResultExec
-	Reason           string // populated only when Action == ResultFailClosed
-}
+// (InstallParams, Result, ResultAction, ResultSkip/Exec/FailClosed, and
+// ErrNotSupported are all declared in internal/shim/kernelinstall/types.go
+// — a non-build-tagged file shared across Linux and non-Linux. Do NOT
+// redeclare them here. Reference the godoc comments on those types for
+// the public contract.)
 //
 // Design choice — all-in-one vs. relay bundle:
 //

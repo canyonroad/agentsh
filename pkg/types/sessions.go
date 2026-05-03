@@ -127,13 +127,15 @@ type WrapInitRequest struct {
 	AgentCommand string   `json:"agent_command"`
 	AgentArgs    []string `json:"agent_args,omitempty"`
 	CallerUID    int      `json:"caller_uid,omitempty"`
-	// Mode selects wrap lifecycle. "agent" (default, used by `agentsh wrap`)
-	// keeps the notify listener alive for the session lifetime. "shim"
-	// (used by the shell shim) tears the listener down after a single
-	// accept — the wrapper either sends its notify fd or the connection
-	// closes, and the goroutine exits. This prevents per-invocation
-	// goroutine leaks. An empty string (field absent on the wire) is
-	// treated the same as "agent".
+	// Mode selects wrap lifecycle. Both "agent" (default, used by
+	// `agentsh wrap`) and "shim" (used by the shell shim) currently use
+	// the server's existing accept-once-then-handler control flow — the
+	// listener goroutine accepts a single connection from the wrapper,
+	// hands the notify fd to the persistent notify-handler, and exits.
+	// The Mode field is plumbed for future use (e.g., distinct cleanup
+	// strategies) and as an explicit signal of intent at the call site.
+	// An empty string (field absent on the wire) is treated the same as
+	// "agent".
 	Mode string `json:"mode,omitempty"`
 }
 
