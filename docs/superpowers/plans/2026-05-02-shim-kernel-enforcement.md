@@ -741,12 +741,14 @@ type InstallParams struct {
 }
 
 // Result and ResultAction declared cross-platform for the same reason.
+// Single canonical definition shared by install_linux.go and install_other.go.
 type Result struct {
-	Action   ResultAction
-	ExecPath string
-	ExecArgs []string
-	ExecEnv  []string
-	Reason   string
+	Action          ResultAction
+	ExecPath        string
+	ExecArgs        []string
+	ExecEnv         []string
+	WrapperExitCode int    // populated only when Action == ResultExec
+	Reason          string // populated only when Action == ResultFailClosed
 }
 
 type ResultAction int
@@ -852,13 +854,9 @@ type Result struct {
 // WrapperCmd} and the caller drives the relay loop itself. More
 // composable if a future caller needs to multiplex multiple relays, but
 // adds complexity for no current benefit.
-type Result struct {
-	Action   ResultAction
-	ExecPath string
-	ExecArgs []string
-	ExecEnv  []string
-	Reason   string
-}
+// (Result is declared once in install_other.go for cross-platform reuse — do
+// NOT redeclare it here. It includes WrapperExitCode for ResultExec and
+// Reason for ResultFailClosed.)
 
 const wrapInitTimeout = 5 * time.Second
 
@@ -958,12 +956,15 @@ func Install(p InstallParams) (Result, error) {
 	//  10. cmd.Wait() → exitCode.
 	//  11. Return Result{Action: ResultExec, WrapperExitCode: exitCode, ...}
 	//      — the SHIM's main.go calls os.Exit(WrapperExitCode), not Install.
-	_ = strconv.Itoa // suppress unused import until relay is implemented
+	//
+	// CRITICAL: do NOT return ResultExec until steps 1–11 are all done.
+	// Returning early here would tell the caller "wrapper ran successfully"
+	// when it actually never launched, propagating WrapperExitCode=0 (a
+	// silent bypass). The skeleton below intentionally returns
+	// ResultFailClosed to fail noisily until the relay is wired up.
 	return Result{
-		Action:   ResultExec,
-		ExecPath: resp.WrapperBinary,
-		ExecArgs: args,
-		ExecEnv:  env,
+		Action: ResultFailClosed,
+		Reason: "kernelinstall.Install relay not yet implemented (TODO above)",
 	}, nil
 }
 
@@ -1092,10 +1093,21 @@ In `cmd/agentsh-shell-shim/main.go`, insert the kernelinstall block BEFORE the e
         fatalWithHint(126, fmt.Sprintf("agentsh-shell-shim: kernel install: %v", installErr),
             "To disable, set shim_install=off in /etc/agentsh/shim.conf")
     }
-    if res.Action == kernelinstall.ResultExec {
+    switch res.Action {
+    case kernelinstall.ResultExec:
         // Install drove the socketpair relay and waited for the wrapper.
-        // The shim is responsible for propagating the wrapper's exit code.
+        // Propagate the wrapper's exit code.
         os.Exit(res.WrapperExitCode)
+    case kernelinstall.ResultFailClosed:
+        // mode=on on a platform/kernel that can't install (e.g., non-Linux,
+        // missing seccomp/Landlock, etc.). Reason carries the explanation.
+        fatalWithHint(126, "agentsh-shell-shim: kernel install fail-closed: "+res.Reason,
+            "To disable, set shim_install=off in /etc/agentsh/shim.conf")
+    case kernelinstall.ResultSkip:
+        // mode=auto with non-actionable failure (server unreachable, 5xx,
+        // empty wrap-init response, etc.). Fall through to the existing
+        // agentsh-exec proxy path below (which carries the AGENTSH_IN_SESSION
+        // recursion guard).
     }
 }
 
@@ -1432,13 +1444,7 @@ safe choice is to always install when the shim is not in-session.
 - **Direct SDK exec** (`sb.exec("cat", [...])` without going through
   any shell) bypasses the shim. The fix on that path is to integrate
   the SDK with `agentsh exec` directly. Tracked as a separate concern.
-- **No-new-privileges environments** (Daytona, Fargate) reject the
-  seccomp install with EPERM. Once the shim has committed to install
-  (wrap-init returned a usable response and the wrapper was launched),
-  the wrapper's non-zero exit propagates as exit 126 in BOTH `mode=auto`
-  and `mode=on` — there is no silent skip. To avoid this, operators on
-  no-new-privs environments should set `mode=off` and use ptrace-pid
-  mode (#269) instead.
+- **No-new-privileges / restricted seccomp environments** (Daytona, Fargate, some container LSM profiles) reject the wrapper's seccomp install. Once the shim has committed to install (wrap-init returned a usable response and the wrapper was launched), the wrapper's non-zero exit code is propagated to the shim's caller as-is in BOTH `mode=auto` and `mode=on` — there is no silent skip. The current `agentsh-unixwrap` exits with status `1` on install failure (not 126); the shim faithfully relays that. To avoid breakage, operators on these environments should set `shim_install=off` in `/etc/agentsh/shim.conf` and use ptrace-pid mode (#269) instead.
 - **Per-invocation cost** is ~5–10 ms (HTTP wrap-init + exec hop +
   filter install). Acceptable for sandbox-SDK use; not recommended for
   workloads that fork thousands of short-lived commands per second.
