@@ -15,8 +15,9 @@
 ## File Structure
 
 **Created:**
-- `internal/shim/kernelinstall/install_linux.go` — orchestrates wrap-init RPC, socket open, env build, execve to wrapper. Linux-only.
-- `internal/shim/kernelinstall/install_other.go` — non-Linux stub returning "unsupported" so cross-compilation passes.
+- `internal/shim/kernelinstall/types.go` — cross-platform shared types (`InstallParams`, `Result`, `ResultAction`, constants) — no build tag so both Linux and non-Linux builds see the same declarations.
+- `internal/shim/kernelinstall/install_linux.go` — orchestrates wrap-init RPC, socketpair relay, child-process launch, exit-code propagation. Linux-only.
+- `internal/shim/kernelinstall/install_other.go` — non-Linux stub returning `ResultFailClosed` for `ModeOn` (preserves install-or-fail-closed contract) and `ResultSkip` otherwise.
 - `internal/shim/kernelinstall/mode.go` — pure parsing of `auto|on|off` from string; cross-platform.
 - `internal/shim/kernelinstall/mode_test.go` — table tests for mode parsing.
 - `internal/shim/kernelinstall/install_linux_test.go` — unit tests against an httptest server simulating wrap-init.
@@ -700,35 +701,16 @@ func TestInstall_BuildsExecPlan(t *testing.T) {
 Run: `GOOS=linux go test ./internal/shim/kernelinstall/`
 Expected: FAIL — `Install` not defined.
 
-- [ ] **Step 3: Create the non-Linux stub**
+- [ ] **Step 3a: Create the cross-platform types file**
 
-Create `internal/shim/kernelinstall/install_other.go`:
+The shared types (`InstallParams`, `Result`, `ResultAction`, constants, `ErrNotSupported`) MUST live in a non-build-tagged file so both Linux and non-Linux builds see the same declarations. Create `internal/shim/kernelinstall/types.go` (no build tag):
 
 ```go
-//go:build !linux
-
 package kernelinstall
 
 import "fmt"
 
-// Install is unsupported on non-Linux targets.
-// ModeOn is fail-closed: "install or fail" — returning ResultSkip on a
-// non-Linux platform would silently bypass enforcement, violating the
-// ModeOn contract. Return ResultFailClosed so the caller exits 126.
-func Install(p InstallParams) (Result, error) {
-	if p.Mode == ModeOn {
-		return Result{
-			Action: ResultFailClosed,
-			Reason: "kernelinstall is not supported on this platform; mode=on requires Linux",
-		}, nil
-	}
-	return Result{
-		Action: ResultSkip,
-		Reason: "kernelinstall is not supported on this platform",
-	}, nil
-}
-
-// InstallParams declared here so the type compiles cross-platform.
+// InstallParams collects everything Install needs.
 type InstallParams struct {
 	ServerBaseURL string
 	SessionID     string
@@ -740,8 +722,16 @@ type InstallParams struct {
 	CallerUID     int
 }
 
-// Result and ResultAction declared cross-platform for the same reason.
-// Single canonical definition shared by install_linux.go and install_other.go.
+// Result is what Install returns. Inspect Action.
+//
+// When Action == ResultExec: the relay is done and the wrapper has
+// exited. The caller MUST `os.Exit(res.WrapperExitCode)` to propagate
+// it. (ExecPath/Args/Env are populated for log lines / debugging.)
+//
+// When Action == ResultFailClosed: only Reason is populated; caller
+// MUST fail-closed (e.g., fatalWithHint(126, res.Reason, ...)).
+//
+// When Action == ResultSkip: caller falls through to its existing path.
 type Result struct {
 	Action          ResultAction
 	ExecPath        string
@@ -760,6 +750,33 @@ const (
 )
 
 var ErrNotSupported = fmt.Errorf("kernelinstall: not supported on this platform")
+```
+
+- [ ] **Step 3b: Create the non-Linux stub**
+
+Create `internal/shim/kernelinstall/install_other.go`:
+
+```go
+//go:build !linux
+
+package kernelinstall
+
+// Install is unsupported on non-Linux targets.
+// ModeOn is fail-closed: "install or fail" — returning ResultSkip on a
+// non-Linux platform would silently bypass enforcement, violating the
+// ModeOn contract. Return ResultFailClosed so the caller exits 126.
+func Install(p InstallParams) (Result, error) {
+	if p.Mode == ModeOn {
+		return Result{
+			Action: ResultFailClosed,
+			Reason: "kernelinstall is not supported on this platform; mode=on requires Linux",
+		}, nil
+	}
+	return Result{
+		Action: ResultSkip,
+		Reason: "kernelinstall is not supported on this platform",
+	}, nil
+}
 ```
 
 - [ ] **Step 4: Implement install_linux.go**
@@ -918,6 +935,15 @@ func Install(p InstallParams) (Result, error) {
 	// pkg/types/sessions.go's WrapInitResponse doc comment for why
 	// presence-of-WrapperBinary is the fail-closed wire choice.
 	if resp.WrapperBinary == "" || resp.NotifySocket == "" {
+		// In ModeOn, "install or fail-closed" means an empty wrap-init
+		// response is a failure, not a skip. Otherwise we silently drop
+		// enforcement when an admin explicitly opted into mode=on.
+		if p.Mode == ModeOn {
+			return Result{
+				Action: ResultFailClosed,
+				Reason: "wrap-init returned empty WrapperBinary/NotifySocket; mode=on requires install",
+			}, nil
+		}
 		return Result{Action: ResultSkip}, nil
 	}
 
@@ -1014,17 +1040,30 @@ func basename(p string) string {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [ ] **Step 5: Implement the socketpair relay**
+
+The skeleton at the TODO returns `ResultFailClosed` with reason `"relay not yet implemented"`. Replace it with the actual relay loop (steps 1–11 in the godoc above). Reference: `internal/cli/wrap_linux.go` `platformSetupWrap`. Either:
+
+- (recommended for initial cut) inline the relay logic into Install — duplicates ~50 lines from platformSetupWrap but no new shared package, OR
+- (deferred) extract `internal/shim/wraprelay` shared between `internal/cli` and `internal/shim/kernelinstall` — DRY but bigger refactor surface.
+
+After the relay is implemented, `Install` returns `Result{Action: ResultExec, WrapperExitCode: <code>, ...}` after the wrapper exits.
+
+- [ ] **Step 6: Update unit tests for the success path**
+
+The earlier unit tests in `install_linux_test.go` assert `ResultExec` on the success branch. Until the relay lands they will assert against the skeleton's `ResultFailClosed`. Once the relay is implemented (Step 5), update the tests to expect `ResultExec` and a `WrapperExitCode` matching whatever a stub wrapper exits with (use a helper that builds a tiny `/bin/true`-equivalent test wrapper that just exits 0, or a wrapper that exits with a configurable code via env).
+
+- [ ] **Step 7: Run tests to verify they pass**
 
 Run: `go test ./internal/shim/kernelinstall/`
-Expected: all PASS.
+Expected: all PASS (including the relay-driven success test).
 
-- [ ] **Step 6: Verify cross-compile**
+- [ ] **Step 8: Verify cross-compile**
 
 Run: `GOOS=darwin go build ./internal/shim/kernelinstall/ && GOOS=windows go build ./internal/shim/kernelinstall/`
 Expected: no errors.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add internal/shim/kernelinstall/install_linux.go internal/shim/kernelinstall/install_other.go internal/shim/kernelinstall/install_linux_test.go
