@@ -1179,18 +1179,34 @@ import (
 // a different process tree.
 //
 // Skips when the test environment lacks the kernel features (Landlock or
-// seccomp-notify) or when /etc/shadow is not present.
+// seccomp-notify).
+//
+// We use a tempdir-based deny target instead of /etc/shadow because the
+// latter is already 0600 root:root in most test environments, so a read
+// attempt fails on Unix DAC alone — the test would pass even with no
+// agentsh enforcement at all (false positive). The tempdir file is
+// readable by the test user by default, so a successful deny *only*
+// happens if Landlock actually blocks the read.
 func TestShimInstall_SiblingProcessTree(t *testing.T) {
-	if _, err := os.Stat("/etc/shadow"); err != nil {
-		t.Skip("/etc/shadow not present; nothing to deny against")
+	denyDir := t.TempDir()
+	denyFile := filepath.Join(denyDir, "secret.txt")
+	if err := os.WriteFile(denyFile, []byte("SHOULD_NOT_LEAK"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	srv, _ := startTestServerWithLandlockDeny(t, "/etc/shadow")
+
+	// Sanity check: without agentsh, the test user can read the file.
+	// If this fails, the environment is wrong (not the policy).
+	if _, err := os.ReadFile(denyFile); err != nil {
+		t.Fatalf("environment check failed: test user cannot read %s without policy: %v", denyFile, err)
+	}
+
+	srv, _ := startTestServerWithLandlockDeny(t, denyFile)
 	defer srv.Close()
 
 	shimPath := buildShim(t)
 	wrapPath := buildWrap(t) // ensures agentsh-unixwrap is on PATH
 
-	cmd := exec.CommandContext(context.Background(), shimPath, "-c", "cat /etc/shadow")
+	cmd := exec.CommandContext(context.Background(), shimPath, "-c", "cat "+denyFile)
 	cmd.Env = append(os.Environ(),
 		"AGENTSH_SERVER="+srv.URL,
 		"AGENTSH_SESSION_ID=test-shim-install",
@@ -1202,8 +1218,8 @@ func TestShimInstall_SiblingProcessTree(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit, got 0; output:\n%s", out)
 	}
-	if strings.Contains(string(out), "root:") {
-		t.Fatalf("/etc/shadow contents leaked; filter not enforced:\n%s", out)
+	if strings.Contains(string(out), "SHOULD_NOT_LEAK") {
+		t.Fatalf("denyFile contents leaked; filter not enforced:\n%s", out)
 	}
 }
 
@@ -1246,23 +1262,32 @@ git commit -m "test(api): integration test for shim-installed Landlock on siblin
 Add to `seccomp_wrapper_shim_install_test.go`:
 
 ```go
-// TestShimInstall_NestedInstallsCompose verifies that bash -c "bash -c cat /etc/shadow"
+// TestShimInstall_NestedInstallsCompose verifies that bash -c "bash -c cat <denyFile>"
 // installs filters at BOTH levels (filter stacking is allowed up to the
-// kernel's 64-filter limit), and that the inner shell's read of
-// /etc/shadow is still blocked. We don't try to deduplicate nested
+// kernel's 64-filter limit), and that the inner shell's read of the
+// deny-target is still blocked. We don't try to deduplicate nested
 // installs — there's no portable, unforgeable signal for "agentsh already
 // installed here", so always-install is the safe choice.
+//
+// Uses a tempdir-based deny target (not /etc/shadow) so the test cannot
+// pass on Unix DAC alone — see TestShimInstall_SiblingProcessTree.
 func TestShimInstall_NestedInstallsCompose(t *testing.T) {
-	if _, err := os.Stat("/etc/shadow"); err != nil {
-		t.Skip("/etc/shadow not present; nothing to deny against")
+	denyDir := t.TempDir()
+	denyFile := filepath.Join(denyDir, "secret.txt")
+	if err := os.WriteFile(denyFile, []byte("SHOULD_NOT_LEAK"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	srv, callCount := startTestServerCountingWithLandlockDeny(t, "/etc/shadow")
+	if _, err := os.ReadFile(denyFile); err != nil {
+		t.Fatalf("environment check failed: cannot read %s without policy: %v", denyFile, err)
+	}
+
+	srv, callCount := startTestServerCountingWithLandlockDeny(t, denyFile)
 	defer srv.Close()
 
 	shimPath := buildShim(t)
 	wrapPath := buildWrap(t)
 
-	cmd := exec.Command(shimPath, "-c", "bash -c 'cat /etc/shadow'")
+	cmd := exec.Command(shimPath, "-c", "bash -c 'cat "+denyFile+"'")
 	cmd.Env = append(os.Environ(),
 		"AGENTSH_SERVER="+srv.URL,
 		"AGENTSH_SESSION_ID=test-shim-nested",
@@ -1274,8 +1299,8 @@ func TestShimInstall_NestedInstallsCompose(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit (inner read blocked), got 0:\n%s", out)
 	}
-	if strings.Contains(string(out), "root:") {
-		t.Fatalf("/etc/shadow contents leaked from inner shell; nested filter not enforced:\n%s", out)
+	if strings.Contains(string(out), "SHOULD_NOT_LEAK") {
+		t.Fatalf("denyFile contents leaked from inner shell; nested filter not enforced:\n%s", out)
 	}
 	if got := callCount(); got != 2 {
 		t.Fatalf("got %d wrap-init calls, want 2 (one per nested invocation)", got)
