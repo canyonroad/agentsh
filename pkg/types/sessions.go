@@ -122,21 +122,30 @@ type SessionPatchRequest struct {
 	Unset []string          `json:"unset,omitempty"`
 }
 
-// WrapInitRequest is sent by the CLI to initialize seccomp wrapping for a session.
+// WrapInitRequest is sent by the CLI or shim to initialize seccomp wrapping for a session.
 type WrapInitRequest struct {
 	AgentCommand string   `json:"agent_command"`
 	AgentArgs    []string `json:"agent_args,omitempty"`
 	CallerUID    int      `json:"caller_uid,omitempty"`
+	// Mode selects wrap lifecycle. "agent" (default, used by `agentsh wrap`)
+	// keeps the notify listener alive for the session lifetime. "shim"
+	// (used by the shell shim) tears the listener down when the wrapped
+	// process exits.
+	Mode string `json:"mode,omitempty"`
 }
 
-// WrapInitResponse returns the seccomp wrapper configuration to the CLI.
+// WrapInitResponse returns the seccomp wrapper configuration to the caller.
 type WrapInitResponse struct {
 	PtraceMode            bool              `json:"ptrace_mode,omitempty"`
 	SafeToBypassShellShim bool              `json:"safe_to_bypass_shell_shim"`
 	WrapperBinary         string            `json:"wrapper_binary"`
 	StubBinary            string            `json:"stub_binary,omitempty"`
-	SeccompConfig         string            `json:"seccomp_config"`          // JSON-encoded seccomp config
-	NotifySocket          string            `json:"notify_socket"`           // Unix socket path for forwarding notify fd
-	SignalSocket          string            `json:"signal_socket,omitempty"` // Unix socket path for forwarding signal filter fd
-	WrapperEnv            map[string]string `json:"wrapper_env"`             // Extra env vars for the wrapper
+	SeccompConfig         string            `json:"seccomp_config"`
+	NotifySocket          string            `json:"notify_socket"`
+	SignalSocket          string            `json:"signal_socket,omitempty"`
+	WrapperEnv            map[string]string `json:"wrapper_env"`
+	// InstallRequired reports whether the caller must install kernel
+	// filters. False when no enforcement features are enabled server-side
+	// (lets shim-mode callers short-circuit without paying setup cost).
+	InstallRequired bool `json:"install_required"`
 }
