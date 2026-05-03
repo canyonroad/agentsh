@@ -128,6 +128,19 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 	// Step 3: already delegated?
 	ownDelegated, err := readControllerSet(fs, filepath.Join(own, "cgroup.subtree_control"))
 	if err == nil && containsAll(ownDelegated, requiredControllers) {
+		// cgroup.subtree_control says we have delegation, but on some hosts
+		// (read-only-delegated subtrees, MAC policies) mkdir within the
+		// subtree is still denied — silently producing per-command
+		// cgroup_apply_failed events at runtime while detect over-reports
+		// availability. Verify writability before claiming success.
+		if probeErr := probeNestedWritability(fs, own); probeErr != nil {
+			reason := fmt.Sprintf("subtree delegated but child cgroup mkdir denied: %v", probeErr)
+			res, err := tryTopLevel(ctx, fs, own, reason)
+			if err == nil && res != nil {
+				res.LeafMoved = res.LeafMoved || leafResident
+			}
+			return res, err
+		}
 		return &CgroupProbeResult{
 			Mode:        ModeNested,
 			Reason:      "already delegated",
@@ -140,6 +153,17 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 	// Step 4: try to enable the required set.
 	enableErr := enableControllersFS(fs, own, requiredControllers)
 	if enableErr == nil {
+		// Same writability check as the already-delegated branch: enabling
+		// controllers in subtree_control proves the file is writable but
+		// does not prove that mkdir of child cgroups will be permitted.
+		if probeErr := probeNestedWritability(fs, own); probeErr != nil {
+			reason := fmt.Sprintf("controllers enabled but child cgroup mkdir denied: %v", probeErr)
+			res, err := tryTopLevel(ctx, fs, own, reason)
+			if err == nil && res != nil {
+				res.LeafMoved = res.LeafMoved || leafResident
+			}
+			return res, err
+		}
 		// Re-read to confirm and to pick up the io flag.
 		delegatedNow, _ := readControllerSet(fs, filepath.Join(own, "cgroup.subtree_control"))
 		return &CgroupProbeResult{
@@ -156,6 +180,14 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 	if errors.Is(enableErr, syscall.EBUSY) {
 		moved, enabled, retryErr := tryLeafMove(fs, own)
 		if enabled {
+			if probeErr := probeNestedWritability(fs, own); probeErr != nil {
+				reason := fmt.Sprintf("leaf-moved and controllers enabled but child cgroup mkdir denied: %v", probeErr)
+				res, err := tryTopLevel(ctx, fs, own, reason)
+				if err == nil && res != nil {
+					res.LeafMoved = true
+				}
+				return res, err
+			}
 			delegatedNow, _ := readControllerSet(fs, filepath.Join(own, "cgroup.subtree_control"))
 			return &CgroupProbeResult{
 				Mode:        ModeNested,
@@ -200,6 +232,27 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 // the limits package (e.g. the capabilities probe).
 func ProbeCgroupsV2Default(ctx context.Context) (*CgroupProbeResult, error) {
 	return ProbeCgroupsV2(ctx, osCgroupFS{}, "")
+}
+
+// probeNestedWritability creates and removes a temporary child cgroup under
+// own to verify the kernel actually permits creating new cgroups there.
+// Some hosts present a delegated cgroup.subtree_control while still denying
+// mkdir within the subtree (read-only delegation, MAC policies). Without
+// this probe, the capability check over-reports cgroups_v2 availability and
+// per-command resource limits silently fail at runtime via per-command
+// cgroup_apply_failed events.
+//
+// EEXIST is treated as success: a stale probe directory from a crashed prior
+// run is itself evidence that mkdir succeeded at some point. The function
+// makes a best-effort cleanup attempt either way.
+func probeNestedWritability(fs cgroupFS, own string) error {
+	probeDir := filepath.Join(own, fmt.Sprintf("agentsh.write-probe-%d", os.Getpid()))
+	err := fs.Mkdir(probeDir, 0o755)
+	if err != nil && !errors.Is(err, syscall.EEXIST) {
+		return err
+	}
+	_ = fs.Remove(probeDir)
+	return nil
 }
 
 // tryLeafMove handles the EBUSY case: the own cgroup has internal processes

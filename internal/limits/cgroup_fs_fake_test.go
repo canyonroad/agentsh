@@ -31,6 +31,11 @@ type fakeCgroupFS struct {
 	// tests where the first enableControllers write fails with EBUSY and
 	// the retry after leaf-move succeeds.
 	openWriteErrsOnce map[string]error
+	// mkdirErrUnder injects an error returned by Mkdir for any direct
+	// child of the given parent directory. Used to simulate hosts where
+	// cgroup.subtree_control reports delegated controllers but the kernel
+	// denies mkdir within the subtree (read-only delegation, MAC policies).
+	mkdirErrUnder map[string]error
 }
 
 type fakeEntry struct {
@@ -44,6 +49,7 @@ func newFakeCgroupFS() *fakeCgroupFS {
 		writeErrs:    map[string]error{},
 		openErrs:     map[string]error{},
 		openWriteErrsOnce: map[string]error{},
+		mkdirErrUnder:     map[string]error{},
 	}
 }
 
@@ -96,6 +102,9 @@ func (f *fakeCgroupFS) Mkdir(p string, perm os.FileMode) error {
 	p = path.Clean(p)
 	if _, ok := f.files[p]; ok {
 		return &fs.PathError{Op: "mkdir", Path: p, Err: syscall.EEXIST}
+	}
+	if err, ok := f.mkdirErrUnder[path.Dir(p)]; ok {
+		return &fs.PathError{Op: "mkdir", Path: p, Err: err}
 	}
 	if _, ok := f.files[path.Dir(p)]; !ok {
 		return &fs.PathError{Op: "mkdir", Path: p, Err: syscall.ENOENT}

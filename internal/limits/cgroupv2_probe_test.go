@@ -406,3 +406,145 @@ func TestProbe_ExplicitLeafHintNotStripped(t *testing.T) {
 		t.Fatalf("explicit leaf hint should NOT be stripped: got %q, want %q", res.OwnCgroup, leafPath)
 	}
 }
+
+// TestProbe_AlreadyDelegated_MkdirDeniedFallsBack covers the OpenComputer
+// case: cgroup.subtree_control reports cpu/memory/pids delegated, but
+// mkdir within the subtree is denied. Without the writability probe, this
+// silently produces per-command cgroup_apply_failed at runtime while
+// detect over-reports cgroups_v2 ✓ (canyonroad/agentsh#272).
+func TestProbe_AlreadyDelegated_MkdirDeniedFallsBack(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu io memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "cpu io memory pids")
+	f.mkdirErrUnder[own] = syscall.EACCES
+	// Top-level slice mkdir should also fail (mirrors OC posture).
+	f.mkdirErrUnder["/sys/fs/cgroup"] = syscall.EACCES
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeUnavailable {
+		t.Fatalf("mode: got %q, want unavailable (subtree mkdir denied + top-level mkdir denied)", res.Mode)
+	}
+	if !strings.Contains(res.Reason, "subtree delegated but child cgroup mkdir denied") {
+		t.Fatalf("reason should explain delegated-but-not-writable: %q", res.Reason)
+	}
+}
+
+// TestProbe_AlreadyDelegated_MkdirDeniedFallsToTopLevel is the case where
+// the nested subtree is read-only-delegated but the top-level slice mkdir
+// works — we should land in top-level mode, not unavailable.
+func TestProbe_AlreadyDelegated_MkdirDeniedFallsToTopLevel(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "cpu memory pids")
+	f.mkdirErrUnder[own] = syscall.EACCES
+	// Top-level slice mkdir works; pre-seed memory.max so the slice probe passes.
+	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeTopLevel {
+		t.Fatalf("mode: got %q, want top-level", res.Mode)
+	}
+	if !strings.Contains(res.Reason, "subtree delegated but child cgroup mkdir denied") {
+		t.Fatalf("reason should explain why nested was rejected: %q", res.Reason)
+	}
+}
+
+// TestProbe_AlreadyDelegated_MkdirSucceeds_ProbeCleanedUp verifies the
+// writability probe leaves no stray directories on the happy path.
+func TestProbe_AlreadyDelegated_MkdirSucceeds_ProbeCleanedUp(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu io memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "cpu io memory pids")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeNested || res.Reason != "already delegated" {
+		t.Fatalf("mode/reason: got %q/%q, want nested/already delegated", res.Mode, res.Reason)
+	}
+	// No agentsh.write-probe-* directories should remain under own.
+	entries, err := f.ReadDir(own)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "agentsh.write-probe-") {
+			t.Fatalf("probe directory leaked: %s", e.Name())
+		}
+	}
+}
+
+// TestProbe_EnabledByProbe_MkdirDeniedFallsBack covers the case where
+// enableControllersFS succeeds (subtree_control is writable) but mkdir
+// within the subtree is still denied — same OC failure mode reached
+// through a different path.
+func TestProbe_EnabledByProbe_MkdirDeniedFallsBack(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.mkdirErrUnder[own] = syscall.EACCES
+	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeTopLevel {
+		t.Fatalf("mode: got %q, want top-level", res.Mode)
+	}
+	if !strings.Contains(res.Reason, "controllers enabled but child cgroup mkdir denied") {
+		t.Fatalf("reason should explain enable-but-not-writable: %q", res.Reason)
+	}
+}
+
+// TestProbe_LeafMove_MkdirDeniedFallsBack covers the leaf-move path: parent
+// hits EBUSY, leaf-move + retry-enable succeeds, but child cgroup mkdir is
+// still denied. The probe should also catch this case so the leaf-move
+// branch can't over-report nested availability either.
+func TestProbe_LeafMove_MkdirDeniedFallsBack(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	// First write to subtree_control fails with EBUSY; retry after leaf-move succeeds.
+	f.openWriteErrsOnce[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	// Block child cgroup mkdir specifically (but allow the leaf cgroup itself,
+	// since agentsh.leaf creation happens before the writability probe).
+	// We can't easily distinguish the two with mkdirErrUnder, so we accept
+	// that the leaf is created first and then block subsequent probes by
+	// switching the predicate after leaf creation. The fake doesn't support
+	// that natively; instead, verify behavior via top-level fallback path.
+	f.mkdirErrUnder[own] = syscall.EACCES
+	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
+
+	// Pre-create the leaf so the EBUSY+leaf-move retry doesn't need to mkdir
+	// it (which would also be blocked by mkdirErrUnder[own]).
+	f.seedDir(own + "/agentsh.leaf")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeTopLevel {
+		t.Fatalf("mode: got %q, want top-level (probe should reject nested when child mkdir denied)", res.Mode)
+	}
+	if !strings.Contains(res.Reason, "child cgroup mkdir denied") {
+		t.Fatalf("reason should mention the writability failure: %q", res.Reason)
+	}
+}
