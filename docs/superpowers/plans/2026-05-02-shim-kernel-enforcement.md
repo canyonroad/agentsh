@@ -393,7 +393,11 @@ func TestResolveMode(t *testing.T) {
 		{name: "conf_auto", conf: "auto", env: "", want: ModeAuto},
 		{name: "conf_on", conf: "on", env: "", want: ModeOn},
 		{name: "conf_off", conf: "off", env: "", want: ModeOff},
-		{name: "env_overrides_conf", conf: "off", env: "on", want: ModeOn},
+		{name: "env_strengthens_auto_to_on", conf: "auto", env: "on", want: ModeOn},
+		{name: "env_cannot_weaken_on_to_off", conf: "on", env: "off", want: ModeOn},
+		{name: "env_cannot_weaken_on_to_auto", conf: "on", env: "auto", want: ModeOn},
+		{name: "env_cannot_weaken_auto_to_off", conf: "auto", env: "off", want: ModeAuto},
+		{name: "env_off_with_conf_off_stays_off", conf: "off", env: "off", want: ModeOff},
 		{name: "env_invalid", conf: "auto", env: "maybe", wantErr: true},
 		{name: "conf_invalid", conf: "yolo", env: "", wantErr: true},
 	}
@@ -435,46 +439,74 @@ package kernelinstall
 import "fmt"
 
 // Mode controls whether the shim attempts kernel-filter install.
+// Order is meaningful: off < auto < on (lower = weaker enforcement).
 type Mode int
 
 const (
-	ModeAuto Mode = iota // call wrap-init; install when server says it's required
+	ModeOff  Mode = iota // never install (admin opt-out)
+	ModeAuto             // install when wrap-init returns a populated response
 	ModeOn               // install or fail-closed
-	ModeOff              // never install; fall back to existing agentsh-exec proxy
 )
 
 func (m Mode) String() string {
 	switch m {
+	case ModeOff:
+		return "off"
 	case ModeAuto:
 		return "auto"
 	case ModeOn:
 		return "on"
-	case ModeOff:
-		return "off"
 	default:
 		return "unknown"
 	}
 }
 
-// ResolveMode picks the effective mode from config-file value and env-var
-// override. Empty string means unset; env wins over config.
+// ResolveMode picks the effective mode from the trusted config-file value
+// and the (untrusted, caller-controlled) env-var override.
+//
+// Trust model: /etc/agentsh/shim.conf is root-owned and admin-managed,
+// so its value is authoritative. The AGENTSH_SHIM_INSTALL env var is
+// readable from the caller's environment, so a malicious sandbox-SDK
+// supervisor could pre-set it. To prevent silent bypass, the env var
+// is honored ONLY if it would STRENGTHEN the effective mode (i.e.,
+// produce a higher Mode value in the off < auto < on ordering). An
+// env-var attempt to weaken is silently ignored — the config wins.
+//
+// Empty conf defaults to ModeAuto. Empty env is ignored.
 func ResolveMode(conf, env string) (Mode, error) {
-	pick := conf
-	if env != "" {
-		pick = env
+	confMode, err := parseMode(conf, ModeAuto)
+	if err != nil {
+		return ModeAuto, fmt.Errorf("conf: %w", err)
 	}
-	if pick == "" {
-		return ModeAuto, nil
+	if env == "" {
+		return confMode, nil
 	}
-	switch pick {
+	envMode, err := parseMode(env, confMode)
+	if err != nil {
+		return confMode, fmt.Errorf("env: %w", err)
+	}
+	// Env may only strengthen.
+	if envMode > confMode {
+		return envMode, nil
+	}
+	return confMode, nil
+}
+
+// parseMode parses a mode string. Empty string returns the supplied default.
+// Unknown values return an error.
+func parseMode(s string, def Mode) (Mode, error) {
+	if s == "" {
+		return def, nil
+	}
+	switch s {
+	case "off":
+		return ModeOff, nil
 	case "auto":
 		return ModeAuto, nil
 	case "on":
 		return ModeOn, nil
-	case "off":
-		return ModeOff, nil
 	default:
-		return ModeAuto, fmt.Errorf("invalid shim_install value %q (expected auto, on, or off)", pick)
+		return def, fmt.Errorf("invalid mode %q (expected auto, on, or off)", s)
 	}
 }
 ```
@@ -1314,8 +1346,11 @@ sandbox:
   rejects the filter) exits 126 with a hint pointing at this doc.
 - `off`: shim never attempts install. Equivalent to pre-#267 behavior.
 
-The override env var is `AGENTSH_SHIM_INSTALL=auto|on|off`. Env wins
-over `/etc/agentsh/shim.conf` and over the server-side YAML config.
+The override env var is `AGENTSH_SHIM_INSTALL=auto|on|off`. The env var
+may only **strengthen** enforcement, never weaken it: the trusted source
+is `/etc/agentsh/shim.conf` (root-owned, admin-managed). If the env var
+would produce a weaker mode than the config (e.g., config says `on` and
+env says `off`), the env var is silently ignored and the config wins.
 
 ## What it does
 

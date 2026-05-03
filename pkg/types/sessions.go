@@ -129,9 +129,13 @@ type WrapInitRequest struct {
 	CallerUID    int      `json:"caller_uid,omitempty"`
 	// Mode selects wrap lifecycle. "agent" (default, used by `agentsh wrap`)
 	// keeps the notify listener alive for the session lifetime. "shim"
-	// (used by the shell shim) tears the listener down when the wrapped
-	// process exits. An empty string (field absent on the wire) is treated
-	// the same as "agent".
+	// (used by the shell shim) is RESERVED for per-invocation listener
+	// cleanup; until that lifecycle support lands (tracked as Task 3 in
+	// docs/superpowers/plans/2026-05-02-shim-kernel-enforcement.md),
+	// Mode=="shim" is accepted but produces session-scoped listener
+	// behavior identical to "agent". Callers MUST NOT depend on
+	// per-invocation cleanup until that task lands. An empty string
+	// (field absent on the wire) is treated the same as "agent".
 	Mode string `json:"mode,omitempty"`
 }
 

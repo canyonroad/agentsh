@@ -105,7 +105,7 @@ sandbox:
     mode: auto    # auto | on | off  (default: auto)
 ```
 
-Env override: `AGENTSH_SHIM_INSTALL=auto|on|off`.
+Env override: `AGENTSH_SHIM_INSTALL=auto|on|off`. The env var may only **strengthen** enforcement, never weaken it — a malicious sandbox-SDK supervisor could pre-set it to bypass enforcement. The trusted source is `/etc/agentsh/shim.conf` (root-owned, admin-managed); the env var is honored only if it produces a stricter effective mode in the `off < auto < on` ordering.
 No marker env is needed or used — install is always attempted on every invocation that meets the decision-tree criteria (see "Why no already-filtered short-circuit" above).
 
 `auto` = "install when there's something to install and the kernel supports it"; `on` = "install or fail-closed"; `off` = "never install, fall back to today's behavior".
