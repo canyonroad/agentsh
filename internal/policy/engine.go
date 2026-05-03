@@ -696,6 +696,16 @@ func decisionStrictness(d types.Decision) int {
 func (e *Engine) matchCommandRules(command string, args []string) (Decision, bool) {
 	cmdLower := strings.ToLower(command)
 	cmdBase := strings.ToLower(filepath.Base(command))
+	// The shim install renames the original shell to <name>.real and places
+	// the shim at the original path. Server-side, the shim forwards the
+	// real shell as the outer command — so an operator policy listing
+	// `commands: [bash]` would otherwise miss `bash.real` and fall through
+	// to default-deny on every shim-routed shell invocation. shellparse
+	// already strips this suffix for known-shell detection (see
+	// shellparse.basenameLower); apply the same normalization to the
+	// basename match here so policy entries written without `.real`
+	// continue to match after a shim install.
+	cmdBaseNorm := strings.TrimSuffix(cmdBase, ".real")
 
 	for _, r := range e.compiledCommandRules {
 		// Pre-check is always depth 0 (direct command from user)
@@ -730,6 +740,10 @@ func (e *Engine) matchCommandRules(command string, args []string) (Decision, boo
 			if !commandMatched {
 				if _, ok := r.basenames[cmdBase]; ok {
 					commandMatched = true
+				} else if cmdBaseNorm != cmdBase {
+					if _, ok := r.basenames[cmdBaseNorm]; ok {
+						commandMatched = true
+					}
 				}
 			}
 
@@ -737,6 +751,10 @@ func (e *Engine) matchCommandRules(command string, args []string) (Decision, boo
 			if !commandMatched {
 				for _, g := range r.basenameGlobs {
 					if g.Match(cmdBase) || g.Match(filepath.Base(command)) {
+						commandMatched = true
+						break
+					}
+					if cmdBaseNorm != cmdBase && g.Match(cmdBaseNorm) {
 						commandMatched = true
 						break
 					}

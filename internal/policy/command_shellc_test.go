@@ -803,3 +803,59 @@ func TestEngine_CheckCommand_ShellCDerive_ShimRealSuffix(t *testing.T) {
 		})
 	}
 }
+
+// TestEngine_CheckCommand_RealSuffix_PolicyOmitsRealVariant covers
+// canyonroad/agentsh#270: under shim install, the server sees the renamed
+// real shell (e.g. /bin/bash.real) as the outer command, but operator
+// policies typically list shells without the .real suffix
+// (`commands: [bash]`). Before the fix, basename matching was strict and
+// every shim-routed bash invocation hit default-deny — making
+// AGENTSH_SHIM_FORCE=1 unusable on hosts where the shim is the only
+// enforcement path. The fix: matchCommandRules normalizes the trailing
+// `.real` suffix when checking basenames, mirroring shellparse's
+// known-shell normalization.
+func TestEngine_CheckCommand_RealSuffix_PolicyOmitsRealVariant(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "shim-policy-without-real-variants",
+		CommandRules: []CommandRule{
+			{Name: "deny-shutdown", Commands: []string{"shutdown"}, Decision: "deny"},
+			{Name: "allow-safe-commands", Commands: []string{"echo", "ls", "cat"}, Decision: "allow"},
+			// Operator wrote the canonical name only — no `.real` variants.
+			{Name: "allow-shells", Commands: []string{"sh", "bash", "dash", "zsh"}, Decision: "allow"},
+		},
+	}
+	e, err := NewEngine(p, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		command  string
+		args     []string
+		decision types.Decision
+		rule     string
+	}{
+		// The exact scenario from #270 — the trivial case must allow.
+		{"/bin/bash.real -c 'echo hello' (#270 trivial case)", "/bin/bash.real", []string{"-c", "echo hello"}, types.DecisionAllow, "allow-shells"},
+		{"/bin/sh.real -c 'echo hi'", "/bin/sh.real", []string{"-c", "echo hi"}, types.DecisionAllow, "allow-shells"},
+		// Bare shim-routed shell still allows.
+		{"/bin/bash.real (bare)", "/bin/bash.real", nil, types.DecisionAllow, "allow-shells"},
+		// Inner-deny still fires through .real (does not regress shim-real bypass coverage).
+		{"/bin/bash.real -c 'shutdown' → derived deny", "/bin/bash.real", []string{"-c", "shutdown"}, types.DecisionDeny, "deny-shutdown"},
+		// Case insensitivity preserved through .real strip.
+		{"/bin/BASH.REAL -c 'echo ok'", "/bin/BASH.REAL", []string{"-c", "echo ok"}, types.DecisionAllow, "allow-shells"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dec := e.CheckCommand(tc.command, tc.args)
+			if dec.PolicyDecision != tc.decision {
+				t.Errorf("decision: got %s, want %s (rule=%q)", dec.PolicyDecision, tc.decision, dec.Rule)
+			}
+			if dec.Rule != tc.rule {
+				t.Errorf("rule: got %q, want %q", dec.Rule, tc.rule)
+			}
+		})
+	}
+}
