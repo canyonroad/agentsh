@@ -136,6 +136,16 @@ type WrapInitRequest struct {
 }
 
 // WrapInitResponse returns the seccomp wrapper configuration to the caller.
+//
+// To decide whether to install kernel filters, the caller MUST inspect the
+// presence of WrapperBinary (and NotifySocket): both populated means
+// install; either empty means skip. Do not infer install/skip from a
+// single boolean field — it is impossible to distinguish a deliberate
+// "skip" from an old server that omits the field, and treating an absent
+// field as "skip" would silently bypass enforcement in mixed-version
+// deployments. The presence-of-WrapperBinary check is fail-closed: an old
+// server that knows nothing about Mode==shim still returns its standard
+// populated response, which the caller installs from.
 type WrapInitResponse struct {
 	PtraceMode            bool              `json:"ptrace_mode,omitempty"`
 	SafeToBypassShellShim bool              `json:"safe_to_bypass_shell_shim"`
@@ -145,10 +155,4 @@ type WrapInitResponse struct {
 	NotifySocket          string            `json:"notify_socket"`
 	SignalSocket          string            `json:"signal_socket,omitempty"`
 	WrapperEnv            map[string]string `json:"wrapper_env"`
-	// InstallRequired reports whether the caller must install kernel
-	// filters. False when no enforcement features are enabled server-side
-	// (lets shim-mode callers short-circuit without paying setup cost).
-	// Always serialized (no omitempty) so callers can distinguish a
-	// deliberate false from an old server that omits the field entirely.
-	InstallRequired bool `json:"install_required"`
 }

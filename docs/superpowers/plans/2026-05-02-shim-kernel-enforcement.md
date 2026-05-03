@@ -4,7 +4,7 @@
 
 **Goal:** Close the file/network/signal-policy gap when commands are spawned outside agentsh server's process tree (sandbox-SDK pattern: Tensorlake, E2B, Modal). The shim invokes the existing `agentsh-unixwrap` machinery on its own process before execve, so kernel filters govern the user's command even though it isn't a descendant of the agentsh server.
 
-**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. Server returns `install_required:false` when no enforcement is configured (auto-detect short-circuit) and uses per-invocation listener cleanup for shim-mode wraps. Shim opens the server's notify Unix socket directly (no socketpair relay), clears CLOEXEC on the fd, then `syscall.Exec`s `agentsh-unixwrap` with `AGENTSH_NOTIFY_SOCK_FD` set. Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed.
+**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. Server returns an empty response (no `WrapperBinary`/`NotifySocket`) when no enforcement is configured; the shim treats presence-of-`WrapperBinary` as the install/skip signal (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim opens the server's notify Unix socket directly (no socketpair relay), clears CLOEXEC on the fd, then `syscall.Exec`s `agentsh-unixwrap` with `AGENTSH_NOTIFY_SOCK_FD` set. "Already-filtered" detection is **unforgeable**: backed by `/proc/self/status` `Seccomp:` field, not the `AGENTSH_SHIM_INSTALL_DONE` env var alone (caller-controlled env can't be trusted as authority). Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed.
 
 **Tech Stack:** Go 1.x, Linux-only (`+build linux`), seccomp-bpf user-notify, Landlock, Unix domain sockets with SCM_RIGHTS. No new dependencies.
 
@@ -20,12 +20,12 @@
 - `internal/shim/kernelinstall/mode.go` — pure parsing of `auto|on|off` from string; cross-platform.
 - `internal/shim/kernelinstall/mode_test.go` — table tests for mode parsing.
 - `internal/shim/kernelinstall/install_linux_test.go` — unit tests against an httptest server simulating wrap-init.
-- `internal/api/wrap_shim_mode_test.go` — server-side tests for `Mode: "shim"` and `InstallRequired: false`.
+- `internal/api/wrap_shim_mode_test.go` — server-side tests for `Mode: "shim"` short-circuit (empty `WrapperBinary` when nothing enabled).
 - `internal/api/seccomp_wrapper_shim_install_test.go` — integration test: bash spawns in a sibling process tree; assert `cat /etc/shadow` is blocked.
 - `docs/cookbook/sandbox-sdk-integrations.md` — operator-facing doc for `sandbox.shim_install.mode` and the integration model.
 
 **Modified:**
-- `pkg/types/sessions.go` — `WrapInitRequest.Mode` field, `WrapInitResponse.InstallRequired` field.
+- `pkg/types/sessions.go` — `WrapInitRequest.Mode` field. (No new response field — install/skip is signalled by `WrapperBinary` presence; see Architecture.)
 - `internal/api/wrap.go` — `wrapInitCore` honors `Mode == "shim"` (lifecycle + auto-detect short-circuit).
 - `internal/api/wrap_linux.go` — `acceptNotifyFD` accepts an optional teardown context for per-invocation cleanup.
 - `internal/config/config.go` — `SandboxConfig.ShimInstall` block with `Mode string`.
@@ -37,14 +37,16 @@
 
 ## Phase 1 — Server-side wrap-init `Mode` parameter and auto-detect
 
-### Task 1: Add `Mode` to WrapInitRequest and `InstallRequired` to WrapInitResponse
+### Task 1: Add `Mode` to WrapInitRequest
+
+**Status: COMPLETED.** Implementation already merged at commits b8863afc + 55422355 + a follow-up that removed the originally-planned `InstallRequired` field. The protocol now uses **presence of `WrapperBinary`/`NotifySocket` in the wrap-init response** as the install/skip signal (see Architecture). This change was driven by a roborev review finding: a plain `bool InstallRequired` cannot distinguish a deliberate `false` from an old server that omits the field, which would silently bypass enforcement in mixed-version deployments.
 
 **Files:**
 - Modify: `pkg/types/sessions.go:125-142`
 
-- [ ] **Step 1: Modify the types**
+- [x] **Step 1: Modify the types**
 
-In `pkg/types/sessions.go`, replace the existing `WrapInitRequest` and `WrapInitResponse` definitions with:
+In `pkg/types/sessions.go`, the final form is:
 
 ```go
 // WrapInitRequest is sent by the CLI or shim to initialize seccomp wrapping for a session.
@@ -55,11 +57,22 @@ type WrapInitRequest struct {
 	// Mode selects wrap lifecycle. "agent" (default, used by `agentsh wrap`)
 	// keeps the notify listener alive for the session lifetime. "shim"
 	// (used by the shell shim) tears the listener down when the wrapped
-	// process exits.
+	// process exits. An empty string (field absent on the wire) is treated
+	// the same as "agent".
 	Mode string `json:"mode,omitempty"`
 }
 
 // WrapInitResponse returns the seccomp wrapper configuration to the caller.
+//
+// To decide whether to install kernel filters, the caller MUST inspect the
+// presence of WrapperBinary (and NotifySocket): both populated means
+// install; either empty means skip. Do not infer install/skip from a
+// single boolean field — it is impossible to distinguish a deliberate
+// "skip" from an old server that omits the field, and treating an absent
+// field as "skip" would silently bypass enforcement in mixed-version
+// deployments. The presence-of-WrapperBinary check is fail-closed: an old
+// server that knows nothing about Mode==shim still returns its standard
+// populated response, which the caller installs from.
 type WrapInitResponse struct {
 	PtraceMode            bool              `json:"ptrace_mode,omitempty"`
 	SafeToBypassShellShim bool              `json:"safe_to_bypass_shell_shim"`
@@ -69,28 +82,23 @@ type WrapInitResponse struct {
 	NotifySocket          string            `json:"notify_socket"`
 	SignalSocket          string            `json:"signal_socket,omitempty"`
 	WrapperEnv            map[string]string `json:"wrapper_env"`
-	// InstallRequired reports whether the caller must install kernel
-	// filters. False when no enforcement features are enabled server-side
-	// (lets shim-mode callers short-circuit without paying setup cost).
-	InstallRequired bool `json:"install_required"`
 }
 ```
 
-- [ ] **Step 2: Build to verify compile**
-
-Run: `go build ./pkg/types/...`
-Expected: no errors.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add pkg/types/sessions.go
-git commit -m "feat(types): add WrapInitRequest.Mode and WrapInitResponse.InstallRequired"
-```
+- [x] **Step 2: Build to verify compile** — passed.
+- [x] **Step 3: Commit** — done at b8863afc; follow-ups at 55422355 and the InstallRequired-removal commit.
 
 ---
 
-### Task 2: Server returns `InstallRequired:false` when nothing enabled (Mode==shim)
+### Task 2: Server returns `InstallRequired:false` when nothing enabled (Mode==shim) — SUPERSEDED, see body below
+
+**Note:** Title kept for stability; content rewritten to reflect the empty-`WrapperBinary` signal instead of a removed boolean field. See Task 1's superseded note and the spec's "Install/skip signal (no `install_required` field)" section.
+
+**Files:**
+- Create: `internal/api/wrap_shim_mode_test.go`
+- Modify: `internal/api/wrap.go` (in `wrapInitCore` around line 215; add helper at end of file)
+
+### Task 2: Server returns empty `WrapperBinary` when nothing enabled (Mode==shim)
 
 **Files:**
 - Create: `internal/api/wrap_shim_mode_test.go`
@@ -106,7 +114,6 @@ Create `internal/api/wrap_shim_mode_test.go`:
 package api
 
 import (
-	"context"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -115,9 +122,12 @@ import (
 )
 
 // TestWrapInit_ShimMode_NothingEnabled verifies that shim-mode wrap-init
-// returns InstallRequired=false (no kernel setup needed) when neither the
-// seccomp wrapper nor Landlock are configured. The shim short-circuits on
-// this response and falls through to the existing agentsh-exec proxy path.
+// returns an empty response (no WrapperBinary, no NotifySocket) when neither
+// the seccomp wrapper nor Landlock are configured. The shim treats absent
+// WrapperBinary as the skip signal and falls through to the existing
+// agentsh-exec proxy path. (We intentionally do NOT use a boolean
+// install_required field — see pkg/types/sessions.go's WrapInitResponse
+// doc comment for why presence-of-WrapperBinary is the fail-closed choice.)
 func TestWrapInit_ShimMode_NothingEnabled(t *testing.T) {
 	cfg := config.Config{}
 	cfg.Sandbox.UnixSockets.Enabled = boolPtr(false)
@@ -138,8 +148,11 @@ func TestWrapInit_ShimMode_NothingEnabled(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("got code %d, want 200", code)
 	}
-	if resp.InstallRequired {
-		t.Fatalf("got InstallRequired=true, want false (nothing enabled)")
+	if resp.WrapperBinary != "" {
+		t.Fatalf("got WrapperBinary=%q, want empty (nothing enabled)", resp.WrapperBinary)
+	}
+	if resp.NotifySocket != "" {
+		t.Fatalf("got NotifySocket=%q, want empty (nothing enabled)", resp.NotifySocket)
 	}
 }
 
@@ -149,7 +162,7 @@ func boolPtr(b bool) *bool { return &b }
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test -run TestWrapInit_ShimMode_NothingEnabled ./internal/api/`
-Expected: FAIL — either compilation error (helper not present) or `InstallRequired=true`.
+Expected: FAIL — either compilation error (helper not present) or non-empty WrapperBinary.
 
 - [ ] **Step 3: Implement the auto-detect short-circuit**
 
@@ -157,11 +170,14 @@ In `internal/api/wrap.go`, immediately after the ptrace-mode branch ends (around
 
 ```go
 	// Mode == "shim" auto-detect: when shim-mode callers ask the server
-	// what to install, return InstallRequired=false if no enforcement
-	// features are configured. The shim then falls back to its existing
-	// agentsh-exec proxy path without paying any kernel setup cost.
+	// what to install, return an empty response if no enforcement features
+	// are configured. The shim sees the absent WrapperBinary as the skip
+	// signal and falls back to its existing agentsh-exec proxy path
+	// without paying any kernel setup cost. We deliberately do NOT use a
+	// bool install_required field — see pkg/types/sessions.go's
+	// WrapInitResponse doc comment for the wire-protocol rationale.
 	if req.Mode == "shim" && !shimInstallRequired(a.cfg) {
-		return types.WrapInitResponse{InstallRequired: false}, http.StatusOK, nil
+		return types.WrapInitResponse{}, http.StatusOK, nil
 	}
 ```
 
@@ -178,36 +194,21 @@ func shimInstallRequired(cfg *config.Config) bool {
 }
 ```
 
-- [ ] **Step 4: Add `InstallRequired: true` to the existing success returns**
-
-Find the `return types.WrapInitResponse{...}` blocks in `wrapInitCore` that succeed (the seccomp wrapper path returns near line 360 and the ptrace-mode return near line 209). For both, add `InstallRequired: true,` to the returned struct so callers can rely on the field. The ptrace return becomes:
-
-```go
-		return types.WrapInitResponse{
-			PtraceMode:            true,
-			SafeToBypassShellShim: true,
-			NotifySocket:          notifySocketPath,
-			InstallRequired:       true,
-		}, http.StatusOK, nil
-```
-
-(Add the same field, value `true`, to the seccomp-wrapper success return — search for `WrapperBinary: wrapperPath,` to find it.)
-
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 4: Run test to verify it passes**
 
 Run: `go test -run TestWrapInit_ShimMode_NothingEnabled ./internal/api/`
 Expected: PASS.
 
-- [ ] **Step 6: Run the full wrap test suite to check no regressions**
+- [ ] **Step 5: Run the full wrap test suite to check no regressions**
 
 Run: `go test -run TestWrapInit ./internal/api/`
 Expected: all PASS (existing tests don't set `Mode`, so they hit the legacy paths unchanged).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add internal/api/wrap.go internal/api/wrap_shim_mode_test.go
-git commit -m "feat(api): wrap-init Mode==shim short-circuits when nothing to install"
+git commit -m "feat(api): wrap-init Mode==shim returns empty response when nothing to install"
 ```
 
 ---
@@ -631,11 +632,12 @@ import (
 )
 
 // TestInstall_ShortCircuitsWhenNothingRequired asserts that when wrap-init
-// returns InstallRequired=false, Install returns ResultSkip without opening
-// any socket or building any execve plan.
+// returns an empty response (no WrapperBinary), Install returns ResultSkip
+// without opening any socket or building any execve plan. The empty
+// response is the server's "nothing to install" signal in shim mode.
 func TestInstall_ShortCircuitsWhenNothingRequired(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(types.WrapInitResponse{InstallRequired: false})
+		json.NewEncoder(w).Encode(types.WrapInitResponse{}) // empty WrapperBinary
 	}))
 	defer srv.Close()
 
@@ -715,10 +717,9 @@ func TestInstall_BuildsExecPlan(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(types.WrapInitResponse{
-			InstallRequired: true,
-			WrapperBinary:   "/usr/bin/agentsh-unixwrap",
-			NotifySocket:    socketPath,
-			WrapperEnv:      map[string]string{"AGENTSH_SECCOMP_CONFIG": "{}"},
+			WrapperBinary: "/usr/bin/agentsh-unixwrap",
+			NotifySocket:  socketPath,
+			WrapperEnv:    map[string]string{"AGENTSH_SECCOMP_CONFIG": "{}"},
 		})
 	}))
 	defer srv.Close()
@@ -788,6 +789,10 @@ func Install(p InstallParams) (Result, error) {
 	return Result{Action: ResultSkip}, nil
 }
 
+// AlreadyFiltered always returns false on non-Linux targets — there's no
+// /proc/self/status to consult, and seccomp is Linux-only anyway.
+func AlreadyFiltered() bool { return false }
+
 // InstallParams declared here so the type compiles cross-platform.
 type InstallParams struct {
 	ServerBaseURL string
@@ -830,11 +835,13 @@ Create `internal/shim/kernelinstall/install_linux.go`:
 package kernelinstall
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -842,6 +849,47 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
+
+// AlreadyFiltered reports whether this process already runs under a seccomp
+// filter (`/proc/self/status` Seccomp: 2 == SECCOMP_MODE_FILTER). Used by
+// the shim as the unforgeable "already-filtered" check before invoking
+// Install — a caller-controlled env var alone could be pre-set by an
+// attacker to bypass the install path.
+//
+// False positives (a non-agentsh seccomp filter in the environment) are
+// tolerable: installing again either succeeds (filter stacking is allowed
+// up to the kernel limit) or fails closed in the wrapper. Either way, no
+// silent bypass.
+//
+// On non-Linux platforms or when /proc is not mounted, returns false (and
+// the caller proceeds to the existing skip/install decision tree).
+func AlreadyFiltered() bool {
+	f, err := os.Open("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "Seccomp:") {
+			continue
+		}
+		// Format: "Seccomp:\t<n>"
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			return false
+		}
+		// 0 = disabled, 1 = strict, 2 = filter mode (BPF). Treat anything
+		// >= 2 as "already filtered" (future kernels may add more modes).
+		v, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return false
+		}
+		return v >= 2
+	}
+	return false
+}
 
 // InstallParams collects everything Install needs. ServerBaseURL is the
 // HTTP base (e.g. "http://127.0.0.1:18080"); the session ID identifies
@@ -904,16 +952,12 @@ func Install(p InstallParams) (Result, error) {
 		return Result{Action: ResultSkip, Reason: err.Error()}, nil
 	}
 
-	if !resp.InstallRequired {
-		return Result{Action: ResultSkip}, nil
-	}
-
+	// Install/skip signal: presence of WrapperBinary AND NotifySocket.
+	// We deliberately do NOT use a boolean install_required field — see
+	// pkg/types/sessions.go's WrapInitResponse doc comment for why
+	// presence-of-WrapperBinary is the fail-closed wire choice.
 	if resp.WrapperBinary == "" || resp.NotifySocket == "" {
-		err := fmt.Errorf("wrap-init returned InstallRequired but missing WrapperBinary/NotifySocket")
-		if p.Mode == ModeOn {
-			return Result{}, err
-		}
-		return Result{Action: ResultSkip, Reason: err.Error()}, nil
+		return Result{Action: ResultSkip}, nil
 	}
 
 	notifyFD, err := openNotifySocket(resp.NotifySocket)
@@ -1066,7 +1110,16 @@ In `cmd/agentsh-shell-shim/main.go`, after the `tty := term.IsTerminal(...)` lin
 	// shim itself before execve. The kernelinstall package decides
 	// whether to skip, exec the wrapper, or fail-closed based on the
 	// shim_install mode and the server's wrap-init response.
-	if os.Getenv("AGENTSH_SHIM_INSTALL_DONE") != "1" {
+	//
+	// "Already-filtered" detection MUST be unforgeable: a caller-controlled
+	// AGENTSH_SHIM_INSTALL_DONE env var alone can be pre-set by an attacker
+	// to bypass install. We require an actual kernel-state proof. The
+	// kernelinstall.AlreadyFiltered helper checks /proc/self/status for
+	// Seccomp filter mode (==2). If a real filter is in place, skip; the
+	// env-var marker is treated as a hint only.
+	if kernelinstall.AlreadyFiltered() {
+		debugLog("kernel install: skip (Seccomp filter already active on this process)")
+	} else {
 		mode, modeErr := kernelinstall.ResolveMode(conf.ShimInstall, os.Getenv("AGENTSH_SHIM_INSTALL"))
 		if modeErr != nil {
 			fatalWithHint(127, "agentsh-shell-shim: "+modeErr.Error(),
@@ -1251,8 +1304,12 @@ Add to `seccomp_wrapper_shim_install_test.go`:
 
 ```go
 // TestShimInstall_NestedNoDoubleInstall verifies that bash -c "bash -c whoami"
-// triggers exactly one wrap-init call (the inner bash inherits the filter
-// from the outer one via AGENTSH_SHIM_INSTALL_DONE).
+// triggers exactly one wrap-init call. The inner bash sees Seccomp filter
+// mode 2 in /proc/self/status (inherited from the outer install via the
+// wrapper) and short-circuits via kernelinstall.AlreadyFiltered() before
+// it ever reaches kernelinstall.Install / wrap-init. The
+// AGENTSH_SHIM_INSTALL_DONE env-var marker is informational only — the
+// kernel-state check is what actually prevents the second install.
 func TestShimInstall_NestedNoDoubleInstall(t *testing.T) {
 	srv, callCount := startTestServerCounting(t)
 	defer srv.Close()
@@ -1280,7 +1337,7 @@ func TestShimInstall_NestedNoDoubleInstall(t *testing.T) {
 - [ ] **Step 2: Run test to verify it fails or passes**
 
 Run: `go test -tags=cgo -run TestShimInstall_NestedNoDoubleInstall ./internal/api/`
-Expected: PASS once `AGENTSH_SHIM_INSTALL_DONE=1` is honored. If it fails (count > 1), check the env-var marker is being set in `kernelinstall.Install`'s output env.
+Expected: PASS — the inner bash sees Seccomp:2 in /proc/self/status and skips wrap-init. If it fails (count > 1), verify kernelinstall.AlreadyFiltered() is being called and that the wrapper's seccomp filter is actually being installed in the outer invocation.
 
 - [ ] **Step 3: Commit**
 
@@ -1397,16 +1454,22 @@ over `/etc/agentsh/shim.conf` and over the server-side YAML config.
 
 Per shim invocation, when install is required:
 
-1. Shim opens the server's notify socket directly (no relay).
-2. Sets `AGENTSH_NOTIFY_SOCK_FD=<n>` and `AGENTSH_SHIM_INSTALL_DONE=1`.
-3. `syscall.Exec`s `agentsh-unixwrap` with the user's shell command.
-4. `agentsh-unixwrap` installs seccomp-notify, sends the notify fd back
+1. Shim checks `/proc/self/status` for Seccomp filter mode (==2). If
+   present, the shim is already running under an inherited filter and
+   skips wrap-init entirely. This check is the unforgeable
+   "already-installed" signal — a caller-controlled env var alone is not
+   trusted.
+2. Shim opens the server's notify socket directly (no relay).
+3. Sets `AGENTSH_NOTIFY_SOCK_FD=<n>` (and `AGENTSH_SHIM_INSTALL_DONE=1`
+   as an informational hint only).
+4. `syscall.Exec`s `agentsh-unixwrap` with the user's shell command.
+5. `agentsh-unixwrap` installs seccomp-notify, sends the notify fd back
    over the socket, applies Landlock, then execve's the user's shell.
-5. The user's command runs under both filters.
+6. The user's command runs under both filters.
 
 Nested shim invocations (`bash -c "bash -c ..."`) skip install — the
-inner bash inherits the filter from the outer one via the marker env
-var.
+inner bash sees Seccomp:2 in `/proc/self/status` (inherited from the
+wrapper's seccomp filter) and short-circuits before consulting wrap-init.
 
 ## Limitations
 
