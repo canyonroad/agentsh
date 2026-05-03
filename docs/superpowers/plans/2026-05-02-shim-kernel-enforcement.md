@@ -4,7 +4,7 @@
 
 **Goal:** Close the file/network/signal-policy gap when commands are spawned outside agentsh server's process tree (sandbox-SDK pattern: Tensorlake, E2B, Modal). The shim invokes the existing `agentsh-unixwrap` machinery on its own process before execve, so kernel filters govern the user's command even though it isn't a descendant of the agentsh server.
 
-**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. Server returns an empty response (no `WrapperBinary`/`NotifySocket`) when no enforcement is configured; the shim treats presence-of-`WrapperBinary` as the install/skip signal (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim opens the server's notify Unix socket directly (no socketpair relay), clears CLOEXEC on the fd, then `syscall.Exec`s `agentsh-unixwrap` with `AGENTSH_NOTIFY_SOCK_FD` set. "Already-filtered" detection is **unforgeable**: backed by `/proc/self/status` `Seccomp:` field, not the `AGENTSH_SHIM_INSTALL_DONE` env var alone (caller-controlled env can't be trusted as authority). Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed.
+**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. Server returns an empty response (no `WrapperBinary`/`NotifySocket`) when no enforcement is configured; the shim treats presence-of-`WrapperBinary` as the install/skip signal (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim opens the server's notify Unix socket directly (no socketpair relay), clears CLOEXEC on the fd, then `syscall.Exec`s `agentsh-unixwrap` with `AGENTSH_NOTIFY_SOCK_FD` set. **The shim always installs** when mode != off and the server has something to install — there is no portable, unforgeable way to detect "already installed by us" (env-var markers are caller-controlled; `Seccomp:2` is true for any container default profile). Filter stacking up to the kernel's 64-filter limit covers realistic nesting depths. Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed.
 
 **Tech Stack:** Go 1.x, Linux-only (`+build linux`), seccomp-bpf user-notify, Landlock, Unix domain sockets with SCM_RIGHTS. No new dependencies.
 
@@ -744,18 +744,11 @@ func TestInstall_BuildsExecPlan(t *testing.T) {
 	if len(res.ExecArgs) != len(wantArgs) {
 		t.Fatalf("got args %v, want %v", res.ExecArgs, wantArgs)
 	}
-	hasMarker := false
 	hasFD := false
 	for _, e := range res.ExecEnv {
-		if e == "AGENTSH_SHIM_INSTALL_DONE=1" {
-			hasMarker = true
-		}
 		if strings.HasPrefix(e, "AGENTSH_NOTIFY_SOCK_FD=") {
 			hasFD = true
 		}
-	}
-	if !hasMarker {
-		t.Fatal("AGENTSH_SHIM_INSTALL_DONE=1 not in env")
 	}
 	if !hasFD {
 		t.Fatal("AGENTSH_NOTIFY_SOCK_FD not in env")
@@ -788,10 +781,6 @@ import "fmt"
 func Install(p InstallParams) (Result, error) {
 	return Result{Action: ResultSkip}, nil
 }
-
-// AlreadyFiltered always returns false on non-Linux targets — there's no
-// /proc/self/status to consult, and seccomp is Linux-only anyway.
-func AlreadyFiltered() bool { return false }
 
 // InstallParams declared here so the type compiles cross-platform.
 type InstallParams struct {
@@ -835,13 +824,11 @@ Create `internal/shim/kernelinstall/install_linux.go`:
 package kernelinstall
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -849,47 +836,6 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
-
-// AlreadyFiltered reports whether this process already runs under a seccomp
-// filter (`/proc/self/status` Seccomp: 2 == SECCOMP_MODE_FILTER). Used by
-// the shim as the unforgeable "already-filtered" check before invoking
-// Install — a caller-controlled env var alone could be pre-set by an
-// attacker to bypass the install path.
-//
-// False positives (a non-agentsh seccomp filter in the environment) are
-// tolerable: installing again either succeeds (filter stacking is allowed
-// up to the kernel limit) or fails closed in the wrapper. Either way, no
-// silent bypass.
-//
-// On non-Linux platforms or when /proc is not mounted, returns false (and
-// the caller proceeds to the existing skip/install decision tree).
-func AlreadyFiltered() bool {
-	f, err := os.Open("/proc/self/status")
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if !strings.HasPrefix(line, "Seccomp:") {
-			continue
-		}
-		// Format: "Seccomp:\t<n>"
-		parts := strings.Fields(line)
-		if len(parts) < 2 {
-			return false
-		}
-		// 0 = disabled, 1 = strict, 2 = filter mode (BPF). Treat anything
-		// >= 2 as "already filtered" (future kernels may add more modes).
-		v, err := strconv.Atoi(parts[1])
-		if err != nil {
-			return false
-		}
-		return v >= 2
-	}
-	return false
-}
 
 // InstallParams collects everything Install needs. ServerBaseURL is the
 // HTTP base (e.g. "http://127.0.0.1:18080"); the session ID identifies
@@ -969,7 +915,6 @@ func Install(p InstallParams) (Result, error) {
 
 	env := append([]string{}, p.Env...)
 	env = appendOrReplace(env, "AGENTSH_NOTIFY_SOCK_FD="+strconv.Itoa(notifyFD))
-	env = appendOrReplace(env, "AGENTSH_SHIM_INSTALL_DONE=1")
 	for k, v := range resp.WrapperEnv {
 		env = appendOrReplace(env, k+"="+v)
 	}
@@ -1111,15 +1056,13 @@ In `cmd/agentsh-shell-shim/main.go`, after the `tty := term.IsTerminal(...)` lin
 	// whether to skip, exec the wrapper, or fail-closed based on the
 	// shim_install mode and the server's wrap-init response.
 	//
-	// "Already-filtered" detection MUST be unforgeable: a caller-controlled
-	// AGENTSH_SHIM_INSTALL_DONE env var alone can be pre-set by an attacker
-	// to bypass install. We require an actual kernel-state proof. The
-	// kernelinstall.AlreadyFiltered helper checks /proc/self/status for
-	// Seccomp filter mode (==2). If a real filter is in place, skip; the
-	// env-var marker is treated as a hint only.
-	if kernelinstall.AlreadyFiltered() {
-		debugLog("kernel install: skip (Seccomp filter already active on this process)")
-	} else {
+	// We deliberately do NOT short-circuit nested invocations on any
+	// "already-filtered" signal: env-var markers are caller-controlled,
+	// and Seccomp:2 is true for any container default profile (Docker,
+	// k8s) so it can't be used to recognize "agentsh already installed
+	// here". Always install. Filter stacking up to the kernel's 64-filter
+	// limit covers realistic nesting depths.
+	{
 		mode, modeErr := kernelinstall.ResolveMode(conf.ShimInstall, os.Getenv("AGENTSH_SHIM_INSTALL"))
 		if modeErr != nil {
 			fatalWithHint(127, "agentsh-shell-shim: "+modeErr.Error(),
@@ -1293,7 +1236,7 @@ git commit -m "test(api): integration test for shim-installed Landlock on siblin
 
 ---
 
-### Task 9: Nested-shim no-double-install test
+### Task 9: Nested-shim filters compose, inner shell still enforced
 
 **Files:**
 - Modify: `internal/api/seccomp_wrapper_shim_install_test.go`
@@ -1303,21 +1246,23 @@ git commit -m "test(api): integration test for shim-installed Landlock on siblin
 Add to `seccomp_wrapper_shim_install_test.go`:
 
 ```go
-// TestShimInstall_NestedNoDoubleInstall verifies that bash -c "bash -c whoami"
-// triggers exactly one wrap-init call. The inner bash sees Seccomp filter
-// mode 2 in /proc/self/status (inherited from the outer install via the
-// wrapper) and short-circuits via kernelinstall.AlreadyFiltered() before
-// it ever reaches kernelinstall.Install / wrap-init. The
-// AGENTSH_SHIM_INSTALL_DONE env-var marker is informational only — the
-// kernel-state check is what actually prevents the second install.
-func TestShimInstall_NestedNoDoubleInstall(t *testing.T) {
-	srv, callCount := startTestServerCounting(t)
+// TestShimInstall_NestedInstallsCompose verifies that bash -c "bash -c cat /etc/shadow"
+// installs filters at BOTH levels (filter stacking is allowed up to the
+// kernel's 64-filter limit), and that the inner shell's read of
+// /etc/shadow is still blocked. We don't try to deduplicate nested
+// installs — there's no portable, unforgeable signal for "agentsh already
+// installed here", so always-install is the safe choice.
+func TestShimInstall_NestedInstallsCompose(t *testing.T) {
+	if _, err := os.Stat("/etc/shadow"); err != nil {
+		t.Skip("/etc/shadow not present; nothing to deny against")
+	}
+	srv, callCount := startTestServerCountingWithLandlockDeny(t, "/etc/shadow")
 	defer srv.Close()
 
 	shimPath := buildShim(t)
 	wrapPath := buildWrap(t)
 
-	cmd := exec.Command(shimPath, "-c", "bash -c whoami")
+	cmd := exec.Command(shimPath, "-c", "bash -c 'cat /etc/shadow'")
 	cmd.Env = append(os.Environ(),
 		"AGENTSH_SERVER="+srv.URL,
 		"AGENTSH_SESSION_ID=test-shim-nested",
@@ -1325,25 +1270,29 @@ func TestShimInstall_NestedNoDoubleInstall(t *testing.T) {
 		"PATH="+filepath.Dir(wrapPath)+":"+os.Getenv("PATH"),
 	)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("nested shim failed: %v\n%s", err, out)
+	t.Logf("output: %s", out)
+	if err == nil {
+		t.Fatalf("expected non-zero exit (inner read blocked), got 0:\n%s", out)
 	}
-	if got := callCount(); got != 1 {
-		t.Fatalf("got %d wrap-init calls, want 1", got)
+	if strings.Contains(string(out), "root:") {
+		t.Fatalf("/etc/shadow contents leaked from inner shell; nested filter not enforced:\n%s", out)
+	}
+	if got := callCount(); got != 2 {
+		t.Fatalf("got %d wrap-init calls, want 2 (one per nested invocation)", got)
 	}
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails or passes**
+- [ ] **Step 2: Run test to verify it passes**
 
-Run: `go test -tags=cgo -run TestShimInstall_NestedNoDoubleInstall ./internal/api/`
-Expected: PASS — the inner bash sees Seccomp:2 in /proc/self/status and skips wrap-init. If it fails (count > 1), verify kernelinstall.AlreadyFiltered() is being called and that the wrapper's seccomp filter is actually being installed in the outer invocation.
+Run: `go test -tags=cgo -run TestShimInstall_NestedInstallsCompose ./internal/api/`
+Expected: PASS — both levels install, inner read blocked, count == 2. If it fails, check the inner wrapper is actually installing on top of the outer (filter stacking) and the server's notify handler is processing both filter chains correctly.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add internal/api/seccomp_wrapper_shim_install_test.go
-git commit -m "test(api): nested shim invocations install exactly one filter"
+git commit -m "test(api): nested shim invocations compose filters; inner shell still enforced"
 ```
 
 ---
@@ -1454,22 +1403,21 @@ over `/etc/agentsh/shim.conf` and over the server-side YAML config.
 
 Per shim invocation, when install is required:
 
-1. Shim checks `/proc/self/status` for Seccomp filter mode (==2). If
-   present, the shim is already running under an inherited filter and
-   skips wrap-init entirely. This check is the unforgeable
-   "already-installed" signal — a caller-controlled env var alone is not
-   trusted.
-2. Shim opens the server's notify socket directly (no relay).
-3. Sets `AGENTSH_NOTIFY_SOCK_FD=<n>` (and `AGENTSH_SHIM_INSTALL_DONE=1`
-   as an informational hint only).
-4. `syscall.Exec`s `agentsh-unixwrap` with the user's shell command.
-5. `agentsh-unixwrap` installs seccomp-notify, sends the notify fd back
+1. Shim opens the server's notify socket directly (no relay).
+2. Sets `AGENTSH_NOTIFY_SOCK_FD=<n>`.
+3. `syscall.Exec`s `agentsh-unixwrap` with the user's shell command.
+4. `agentsh-unixwrap` installs seccomp-notify, sends the notify fd back
    over the socket, applies Landlock, then execve's the user's shell.
-6. The user's command runs under both filters.
+5. The user's command runs under both filters.
 
-Nested shim invocations (`bash -c "bash -c ..."`) skip install — the
-inner bash sees Seccomp:2 in `/proc/self/status` (inherited from the
-wrapper's seccomp filter) and short-circuits before consulting wrap-init.
+Nested shim invocations (`bash -c "bash -c ..."`) **install at every
+level** — filter stacking up to the kernel's 64-filter limit is allowed
+and easily covers realistic nesting depths. There is no portable,
+unforgeable way to detect "the active filter is *our* filter" without
+elevated privileges (env-var markers are caller-controlled; a
+container's default seccomp profile already sets `Seccomp:2` so that
+kernel-state field can't be used to recognize agentsh's install). The
+safe choice is to always install when the shim is not in-session.
 
 ## Limitations
 
