@@ -10,9 +10,10 @@ import (
 
 // ShimConf is the parsed shim configuration.
 type ShimConf struct {
-	Force     bool              // force=true|1
-	ReadyGate bool              // ready_gate=true|1
-	Raw       map[string]string // all key=value pairs for forward compat
+	Force       bool              // force=true|1
+	ReadyGate   bool              // ready_gate=true|1
+	ShimInstall string            // shim_install=auto|on|off (default: auto)
+	Raw         map[string]string // all key=value pairs for forward compat
 }
 
 // ShimConfPath returns the config file path under root.
@@ -27,7 +28,7 @@ func ShimConfPath(root string) string {
 // Missing file (ENOENT) returns empty conf with nil error.
 // Other read errors return empty conf and the error.
 func ReadShimConf(root string) (ShimConf, error) {
-	conf := ShimConf{Raw: make(map[string]string)}
+	conf := ShimConf{Raw: make(map[string]string), ShimInstall: "auto"}
 	data, err := os.ReadFile(ShimConfPath(root))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -64,6 +65,14 @@ func ReadShimConf(root string) (ShimConf, error) {
 			// valid
 		default:
 			return conf, fmt.Errorf("shim.conf: invalid ready_gate value %q (expected true, 1, false, or 0)", v)
+		}
+	}
+	if v, ok := conf.Raw["shim_install"]; ok {
+		switch v {
+		case "auto", "on", "off":
+			conf.ShimInstall = v
+		default:
+			return conf, fmt.Errorf("shim.conf: invalid shim_install value %q (expected auto, on, or off)", v)
 		}
 	}
 	return conf, nil
