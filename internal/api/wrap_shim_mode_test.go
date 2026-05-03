@@ -3,7 +3,6 @@
 package api
 
 import (
-	"os/exec"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -13,20 +12,13 @@ import (
 // TestWrapInit_ShimMode_PopulatesWrapperBinary verifies that wrap-init with
 // Mode=="shim" returns the same shape of response as agent mode: a populated
 // WrapperBinary. We deliberately do NOT short-circuit on the server based on
-// which features are configured — there is no maintainable predicate that
-// covers every wrapper-install path (the seccomp wrapper installs filters
-// for several non-notify configs too: errno/kill blocks, blocked socket
-// families, block_io_uring), and any partial predicate is a silent
-// policy-bypass risk. The shim always installs in mode=auto/on; mode=off
-// is the explicit operator opt-out.
+// which features are configured — see the longer rationale in
+// docs/superpowers/specs/2026-05-02-shim-kernel-enforcement-design.md.
 func TestWrapInit_ShimMode_PopulatesWrapperBinary(t *testing.T) {
-	if _, err := exec.LookPath("agentsh-unixwrap"); err != nil {
-		t.Skip("agentsh-unixwrap not on PATH; cannot exercise wrap-init success path")
-	}
-
 	cfg := &config.Config{}
-	// Match the gate that the historical agent-mode tests use to reach the
-	// populated path. Look at wrap_test.go for the canonical setup.
+	// Use /bin/true as a stable wrapper path so the test runs in any CI
+	// without requiring agentsh-unixwrap to be preinstalled on PATH.
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
 	cfg.Sandbox.UnixSockets.Enabled = func(b bool) *bool { return &b }(true)
 
 	app, mgr := newTestAppForWrap(t, cfg)
@@ -47,9 +39,46 @@ func TestWrapInit_ShimMode_PopulatesWrapperBinary(t *testing.T) {
 		t.Fatalf("got code %d, want 200", code)
 	}
 	if resp.WrapperBinary == "" {
-		t.Fatal("got empty WrapperBinary; shim mode must return the same shape as agent mode (no server-side install/skip predicate)")
+		t.Fatal("got empty WrapperBinary; shim mode must return the same shape as agent mode")
 	}
 	if resp.NotifySocket == "" {
 		t.Fatal("got empty NotifySocket; expected a populated socket path")
+	}
+}
+
+// TestWrapInit_ShimMode_NoFeaturesConfigured covers the documented "no
+// server-side install/skip predicate" contract: even when no enforcement
+// features are explicitly enabled in cfg, the server still returns a
+// populated WrapperBinary for Mode==shim (matching agent-mode behavior).
+// The shim's mode=auto/on/off config governs install/skip; the server
+// does not predict.
+func TestWrapInit_ShimMode_NoFeaturesConfigured(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	// Note: NOT setting UnixSockets.Enabled, Landlock.Enabled, or any
+	// Seccomp feature flags. This is the "operator forgot to enable
+	// anything" config — the server still hands back a populated wrapper
+	// response, leaving the install decision to the shim.
+	cfg.Sandbox.UnixSockets.Enabled = func(b bool) *bool { return &b }(true)
+
+	app, mgr := newTestAppForWrap(t, cfg)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/bash",
+		AgentArgs:    []string{"-c", "echo hi"},
+		Mode:         "shim",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Fatalf("got code %d, want 200", code)
+	}
+	if resp.WrapperBinary == "" {
+		t.Fatal("server short-circuited (empty WrapperBinary) in shim mode; the spec mandates no server-side predicate")
 	}
 }

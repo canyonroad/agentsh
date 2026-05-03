@@ -711,6 +711,7 @@ func Install(p InstallParams) (Result, error) {
 type InstallParams struct {
 	ServerBaseURL string
 	SessionID     string
+	APIKey        string // for X-API-Key auth header (read from AGENTSH_API_KEY in the shim wiring)
 	Mode          Mode
 	RealShell     string
 	ShellArgs     []string
@@ -749,28 +750,30 @@ Create `internal/shim/kernelinstall/install_linux.go`:
 package kernelinstall
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
 	"net"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/client"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
 
 // InstallParams collects everything Install needs. ServerBaseURL is the
 // HTTP base (e.g. "http://127.0.0.1:18080"); the session ID identifies
-// which session's policy to apply; RealShell + ShellArgs is the user's
-// command (whatever the shim was about to execve). Env is the environment
-// the shim would have passed to that command — Install appends marker and
+// which session's policy to apply; APIKey is the X-API-Key credential
+// required by API-key-protected deployments (read from AGENTSH_API_KEY
+// in the shim wiring). RealShell + ShellArgs is the user's command
+// (whatever the shim was about to execve). Env is the environment the
+// shim would have passed to that command — Install appends marker and
 // fd-number entries and returns the merged list.
 type InstallParams struct {
 	ServerBaseURL string
 	SessionID     string
+	APIKey        string // for X-API-Key auth header (read from AGENTSH_API_KEY in the shim wiring)
 	Mode          Mode
 	RealShell     string
 	ShellArgs     []string
@@ -857,33 +860,27 @@ func Install(p InstallParams) (Result, error) {
 	}, nil
 }
 
+// callWrapInit wraps internal/client's WrapInit so kernelinstall picks
+// up the canonical auth (X-API-Key), transport (HTTP / Unix socket /
+// gRPC), timeouts, and path-escaping. Hand-rolled HTTP would silently
+// miss API-key headers and skip enforcement on protected deployments.
 func callWrapInit(p InstallParams) (types.WrapInitResponse, error) {
-	body, _ := json.Marshal(types.WrapInitRequest{
+	cl, err := client.NewForCLI(client.CLIOptions{
+		HTTPBaseURL:   p.ServerBaseURL,
+		APIKey:        p.APIKey,
+		ClientTimeout: wrapInitTimeout,
+	})
+	if err != nil {
+		return types.WrapInitResponse{}, fmt.Errorf("client: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wrapInitTimeout)
+	defer cancel()
+	return cl.WrapInit(ctx, p.SessionID, types.WrapInitRequest{
 		AgentCommand: p.RealShell,
 		AgentArgs:    p.ShellArgs,
 		CallerUID:    p.CallerUID,
 		Mode:         "shim",
 	})
-	url := strings.TrimRight(p.ServerBaseURL, "/") + "/api/v1/sessions/" + p.SessionID + "/wrap-init"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return types.WrapInitResponse{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: wrapInitTimeout}
-	httpResp, err := client.Do(req)
-	if err != nil {
-		return types.WrapInitResponse{}, err
-	}
-	defer httpResp.Body.Close()
-	if httpResp.StatusCode/100 != 2 {
-		return types.WrapInitResponse{}, fmt.Errorf("status %d", httpResp.StatusCode)
-	}
-	var resp types.WrapInitResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
-		return types.WrapInitResponse{}, fmt.Errorf("decode: %w", err)
-	}
-	return resp, nil
 }
 
 // openNotifySocket dials the server's notify Unix socket and returns a raw
@@ -997,6 +994,7 @@ In `cmd/agentsh-shell-shim/main.go`, after the `tty := term.IsTerminal(...)` lin
 		res, instErr := kernelinstall.Install(kernelinstall.InstallParams{
 			ServerBaseURL: serverBase,
 			SessionID:     sessID,
+			APIKey:        os.Getenv("AGENTSH_API_KEY"),  // NEW: for X-API-Key auth header
 			Mode:          mode,
 			RealShell:     realShell,
 			ShellArgs:     shellArgs,
