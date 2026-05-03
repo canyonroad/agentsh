@@ -84,7 +84,7 @@ An earlier draft tried to skip install for nested shim invocations (`bash -c "ba
 - Seccomp filter mode `2` only proves *some* seccomp filter is in place. In container environments (Docker default profile, Kubernetes runtimeClass, Podman), every process already runs under a non-agentsh seccomp filter, so `Seccomp:2` is always true — checking it would silently bypass agentsh policy in every containerized deployment.
 - There is no portable, unforgeable way (without `CAP_SYS_ADMIN` for `PTRACE_SECCOMP_GET_FILTER` and a known filter hash) to prove "the active seccomp filter is *the agentsh filter*".
 
-So the design **always installs** when the shim is not in-session and mode != off and the server has something to install. Filter stacking up to the kernel's 64-filter limit is well within real-world nesting depths (typical workloads nest at most 2–3 levels). Per-invocation cost (~5–10 ms) is acceptable for sandbox-SDK use. Server-side per-invocation listener cleanup (described below) keeps the listener-goroutine count proportional to currently-active nesting depth, not unbounded.
+So the design **always installs** when `shim_install.mode != off` and wrap-init returns a populated response, regardless of `AGENTSH_IN_SESSION` (see "Why AGENTSH_IN_SESSION does not gate the install branch" above). Filter stacking up to the kernel's 64-filter limit is well within real-world nesting depths (typical workloads nest at most 2–3 levels). Per-invocation cost (~5–10 ms) is acceptable for sandbox-SDK use. Server-side per-invocation listener cleanup (described below) keeps the listener-goroutine count proportional to currently-active nesting depth, not unbounded.
 
 #### Install/skip signal (no `install_required` field)
 
@@ -151,7 +151,7 @@ If a tight `for i in $(seq 1000); do echo $i; done` loop hurts in practice, we h
 ### Testing
 
 - **Unit tests:** `internal/shim/kernelinstall` decision tree with mocked wrap-init responses; covers each branch of the decision diagram and each failure mode in the table.
-- **Integration tests:** extend the `seccomp_wrapper_test.go` family. New scenarios spawn a process tree that's a *sibling* of the agentsh server (mirroring the sandbox-SDK case) and assert `cat /etc/shadow` exits non-zero; assert `connect()` to a denied address fails; assert nested `bash -c 'bash -c whoami'` doesn't double-install.
+- **Integration tests:** extend the `seccomp_wrapper_test.go` family. New scenarios spawn a process tree that's a *sibling* of the agentsh server (mirroring the sandbox-SDK case) and assert reads of a tempdir-based deny target return non-zero with no leaked content; assert `connect()` to a denied address fails; assert nested `bash -c 'bash -c cat <denyfile>'` installs filters at BOTH levels (filter stacking) AND that the inner shell's read remains blocked. Nested installs are expected — there is no safe "already-filtered" signal, so the design installs on every level.
 - **End-to-end repro:** new `Dockerfile.shim-install-test` mirroring `agentsh-tensorlake`'s setup; CI runs Eran's repro grid and asserts every red row turns green.
 - **Regression:** the existing `agentsh wrap` path tests must continue to pass unchanged — Mode defaults to `"agent"`, the server's existing lifecycle behavior applies.
 
