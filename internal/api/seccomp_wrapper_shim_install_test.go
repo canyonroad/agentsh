@@ -117,6 +117,109 @@ func TestShimInstall_SiblingProcessTree(t *testing.T) {
 	t.Logf("PASS: shim exited non-zero and sentinel did not appear in output")
 }
 
+// TestShimInstall_NestedInstallsCompose verifies that a shim invocation that
+// contains a nested shim invocation (bash -c 'bash -c "..."') correctly
+// stacks two Landlock/seccomp filters and the inner shell's read of the deny
+// target is still blocked. This exercises the filter-stacking path: the outer
+// shim installs one filter set, the inner shim installs a second set on top.
+//
+// The test does NOT assert that wrap-init was called exactly twice — that would
+// require server-side call counting.  It does assert the security-relevant
+// outcome: the sentinel never appears in the output.
+func TestShimInstall_NestedInstallsCompose(t *testing.T) {
+	if !landlockSupported(t) {
+		t.Skip("Landlock not supported in this environment")
+	}
+	if !seccompUserNotifySupported(t) {
+		t.Skip("seccomp user-notify not supported in this environment")
+	}
+	if !cgoAvailable() {
+		t.Skip("cgo not available — cannot build agentsh-unixwrap")
+	}
+
+	// Build both binaries before allocating any test resources.
+	wrapPath := buildWrapBinary(t)
+	shimPath := buildShimBinary(t)
+
+	// Create the deny target: a file in its own tempdir.  The test server
+	// Landlock policy denies all reads from that directory.
+	denyDir := t.TempDir()
+	denyFile := filepath.Join(denyDir, "secret.txt")
+	const sentinel = "NESTED_SHOULD_NOT_LEAK_C7E1F2A0"
+	if err := os.WriteFile(denyFile, []byte(sentinel), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity check: without agentsh the test user can read the file.
+	if _, err := os.ReadFile(denyFile); err != nil {
+		t.Fatalf("environment check failed: cannot read %s without policy: %v", denyFile, err)
+	}
+
+	// Start the in-process test server with Landlock deny on denyDir.
+	spec := startTestServerWithLandlockDeny(t, denyFile)
+	t.Logf("test server URL: %s  session: %s", spec.srv.URL, spec.sessionID)
+
+	// The shim binary is named "bash"; it looks for "bash.real" next to itself
+	// to find the actual shell.  Create the symlink in the same directory.
+	shimDir := filepath.Dir(shimPath)
+	bashReal := filepath.Join(shimDir, "bash.real")
+	realBash, err := exec.LookPath("bash")
+	if err != nil {
+		realBash = "/bin/bash"
+	}
+	if _, statErr := os.Stat(realBash); statErr != nil {
+		t.Skipf("bash not found at %s: %v", realBash, statErr)
+	}
+	if err := os.Symlink(realBash, bashReal); err != nil {
+		t.Fatalf("symlink bash.real: %v", err)
+	}
+
+	// Set up a temp shim.conf root with shim_install=on.
+	confRoot := t.TempDir()
+	confDir := filepath.Join(confRoot, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatalf("mkdir shim conf dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("shim_install=on\n"), 0o644); err != nil {
+		t.Fatalf("write shim.conf: %v", err)
+	}
+
+	// PATH must contain both the shim directory (so the inner "bash" resolves
+	// to the shim, not the real bash) and the wrap directory (so wrap-init
+	// can find agentsh-unixwrap).
+	wrapDir := filepath.Dir(wrapPath)
+	testPATH := shimDir + ":" + wrapDir + ":" + os.Getenv("PATH")
+
+	env := append(os.Environ(),
+		"AGENTSH_SERVER="+spec.srv.URL,
+		"AGENTSH_SESSION_ID="+spec.sessionID,
+		"AGENTSH_SHIM_INSTALL=on",
+		"AGENTSH_SHIM_CONF_ROOT="+confRoot,
+		"PATH="+testPATH,
+		"AGENTSH_SHIM_DEBUG=1",
+	)
+	// Strip AGENTSH_IN_SESSION so neither shim level skips the kernelinstall branch.
+	env = filterEnv(env, "AGENTSH_IN_SESSION")
+
+	// Outer shim: bash -c "bash -c 'cat $denyFile'"
+	// The inner "bash" is resolved via PATH to the shim binary, so two levels
+	// of filter installation occur.
+	innerCmd := "bash -c 'cat " + denyFile + "'"
+	cmd := exec.CommandContext(context.Background(), shimPath, "-c", innerCmd)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	t.Logf("nested shim output:\n%s", out)
+	t.Logf("wrap-init handler reached (server-side logs above) — filter stacking occurred")
+
+	if err == nil {
+		t.Fatalf("expected non-zero exit (inner read must be blocked); got 0:\n%s", out)
+	}
+	if strings.Contains(string(out), sentinel) {
+		t.Fatalf("sentinel leaked from inner shell — nested filter stacking failed:\n%s", out)
+	}
+	t.Logf("PASS: nested shim exited non-zero and sentinel did not appear in output")
+}
+
 // filterEnv returns a copy of env with all entries that start with key= removed.
 func filterEnv(env []string, key string) []string {
 	prefix := key + "="
