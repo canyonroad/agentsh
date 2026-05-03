@@ -4,7 +4,7 @@
 
 **Goal:** Close the file/network/signal-policy gap when commands are spawned outside agentsh server's process tree (sandbox-SDK pattern: Tensorlake, E2B, Modal). The shim invokes the existing `agentsh-unixwrap` machinery on its own process before execve, so kernel filters govern the user's command even though it isn't a descendant of the agentsh server.
 
-**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. The server always returns the same populated response regardless of Mode — install/skip is the shim's decision, governed by its `mode=auto/on/off` config (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim opens the server's notify Unix socket directly (no socketpair relay), clears CLOEXEC on the fd, then `syscall.Exec`s `agentsh-unixwrap` with `AGENTSH_NOTIFY_SOCK_FD` set. **The shim always installs** when mode != off — there is no portable, unforgeable way to detect "already installed by us" (env-var markers are caller-controlled; `Seccomp:2` is true for any container default profile). Filter stacking up to the kernel's 64-filter limit covers realistic nesting depths. Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed.
+**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. The server always returns the same populated response regardless of Mode — install/skip is the shim's decision, governed by its `mode=auto/on/off` config (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim opens the server's notify Unix socket directly (no socketpair relay), clears CLOEXEC on the fd, then `syscall.Exec`s `agentsh-unixwrap` with `AGENTSH_NOTIFY_SOCK_FD` set. **The shim always installs** when mode != off — there is no portable, unforgeable way to detect "already installed by us" (env-var markers are caller-controlled; `Seccomp:2` is true for any container default profile). Filter stacking up to the kernel's 64-filter limit covers realistic nesting depths. Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed. **IMPORTANT: the install branch runs BEFORE the `AGENTSH_IN_SESSION=1` recursion guard** — `AGENTSH_IN_SESSION` is caller-controllable, so gating install on it would let a malicious sandbox-SDK supervisor pre-set the env var and bypass enforcement. The recursion guard remains in place for the agentsh-exec proxy path only (where recursion would deadlock). Server-spawned children running the install branch install again — wasteful but safe.
 
 **Tech Stack:** Go 1.x, Linux-only (`+build linux`), seccomp-bpf user-notify, Landlock, Unix domain sockets with SCM_RIGHTS. No new dependencies.
 
@@ -31,7 +31,7 @@
 - `internal/config/config.go` — `SandboxConfig.ShimInstall` block with `Mode string`.
 - `internal/shim/conf.go` — `ShimConf.ShimInstall string` (parsed from `shim_install=` line in `/etc/agentsh/shim.conf`).
 - `internal/shim/conf_test.go` — coverage for the new key.
-- `cmd/agentsh-shell-shim/main.go` — insert kernelinstall branch before existing agentsh-exec proxy (~line 224).
+- `cmd/agentsh-shell-shim/main.go` — insert kernelinstall branch BEFORE the existing `if inSession == "1"` recursion guard (not after the agentsh-exec proxy, before it — install branch must run before the caller-controllable `AGENTSH_IN_SESSION` check).
 
 ---
 
@@ -964,68 +964,35 @@ git commit -m "feat(shim): kernelinstall.Install dials wrap-init and builds exec
 ### Task 7: Insert install branch in `cmd/agentsh-shell-shim/main.go`
 
 **Files:**
-- Modify: `cmd/agentsh-shell-shim/main.go` (insert before line 224 `args := []string{agentshBin, "exec"}`)
+- Modify: `cmd/agentsh-shell-shim/main.go` (insert BEFORE the existing `if inSession == "1"` block — the install branch must run before the recursion guard)
 
 - [ ] **Step 1: Add the call site**
 
-In `cmd/agentsh-shell-shim/main.go`, after the `tty := term.IsTerminal(...)` line (~line 224), add:
+In `cmd/agentsh-shell-shim/main.go`, insert the kernelinstall block BEFORE the existing `if inSession == "1"` recursion guard (around line 41). The placement is deliberate — see the comment in the code:
 
 ```go
-	// Try shim-installed kernel enforcement (issues #267 + #268). When the
-	// shim is not in the agentsh server's process tree (sandbox-SDK
-	// pattern), file/network/signal policy needs to be installed by the
-	// shim itself before execve. The kernelinstall package decides
-	// whether to skip, exec the wrapper, or fail-closed based on the
-	// shim_install mode and the server's wrap-init response.
-	//
-	// We deliberately do NOT short-circuit nested invocations on any
-	// "already-filtered" signal: env-var markers are caller-controlled,
-	// and Seccomp:2 is true for any container default profile (Docker,
-	// k8s) so it can't be used to recognize "agentsh already installed
-	// here". Always install. Filter stacking up to the kernel's 64-filter
-	// limit covers realistic nesting depths.
-	{
-		mode, modeErr := kernelinstall.ResolveMode(conf.ShimInstall, os.Getenv("AGENTSH_SHIM_INSTALL"))
-		if modeErr != nil {
-			fatalWithHint(127, "agentsh-shell-shim: "+modeErr.Error(),
-				"Set shim_install in /etc/agentsh/shim.conf or AGENTSH_SHIM_INSTALL to one of: auto, on, off.")
-		}
-		serverBase := serverHTTPBaseURL() // helper added below
-		res, instErr := kernelinstall.Install(kernelinstall.InstallParams{
-			ServerBaseURL: serverBase,
-			SessionID:     sessID,
-			APIKey:        os.Getenv("AGENTSH_API_KEY"),  // NEW: for X-API-Key auth header
-			Mode:          mode,
-			RealShell:     realShell,
-			ShellArgs:     shellArgs,
-			Env:           os.Environ(),
-			CallerUID:     os.Getuid(),
-		})
-		if instErr != nil {
-			// Mode=on path with wrap-init error: fail-closed.
-			fatalWithHint(126, "agentsh-shell-shim: kernel install: "+instErr.Error(),
-				"Disable shim install via shim_install=off or AGENTSH_SHIM_INSTALL=off if this is breaking workloads.")
-		}
-		switch res.Action {
-		case kernelinstall.ResultExec:
-			debugLog("kernel install: execve %s with NotifyFD=%d", res.ExecPath, res.NotifyFD)
-			if err := syscall.Exec(res.ExecPath, res.ExecArgs, res.ExecEnv); err != nil {
-				fatalWithHint(126, "agentsh-shell-shim: exec wrapper: "+err.Error(),
-					"Verify agentsh-unixwrap is installed and on PATH.")
-			}
-			return // unreachable
-		case kernelinstall.ResultFailClosed:
-			fatalWithHint(126, "agentsh-shell-shim: kernel install fail-closed: "+res.Reason,
-				"Disable shim install via shim_install=off if this is breaking workloads.")
-		case kernelinstall.ResultSkip:
-			debugLog("kernel install: skip (%s)", res.Reason)
-			// fall through to existing agentsh-exec proxy path
-		}
-	}
+// Try shim-installed kernel enforcement (issues #267 + #268). When the
+// shim is not in the agentsh server's process tree (sandbox-SDK
+// pattern), file/network/signal policy needs to be installed by the
+// shim itself before execve.
+//
+// IMPORTANT: this branch deliberately runs BEFORE the AGENTSH_IN_SESSION
+// recursion guard. The env var is caller-controllable, so gating the
+// install branch on it would let a malicious sandbox-SDK supervisor
+// pre-set AGENTSH_IN_SESSION=1 and bypass kernel enforcement entirely.
+// In the legitimate server-spawned-child case, the install branch
+// just installs again — wasteful (filter stacking) but safe. The
+// in-session guard remains in place for the agentsh-exec proxy that
+// follows it (where recursion would actually deadlock).
+{
+    mode, modeErr := kernelinstall.ResolveMode(conf.ShimInstall, os.Getenv("AGENTSH_SHIM_INSTALL"))
+    ... (existing block) ...
+}
 
-	// Existing agentsh-exec proxy path:
-	args := []string{agentshBin, "exec"}
-```
+// Existing recursion guard (unchanged):
+if inSession == "1" {
+    ... (existing block) ...
+}
 
 Add the import at the top of the file:
 

@@ -59,7 +59,6 @@ func TestWrapInit_ShimMode_NoFeaturesConfigured(t *testing.T) {
 	// Seccomp feature flags. This is the "operator forgot to enable
 	// anything" config — the server still hands back a populated wrapper
 	// response, leaving the install decision to the shim.
-	cfg.Sandbox.UnixSockets.Enabled = func(b bool) *bool { return &b }(true)
 
 	app, mgr := newTestAppForWrap(t, cfg)
 	s, err := mgr.Create(t.TempDir(), "default")

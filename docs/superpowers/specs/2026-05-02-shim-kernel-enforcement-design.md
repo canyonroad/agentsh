@@ -45,10 +45,12 @@ ptrace-pid mode (#269) is the only currently-shipping mitigation. Its costs (sin
 
 ```
 shim invoked
-  ├─ AGENTSH_IN_SESSION=1?         ─→ exec real shell      (existing recursion guard)
   ├─ shim_install.mode == off?     ─→ existing agentsh-exec proxy path
+  │                                    (with the existing AGENTSH_IN_SESSION
+  │                                     recursion guard)
   ├─ wrap-init response has empty WrapperBinary or NotifySocket?
   │                                ─→ existing agentsh-exec proxy path
+  │                                    (same in-session guard applies)
   └─ install path:
         POST /api/v1/sessions/{id}/wrap-init
             { agent_command: realShell, agent_args: shellArgs, mode: "shim" }
@@ -57,7 +59,22 @@ shim invoked
         execve agentsh-unixwrap -- realShell shellArgs...
             (unixwrap installs seccomp → SCM_RIGHTS to server → installs Landlock → execs target)
         any failure ⇒ exit 126 (fail-closed)
+
+NOTE: AGENTSH_IN_SESSION=1 (caller-controllable env var) is NOT a
+gate for the install branch — it would let a malicious sandbox-SDK
+supervisor pre-set it and bypass enforcement. The existing recursion
+guard in the agentsh-exec proxy path is unchanged (it prevents
+infinite recursion when the agentsh server fork+execs the shim, where
+the in-session signal is trustworthy because it came from the server's
+own fork). For the new install branch, server-spawned shims simply
+install again — wasteful (filter stacking) but safe.
 ```
+
+#### Why AGENTSH_IN_SESSION does not gate the install branch
+
+`AGENTSH_IN_SESSION=1` is set by the agentsh server before fork+exec'ing its own children, so the shim can recognize "I'm a child of the server, exec the real shell instead of proxying back through agentsh exec (deadlock guard)". That trust model is sound for the agentsh-exec proxy — recursion would actually deadlock — but the env var is caller-controllable, so a malicious supervisor running outside the agentsh server's process tree can pre-set it.
+
+For the kernel-install branch, the legitimate "I'm in-session" case (server-spawned child) just installs again. Filter stacking is allowed; the wrapper opens a fresh notify socket; the only cost is one extra wrap-init round trip per server-spawned exec — wasteful, not unsafe. The forgery case (sandbox supervisor pre-setting the env) is closed: the shim still installs, exactly as it would for any other sibling-tree invocation.
 
 #### Why no "already-filtered" short-circuit
 
@@ -73,13 +90,12 @@ So the design **always installs** when the shim is not in-session and mode != of
 
 The protocol uses **presence of `WrapperBinary` and `NotifySocket` in the wrap-init response** as the install/skip signal. Both populated → install. Either empty → skip and fall through to the existing agentsh-exec proxy path. A boolean `install_required` field was rejected because JSON cannot distinguish `false` from "field absent on an old server", and treating an absent field as "skip" silently bypasses enforcement in mixed-version deployments. Presence-of-WrapperBinary is fail-closed: an old server returning its standard populated response triggers an install, exactly as the caller would have wanted.
 
-Three guard rails preserve current behavior:
+Two guard rails preserve current behavior:
 
-- `AGENTSH_IN_SESSION=1` (server-spawned children) — unchanged.
-- `shim_install.mode=off` or wrap-init returns an empty `WrapperBinary`/`NotifySocket` — unchanged; falls into the existing `agentsh exec` proxy.
-- All other invocations install. Nested invocations install again — that's fine (filters compose; per-invocation cost is acceptable).
+- `shim_install.mode=off` or wrap-init returns an empty `WrapperBinary`/`NotifySocket` — unchanged; falls into the existing `agentsh exec` proxy (which still carries the `AGENTSH_IN_SESSION=1` recursion guard).
+- All other invocations install. Nested invocations — including server-spawned children — install again. That's fine: filters compose; per-invocation cost is acceptable; and `AGENTSH_IN_SESSION=1` is NOT a gate for the install branch (it is caller-controllable — see "Why AGENTSH_IN_SESSION does not gate the install branch" above).
 
-The new branch only fires when there's something to actually enforce **and** we are outside the server's process tree.
+The new branch fires when there's something to actually enforce. `AGENTSH_IN_SESSION=1` no longer gates this path — the install branch runs first.
 
 ### Server-side changes
 
@@ -94,7 +110,7 @@ Reuse `/api/v1/sessions/{id}/wrap-init`. Two deltas to that handler:
 ### Client-side (shim) changes
 
 - New package `internal/shim/kernelinstall` (Linux-only build tag): owns the auto-detect probe, the wrap-init RPC, building the unixwrap exec args, setting marker env vars, fail-closed exit handling.
-- `cmd/agentsh-shell-shim/main.go`: insert the new branch *before* the existing `agentsh exec` proxy path (around line 225). When the install path applies the shim execve's `agentsh-unixwrap` directly — *not* `agentsh exec`. Intentional: we want the inherited filter to govern the user's shell, not a Go process that's about to exit.
+- `cmd/agentsh-shell-shim/main.go`: insert the new branch **before the existing `if inSession == "1"` recursion guard** (not just before the agentsh-exec proxy — before the AGENTSH_IN_SESSION check itself). This is a security requirement: `AGENTSH_IN_SESSION` is caller-controllable, so gating the install branch on it would let a malicious sandbox-SDK supervisor bypass enforcement by pre-setting the env var. When the install path applies the shim execve's `agentsh-unixwrap` directly — *not* `agentsh exec`. Intentional: we want the inherited filter to govern the user's shell, not a Go process that's about to exit.
 - `agentsh-unixwrap` itself: zero changes. The contract it expects (env config, AGENTSH_NOTIFY_SOCK_FD, target argv) is satisfied identically by the shim and by the server's exec path.
 
 ### Config
