@@ -4,7 +4,7 @@
 
 **Goal:** Close the file/network/signal-policy gap when commands are spawned outside agentsh server's process tree (sandbox-SDK pattern: Tensorlake, E2B, Modal). The shim invokes the existing `agentsh-unixwrap` machinery on its own process before execve, so kernel filters govern the user's command even though it isn't a descendant of the agentsh server.
 
-**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. The server always returns the same populated response regardless of Mode — install/skip is the shim's decision, governed by its `mode=auto/on/off` config (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim opens the server's notify Unix socket directly (no socketpair relay), clears CLOEXEC on the fd, then `syscall.Exec`s `agentsh-unixwrap` with `AGENTSH_NOTIFY_SOCK_FD` set. **The shim always installs** when mode != off — there is no portable, unforgeable way to detect "already installed by us" (env-var markers are caller-controlled; `Seccomp:2` is true for any container default profile). Filter stacking up to the kernel's 64-filter limit covers realistic nesting depths. Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed. **IMPORTANT: the install branch runs BEFORE the `AGENTSH_IN_SESSION=1` recursion guard** — `AGENTSH_IN_SESSION` is caller-controllable, so gating install on it would let a malicious sandbox-SDK supervisor pre-set the env var and bypass enforcement. The recursion guard remains in place for the agentsh-exec proxy path only (where recursion would deadlock). Server-spawned children running the install branch install again — wasteful but safe.
+**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. The server always returns the same populated response regardless of Mode — install/skip is the shim's decision, governed by its `mode=auto/on/off` config (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim opens the server's notify Unix socket directly (no socketpair relay), clears CLOEXEC on the fd, then launches `agentsh-unixwrap` as a **child process** via `runAndExit` (NOT `syscall.Exec`) with `AGENTSH_NOTIFY_SOCK_FD` set. **The shim always installs** when mode != off — there is no portable, unforgeable way to detect "already installed by us" (env-var markers are caller-controlled; `Seccomp:2` is true for any container default profile). Filter stacking up to the kernel's 64-filter limit covers realistic nesting depths. Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed. **IMPORTANT: the install branch runs BEFORE the `AGENTSH_IN_SESSION=1` recursion guard** — `AGENTSH_IN_SESSION` is caller-controllable, so gating install on it would let a malicious sandbox-SDK supervisor pre-set the env var and bypass enforcement. The recursion guard remains in place for the agentsh-exec proxy path only (where recursion would deadlock). Server-spawned children running the install branch install again — wasteful but safe.
 
 **Tech Stack:** Go 1.x, Linux-only (`+build linux`), seccomp-bpf user-notify, Landlock, Unix domain sockets with SCM_RIGHTS. No new dependencies.
 
@@ -789,8 +789,13 @@ const (
 	// shell). Returned for ModeAuto when wrap-init reports nothing to do
 	// or when the server is unreachable.
 	ResultSkip ResultAction = iota
-	// ResultExec = syscall.Exec the returned ExecPath/Args/Env. The
-	// NotifyFD is open and CLOEXEC-cleared on the calling process.
+	// ResultExec = launch the returned ExecPath/Args/Env as a CHILD process
+	// (use runAndExit, not syscall.Exec). The NotifyFD is open and
+	// CLOEXEC-cleared on the calling process; the child inherits it. The
+	// shim must not replace itself via syscall.Exec — see
+	// cmd/agentsh-shell-shim/main.go's existing runAndExit comment for
+	// the SDK output-capture rationale (Daytona/E2B toolboxes track the
+	// originally-spawned PID's pipes).
 	ResultExec
 	// ResultFailClosed = caller must exit 126 with the Reason.
 	ResultFailClosed
@@ -986,7 +991,33 @@ In `cmd/agentsh-shell-shim/main.go`, insert the kernelinstall block BEFORE the e
 // follows it (where recursion would actually deadlock).
 {
     mode, modeErr := kernelinstall.ResolveMode(conf.ShimInstall, os.Getenv("AGENTSH_SHIM_INSTALL"))
-    ... (existing block) ...
+    if modeErr != nil {
+        fatalWithHint(126, fmt.Sprintf("agentsh-shell-shim: shim_install mode: %v", modeErr), "")
+    }
+    res, installErr := kernelinstall.Install(kernelinstall.InstallParams{
+        ServerBaseURL: serverHTTPBaseURL(),
+        SessionID:     sessID,
+        APIKey:        os.Getenv("AGENTSH_API_KEY"),
+        Mode:          mode,
+        RealShell:     realShell,
+        ShellArgs:     os.Args[1:],
+        Env:           os.Environ(),
+    })
+    if installErr != nil {
+        fatalWithHint(126, fmt.Sprintf("agentsh-shell-shim: kernel install: %v", installErr),
+            "To disable, set sandbox.shim_install.mode=off in /etc/agentsh/shim.conf")
+    }
+    if res.Action == kernelinstall.ResultExec {
+        // Launch agentsh-unixwrap as a CHILD process, not via syscall.Exec.
+        // Sandbox toolboxes (Daytona, E2B) capture output by reading pipes
+        // attached to the process they started (the shim). syscall.Exec
+        // would replace the shim and the toolbox would lose its output pipe.
+        // runAndExit forks the wrapper, copies pipes through, and exits with
+        // the wrapper's exit code — keeping the shim's PID alive until done.
+        // The NotifyFD has CLOEXEC cleared; the child inherits it.
+        runAndExit(res.ExecPath, "", res.ExecArgs[1:], res.ExecEnv)
+        // runAndExit calls os.Exit; the line below is unreachable.
+    }
 }
 
 // Existing recursion guard (unchanged):
@@ -1323,10 +1354,11 @@ Per shim invocation, when install is required:
 
 1. Shim opens the server's notify socket directly (no relay).
 2. Sets `AGENTSH_NOTIFY_SOCK_FD=<n>`.
-3. `syscall.Exec`s `agentsh-unixwrap` with the user's shell command.
+3. Launches `agentsh-unixwrap` as a **child process** via `runAndExit` (NOT `syscall.Exec`). The shim stays alive as the parent, keeping its pipes open so sandbox toolboxes (Daytona, E2B) that track the spawned PID's output don't lose it when the wrapper runs.
 4. `agentsh-unixwrap` installs seccomp-notify, sends the notify fd back
    over the socket, applies Landlock, then execve's the user's shell.
-5. The user's command runs under both filters.
+5. The user's command runs under both filters. The wrapper's exit code
+   propagates back through the shim via `runAndExit`.
 
 Nested shim invocations (`bash -c "bash -c ..."`) **install at every
 level** — filter stacking up to the kernel's 64-filter limit is allowed
@@ -1343,9 +1375,12 @@ safe choice is to always install when the shim is not in-session.
   any shell) bypasses the shim. The fix on that path is to integrate
   the SDK with `agentsh exec` directly. Tracked as a separate concern.
 - **No-new-privileges environments** (Daytona, Fargate) reject the
-  seccomp install. `mode=auto` will detect this server-side and fall
-  through; ptrace-pid mode (#269) remains the enforcement path on
-  those environments.
+  seccomp install with EPERM. Once the shim has committed to install
+  (wrap-init returned a usable response and the wrapper was launched),
+  the wrapper's non-zero exit propagates as exit 126 in BOTH `mode=auto`
+  and `mode=on` — there is no silent skip. To avoid this, operators on
+  no-new-privs environments should set `mode=off` and use ptrace-pid
+  mode (#269) instead.
 - **Per-invocation cost** is ~5–10 ms (HTTP wrap-init + exec hop +
   filter install). Acceptable for sandbox-SDK use; not recommended for
   workloads that fork thousands of short-lived commands per second.

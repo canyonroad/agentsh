@@ -80,4 +80,7 @@ func TestWrapInit_ShimMode_NoFeaturesConfigured(t *testing.T) {
 	if resp.WrapperBinary == "" {
 		t.Fatal("server short-circuited (empty WrapperBinary) in shim mode; the spec mandates no server-side predicate")
 	}
+	if resp.NotifySocket == "" {
+		t.Fatal("got empty NotifySocket; both WrapperBinary and NotifySocket must be populated for the install signal")
+	}
 }

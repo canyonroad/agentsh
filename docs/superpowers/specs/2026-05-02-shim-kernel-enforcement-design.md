@@ -128,13 +128,21 @@ No marker env is needed or used — install is always attempted on every invocat
 
 ### Failure modes
 
-| Situation | Behavior |
-|---|---|
-| Server unreachable | Existing ready_gate behavior (local: fall through to real shell; remote: fail-closed). No new code path. |
-| `wrap-init` returns 5xx | Fail-closed, exit 126 with hint mentioning `shim_install.mode=off`. |
-| `wrap-init` returns empty `WrapperBinary`/`NotifySocket` | Fall through to existing agentsh-exec proxy path. |
-| `agentsh-unixwrap` not on PATH | Fail-closed in `mode=on`; in `mode=auto` server already detects this and returns an empty `WrapperBinary`. |
-| Kernel rejects seccomp/landlock install (ENOSYS, EPERM) | unixwrap exits non-zero; shim exits 126; audit event emitted. |
+The table distinguishes two commitment points:
+
+- **Before commit** — the shim has not yet launched the wrapper (wrap-init hasn't returned a usable response). In `auto` mode, these failures fall through silently to the existing agentsh-exec proxy path.
+- **After commit** — wrap-init returned a populated response and the shim launched `agentsh-unixwrap` via `runAndExit`. The wrapper's exit code IS the shim's exit code. There is no further "fall through" path — the shim is waiting for the child wrapper to exit, and its exit code propagates directly. Both `auto` and `on` behave identically after commit.
+
+| Situation | Commitment point | `mode=auto` | `mode=on` |
+|---|---|---|---|
+| Server unreachable (before wrap-init RPC) | Before commit | Fall through to agentsh-exec proxy | Fail-closed, exit 126 |
+| `wrap-init` returns 5xx | Before commit | Fall through to agentsh-exec proxy | Fail-closed, exit 126 with hint |
+| `wrap-init` returns empty `WrapperBinary`/`NotifySocket` | Before commit | Fall through to agentsh-exec proxy | Fall through (server signal: nothing to install) |
+| `agentsh-unixwrap` not on PATH | Before commit (runAndExit fails to start) | Fail-closed, exit 126 | Fail-closed, exit 126 |
+| Kernel rejects seccomp/Landlock install (ENOSYS, EPERM) | After commit (wrapper exits non-zero) | Exit 126 — no fall-through | Exit 126 — no fall-through |
+| Wrapper exits non-zero for any other reason | After commit | Exit with wrapper's code — no fall-through | Exit with wrapper's code — no fall-through |
+
+**Key invariant:** once the shim commits to install (wrap-init returned a usable response and `runAndExit` was called), `mode=auto` is identical to `mode=on`. The "auto can fall through" behavior only applies before that commit point — i.e., when the server is unreachable or returns a non-usable response.
 
 ### Performance
 
@@ -160,7 +168,7 @@ If a tight `for i in $(seq 1000); do echo $i; done` loop hurts in practice, we h
 - **Wrap-init listener lifecycle change** is the riskiest server-side delta (per-exec goroutines instead of session-scoped). Needs explicit teardown test asserting no goroutine leak after 1000 shim invocations against the same session.
 - **Per-invocation cost** (~5–10 ms/exec) — measured at design time, validate at implementation time. Cache strategy on hand if needed.
 - **Direct SDK exec** (sb.exec without bash) — documented gap, not solved here. Track separately.
-- **Daytona / Fargate (no-new-privs)** — not addressed in this design. `mode=auto` will receive a populated wrap-init response (the server has no install/skip predicate), the shim will execve into `agentsh-unixwrap`, and the wrapper's `seccomp(SET_MODE_FILTER, NEW_LISTENER)` will fail with `EPERM` because of the no-new-privs baseline. The wrapper exits non-zero and the shim fails closed in `mode=on` (or falls through in `mode=auto`). Closing this gap properly requires either an environment-side fix (operator turns off no-new-privs) or a separate enforcement path; ptrace-pid mode (#269) remains the recommendation on these environments.
+- **Daytona / Fargate (no-new-privs)** — not addressed in this design. `mode=auto` will receive a populated wrap-init response (the server has no install/skip predicate), the shim will launch `agentsh-unixwrap` via `runAndExit`, and the wrapper's `seccomp(SET_MODE_FILTER, NEW_LISTENER)` will fail with `EPERM` because of the no-new-privs baseline. The wrapper exits non-zero. Because the shim has already committed to install at this point (wrap-init returned a usable response and `runAndExit` was called), **both `mode=auto` and `mode=on` propagate the wrapper's exit code as exit 126** — there is no silent skip or fall-through in either mode. Closing this gap properly requires either an environment-side fix (operator turns off no-new-privs) or a separate enforcement path; ptrace-pid mode (#269) remains the recommendation on these environments.
 
 ## Sequencing
 
