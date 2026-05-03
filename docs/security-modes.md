@@ -466,3 +466,4 @@ Requires Docker with `--cap-add SYS_ADMIN --cap-add SYS_PTRACE --device /dev/fus
 - [Detecting Available Capabilities](cross-platform.md#detecting-available-capabilities) - `agentsh detect` command
 - [Seccomp-BPF Syscall Filtering](seccomp.md) - Full seccomp mode details
 - [Policy Documentation](operations/policies.md) - Command and signal policy configuration
+- [Sandbox SDK Integrations](cookbook/sandbox-sdk-integrations.md) - `shim_install` for sibling-process-tree enforcement (Tensorlake / E2B / Modal / Daytona)

@@ -122,21 +122,41 @@ type SessionPatchRequest struct {
 	Unset []string          `json:"unset,omitempty"`
 }
 
-// WrapInitRequest is sent by the CLI to initialize seccomp wrapping for a session.
+// WrapInitRequest is sent by the CLI or shim to initialize seccomp wrapping for a session.
 type WrapInitRequest struct {
 	AgentCommand string   `json:"agent_command"`
 	AgentArgs    []string `json:"agent_args,omitempty"`
 	CallerUID    int      `json:"caller_uid,omitempty"`
+	// Mode selects wrap lifecycle. Both "agent" (default, used by
+	// `agentsh wrap`) and "shim" (used by the shell shim) currently use
+	// the server's existing accept-once-then-handler control flow — the
+	// listener goroutine accepts a single connection from the wrapper,
+	// hands the notify fd to the persistent notify-handler, and exits.
+	// The Mode field is plumbed for future use (e.g., distinct cleanup
+	// strategies) and as an explicit signal of intent at the call site.
+	// An empty string (field absent on the wire) is treated the same as
+	// "agent".
+	Mode string `json:"mode,omitempty"`
 }
 
-// WrapInitResponse returns the seccomp wrapper configuration to the CLI.
+// WrapInitResponse returns the seccomp wrapper configuration to the caller.
+//
+// To decide whether to install kernel filters, the caller MUST inspect the
+// presence of WrapperBinary (and NotifySocket): both populated means
+// install; either empty means skip. Do not infer install/skip from a
+// single boolean field — it is impossible to distinguish a deliberate
+// "skip" from an old server that omits the field, and treating an absent
+// field as "skip" would silently bypass enforcement in mixed-version
+// deployments. The presence-of-WrapperBinary check is fail-closed: an old
+// server that knows nothing about Mode==shim still returns its standard
+// populated response, which the caller installs from.
 type WrapInitResponse struct {
 	PtraceMode            bool              `json:"ptrace_mode,omitempty"`
 	SafeToBypassShellShim bool              `json:"safe_to_bypass_shell_shim"`
 	WrapperBinary         string            `json:"wrapper_binary"`
 	StubBinary            string            `json:"stub_binary,omitempty"`
-	SeccompConfig         string            `json:"seccomp_config"`          // JSON-encoded seccomp config
-	NotifySocket          string            `json:"notify_socket"`           // Unix socket path for forwarding notify fd
-	SignalSocket          string            `json:"signal_socket,omitempty"` // Unix socket path for forwarding signal filter fd
-	WrapperEnv            map[string]string `json:"wrapper_env"`             // Extra env vars for the wrapper
+	SeccompConfig         string            `json:"seccomp_config"`
+	NotifySocket          string            `json:"notify_socket"`
+	SignalSocket          string            `json:"signal_socket,omitempty"`
+	WrapperEnv            map[string]string `json:"wrapper_env"`
 }

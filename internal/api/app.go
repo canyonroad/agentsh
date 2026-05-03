@@ -89,6 +89,11 @@ type App struct {
 	sessionTracker interface {
 		RegisterProcess(sessionID string, pid, ppid int32)
 	}
+
+	// acceptNotifyFDForTest, if non-nil, wraps the goroutine launch for
+	// acceptNotifyFD so tests can observe its lifecycle. Production code
+	// passes nil and the goroutine is launched directly via `go fn()`.
+	acceptNotifyFDForTest func(fn func())
 }
 
 func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader, cgroupMgr *limits.CgroupManager) *App {

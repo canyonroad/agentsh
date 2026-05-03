@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/shim"
+	"github.com/agentsh/agentsh/internal/shim/kernelinstall"
 	"golang.org/x/term"
 )
 
@@ -32,6 +33,123 @@ func main() {
 		shellName = "sh"
 	}
 
+	// Read shim.conf early — needed by both the kernelinstall branch (below)
+	// and the non-interactive bypass / ready-gate logic further down.
+	// Distinguishes validation errors (typos like force=tru, ready_gate=tru)
+	// from I/O errors (permission denied). Validation errors must fail
+	// visibly — a typo in ready_gate silently disabling the boot-safety
+	// gate would leave operators in the exact boot-loop this code prevents.
+	// I/O errors → fail-closed (assume force=true) because the operator
+	// wrote the file for a reason.
+	conf, confErr := shim.ReadShimConf(shimConfRoot())
+	if confErr != nil {
+		if strings.HasPrefix(confErr.Error(), "shim.conf:") {
+			fatalWithHint(127,
+				fmt.Sprintf("agentsh-shell-shim: %v", confErr),
+				"Fix the value in "+shim.ShimConfPath(shimConfRoot())+" or remove the invalid line.",
+			)
+		}
+		debugLog("read shim.conf: %v (fail-closed: assuming force=true)", confErr)
+		conf.Force = true
+	}
+
+	// Resolve the real shell early — needed by the kernelinstall branch and by
+	// the agentsh CLI bypass below.  We capture the error rather than fataling
+	// immediately so the in-session bypass can use its own PATH fallback (the
+	// .real file may not exist in containerised environments where the shim is
+	// installed but sh.real is absent).  Non-bypass paths fatal below if
+	// realShellErr != nil.
+	realShell, realShellErr := resolveRealShell(shellName)
+
+	// Agentsh CLI bypass: if the command being run IS the agentsh binary,
+	// exec the real shell directly. The agentsh CLI connects back to the
+	// server, which would deadlock if the server is handling this shim's
+	// exec request. This applies to: agentsh detect, agentsh --version,
+	// agentsh debug policy-test, agentsh trash list, etc.
+	// Checked early so the kernelinstall branch below can also skip for
+	// agentsh-CLI invocations without duplicating the check.
+	if isAgentshCommand(os.Args[1:]) {
+		if realShellErr != nil {
+			fatalWithHint(127,
+				fmt.Sprintf("agentsh-shell-shim: resolve real shell: %v", realShellErr),
+				fmt.Sprintf("Expected %s.real to exist next to the shim (or in /bin or /usr/bin).", shellName),
+			)
+		}
+		debugLog("agentsh CLI bypass: command is agentsh itself, executing real shell %s", realShell)
+		runAndExit(realShell, argv0, os.Args[1:], os.Environ())
+		return
+	}
+
+	// sessID and sessFile are resolved lazily: only when a code path actually
+	// needs them (kernel-install wrap-init, or the final agentsh exec invocation).
+	// Bypass paths (in-session, agentsh-CLI, non-interactive) do NOT call
+	// ResolveSessionID so they produce no session-file side effects.
+	var sessID, sessFile string
+	resolveSession := func() {
+		if sessID != "" {
+			return // already resolved
+		}
+		wd, _ := os.Getwd()
+		var sessErr error
+		sessID, sessFile, sessErr = shim.ResolveSessionID(shim.ResolveSessionIDOptions{
+			WorkDir: wd,
+		})
+		if sessErr != nil {
+			fatalWithHint(127,
+				fmt.Sprintf("agentsh-shell-shim: resolve session id: %v", sessErr),
+				"Set AGENTSH_SESSION_ID (best), or set AGENTSH_SESSION_FILE to a writable file path for a stable ID.",
+			)
+		}
+		debugLog("resolved session: id=%s file=%s wd=%s", sessID, sessFile, wd)
+	}
+
+	// Kernel-install branch (issues #267 + #268). Runs BEFORE the
+	// AGENTSH_IN_SESSION=1 recursion guard because that env var is
+	// caller-controllable — gating install on it would let a malicious
+	// sandbox-SDK supervisor bypass kernel enforcement. Server-spawned
+	// children installing again is wasteful (filter stacking) but safe.
+	//
+	// Skipped when there are no shell args (bare interactive shell — no
+	// command to wrap), for agentsh-CLI invocations (already handled above),
+	// and when realShell could not be resolved (we fall through to the
+	// in-session guard, which has its own PATH fallback).
+	if len(os.Args) > 1 && realShellErr == nil {
+		mode, modeErr := kernelinstall.ResolveMode(conf.ShimInstall, os.Getenv("AGENTSH_SHIM_INSTALL"))
+		if modeErr != nil {
+			fatalWithHint(126, "agentsh-shell-shim: shim_install mode: "+modeErr.Error(),
+				"Set shim_install in /etc/agentsh/shim.conf or AGENTSH_SHIM_INSTALL to one of: auto, on, off.")
+		}
+		if mode != kernelinstall.ModeOff {
+			resolveSession()
+			res, installErr := kernelinstall.Install(kernelinstall.InstallParams{
+				ServerBaseURL: serverHTTPBaseURL(),
+				SessionID:     sessID,
+				APIKey:        os.Getenv("AGENTSH_API_KEY"),
+				Mode:          mode,
+				RealShell:     realShell,
+				ShellArgs:     os.Args[1:],
+				Env:           os.Environ(),
+				CallerUID:     os.Getuid(),
+			})
+			if installErr != nil {
+				fatalWithHint(126, "agentsh-shell-shim: kernel install: "+installErr.Error(),
+					"To disable, set shim_install=off in /etc/agentsh/shim.conf")
+			}
+			switch res.Action {
+			case kernelinstall.ResultExec:
+				// Install drove the socketpair relay and waited for the wrapper.
+				// Propagate the wrapper's exit code.
+				os.Exit(res.WrapperExitCode)
+			case kernelinstall.ResultFailClosed:
+				fatalWithHint(126, "agentsh-shell-shim: kernel install fail-closed: "+res.Reason,
+					"To disable, set shim_install=off in /etc/agentsh/shim.conf")
+			case kernelinstall.ResultSkip:
+				debugLog("kernel install: skip (%s)", res.Reason)
+				// fall through to existing enforcement path
+			}
+		}
+	}
+
 	// Recursion guard: when agentsh executes a process, it sets AGENTSH_IN_SESSION=1.
 	// In that case, run the real shell directly. We try .real first (for proper shim
 	// installations) but fall back to system shell via PATH for containers/environments
@@ -39,39 +157,31 @@ func main() {
 	inSession := strings.TrimSpace(os.Getenv("AGENTSH_IN_SESSION"))
 	debugLog("recursion check: AGENTSH_IN_SESSION=%q", inSession)
 	if inSession == "1" {
-		realShell, err := resolveRealShell(shellName)
-		if err != nil {
+		inSessShell, inSessErr := resolveRealShell(shellName)
+		if inSessErr != nil {
 			// Fall back to looking up the shell in PATH (skipping ourselves)
-			realShell, err = lookupShellInPath(shellName)
-			if err != nil {
+			inSessShell, inSessErr = lookupShellInPath(shellName)
+			if inSessErr != nil {
 				fatalWithHint(127,
 					fmt.Sprintf("agentsh-shell-shim: in-session: could not find %s", shellName),
 					fmt.Sprintf("Tried %s.real and PATH lookup. Ensure the real shell is available.", shellName),
 				)
 			}
 		}
-		debugLog("recursion guard: executing real shell %s", realShell)
-		runAndExit(realShell, argv0, os.Args[1:], os.Environ())
+		debugLog("recursion guard: executing real shell %s", inSessShell)
+		runAndExit(inSessShell, argv0, os.Args[1:], os.Environ())
 		return
 	}
 
-	realShell, err := resolveRealShell(shellName)
-	if err != nil {
+	// Non-bypass paths (non-interactive, ready-gate, and the full agentsh exec
+	// invocation below) all need the real shell.  Fatal now if it was not
+	// resolved — the in-session guard above already returned, so we are not on
+	// that bypass path.
+	if realShellErr != nil {
 		fatalWithHint(127,
-			fmt.Sprintf("agentsh-shell-shim: resolve real shell: %v", err),
+			fmt.Sprintf("agentsh-shell-shim: resolve real shell: %v", realShellErr),
 			fmt.Sprintf("Expected %s.real to exist next to the shim (or in /bin or /usr/bin).", shellName),
 		)
-	}
-
-	// Agentsh CLI bypass: if the command being run IS the agentsh binary,
-	// exec the real shell directly. The agentsh CLI connects back to the
-	// server, which would deadlock if the server is handling this shim's
-	// exec request. This applies to: agentsh detect, agentsh --version,
-	// agentsh debug policy-test, agentsh trash list, etc.
-	if isAgentshCommand(os.Args[1:]) {
-		debugLog("agentsh CLI bypass: command is agentsh itself, executing real shell %s", realShell)
-		runAndExit(realShell, argv0, os.Args[1:], os.Environ())
-		return
 	}
 
 	// Non-interactive bypass: when stdin is not a terminal (piped data, e.g.
@@ -88,23 +198,6 @@ func main() {
 	// platforms where env vars cannot be injected (e.g. exe.dev).
 	// Precedence: AGENTSH_SHIM_FORCE=1 (env) > config file > default (false).
 	// Note: env can only ADD enforcement, never remove it.
-	conf, confErr := shim.ReadShimConf(shimConfRoot())
-	if confErr != nil {
-		// Distinguish validation errors (typos like force=tru, ready_gate=tru)
-		// from I/O errors (permission denied). Validation errors must fail
-		// visibly — a typo in ready_gate silently disabling the boot-safety
-		// gate would leave operators in the exact boot-loop this code prevents.
-		// I/O errors → fail-closed (assume force=true) because the operator
-		// wrote the file for a reason.
-		if strings.HasPrefix(confErr.Error(), "shim.conf:") {
-			fatalWithHint(127,
-				fmt.Sprintf("agentsh-shell-shim: %v", confErr),
-				"Fix the value in "+shim.ShimConfPath(shimConfRoot())+" or remove the invalid line.",
-			)
-		}
-		debugLog("read shim.conf: %v (fail-closed: assuming force=true)", confErr)
-		conf.Force = true
-	}
 	forceShim := strings.TrimSpace(os.Getenv("AGENTSH_SHIM_FORCE"))
 	forceFromEnv := forceShim == "1"
 	switch {
@@ -192,17 +285,10 @@ func main() {
 		fatalWithHint(127, fmt.Sprintf("agentsh-shell-shim: resolve agentsh: %v", err), hint)
 	}
 
-	wd, _ := os.Getwd()
-	sessID, sessFile, err := shim.ResolveSessionID(shim.ResolveSessionIDOptions{
-		WorkDir: wd,
-	})
-	if err != nil {
-		fatalWithHint(127,
-			fmt.Sprintf("agentsh-shell-shim: resolve session id: %v", err),
-			"Set AGENTSH_SESSION_ID (best), or set AGENTSH_SESSION_FILE to a writable file path for a stable ID.",
-		)
-	}
-	debugLog("resolved session: id=%s file=%s wd=%s", sessID, sessFile, wd)
+	// Resolve the session ID now if the kernelinstall branch did not already
+	// do so (mode was off, or realShell was unresolved).  The agentsh exec
+	// invocation below requires sessID.
+	resolveSession()
 
 	// Stdin-mode detection: when the shim is invoked with no command args
 	// (bare /bin/bash, no -c) and stdin is a pipe, the caller is sending
@@ -544,6 +630,18 @@ func debugLog(format string, args ...any) {
 	if strings.TrimSpace(os.Getenv("AGENTSH_SHIM_DEBUG")) == "1" {
 		_, _ = fmt.Fprintf(os.Stderr, "agentsh-shell-shim: "+format+"\n", args...)
 	}
+}
+
+// serverHTTPBaseURL returns the HTTP base URL for the agentsh server,
+// suitable for kernelinstall.Install. Defaults to the local server when
+// AGENTSH_SERVER is unset. Returns the URL even when the server is
+// unreachable; the caller's Mode dictates how that error is handled.
+func serverHTTPBaseURL() string {
+	v := strings.TrimSpace(os.Getenv("AGENTSH_SERVER"))
+	if v != "" {
+		return v
+	}
+	return "http://127.0.0.1:18080"
 }
 
 // serverAddrFromEnv returns the network type and address of the agentsh server

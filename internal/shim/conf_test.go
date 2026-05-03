@@ -214,6 +214,37 @@ func TestWriteShimConf_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestShimConf_ShimInstall(t *testing.T) {
+	root := t.TempDir()
+	writeTestConf(t, root, "shim_install=on\n")
+	conf, err := ReadShimConf(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conf.ShimInstall != "on" {
+		t.Fatalf("got %q, want %q", conf.ShimInstall, "on")
+	}
+}
+
+func TestShimConf_ShimInstall_DefaultsAuto(t *testing.T) {
+	conf, err := ReadShimConf(t.TempDir()) // no shim.conf present
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conf.ShimInstall != "auto" {
+		t.Fatalf("got %q, want %q", conf.ShimInstall, "auto")
+	}
+}
+
+func TestShimConf_ShimInstall_InvalidValue(t *testing.T) {
+	root := t.TempDir()
+	writeTestConf(t, root, "shim_install=maybe\n")
+	_, err := ReadShimConf(root)
+	if err == nil {
+		t.Fatal("expected error for invalid shim_install value")
+	}
+}
+
 // writeTestConf writes content to {root}/etc/agentsh/shim.conf.
 func writeTestConf(t *testing.T, root, content string) {
 	t.Helper()

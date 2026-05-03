@@ -286,8 +286,20 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		return types.WrapInitResponse{}, http.StatusInternalServerError, err
 	}
 
-	// Start background goroutine to accept the notify fd connection
-	go a.acceptNotifyFD(ctx, listener, notifySocketPath, sessionID, s, execveEnabled, req.CallerUID)
+	// Start background goroutine to accept the notify fd connection.
+	// In shim mode (Mode=="shim") the goroutine exits after a single accept
+	// so per-invocation resources are reclaimed. In agent mode (default) the
+	// function already exits naturally after one accept, so shimMode is
+	// plumbed for clarity and future-proofing but changes no behavior today.
+	shimMode := req.Mode == "shim"
+	startListener := func() {
+		a.acceptNotifyFD(ctx, listener, notifySocketPath, sessionID, s, execveEnabled, req.CallerUID, shimMode)
+	}
+	if a.acceptNotifyFDForTest != nil {
+		a.acceptNotifyFDForTest(startListener)
+	} else {
+		go startListener()
+	}
 
 	// Create signal filter socket if signal filtering is enabled.
 	// This must happen before marshaling the seccomp config so that
@@ -502,7 +514,13 @@ func blockedFamiliesUsesNotify(families []config.SandboxSeccompSocketFamilyConfi
 
 // acceptNotifyFD listens on the Unix socket for a single connection from the CLI,
 // receives the seccomp notify fd, and starts the notify handler.
-func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string, s *session.Session, execveEnabled bool, expectedUID int) {
+//
+// shimMode is true when the caller set Mode=="shim" on the WrapInitRequest.
+// In both modes the function accepts exactly one valid connection (or exits on
+// timeout/error), so shimMode currently changes no runtime behavior — it is
+// plumbed for clarity and to make the per-invocation contract explicit in the
+// call site.
+func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string, s *session.Session, execveEnabled bool, expectedUID int, shimMode bool) {
 	defer listener.Close()
 	// Clean up the entire private temp directory containing the socket
 	defer os.RemoveAll(filepath.Dir(socketPath))
@@ -642,3 +660,4 @@ func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketP
 	slog.Info("wrap: received signal fd", "session_id", sessionID, "fd", signalFD.Fd())
 	startSignalHandlerForWrap(ctx, signalFD, sessionID, a, s)
 }
+
