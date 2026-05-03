@@ -684,6 +684,7 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * **Policy documentation:** [`docs/operations/policies.md`](docs/operations/policies.md) - policy variables, signal rules, network redirect
 * **Command policies cookbook:** [`docs/cookbook/command-policies.md`](docs/cookbook/command-policies.md) - how to allow a new binary, when to use `wrap` instead of `exec`, and how to debug a denial
 * **HTTP services cookbook:** [`docs/cookbook/http-services.md`](docs/cookbook/http-services.md) - recipes for routing outbound HTTP API calls through declared services with rules and approval gating
+* **Sandbox SDK integrations cookbook:** [`docs/cookbook/sandbox-sdk-integrations.md`](docs/cookbook/sandbox-sdk-integrations.md) - `shim_install` config for Tensorlake / E2B / Modal / Daytona where commands run as siblings of the agentsh server
 * **Policy authoring skills:** [`skills/`](skills/) - AI-assistant skills for creating and editing policies in Claude Code, NanoClaw, etc.
 * **Platform comparison:** [`docs/platform-comparison.md`](docs/platform-comparison.md) - feature support, security scores, performance by platform
 * **Bubblewrap vs agentsh:** [`docs/bubblewrap-vs-agentsh-comparison.md`](docs/bubblewrap-vs-agentsh-comparison.md) - comparison with Bubblewrap for Linux container sandboxing
