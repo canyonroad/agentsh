@@ -3,11 +3,14 @@
 package api
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/capabilities"
@@ -75,9 +78,10 @@ func repoRoot(t *testing.T) string {
 // shimInstallTestServerSpec holds everything the sibling-process integration
 // test needs from the server setup step.
 type shimInstallTestServerSpec struct {
-	srv       *httptest.Server
-	sessionID string
-	mgr       *session.Manager
+	srv           *httptest.Server
+	sessionID     string
+	mgr           *session.Manager
+	wrapInitCalls *atomic.Int32 // counts successful POST /…/wrap-init requests
 }
 
 // startTestServerWithLandlockDeny starts an in-process agentsh HTTP server
@@ -85,6 +89,13 @@ type shimInstallTestServerSpec struct {
 // It also pre-creates a session with the returned sessionID so the shim's
 // wrap-init call finds an existing session.
 func startTestServerWithLandlockDeny(t *testing.T, denyPath string) *shimInstallTestServerSpec {
+	return startTestServerWithLandlockDenyOpts(t, denyPath, nil)
+}
+
+// startTestServerWithLandlockDenyOpts is like startTestServerWithLandlockDeny
+// but accepts extra AllowExecute directories (e.g., the shim's tempdir for
+// the nested-install test so the inner shim binary can be exec'd).
+func startTestServerWithLandlockDenyOpts(t *testing.T, denyPath string, extraAllowExecute []string) *shimInstallTestServerSpec {
 	t.Helper()
 
 	llResult := capabilities.DetectLandlock()
@@ -114,14 +125,14 @@ func startTestServerWithLandlockDeny(t *testing.T, denyPath string) *shimInstall
 	// cat find their shared libraries; they do NOT include denyDir.
 	cfg.Landlock.Enabled = true
 	cfg.Landlock.DenyPaths = []string{denyDir}
-	cfg.Landlock.AllowExecute = []string{
+	cfg.Landlock.AllowExecute = append([]string{
 		"/bin",
 		"/usr/bin",
 		"/lib",
 		"/lib64",
 		"/usr/lib",
 		"/usr/lib64",
-	}
+	}, extraAllowExecute...)
 	cfg.Landlock.AllowRead = []string{
 		"/bin",
 		"/usr/bin",
@@ -157,13 +168,23 @@ func startTestServerWithLandlockDeny(t *testing.T, denyPath string) *shimInstall
 	}
 	_ = s
 
-	srv := newHTTPTestServerOrSkip(t, app.Router())
+	// Wrap the app's router with a middleware that counts wrap-init requests.
+	var counter atomic.Int32
+	counted := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/wrap-init") {
+			counter.Add(1)
+		}
+		app.Router().ServeHTTP(w, r)
+	})
+
+	srv := newHTTPTestServerOrSkip(t, counted)
 	t.Cleanup(srv.Close)
 
 	return &shimInstallTestServerSpec{
-		srv:       srv,
-		sessionID: sessID,
-		mgr:       mgr,
+		srv:           srv,
+		sessionID:     sessID,
+		mgr:           mgr,
+		wrapInitCalls: &counter,
 	}
 }
 

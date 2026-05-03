@@ -118,11 +118,14 @@ func runRelay(p InstallParams, resp types.WrapInitResponse) (Result, error) {
 	}
 
 	// Build env: caller env + AGENTSH_NOTIFY_SOCK_FD=3 + filtered WrapperEnv.
-	// Strip AGENTSH_SIGNAL_SOCK_FD from WrapperEnv: shim mode does not
-	// replicate the signal-filter socketpair, so the wrapper must not try
-	// to open that fd.
-	env := make([]string, len(p.Env))
-	copy(env, p.Env)
+	// Strip AGENTSH_SIGNAL_SOCK_FD from p.Env AND WrapperEnv:
+	//  - from p.Env: a stale value inherited from a parent context (when the
+	//    shim runs inside an already-wrapped process) must not reach the wrapper.
+	//  - from WrapperEnv: shim mode does not replicate the signal-filter
+	//    socketpair, so the wrapper must not try to open that fd.
+	filteredBase := filterSignalSockFD(p.Env)
+	env := make([]string, len(filteredBase))
+	copy(env, filteredBase)
 	env = append(env, "AGENTSH_NOTIFY_SOCK_FD=3")
 	for k, v := range resp.WrapperEnv {
 		if k == signalSockFDKey {
@@ -175,10 +178,23 @@ func runRelay(p InstallParams, resp types.WrapInitResponse) (Result, error) {
 	}
 
 	// Forward the notify fd to the server's Unix listener socket.
+	// IMPORTANT: if forwarding fails, do NOT send the ACK.  Sending the ACK
+	// would let the wrapper execve the user's command with no live policy
+	// handler — a silent enforcement bypass.  Instead close the parent fd so
+	// the wrapper's waitForACK read returns EOF/error, causing the wrapper to
+	// exit with a fatal log.  Then wait for the wrapper and return
+	// ResultFailClosed so the shim aborts rather than running the command.
 	if fwdErr := forwardNotifyFD(notifySocket, notifyFD); fwdErr != nil {
 		unix.Close(notifyFD)
-		slog.Error("kernelinstall: failed to forward notify fd", "error", fwdErr)
-		// Continue; send ACK anyway so the wrapper doesn't hang.
+		slog.Error("kernelinstall: failed to forward notify fd — closing parent fd to abort wrapper", "error", fwdErr)
+		// Close parentFile: wrapper's waitForACK will see EOF/EBADF and fatal.
+		parentFile.Close()
+		exitCode := waitWrapper(cmd)
+		_ = exitCode // wrapper exited due to our close; use ResultFailClosed
+		return Result{
+			Action: ResultFailClosed,
+			Reason: fmt.Sprintf("forward notify fd failed: %v", fwdErr),
+		}, nil
 	}
 	unix.Close(notifyFD)
 

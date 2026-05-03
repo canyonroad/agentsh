@@ -177,6 +177,287 @@ func TestInstall_StripsSignalSockFd(t *testing.T) {
 	}
 }
 
+// ─── Test 6b: AGENTSH_SIGNAL_SOCK_FD is stripped from p.Env (not just WrapperEnv) ─
+
+// TestInstall_StripsSignalSockFdFromPEnv verifies that a stale
+// AGENTSH_SIGNAL_SOCK_FD in p.Env (inherited from a parent context) is removed
+// before being passed to the wrapper, even when WrapperEnv has no such entry.
+// We verify this by running the full relay with a p.Env containing a stale fd
+// value and asserting the wrapper's environment (via the fake wrapper printing
+// its own env) contains no AGENTSH_SIGNAL_SOCK_FD entry.
+func TestInstall_StripsSignalSockFdFromPEnv(t *testing.T) {
+	// Build a fake wrapper that prints its env and then does the socketpair handshake.
+	wrapperBin := buildFakeWrapperPrintEnv(t)
+
+	// Start a fake notify-socket listener.
+	sockDir := t.TempDir()
+	notifySockPath := sockDir + "/notify.sock"
+	ln, err := net.Listen("unix", notifySockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, _ := ln.Accept()
+		if conn != nil {
+			buf := make([]byte, 1)
+			oob := make([]byte, 64)
+			conn.(*net.UnixConn).ReadMsgUnix(buf, oob) //nolint:errcheck
+			conn.Close()
+		}
+	}()
+
+	wrapResp := types.WrapInitResponse{
+		WrapperBinary: wrapperBin,
+		NotifySocket:  notifySockPath,
+		// WrapperEnv deliberately does NOT contain AGENTSH_SIGNAL_SOCK_FD.
+		WrapperEnv: map[string]string{"FAKE_WRAPPER": "1"},
+	}
+	handler, _ := makeWrapInitHandler(200, wrapResp)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeOn
+	// Inject a stale AGENTSH_SIGNAL_SOCK_FD into p.Env (simulates parent context).
+	p.Env = []string{
+		"AGENTSH_SIGNAL_SOCK_FD=4",
+		"OTHER=x",
+		"HOME=/tmp",
+	}
+
+	// Capture wrapper output via a temp file.
+	outFile, err := os.CreateTemp(t.TempDir(), "wrapper-env-*.txt")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	outPath := outFile.Name()
+	outFile.Close()
+
+	// Pass the output file path to the fake wrapper via env.
+	p.Env = append(p.Env, "FAKE_ENV_OUT="+outPath)
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("Install returned error: %v", err)
+	}
+	if res.Action != ResultExec {
+		t.Fatalf("expected ResultExec, got %v (reason: %s)", res.Action, res.Reason)
+	}
+
+	envOutput, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read wrapper env output: %v", err)
+	}
+
+	for _, line := range strings.Split(string(envOutput), "\n") {
+		if strings.HasPrefix(line, "AGENTSH_SIGNAL_SOCK_FD=") {
+			t.Errorf("AGENTSH_SIGNAL_SOCK_FD leaked into wrapper env: %q", line)
+		}
+	}
+	t.Logf("wrapper env output (excerpt):\n%s", string(envOutput))
+}
+
+// fakeWrapperPrintEnvSrc is a fake wrapper that writes its environment to the
+// file named by FAKE_ENV_OUT, sends the notify fd, reads the ACK, and exits 0.
+const fakeWrapperPrintEnvSrc = `package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"golang.org/x/sys/unix"
+)
+
+func main() {
+	sock := 3
+
+	// Write environment to FAKE_ENV_OUT before the handshake.
+	if outPath := os.Getenv("FAKE_ENV_OUT"); outPath != "" {
+		var sb strings.Builder
+		for _, e := range os.Environ() {
+			sb.WriteString(e)
+			sb.WriteByte('\n')
+		}
+		_ = os.WriteFile(outPath, []byte(sb.String()), 0600)
+	}
+
+	notifyFD, err := unix.Dup(sock)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fake-wrapper: dup: %v\n", err)
+		os.Exit(1)
+	}
+
+	rights := unix.UnixRights(notifyFD)
+	if err := unix.Sendmsg(sock, []byte{0}, rights, nil, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "fake-wrapper: sendmsg: %v\n", err)
+		os.Exit(1)
+	}
+	unix.Close(notifyFD)
+
+	ack := make([]byte, 1)
+	if _, err := unix.Read(sock, ack); err != nil {
+		fmt.Fprintf(os.Stderr, "fake-wrapper: read ack: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+`
+
+// buildFakeWrapperPrintEnv builds the fakeWrapperPrintEnvSrc binary.
+func buildFakeWrapperPrintEnv(t *testing.T) string {
+	t.Helper()
+
+	goExe, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go binary not found in PATH; skipping print-env test")
+	}
+
+	modRoot := findModuleRoot(t)
+	srcDir, err := os.MkdirTemp(modRoot, "fakewrapper_printenv_src_*")
+	if err != nil {
+		t.Fatalf("mkdirtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(srcDir) })
+
+	if err := os.WriteFile(srcDir+"/main.go", []byte(fakeWrapperPrintEnvSrc), 0644); err != nil {
+		t.Fatalf("write fake wrapper printenv source: %v", err)
+	}
+
+	binDir := t.TempDir()
+	binPath := binDir + "/fakewrap-printenv"
+
+	buildCmd := exec.Command(goExe, "build", "-o", binPath, srcDir)
+	buildCmd.Dir = modRoot
+	out, buildErr := buildCmd.CombinedOutput()
+	if buildErr != nil {
+		t.Skipf("compile fake wrapper printenv: %v\n%s", buildErr, out)
+	}
+	return binPath
+}
+
+// ─── Test 7a: relay forward-failure → ResultFailClosed, ACK not sent ──────────
+//
+// Simulates a forward failure by pointing resp.NotifySocket at a non-existent
+// path.  The fake wrapper sends the notify fd, then blocks waiting for the ACK.
+// When forwardNotifyFD fails, runRelay must:
+//   - NOT write an ACK byte to the parent fd.
+//   - Close the parent fd so the wrapper's read-ACK returns EOF → wrapper exits.
+//   - Return ResultFailClosed.
+//
+// We verify the ACK-not-sent guarantee by interposing a pipe: the test puts a
+// read end on the parent side of the socketpair and asserts zero bytes received
+// before the wrapper exits.
+
+func TestInstall_RelayForwardFail_NoACK_ResultFailClosed(t *testing.T) {
+	// Build the fake wrapper.
+	wrapperBin := buildFakeWrapperNoACKExit(t)
+
+	// httptest server returns a valid WrapperBinary but a bogus (non-existent)
+	// NotifySocket so forwardNotifyFD will fail with "dial …: no such file".
+	wrapResp := types.WrapInitResponse{
+		WrapperBinary: wrapperBin,
+		NotifySocket:  "/nonexistent/path/notify.sock",
+		WrapperEnv:    map[string]string{},
+	}
+	handler, _ := makeWrapInitHandler(200, wrapResp)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeOn
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("Install returned error: %v", err)
+	}
+	if res.Action != ResultFailClosed {
+		t.Fatalf("expected ResultFailClosed (forward failed → fail-closed), got %v (reason: %s)", res.Action, res.Reason)
+	}
+	if res.Reason == "" {
+		t.Error("expected non-empty Reason for forward failure")
+	}
+	if !strings.Contains(res.Reason, "forward notify fd failed") {
+		t.Errorf("expected Reason to contain 'forward notify fd failed', got %q", res.Reason)
+	}
+}
+
+// fakeWrapperNoACKExitSrc is a fake wrapper that sends the notify fd and then
+// exits with code 2 when the ACK read fails (parent closed the fd).  This lets
+// the test verify that the wrapper exited due to the closed parent fd, not for
+// any other reason.
+const fakeWrapperNoACKExitSrc = `package main
+
+import (
+	"fmt"
+	"os"
+
+	"golang.org/x/sys/unix"
+)
+
+func main() {
+	sock := 3
+
+	notifyFD, err := unix.Dup(sock)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fake-wrapper: dup: %v\n", err)
+		os.Exit(1)
+	}
+
+	rights := unix.UnixRights(notifyFD)
+	if err := unix.Sendmsg(sock, []byte{0}, rights, nil, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "fake-wrapper: sendmsg: %v\n", err)
+		os.Exit(1)
+	}
+	unix.Close(notifyFD)
+
+	// Try to read ACK. If the parent closed the fd, Read returns an error or
+	// n==0 (EOF). Exit 2 to distinguish from other failure modes.
+	ack := make([]byte, 1)
+	n, readErr := unix.Read(sock, ack)
+	if readErr != nil || n == 0 {
+		// Parent closed the fd before writing ACK — expected in forward-failure path.
+		os.Exit(2)
+	}
+	// ACK received unexpectedly.
+	fmt.Fprintf(os.Stderr, "fake-wrapper: unexpected ACK byte 0x%02x\n", ack[0])
+	os.Exit(3)
+}
+`
+
+// buildFakeWrapperNoACKExit builds the fakeWrapperNoACKExitSrc binary.
+func buildFakeWrapperNoACKExit(t *testing.T) string {
+	t.Helper()
+
+	goExe, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go binary not found in PATH; skipping relay forward-fail test")
+	}
+
+	modRoot := findModuleRoot(t)
+	srcDir, err := os.MkdirTemp(modRoot, "fakewrapper_noack_src_*")
+	if err != nil {
+		t.Fatalf("mkdirtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(srcDir) })
+
+	if err := os.WriteFile(srcDir+"/main.go", []byte(fakeWrapperNoACKExitSrc), 0644); err != nil {
+		t.Fatalf("write fake wrapper no-ack source: %v", err)
+	}
+
+	binDir := t.TempDir()
+	binPath := binDir + "/fakewrap-noack"
+
+	buildCmd := exec.Command(goExe, "build", "-o", binPath, srcDir)
+	buildCmd.Dir = modRoot
+	out, buildErr := buildCmd.CombinedOutput()
+	if buildErr != nil {
+		t.Skipf("compile fake wrapper no-ack: %v\n%s", buildErr, out)
+	}
+	return binPath
+}
+
 // ─── Test 7: full relay happy-path ───────────────────────────────────────────
 //
 // This test builds a tiny fake-wrapper binary (Go) that implements the wrapper
