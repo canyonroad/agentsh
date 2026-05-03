@@ -4,7 +4,7 @@
 
 **Goal:** Close the file/network/signal-policy gap when commands are spawned outside agentsh server's process tree (sandbox-SDK pattern: Tensorlake, E2B, Modal). The shim invokes the existing `agentsh-unixwrap` machinery on its own process before execve, so kernel filters govern the user's command even though it isn't a descendant of the agentsh server.
 
-**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. The server always returns the same populated response regardless of Mode — install/skip is the shim's decision, governed by its `mode=auto/on/off` config (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim uses the **same socketpair-relay pattern** as `internal/cli/wrap_linux.go`'s `platformSetupWrap`: create an AF_UNIX SOCK_SEQPACKET socketpair, pass the child end to the wrapper as fd 3, act as relay (receive notify fd via SCM_RIGHTS, forward to server, send ACK byte back through socketpair), then wait and propagate exit code. Then launches `agentsh-unixwrap` as a **child process** via `runAndExit` (NOT `syscall.Exec`) with `AGENTSH_NOTIFY_SOCK_FD=3` set. (Direct-connect from shim to the server's notify socket does NOT work: the server's `acceptNotifyFD` never sends the ACK byte that the wrapper's `waitForACK` blocks on.) **The shim always installs** when mode != off — there is no portable, unforgeable way to detect "already installed by us" (env-var markers are caller-controlled; `Seccomp:2` is true for any container default profile). Filter stacking up to the kernel's 64-filter limit covers realistic nesting depths. Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed. **IMPORTANT: the install branch runs BEFORE the `AGENTSH_IN_SESSION=1` recursion guard** — `AGENTSH_IN_SESSION` is caller-controllable, so gating install on it would let a malicious sandbox-SDK supervisor pre-set the env var and bypass enforcement. The recursion guard remains in place for the agentsh-exec proxy path only (where recursion would deadlock). Server-spawned children running the install branch install again — wasteful but safe.
+**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. The server always returns the same populated response regardless of Mode — install/skip is the shim's decision, governed by its `mode=auto/on/off` config (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim uses the **same socketpair-relay pattern** as `internal/cli/wrap_linux.go`'s `platformSetupWrap`: create an AF_UNIX SOCK_SEQPACKET socketpair, pass the child end to the wrapper as fd 3, act as relay (receive notify fd via SCM_RIGHTS, forward to server, send ACK byte back through socketpair), then wait and propagate exit code. Then launches `agentsh-unixwrap` as a **child process** via `runAndExit` (NOT `syscall.Exec`) with `AGENTSH_NOTIFY_SOCK_FD=3` set. (Direct-connect from shim to the server's notify socket does NOT work: the server's `acceptNotifyFD` never sends the ACK byte that the wrapper's `waitForACK` blocks on.) **The shim always installs** when mode != off — there is no portable, unforgeable way to detect "already installed by us" (env-var markers are caller-controlled; `Seccomp:2` is true for any container default profile). Filter stacking up to the kernel's 64-filter limit covers realistic nesting depths. Default-on with one operator override (`shim_install=auto|on|off` in `/etc/agentsh/shim.conf` — there is no server-side YAML config; see Task 10 superseded note). Fail-closed. **IMPORTANT: the install branch runs BEFORE the `AGENTSH_IN_SESSION=1` recursion guard** — `AGENTSH_IN_SESSION` is caller-controllable, so gating install on it would let a malicious sandbox-SDK supervisor pre-set the env var and bypass enforcement. The recursion guard remains in place for the agentsh-exec proxy path only (where recursion would deadlock). Server-spawned children running the install branch install again — wasteful but safe.
 
 **Tech Stack:** Go 1.x, Linux-only (`+build linux`), seccomp-bpf user-notify, Landlock, Unix domain sockets with SCM_RIGHTS. No new dependencies.
 
@@ -22,14 +22,14 @@
 - `internal/shim/kernelinstall/install_linux_test.go` — unit tests against an httptest server simulating wrap-init.
 - `internal/api/wrap_shim_mode_test.go` — server-side regression test that `Mode: "shim"` returns the same shape of response as agent mode (populated `WrapperBinary`); locks in the no-server-side-predicate contract.
 - `internal/api/seccomp_wrapper_shim_install_test.go` — integration test: bash spawns in a sibling process tree; assert reads of a tempdir-based deny target are blocked.
-- `docs/cookbook/sandbox-sdk-integrations.md` — operator-facing doc for `sandbox.shim_install.mode` and the integration model.
+- `docs/cookbook/sandbox-sdk-integrations.md` — operator-facing doc for `shim_install=auto|on|off` in `/etc/agentsh/shim.conf` and the integration model.
 
 **Modified:**
 - `pkg/types/sessions.go` — `WrapInitRequest.Mode` field. (No new response field — install/skip is signalled by `WrapperBinary` presence; see Architecture.)
 - `internal/api/wrap.go` — `wrapInitCore` accepts `Mode == "shim"` (consumed only by Task 3 lifecycle change; no install/skip predicate — see iter-2 simplification in Task 2).
 - `internal/api/wrap_linux.go` — `acceptNotifyFD` accepts an optional teardown context for per-invocation cleanup.
 - `internal/config/config.go` — `SandboxConfig.ShimInstall` block with `Mode string`.
-- `internal/shim/conf.go` — `ShimConf.ShimInstall string` (parsed from `shim_install=` line in `/etc/agentsh/shim.conf`).
+- `internal/shim/conf.go` — `ShimConf.ShimInstall string` (parsed from `shim_install=` line in `/etc/agentsh/shim.conf`). NOTE: `internal/config/config.go` is intentionally NOT modified — see Task 10's superseded note.
 - `internal/shim/conf_test.go` — coverage for the new key.
 - `cmd/agentsh-shell-shim/main.go` — insert kernelinstall branch BEFORE the existing `if inSession == "1"` recursion guard (not after the agentsh-exec proxy, before it — install branch must run before the caller-controllable `AGENTSH_IN_SESSION` check).
 
@@ -807,27 +807,35 @@ const (
 	// shell). Returned for ModeAuto when wrap-init reports nothing to do
 	// or when the server is unreachable.
 	ResultSkip ResultAction = iota
-	// ResultExec = launch the returned ExecPath/Args/Env as a CHILD process
-	// (use runAndExit, not syscall.Exec). The shim must not replace itself
-	// via syscall.Exec — see cmd/agentsh-shell-shim/main.go's existing
-	// runAndExit comment for the SDK output-capture rationale
-	// (Daytona/E2B toolboxes track the originally-spawned PID's pipes).
-	//
-	// NOTE: Install itself drives the socketpair relay (see below) before
-	// returning ResultExec — by the time the caller sees ResultExec the
-	// relay is complete and the wrapper has already exited. The simple
-	// all-in-one API means the caller just checks the action and propagates
-	// exit code.
+	// ResultExec = the wrapper has been launched, the relay is complete,
+	// and the wrapper has exited. Result.WrapperExitCode holds the exit
+	// status; the caller (cmd/agentsh-shell-shim/main.go) is responsible
+	// for `os.Exit(res.WrapperExitCode)`. Install does NOT call os.Exit
+	// itself — keeping the API testable (unit tests can assert exit
+	// codes without taking down the test process).
 	ResultExec
 	// ResultFailClosed = caller must exit 126 with the Reason.
 	ResultFailClosed
 )
 
-// Result is what Install returns. Inspect Action; ExecPath/Args/Env are
-// returned for informational use (e.g., log lines) but the wrapper has
-// already been launched and waited on inside Install by the time the
-// caller receives ResultExec. Only Reason is populated when Action ==
-// ResultFailClosed.
+// Result is what Install returns. Inspect Action.
+//
+// When Action == ResultExec: the relay is done and the wrapper has
+// exited. The caller MUST `os.Exit(res.WrapperExitCode)` to propagate
+// it. (ExecPath/Args/Env are populated for log lines / debugging.)
+//
+// When Action == ResultFailClosed: only Reason is populated; caller
+// MUST fail-closed (e.g., fatalWithHint(126, res.Reason, ...)).
+//
+// When Action == ResultSkip: caller falls through to its existing path.
+type Result struct {
+	Action           ResultAction
+	ExecPath         string
+	ExecArgs         []string
+	ExecEnv          []string
+	WrapperExitCode  int    // populated only when Action == ResultExec
+	Reason           string // populated only when Action == ResultFailClosed
+}
 //
 // Design choice — all-in-one vs. relay bundle:
 //
@@ -948,7 +956,8 @@ func Install(p InstallParams) (Result, error) {
 	//   8. Forward notify fd to conn via unix.Sendmsg + SCM_RIGHTS.
 	//   9. Write ACK byte to parentFD (wrapper's waitForACK unblocks).
 	//  10. cmd.Wait() → exitCode.
-	//  11. os.Exit(exitCode).
+	//  11. Return Result{Action: ResultExec, WrapperExitCode: exitCode, ...}
+	//      — the SHIM's main.go calls os.Exit(WrapperExitCode), not Install.
 	_ = strconv.Itoa // suppress unused import until relay is implemented
 	return Result{
 		Action:   ResultExec,
@@ -1084,14 +1093,9 @@ In `cmd/agentsh-shell-shim/main.go`, insert the kernelinstall block BEFORE the e
             "To disable, set shim_install=off in /etc/agentsh/shim.conf")
     }
     if res.Action == kernelinstall.ResultExec {
-        // Install already drove the socketpair relay and waited for the
-        // wrapper. ResultExec just signals the caller to exit cleanly.
-        // The wrapper's exit code was propagated by Install via os.Exit.
-        // This path is not reached; os.Exit inside Install terminates the
-        // process. The block is retained for clarity (exhaustive switch on
-        // ResultAction values) and in case the API is refactored to return
-        // without exiting.
-        os.Exit(0)
+        // Install drove the socketpair relay and waited for the wrapper.
+        // The shim is responsible for propagating the wrapper's exit code.
+        os.Exit(res.WrapperExitCode)
     }
 }
 
