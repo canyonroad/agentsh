@@ -3,7 +3,9 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,4 +99,50 @@ func TestResolveCommandPath_DirectoryNotResolved(t *testing.T) {
 	t.Setenv("PATH", "")
 	_, err := resolveCommandPath("sh")
 	require.Error(t, err, "a directory named sh must not be returned as the resolved command path")
+}
+
+// TestResolveCommandPath_ErrDotDoesNotFallback guards against roborev
+// #7712 finding (Medium): if LookPath returns a non-not-found error
+// (e.g. exec.ErrDot when the resolved entry is in CWD via "." in PATH),
+// the resolver must NOT silently substitute /usr/bin/<cmd>. Falling
+// back would route around the operator's intended binary in CWD.
+func TestResolveCommandPath_ErrDotDoesNotFallback(t *testing.T) {
+	orig := lookPathFn
+	lookPathFn = func(name string) (string, error) {
+		return "./sh", &exec.Error{Name: name, Err: exec.ErrDot}
+	}
+	t.Cleanup(func() { lookPathFn = orig })
+
+	t.Setenv("PATH", ".")
+	_, err := resolveCommandPath("sh")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, exec.ErrDot), "ErrDot must propagate unchanged, got: %v", err)
+	// fallback_dirs is only emitted when we actually entered the fallback loop.
+	require.NotContains(t, err.Error(), "fallback_dirs=", "non-not-found error must skip the fallback loop")
+}
+
+// TestResolveCommandPath_FallbackSkipsNonExecutableCandidate guards
+// against roborev #7712 finding (Low): if a fallback dir contains a
+// regular file matching the command name but the current process
+// cannot execute it (e.g. mode 0o644, or owned by another user with
+// no group/world execute bit), the resolver must skip it and continue
+// to the next fallback dir rather than returning a path the caller
+// cannot actually exec.
+func TestResolveCommandPath_FallbackSkipsNonExecutableCandidate(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	// dir1 has a non-executable file matching the command.
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "agentsh-271-probe"), []byte("notexec"), 0o644))
+	// dir2 has the executable.
+	exe := filepath.Join(dir2, "agentsh-271-probe")
+	require.NoError(t, os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	orig := fallbackPATH
+	fallbackPATH = []string{dir1, dir2}
+	t.Cleanup(func() { fallbackPATH = orig })
+
+	t.Setenv("PATH", "")
+	resolved, err := resolveCommandPath("agentsh-271-probe")
+	require.NoError(t, err)
+	require.Equal(t, exe, resolved, "resolver must skip non-executable candidate in dir1 and find dir2's executable")
 }
