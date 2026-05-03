@@ -28,7 +28,7 @@
 - `pkg/types/sessions.go` — `WrapInitRequest.Mode` field. (No new response field — install/skip is signalled by `WrapperBinary` presence; see Architecture.)
 - `internal/api/wrap.go` — `wrapInitCore` accepts `Mode == "shim"` (consumed only by Task 3 lifecycle change; no install/skip predicate — see iter-2 simplification in Task 2).
 - `internal/api/wrap_linux.go` — `acceptNotifyFD` accepts an optional teardown context for per-invocation cleanup.
-- `internal/config/config.go` — `SandboxConfig.ShimInstall` block with `Mode string`.
+- ~~`internal/config/config.go`~~ — **NOT modified.** Originally planned, dropped per iter-9: a YAML `sandbox.shim_install.mode` field has no runtime path to the shim. The trusted source is `/etc/agentsh/shim.conf` only. See Task 10's superseded note.
 - `internal/shim/conf.go` — `ShimConf.ShimInstall string` (parsed from `shim_install=` line in `/etc/agentsh/shim.conf`). NOTE: `internal/config/config.go` is intentionally NOT modified — see Task 10's superseded note.
 - `internal/shim/conf_test.go` — coverage for the new key.
 - `cmd/agentsh-shell-shim/main.go` — insert kernelinstall branch BEFORE the existing `if inSession == "1"` recursion guard (not after the agentsh-exec proxy, before it — install branch must run before the caller-controllable `AGENTSH_IN_SESSION` check).
