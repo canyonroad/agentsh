@@ -20,13 +20,13 @@
 - `internal/shim/kernelinstall/mode.go` — pure parsing of `auto|on|off` from string; cross-platform.
 - `internal/shim/kernelinstall/mode_test.go` — table tests for mode parsing.
 - `internal/shim/kernelinstall/install_linux_test.go` — unit tests against an httptest server simulating wrap-init.
-- `internal/api/wrap_shim_mode_test.go` — server-side tests for `Mode: "shim"` short-circuit (empty `WrapperBinary` when nothing enabled).
-- `internal/api/seccomp_wrapper_shim_install_test.go` — integration test: bash spawns in a sibling process tree; assert `cat /etc/shadow` is blocked.
+- `internal/api/wrap_shim_mode_test.go` — server-side regression test that `Mode: "shim"` returns the same shape of response as agent mode (populated `WrapperBinary`); locks in the no-server-side-predicate contract.
+- `internal/api/seccomp_wrapper_shim_install_test.go` — integration test: bash spawns in a sibling process tree; assert reads of a tempdir-based deny target are blocked.
 - `docs/cookbook/sandbox-sdk-integrations.md` — operator-facing doc for `sandbox.shim_install.mode` and the integration model.
 
 **Modified:**
 - `pkg/types/sessions.go` — `WrapInitRequest.Mode` field. (No new response field — install/skip is signalled by `WrapperBinary` presence; see Architecture.)
-- `internal/api/wrap.go` — `wrapInitCore` honors `Mode == "shim"` (lifecycle + auto-detect short-circuit).
+- `internal/api/wrap.go` — `wrapInitCore` accepts `Mode == "shim"` (consumed only by Task 3 lifecycle change; no install/skip predicate — see iter-2 simplification in Task 2).
 - `internal/api/wrap_linux.go` — `acceptNotifyFD` accepts an optional teardown context for per-invocation cleanup.
 - `internal/config/config.go` — `SandboxConfig.ShimInstall` block with `Mode string`.
 - `internal/shim/conf.go` — `ShimConf.ShimInstall string` (parsed from `shim_install=` line in `/etc/agentsh/shim.conf`).

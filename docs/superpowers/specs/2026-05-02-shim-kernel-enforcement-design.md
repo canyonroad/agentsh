@@ -160,7 +160,7 @@ If a tight `for i in $(seq 1000); do echo $i; done` loop hurts in practice, we h
 - **Wrap-init listener lifecycle change** is the riskiest server-side delta (per-exec goroutines instead of session-scoped). Needs explicit teardown test asserting no goroutine leak after 1000 shim invocations against the same session.
 - **Per-invocation cost** (~5–10 ms/exec) — measured at design time, validate at implementation time. Cache strategy on hand if needed.
 - **Direct SDK exec** (sb.exec without bash) — documented gap, not solved here. Track separately.
-- **Daytona / Fargate (no-new-privs)** — not addressed. `mode=auto` detects this via the server-side kernel probe and returns an empty `WrapperBinary` (so the shim short-circuits); ptrace-pid mode stays as the enforcement path on those environments.
+- **Daytona / Fargate (no-new-privs)** — not addressed in this design. `mode=auto` will receive a populated wrap-init response (the server has no install/skip predicate), the shim will execve into `agentsh-unixwrap`, and the wrapper's `seccomp(SET_MODE_FILTER, NEW_LISTENER)` will fail with `EPERM` because of the no-new-privs baseline. The wrapper exits non-zero and the shim fails closed in `mode=on` (or falls through in `mode=auto`). Closing this gap properly requires either an environment-side fix (operator turns off no-new-privs) or a separate enforcement path; ptrace-pid mode (#269) remains the recommendation on these environments.
 
 ## Sequencing
 
