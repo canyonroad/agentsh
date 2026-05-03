@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // CgroupMode names an operating mode for cgroup v2 enforcement.
@@ -242,13 +243,16 @@ func ProbeCgroupsV2Default(ctx context.Context) (*CgroupProbeResult, error) {
 // per-command resource limits silently fail at runtime via per-command
 // cgroup_apply_failed events.
 //
-// EEXIST is treated as success: a stale probe directory from a crashed prior
-// run is itself evidence that mkdir succeeded at some point. The function
-// makes a best-effort cleanup attempt either way.
+// The probe name combines PID and a nanosecond timestamp to make collisions
+// against any stale leftover directory vanishingly unlikely. EEXIST is NOT
+// treated as success — an existing directory is stale evidence (perms may
+// have changed since it was created, cleanup may have failed for unrelated
+// reasons), so we fail closed in that case rather than falsely claim
+// writability.
 func probeNestedWritability(fs cgroupFS, own string) error {
-	probeDir := filepath.Join(own, fmt.Sprintf("agentsh.write-probe-%d", os.Getpid()))
-	err := fs.Mkdir(probeDir, 0o755)
-	if err != nil && !errors.Is(err, syscall.EEXIST) {
+	name := fmt.Sprintf("agentsh.write-probe-%d-%d", os.Getpid(), time.Now().UnixNano())
+	probeDir := filepath.Join(own, name)
+	if err := fs.Mkdir(probeDir, 0o755); err != nil {
 		return err
 	}
 	_ = fs.Remove(probeDir)
