@@ -114,7 +114,7 @@ func TestAcceptNotifyFD_RejectsWrongUID(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, 99999)
+		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, 99999, false)
 	}()
 
 	conn, err := net.Dial("unix", socketPath)
@@ -156,7 +156,7 @@ func TestAcceptNotifyFD_RejectsNegativeUID(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, -1)
+		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, -1, false)
 	}()
 
 	conn, err := net.Dial("unix", socketPath)
@@ -214,7 +214,7 @@ func TestAcceptNotifyFD_AcceptsMatchingUID(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, currentUID)
+		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, currentUID, false)
 	}()
 
 	conn, err := net.Dial("unix", socketPath)
@@ -268,7 +268,7 @@ func TestAcceptNotifyFD_AcceptsLegacyZeroUID(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, 0)
+		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, 0, false)
 	}()
 
 	conn, err := net.Dial("unix", socketPath)
@@ -320,7 +320,7 @@ func TestAcceptNotifyFD_ContinuesAfterWrongUID(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, os.Getuid()+1)
+		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, os.Getuid()+1, false)
 	}()
 
 	firstConn := dialUnixConn(t, socketPath)
