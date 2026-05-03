@@ -130,7 +130,8 @@ type WrapInitRequest struct {
 	// Mode selects wrap lifecycle. "agent" (default, used by `agentsh wrap`)
 	// keeps the notify listener alive for the session lifetime. "shim"
 	// (used by the shell shim) tears the listener down when the wrapped
-	// process exits.
+	// process exits. An empty string (field absent on the wire) is treated
+	// the same as "agent".
 	Mode string `json:"mode,omitempty"`
 }
 
@@ -147,5 +148,7 @@ type WrapInitResponse struct {
 	// InstallRequired reports whether the caller must install kernel
 	// filters. False when no enforcement features are enabled server-side
 	// (lets shim-mode callers short-circuit without paying setup cost).
+	// Always serialized (no omitempty) so callers can distinguish a
+	// deliberate false from an old server that omits the field entirely.
 	InstallRequired bool `json:"install_required"`
 }
