@@ -83,13 +83,13 @@ The new branch only fires when there's something to actually enforce **and** we 
 
 ### Server-side changes
 
-Reuse `/api/v1/sessions/{id}/wrap-init`. Three deltas to that handler:
+Reuse `/api/v1/sessions/{id}/wrap-init`. Two deltas to that handler:
 
 1. **New request field `Mode string`** (`"agent"` default, `"shim"` for the new path). Lets the server pick lifecycle policy without breaking existing callers.
 
 2. **Per-invocation listener cleanup.** Today's `acceptNotifyFD` goroutine lives for the session — fine for `agentsh wrap` long-lived agents, leaks per-invocation in shim mode. Listener terminates on EOF of the notify_fd (kernel closes it when the wrapped process exits) when `Mode == "shim"`. Agent-mode lifecycle unchanged.
 
-3. **Auto-detect short-circuit.** When the request comes in with `Mode == "shim"`, server inspects its own enabled features (`unix_sockets.enabled`, `landlock.enabled`, kernel probe cached at server start) and returns an empty response (no `WrapperBinary`, no `NotifySocket`) if nothing is configured. Shim sees the empty fields and takes the no-op branch without doing any kernel setup.
+**No server-side install/skip predicate (roborev iteration 2 simplification):** An earlier draft added a `shimInstallRequired` short-circuit that returned an empty response when no enforcement was configured. That predicate could not be made complete: `mainFilterUsesUserNotify` covers notify-based configs but misses non-notify install paths (errno/kill blocked syscalls, blocked socket families with errno/kill, `block_io_uring`, the older `sandbox.unix_sockets.enabled` override). Each missed gate was a silent policy bypass. The right fix is to simplify: `wrapInitCore` now always returns the same populated response regardless of `Mode`. The install/skip decision belongs to the shim (via its `mode=auto/on/off` config). `Mode=="shim"` still governs lifecycle (Task 3: per-invocation listener cleanup).
 
 ### Client-side (shim) changes
 
@@ -152,7 +152,7 @@ Per #268's "Sequencing relative to #267": both ship together as a single feature
 
 Order of operations after this design lands:
 
-1. Server-side wrap-init `Mode` parameter + per-invocation listener cleanup + empty-`WrapperBinary` short-circuit when nothing is enabled.
+1. Server-side wrap-init `Mode` parameter + per-invocation listener cleanup. No server-side install/skip predicate — the shim's mode=auto/on/off config governs that decision.
 2. `internal/shim/kernelinstall` package + decision-tree wiring in `cmd/agentsh-shell-shim/main.go`.
 3. Integration tests (sibling-process tree).
 4. End-to-end repro Dockerfile.

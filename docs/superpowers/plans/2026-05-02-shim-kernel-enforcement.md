@@ -4,7 +4,7 @@
 
 **Goal:** Close the file/network/signal-policy gap when commands are spawned outside agentsh server's process tree (sandbox-SDK pattern: Tensorlake, E2B, Modal). The shim invokes the existing `agentsh-unixwrap` machinery on its own process before execve, so kernel filters govern the user's command even though it isn't a descendant of the agentsh server.
 
-**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. Server returns an empty response (no `WrapperBinary`/`NotifySocket`) when no enforcement is configured; the shim treats presence-of-`WrapperBinary` as the install/skip signal (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim opens the server's notify Unix socket directly (no socketpair relay), clears CLOEXEC on the fd, then `syscall.Exec`s `agentsh-unixwrap` with `AGENTSH_NOTIFY_SOCK_FD` set. **The shim always installs** when mode != off and the server has something to install — there is no portable, unforgeable way to detect "already installed by us" (env-var markers are caller-controlled; `Seccomp:2` is true for any container default profile). Filter stacking up to the kernel's 64-filter limit covers realistic nesting depths. Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed.
+**Architecture:** Reuse `/api/v1/sessions/{id}/wrap-init` with a new `Mode: "shim"` request field. The server always returns the same populated response regardless of Mode — install/skip is the shim's decision, governed by its `mode=auto/on/off` config (fail-closed: an old server returning a populated response triggers an install). Per-invocation listener cleanup for shim-mode wraps. Shim opens the server's notify Unix socket directly (no socketpair relay), clears CLOEXEC on the fd, then `syscall.Exec`s `agentsh-unixwrap` with `AGENTSH_NOTIFY_SOCK_FD` set. **The shim always installs** when mode != off — there is no portable, unforgeable way to detect "already installed by us" (env-var markers are caller-controlled; `Seccomp:2` is true for any container default profile). Filter stacking up to the kernel's 64-filter limit covers realistic nesting depths. Default-on with one operator override (`sandbox.shim_install.mode = auto|on|off`). Fail-closed.
 
 **Tech Stack:** Go 1.x, Linux-only (`+build linux`), seccomp-bpf user-notify, Landlock, Unix domain sockets with SCM_RIGHTS. No new dependencies.
 
@@ -90,126 +90,19 @@ type WrapInitResponse struct {
 
 ---
 
-### Task 2: Server returns `InstallRequired:false` when nothing enabled (Mode==shim) — SUPERSEDED, see body below
+### Task 2: No server-side install/skip predicate — COMPLETED (simplified, see note)
 
-**Note:** Title kept for stability; content rewritten to reflect the empty-`WrapperBinary` signal instead of a removed boolean field. See Task 1's superseded note and the spec's "Install/skip signal (no `install_required` field)" section.
+**Roborev iteration 2 simplification:** The original plan added a `shimInstallRequired` predicate and short-circuit. That predicate could not be made complete: `mainFilterUsesUserNotify` covers notify-based configs but misses non-notify paths (errno/kill blocked syscalls, blocked socket families with errno/kill, `block_io_uring`, and the older `sandbox.unix_sockets.enabled` override). Each missed gate was a silent policy bypass.
 
-**Files:**
-- Create: `internal/api/wrap_shim_mode_test.go`
-- Modify: `internal/api/wrap.go` (in `wrapInitCore` around line 215; add helper at end of file)
+**Resolution (commit 94fd906b):** The short-circuit and `shimInstallRequired` were dropped entirely. `wrapInitCore` now always returns the same populated response regardless of `Mode`, matching agent-mode behavior exactly. The install/skip decision belongs to the shim (via its `mode=auto/on/off` config), not the server. `Mode=="shim"` stays in the request type and is still consumed by Task 3 (per-invocation listener cleanup vs session-scoped).
 
-### Task 2: Server returns empty `WrapperBinary` when nothing enabled (Mode==shim)
+**Files changed:**
+- `internal/api/wrap.go` — removed `if req.Mode == "shim" && !a.shimInstallRequired()` block and `shimInstallRequired` method
+- `internal/api/wrap_shim_mode_test.go` — replaced two tests (NothingEnabled / LandlockEnabled) with one test (`TestWrapInit_ShimMode_PopulatesWrapperBinary`) proving shim-mode returns a populated `WrapperBinary` just like agent-mode
 
-**Files:**
-- Create: `internal/api/wrap_shim_mode_test.go`
-- Modify: `internal/api/wrap.go` (in `wrapInitCore` around line 215; add helper at end of file)
-
-- [ ] **Step 1: Write the failing test**
-
-Create `internal/api/wrap_shim_mode_test.go`:
-
-```go
-//go:build linux
-
-package api
-
-import (
-	"testing"
-
-	"github.com/agentsh/agentsh/internal/config"
-	"github.com/agentsh/agentsh/internal/session"
-	"github.com/agentsh/agentsh/pkg/types"
-)
-
-// TestWrapInit_ShimMode_NothingEnabled verifies that shim-mode wrap-init
-// returns an empty response (no WrapperBinary, no NotifySocket) when neither
-// the seccomp wrapper nor Landlock are configured. The shim treats absent
-// WrapperBinary as the skip signal and falls through to the existing
-// agentsh-exec proxy path. (We intentionally do NOT use a boolean
-// install_required field — see pkg/types/sessions.go's WrapInitResponse
-// doc comment for why presence-of-WrapperBinary is the fail-closed choice.)
-func TestWrapInit_ShimMode_NothingEnabled(t *testing.T) {
-	cfg := config.Config{}
-	cfg.Sandbox.UnixSockets.Enabled = boolPtr(false)
-	cfg.Landlock.Enabled = false
-
-	app := newTestApp(t, cfg)
-	s := session.New("test-session", "/tmp")
-	app.sessions.Add(s)
-
-	resp, code, err := app.wrapInitCore(s, "test-session", types.WrapInitRequest{
-		AgentCommand: "/bin/bash",
-		AgentArgs:    []string{"-c", "echo hi"},
-		Mode:         "shim",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if code != 200 {
-		t.Fatalf("got code %d, want 200", code)
-	}
-	if resp.WrapperBinary != "" {
-		t.Fatalf("got WrapperBinary=%q, want empty (nothing enabled)", resp.WrapperBinary)
-	}
-	if resp.NotifySocket != "" {
-		t.Fatalf("got NotifySocket=%q, want empty (nothing enabled)", resp.NotifySocket)
-	}
-}
-
-func boolPtr(b bool) *bool { return &b }
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `go test -run TestWrapInit_ShimMode_NothingEnabled ./internal/api/`
-Expected: FAIL — either compilation error (helper not present) or non-empty WrapperBinary.
-
-- [ ] **Step 3: Implement the auto-detect short-circuit**
-
-In `internal/api/wrap.go`, immediately after the ptrace-mode branch ends (around line 214, just before the comment `// Resolve wrapper binary`), insert:
-
-```go
-	// Mode == "shim" auto-detect: when shim-mode callers ask the server
-	// what to install, return an empty response if no enforcement features
-	// are configured. The shim sees the absent WrapperBinary as the skip
-	// signal and falls back to its existing agentsh-exec proxy path
-	// without paying any kernel setup cost. We deliberately do NOT use a
-	// bool install_required field — see pkg/types/sessions.go's
-	// WrapInitResponse doc comment for the wire-protocol rationale.
-	if req.Mode == "shim" && !shimInstallRequired(a.cfg) {
-		return types.WrapInitResponse{}, http.StatusOK, nil
-	}
-```
-
-At the bottom of `internal/api/wrap.go`, add the helper:
-
-```go
-// shimInstallRequired reports whether shim-mode wrap-init has any kernel
-// enforcement to apply. Mirrors the gates used elsewhere in this file:
-// the seccomp wrapper requires unix_sockets.enabled, and Landlock requires
-// landlock.enabled. Either alone is sufficient to require an install.
-func shimInstallRequired(cfg *config.Config) bool {
-	unixOn := cfg.Sandbox.UnixSockets.Enabled != nil && *cfg.Sandbox.UnixSockets.Enabled
-	return unixOn || cfg.Landlock.Enabled
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `go test -run TestWrapInit_ShimMode_NothingEnabled ./internal/api/`
-Expected: PASS.
-
-- [ ] **Step 5: Run the full wrap test suite to check no regressions**
-
-Run: `go test -run TestWrapInit ./internal/api/`
-Expected: all PASS (existing tests don't set `Mode`, so they hit the legacy paths unchanged).
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add internal/api/wrap.go internal/api/wrap_shim_mode_test.go
-git commit -m "feat(api): wrap-init Mode==shim returns empty response when nothing to install"
-```
+- [x] **Step 1: Drop the short-circuit and helper** — done (94fd906b)
+- [x] **Step 2: Replace test file** — done (94fd906b)
+- [x] **Step 3: Build + tests pass** — `go test -run TestWrapInit ./internal/api/` and cross-compile both clean
 
 ---
 
