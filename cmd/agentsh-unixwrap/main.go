@@ -50,13 +50,15 @@ func main() {
 	// our ancestor, so this prctl authorizes it specifically.
 	// On kernels without Yama, PR_SET_PTRACER returns EINVAL — but it's
 	// also unnecessary because standard Unix DAC governs ptrace.
-	if cfg.ServerPID > 0 {
-		if isYamaActive() {
-			if err := unix.Prctl(unix.PR_SET_PTRACER, uintptr(cfg.ServerPID), 0, 0, 0); err != nil {
-				log.Printf("PR_SET_PTRACER(%d): %v (Yama active, ProcessVMReadv may fail)", cfg.ServerPID, err)
-			}
-		} else {
-			log.Printf("yama: not active, skipping PR_SET_PTRACER (standard DAC governs ptrace)")
+	//
+	// yamaActive is computed once and reused for setupPtracerPreload below
+	// so we don't double-stat the sysctl path. The non-Yama path returns
+	// silently — emitting a "skipping PR_SET_PTRACER" log here would add
+	// noise on every wrapper invocation on most distros (issue #281).
+	yamaActive := isYamaActive()
+	if cfg.ServerPID > 0 && yamaActive {
+		if err := unix.Prctl(unix.PR_SET_PTRACER, uintptr(cfg.ServerPID), 0, 0, 0); err != nil {
+			log.Printf("PR_SET_PTRACER(%d): %v (Yama active, ProcessVMReadv may fail)", cfg.ServerPID, err)
 		}
 	}
 
@@ -193,9 +195,11 @@ func main() {
 	// Set up LD_PRELOAD for the ptracer library so that child processes
 	// call PR_SET_PTRACER(server_pid). Without this, ProcessVMReadv fails
 	// for children under Yama ptrace_scope=1, breaking seccomp path resolution.
-	// Only needed when seccomp notify is active (notifFD >= 0).
+	// Only needed when seccomp notify is active (notifFD >= 0) AND Yama is
+	// active — on non-Yama kernels the LD_PRELOAD is irrelevant and would
+	// only emit confusing "ptracer: lib not found" noise (issue #281).
 	if notifFD >= 0 {
-		setupPtracerPreload(cfg.ServerPID)
+		setupPtracerPreload(cfg.ServerPID, yamaActive)
 	}
 
 	// Block SIGURG on this OS thread to prevent Go's ~10ms async preemption
