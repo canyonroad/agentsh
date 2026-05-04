@@ -116,6 +116,66 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// The handler will be cleaned up when the session ends or the connection closes.
 	ctx := context.Background()
 
+	// Shim mode: pre-check the agent command against policy before issuing
+	// the wrapper. The shim's kernel-install path replaces the existing
+	// `agentsh exec` flow with `wrap-init` + direct wrapper exec, which
+	// bypasses the Exec endpoint's CheckCommand pre-check that surfaces
+	// `command denied by policy` to the user. Without this guard, a denied
+	// command (e.g. `sh -c "shutdown now"`) routes around policy entirely:
+	// the shim invokes the wrapper, the wrapped shell spawns shutdown, and
+	// in-kernel enforcement may or may not catch it depending on whether
+	// it has the necessary privileges in the runtime environment.
+	//
+	// We accept only effective decisions that the wrapper path can faithfully
+	// execute end-to-end: allow (proceed) and audit (allow + logging, which
+	// the wrapped session's audit pipeline still emits). Any restrictive
+	// non-allow decision (deny, approve, redirect, soft_delete) requires
+	// semantics the shim wrap path does NOT implement — approval gating,
+	// command rewriting, redirect target validation. For those we return
+	// 403 so the shim's ModeAuto branch falls through to the existing
+	// `agentsh exec` path, which has full pre-exec policy semantics
+	// (approval prompt, redirect rewrite, deny + user-visible message).
+	// ModeOn still fail-closes via the same path.
+	//
+	// Agent mode (`agentsh wrap`) intentionally retains pre-existing
+	// behavior — it is invoked by an operator with explicit intent and
+	// has its own integration with policy elsewhere.
+	if req.Mode == "shim" {
+		engine := a.policyEngineFor(s)
+		if engine == nil {
+			// No policy engine configured for this session AND no global
+			// engine on the App — fail closed rather than letting the
+			// kernel-install path run without any policy gate. In
+			// production the App is always constructed with a global
+			// engine; reaching this branch means a misconfiguration.
+			return types.WrapInitResponse{}, http.StatusServiceUnavailable,
+				fmt.Errorf("shim wrap-init: no policy engine available for session")
+		}
+		dec := engine.CheckCommand(req.AgentCommand, req.AgentArgs)
+		// We must check BOTH the underlying PolicyDecision and the
+		// EffectiveDecision. Some decisions resolve to effective-allow
+		// even though they carry semantics the shim path does not
+		// implement:
+		//
+		//   - soft_delete: PolicyDecision=soft_delete, Effective=allow.
+		//     The wrapper would not redirect rm to trash; we must defer
+		//     to agentsh-exec which performs the rewrite.
+		//   - approve with enforce_approvals=false (monitor mode):
+		//     PolicyDecision=approve, Effective=allow. Same reasoning.
+		//   - redirect with enforce_redirects=false: PolicyDecision=
+		//     redirect, Effective=allow. Same.
+		//
+		// So gate on PolicyDecision being one of {allow, audit}. Audit
+		// is "allow + enhanced logging" with no rewrite, so it's safe
+		// to issue a wrapper — the wrapped session's audit pipeline
+		// still emits events.
+		pol := dec.PolicyDecision
+		if pol != types.DecisionAllow && pol != types.DecisionAudit {
+			return types.WrapInitResponse{}, http.StatusForbidden,
+				fmt.Errorf("command requires non-shim handling by policy (rule=%s, decision=%s)", dec.Rule, pol)
+		}
+	}
+
 	// Windows uses driver-based interception, not seccomp
 	if runtime.GOOS == "windows" {
 		return a.wrapInitWindows(ctx, s, sessionID, req)
