@@ -438,6 +438,46 @@ func TestWrapInit_ShimMode_PolicyRedirect(t *testing.T) {
 	}
 }
 
+// TestWrapInit_ShimMode_PolicySoftDelete guards roborev #7872 (High):
+// soft_delete resolves to EffectiveDecision=allow even though the
+// underlying rule requires the rm-to-trash redirect that only the
+// agentsh-exec path implements. Gating on EffectiveDecision alone let
+// soft_delete commands through unrewritten — the wrapper would have
+// faithfully run rm against the requested path. Test asserts both that
+// the pre-check rejects soft_delete and that PolicyDecision is the gate
+// (a future change reverting to EffectiveDecision-only would re-fail).
+func TestWrapInit_ShimMode_PolicySoftDelete(t *testing.T) {
+	cfg := &config.Config{}
+	mgr := session.NewManager(5)
+	store := composite.New(mockEventStore{}, nil)
+	broker := events.NewBroker()
+	engine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []policy.CommandRule{
+			{Name: "soft-delete-rm", Commands: []string{"rm"}, Decision: "soft_delete"},
+			{Name: "allow-shells", Commands: []string{"sh", "bash", "sh.real", "bash.real"}, Decision: "allow"},
+		},
+	}, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, code, _ := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/sh.real",
+		AgentArgs:    []string{"-c", "rm /tmp/x"},
+		Mode:         "shim",
+	})
+	if code != http.StatusForbidden {
+		t.Fatalf("soft_delete must not silently issue a wrapper; got code %d", code)
+	}
+}
+
 // TestWrapInit_ShimMode_PolicyAuditAllowed covers the inverse: audit is
 // "allow + enhanced logging" — the wrapper SHOULD be issued so the
 // session's audit pipeline can record events. This is the only non-allow

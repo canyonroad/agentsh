@@ -152,16 +152,27 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 				fmt.Errorf("shim wrap-init: no policy engine available for session")
 		}
 		dec := engine.CheckCommand(req.AgentCommand, req.AgentArgs)
-		// EffectiveDecision honors enforce_approvals/enforce_redirects so
-		// monitor-only deployments still get the wrapper; PolicyDecision
-		// reflects the underlying rule. Use Effective to gate.
-		eff := dec.EffectiveDecision
-		if eff == "" {
-			eff = dec.PolicyDecision
-		}
-		if eff != types.DecisionAllow && eff != types.DecisionAudit {
+		// We must check BOTH the underlying PolicyDecision and the
+		// EffectiveDecision. Some decisions resolve to effective-allow
+		// even though they carry semantics the shim path does not
+		// implement:
+		//
+		//   - soft_delete: PolicyDecision=soft_delete, Effective=allow.
+		//     The wrapper would not redirect rm to trash; we must defer
+		//     to agentsh-exec which performs the rewrite.
+		//   - approve with enforce_approvals=false (monitor mode):
+		//     PolicyDecision=approve, Effective=allow. Same reasoning.
+		//   - redirect with enforce_redirects=false: PolicyDecision=
+		//     redirect, Effective=allow. Same.
+		//
+		// So gate on PolicyDecision being one of {allow, audit}. Audit
+		// is "allow + enhanced logging" with no rewrite, so it's safe
+		// to issue a wrapper — the wrapped session's audit pipeline
+		// still emits events.
+		pol := dec.PolicyDecision
+		if pol != types.DecisionAllow && pol != types.DecisionAudit {
 			return types.WrapInitResponse{}, http.StatusForbidden,
-				fmt.Errorf("command requires non-shim handling by policy (rule=%s, decision=%s)", dec.Rule, eff)
+				fmt.Errorf("command requires non-shim handling by policy (rule=%s, decision=%s)", dec.Rule, pol)
 		}
 	}
 
