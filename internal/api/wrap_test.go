@@ -362,8 +362,122 @@ func TestWrapInit_ShimMode_PolicyDeny(t *testing.T) {
 	if code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", code)
 	}
-	if !strings.Contains(err.Error(), "denied by policy") {
-		t.Errorf("error must surface policy denial; got %q", err.Error())
+	if !strings.Contains(err.Error(), "policy") {
+		t.Errorf("error must surface policy gate; got %q", err.Error())
+	}
+}
+
+// TestWrapInit_ShimMode_PolicyApprove guards roborev #7867 (High): if a
+// rule that requires human approval is enforced, the shim wrap path
+// must not silently issue a wrapper. Falling back to the agentsh-exec
+// path is what surfaces the approval prompt.
+func TestWrapInit_ShimMode_PolicyApprove(t *testing.T) {
+	cfg := &config.Config{}
+	mgr := session.NewManager(5)
+	store := composite.New(mockEventStore{}, nil)
+	broker := events.NewBroker()
+	engine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []policy.CommandRule{
+			{Name: "approve-pip", Commands: []string{"pip"}, Decision: "approve"},
+			{Name: "allow-shells", Commands: []string{"sh", "bash", "sh.real", "bash.real"}, Decision: "allow"},
+		},
+	}, true /* enforceApprovals */, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, code, _ := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/sh.real",
+		AgentArgs:    []string{"-c", "pip install requests"},
+		Mode:         "shim",
+	})
+	if code != http.StatusForbidden {
+		t.Fatalf("approve must not silently issue a wrapper; got code %d", code)
+	}
+}
+
+// TestWrapInit_ShimMode_PolicyRedirect covers the redirect decision.
+// Same reasoning as approve — redirect rewrites the command, which the
+// shim wrap path does not implement, so we must defer to agentsh-exec.
+func TestWrapInit_ShimMode_PolicyRedirect(t *testing.T) {
+	cfg := &config.Config{}
+	mgr := session.NewManager(5)
+	store := composite.New(mockEventStore{}, nil)
+	broker := events.NewBroker()
+	engine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []policy.CommandRule{
+			{Name: "redirect-rm", Commands: []string{"rm"}, Decision: "redirect", RedirectTo: &policy.CommandRedirect{Command: "trash"}},
+			{Name: "allow-shells", Commands: []string{"sh", "bash", "sh.real", "bash.real"}, Decision: "allow"},
+		},
+	}, true, true /* enforceRedirects */)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, code, _ := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/sh.real",
+		AgentArgs:    []string{"-c", "rm /tmp/x"},
+		Mode:         "shim",
+	})
+	if code != http.StatusForbidden {
+		t.Fatalf("redirect must not silently issue a wrapper; got code %d", code)
+	}
+}
+
+// TestWrapInit_ShimMode_PolicyAuditAllowed covers the inverse: audit is
+// "allow + enhanced logging" — the wrapper SHOULD be issued so the
+// session's audit pipeline can record events. This is the only non-allow
+// effective decision the shim path admits.
+func TestWrapInit_ShimMode_PolicyAuditAllowed(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only beyond the policy pre-check")
+	}
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.WrapperBin = "nonexistent-wrapper-binary-xyz-12345"
+	mgr := session.NewManager(5)
+	store := composite.New(mockEventStore{}, nil)
+	broker := events.NewBroker()
+	engine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []policy.CommandRule{
+			{Name: "audit-curl", Commands: []string{"curl"}, Decision: "audit"},
+			{Name: "allow-shells", Commands: []string{"sh", "bash", "sh.real", "bash.real"}, Decision: "allow"},
+		},
+	}, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/sh.real",
+		AgentArgs:    []string{"-c", "curl example"},
+		Mode:         "shim",
+	})
+	// Pre-check must let audit through; downstream wrapper resolution
+	// then fails (503) since we configured a non-existent binary. 403
+	// would mean the policy gate incorrectly blocked an audit decision.
+	if code == http.StatusForbidden {
+		t.Fatalf("audit must pass the policy gate; got 403 with err: %v", err)
 	}
 }
 

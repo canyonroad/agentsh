@@ -126,10 +126,16 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// in-kernel enforcement may or may not catch it depending on whether
 	// it has the necessary privileges in the runtime environment.
 	//
-	// On deny, we return 403 so the shim's ModeAuto branch falls through
-	// to the existing `agentsh exec` path, which has its own CheckCommand
-	// pre-check and emits the user-visible policy denial. ModeOn still
-	// fail-closes via the same path.
+	// We accept only effective decisions that the wrapper path can faithfully
+	// execute end-to-end: allow (proceed) and audit (allow + logging, which
+	// the wrapped session's audit pipeline still emits). Any restrictive
+	// non-allow decision (deny, approve, redirect, soft_delete) requires
+	// semantics the shim wrap path does NOT implement — approval gating,
+	// command rewriting, redirect target validation. For those we return
+	// 403 so the shim's ModeAuto branch falls through to the existing
+	// `agentsh exec` path, which has full pre-exec policy semantics
+	// (approval prompt, redirect rewrite, deny + user-visible message).
+	// ModeOn still fail-closes via the same path.
 	//
 	// Agent mode (`agentsh wrap`) intentionally retains pre-existing
 	// behavior — it is invoked by an operator with explicit intent and
@@ -146,9 +152,16 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 				fmt.Errorf("shim wrap-init: no policy engine available for session")
 		}
 		dec := engine.CheckCommand(req.AgentCommand, req.AgentArgs)
-		if dec.PolicyDecision == types.DecisionDeny {
+		// EffectiveDecision honors enforce_approvals/enforce_redirects so
+		// monitor-only deployments still get the wrapper; PolicyDecision
+		// reflects the underlying rule. Use Effective to gate.
+		eff := dec.EffectiveDecision
+		if eff == "" {
+			eff = dec.PolicyDecision
+		}
+		if eff != types.DecisionAllow && eff != types.DecisionAudit {
 			return types.WrapInitResponse{}, http.StatusForbidden,
-				fmt.Errorf("command denied by policy (rule=%s)", dec.Rule)
+				fmt.Errorf("command requires non-shim handling by policy (rule=%s, decision=%s)", dec.Rule, eff)
 		}
 	}
 
