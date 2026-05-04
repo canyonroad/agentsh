@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 	"unsafe"
 
@@ -661,10 +662,34 @@ func logFilterSnapshot(filt *seccomp.ScmpFilter, cfg FilterConfig, waitKillSet b
 		total += n
 	}
 
+	// Pre-install caller seccomp state — the key signal for the #282
+	// stacked-install hypothesis. If this snapshot fires from a process
+	// that already has Seccomp:2 + FilterCount>=1 inherited via execve,
+	// the kernel may reject the about-to-happen Load() with EFAULT (or
+	// the documented EBUSY) because we're stacking another USER_NOTIF
+	// filter on top. Distinguishing the FIRST install (clean state) from
+	// a NESTED install (state already set) is exactly what tells us
+	// whether the failing rc1 reproduction is a stacking issue or a
+	// kernel quirk in the filter content itself.
+	procState := readSelfSeccompState()
+	procStateStr := "unreadable"
+	if procState.Present {
+		procStateStr = fmt.Sprintf("mode=%d filter_count=%d", procState.Mode, procState.FilterCount)
+	}
+	pid := os.Getpid()
+	ppid := os.Getppid()
+	parentComm := readProcComm(ppid)
+	selfComm := readProcComm(pid)
+
 	slog.Info("seccomp: filter snapshot before Load",
 		"libseccomp_version", libVer,
 		"libseccomp_api", apiStr,
 		"kernel_release", kernel,
+		"self_pid", pid,
+		"self_comm", selfComm,
+		"parent_pid", ppid,
+		"parent_comm", parentComm,
+		"caller_seccomp_state", procStateStr,
 		"attr_tsync", tsync,
 		"attr_no_new_privs", nnp,
 		"attr_raw_rc", rawRC,
