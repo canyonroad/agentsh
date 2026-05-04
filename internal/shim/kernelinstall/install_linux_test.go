@@ -385,6 +385,109 @@ func TestInstall_OmitsArgv0WhenEmpty(t *testing.T) {
 	}
 }
 
+// TestInstall_StripsStaleArgv0FromInheritedEnv guards roborev #7950
+// finding (Low #2): a stale AGENTSH_UNIXWRAP_ARGV0 in p.Env (e.g.
+// re-entrant shim invocation, or operator-set value) must NOT silently
+// reach the wrapper. With InstallParams.Argv0 == "", the contract is
+// "no override, fall back to resolved real path"; a leaked stale value
+// would contradict that. We strip both internal env vars before
+// appending the authoritative value (or none) in runRelay.
+func TestInstall_StripsStaleArgv0FromInheritedEnv(t *testing.T) {
+	wrapperBin := buildFakeWrapperPrintEnv(t)
+
+	sockDir := t.TempDir()
+	notifySockPath := sockDir + "/notify.sock"
+	ln, err := net.Listen("unix", notifySockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, _ := ln.Accept()
+		if conn != nil {
+			buf := make([]byte, 1)
+			oob := make([]byte, 64)
+			conn.(*net.UnixConn).ReadMsgUnix(buf, oob) //nolint:errcheck
+			conn.Close()
+		}
+	}()
+
+	handler, _ := makeWrapInitHandler(200, types.WrapInitResponse{
+		WrapperBinary: wrapperBin,
+		NotifySocket:  notifySockPath,
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	outFile, err := os.CreateTemp(t.TempDir(), "wrapper-env-*.txt")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	outPath := outFile.Name()
+	outFile.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeOn
+	p.Argv0 = "" // explicitly empty — must not be overridden by inherited stale
+	p.Env = []string{
+		"AGENTSH_UNIXWRAP_ARGV0=/bin/stale-shell", // stale inherited value
+		"FAKE_ENV_OUT=" + outPath,
+	}
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if res.Action != ResultExec {
+		t.Fatalf("expected ResultExec, got %v (reason: %s)", res.Action, res.Reason)
+	}
+
+	envOutput, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read wrapper env output: %v", err)
+	}
+	for _, line := range strings.Split(string(envOutput), "\n") {
+		if strings.HasPrefix(line, "AGENTSH_UNIXWRAP_ARGV0=") {
+			t.Errorf("stale AGENTSH_UNIXWRAP_ARGV0 leaked into wrapper env: %q", line)
+		}
+	}
+}
+
+// TestFilterShimInternalEnv covers the helper directly: it must drop
+// both internal env vars and preserve everything else.
+func TestFilterShimInternalEnv(t *testing.T) {
+	in := []string{
+		"AGENTSH_SIGNAL_SOCK_FD=4",
+		"AGENTSH_UNIXWRAP_ARGV0=/bin/stale",
+		"OTHER=x",
+		"HOME=/tmp",
+		"AGENTSH_UNIXWRAP_ARGV0_NOT_OURS=keep", // prefix-not-equal must be preserved
+	}
+	out := filterShimInternalEnv(in)
+	for _, e := range out {
+		if strings.HasPrefix(e, "AGENTSH_SIGNAL_SOCK_FD=") {
+			t.Errorf("AGENTSH_SIGNAL_SOCK_FD not stripped: %q", e)
+		}
+		if strings.HasPrefix(e, "AGENTSH_UNIXWRAP_ARGV0=") {
+			t.Errorf("AGENTSH_UNIXWRAP_ARGV0 not stripped: %q", e)
+		}
+	}
+	want := map[string]bool{
+		"OTHER=x":                            true,
+		"HOME=/tmp":                          true,
+		"AGENTSH_UNIXWRAP_ARGV0_NOT_OURS=keep": true,
+	}
+	got := map[string]bool{}
+	for _, e := range out {
+		got[e] = true
+	}
+	for w := range want {
+		if !got[w] {
+			t.Errorf("expected entry %q in filtered env", w)
+		}
+	}
+}
+
 // fakeWrapperPrintEnvSrc is a fake wrapper that writes its environment to the
 // file named by FAKE_ENV_OUT, sends the notify fd, reads the ACK, and exits 0.
 const fakeWrapperPrintEnvSrc = `package main

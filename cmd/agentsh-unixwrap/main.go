@@ -236,7 +236,14 @@ func main() {
 // override the exec exits 127 with "applet not found". An empty or
 // whitespace-only value preserves the previous behaviour (argv[0]
 // = the resolved real path).
+//
+// Returns rawArgs unchanged when len(rawArgs) == 0; the call site
+// guards via the `len(os.Args) < 3` check, but the explicit zero-arg
+// guard makes the helper safe against future re-use.
 func applyArgv0Override(rawArgs []string, override string) []string {
+	if len(rawArgs) == 0 {
+		return rawArgs
+	}
 	if override = strings.TrimSpace(override); override == "" {
 		return rawArgs
 	}

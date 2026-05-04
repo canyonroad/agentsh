@@ -27,6 +27,14 @@ const wrapInitTimeout = 10 * time.Second
 // wrapper binary.
 const signalSockFDKey = "AGENTSH_SIGNAL_SOCK_FD"
 
+// argv0EnvKey is the env var the shim injects so unixwrap preserves the
+// caller's original invocation name as argv[0] when execve'ing the real
+// shell. Stripped from inherited env so a stale value from a re-entrant
+// invocation (or operator-set value) cannot leak through and contradict
+// the InstallParams.Argv0=="" "no override" contract — only the value we
+// append in runRelay is honored.
+const argv0EnvKey = "AGENTSH_UNIXWRAP_ARGV0"
+
 // Install is the all-in-one entry point that the shim calls before launching
 // the user's command.  It:
 //
@@ -123,7 +131,7 @@ func runRelay(p InstallParams, resp types.WrapInitResponse) (Result, error) {
 	//    shim runs inside an already-wrapped process) must not reach the wrapper.
 	//  - from WrapperEnv: shim mode does not replicate the signal-filter
 	//    socketpair, so the wrapper must not try to open that fd.
-	filteredBase := filterSignalSockFD(p.Env)
+	filteredBase := filterShimInternalEnv(p.Env)
 	env := make([]string, len(filteredBase))
 	copy(env, filteredBase)
 	env = append(env, "AGENTSH_NOTIFY_SOCK_FD=3")
@@ -134,7 +142,7 @@ func runRelay(p InstallParams, resp types.WrapInitResponse) (Result, error) {
 	// 127. The wrapper falls back to its os.Args[2] (the real shell path)
 	// when this is empty, which is correct on non-busybox systems.
 	if p.Argv0 != "" {
-		env = append(env, fmt.Sprintf("AGENTSH_UNIXWRAP_ARGV0=%s", p.Argv0))
+		env = append(env, fmt.Sprintf("%s=%s", argv0EnvKey, p.Argv0))
 	}
 	for k, v := range resp.WrapperEnv {
 		if k == signalSockFDKey {
@@ -303,6 +311,28 @@ func filterSignalSockFD(env []string) []string {
 	prefix := signalSockFDKey + "="
 	for _, e := range env {
 		if strings.HasPrefix(e, prefix) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// filterShimInternalEnv returns a copy of env with all internal env vars
+// (AGENTSH_SIGNAL_SOCK_FD, AGENTSH_UNIXWRAP_ARGV0) removed. The signal
+// fd is stripped because shim mode does not replicate the signal-filter
+// socketpair, so a stale value would point the wrapper at a non-existent
+// fd. The argv0 override is stripped because we always append the
+// authoritative value (or omit it entirely when InstallParams.Argv0 is
+// empty); a stale inherited value from a re-entrant invocation would
+// otherwise silently win on Argv0=="" and contradict the documented
+// "empty falls back to the resolved real path" contract.
+func filterShimInternalEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	signalPrefix := signalSockFDKey + "="
+	argv0Prefix := argv0EnvKey + "="
+	for _, e := range env {
+		if strings.HasPrefix(e, signalPrefix) || strings.HasPrefix(e, argv0Prefix) {
 			continue
 		}
 		out = append(out, e)

@@ -56,6 +56,18 @@ func TestApplyArgv0Override(t *testing.T) {
 			override: "/bin/sh",
 			want:     []string{"/bin/sh", "-c", "echo 'hello world' | tr a-z A-Z"},
 		},
+		{
+			name:     "empty rawArgs with override does not panic and returns empty",
+			args:     []string{},
+			override: "/bin/sh",
+			want:     []string{},
+		},
+		{
+			name:     "nil rawArgs with override returns empty",
+			args:     nil,
+			override: "/bin/sh",
+			want:     nil,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
