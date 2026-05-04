@@ -13,6 +13,16 @@ type InstallParams struct {
 	ShellArgs     []string
 	Env           []string
 	CallerUID     int
+	// Argv0 is the path the user originally invoked the shim as (e.g.
+	// "/bin/sh"). The wrapper uses this as argv[0] when execve'ing the
+	// real shell so busybox-multicall binaries (Alpine /bin/sh) and
+	// shells that key off argv[0] for login/applet semantics see the
+	// expected name. Without this, /bin/sh.real on Alpine — which is a
+	// busybox binary — exits with "sh.real: applet not found" because
+	// busybox derives the applet from the invocation name. Empty falls
+	// back to RealShell, preserving prior behaviour for non-busybox
+	// systems where the basename happens to match.
+	Argv0 string
 }
 
 // Result is returned by Install to tell the caller what to do next.

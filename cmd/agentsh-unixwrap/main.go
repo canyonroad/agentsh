@@ -16,6 +16,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -219,10 +220,37 @@ func main() {
 	if err != nil {
 		log.Fatalf("resolve command %q: %v", cmd, err)
 	}
-	args := os.Args[2:]
+	args := applyArgv0Override(os.Args[2:], os.Getenv("AGENTSH_UNIXWRAP_ARGV0"))
 	if err := syscall.Exec(cmdPath, args, os.Environ()); err != nil {
 		log.Fatalf("exec %s failed: %v", cmd, err)
 	}
+}
+
+// applyArgv0Override returns the argv slice to pass to syscall.Exec,
+// substituting argv[0] with override when override is non-empty (after
+// trimming whitespace). The shim sets AGENTSH_UNIXWRAP_ARGV0 so
+// busybox-multicall binaries (Alpine /bin/sh, BusyBox /bin/bash on some
+// systems) see the original invocation name (e.g. "/bin/sh") instead of
+// the renamed "/bin/sh.real" — busybox uses argv[0] basename to pick
+// its applet, and "sh.real" is not a known applet, so without the
+// override the exec exits 127 with "applet not found". An empty or
+// whitespace-only value preserves the previous behaviour (argv[0]
+// = the resolved real path).
+//
+// Returns rawArgs unchanged when len(rawArgs) == 0; the call site
+// guards via the `len(os.Args) < 3` check, but the explicit zero-arg
+// guard makes the helper safe against future re-use.
+func applyArgv0Override(rawArgs []string, override string) []string {
+	if len(rawArgs) == 0 {
+		return rawArgs
+	}
+	if override = strings.TrimSpace(override); override == "" {
+		return rawArgs
+	}
+	out := make([]string, len(rawArgs))
+	out[0] = override
+	copy(out[1:], rawArgs[1:])
+	return out
 }
 
 func notifySockFD() (int, error) {
