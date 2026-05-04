@@ -260,6 +260,19 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 		return nil, err
 	}
 
+	// Surface raw kernel errnos from filt.Load() instead of letting
+	// libseccomp mask every failure as ECANCELED. Without this, a kernel
+	// rejection (EINVAL for unknown flags, EBUSY for listener conflicts,
+	// EPERM/EACCES for missing privileges, ...) is indistinguishable from
+	// any other "system failure beyond the control of the library" — which
+	// is exactly the diagnostic dead-end hit on Runloop devboxes in #282.
+	// Best-effort: if libseccomp is too old (<2.5) we continue without
+	// raw errnos and rely on the masked ECANCELED.
+	if rcErr := filt.SetRawRC(true); rcErr != nil {
+		slog.Debug("seccomp: SetRawRC unsupported; kernel errnos will be masked as ECANCELED",
+			"error", rcErr)
+	}
+
 	// Enable SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (kernel 6.0+).
 	// When active, non-fatal signals (including Go's ~10ms SIGURG preemption)
 	// cannot interrupt seccomp_do_user_notification, preventing ERESTARTSYS loops.
@@ -480,9 +493,19 @@ func familyToScmpAction(a seccompkg.OnBlockAction) (seccomp.ScmpAction, error) {
 }
 
 // loadWithRetryOnWaitKillFailure loads a seccomp filter and, if the load
-// fails with WaitKill set, clears WaitKill and retries once. This handles
-// custom or vendor kernels that report 6.0+ but reject
-// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV at filter load time.
+// fails with WaitKill set AND the underlying errno is EINVAL, clears
+// WaitKill and retries once. This handles custom or vendor kernels that
+// report 6.0+ but reject SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV at filter
+// load time — the kernel returns EINVAL from the flag-mask check in
+// seccomp_set_mode_filter when an unknown flag is set.
+//
+// For any other errno (EBUSY, EPERM, EACCES, ENOMEM, ...) the failure is
+// unrelated to WaitKill, so we surface the original error verbatim
+// instead of emitting a misleading "WaitKillable rejected" warning and
+// wasting a retry that will fail with the same kernel reason. This
+// requires SetRawRC(true) on the filter so libseccomp does not mask the
+// underlying errno as ECANCELED — InstallFilterWithConfig sets that
+// flag.
 //
 // loadFn is injected so tests can simulate Load() failures deterministically.
 // Production call sites pass `filt.Load`.
@@ -492,6 +515,9 @@ func loadWithRetryOnWaitKillFailure(filt *seccomp.ScmpFilter, waitKillSet bool, 
 		return nil
 	}
 	if !waitKillSet {
+		return err
+	}
+	if !errors.Is(err, unix.EINVAL) {
 		return err
 	}
 	slog.Warn("seccomp: WaitKillable rejected at filter load time; falling back to SIGURG signal mask only",
