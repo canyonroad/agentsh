@@ -127,6 +127,15 @@ func runRelay(p InstallParams, resp types.WrapInitResponse) (Result, error) {
 	env := make([]string, len(filteredBase))
 	copy(env, filteredBase)
 	env = append(env, "AGENTSH_NOTIFY_SOCK_FD=3")
+	// Plumb the original invocation name (e.g. "/bin/sh") through to the
+	// wrapper so it can override argv[0] when execve'ing the real shell.
+	// On Alpine, /bin/sh.real is a busybox binary; without this override,
+	// busybox derives applet name "sh.real" → "applet not found" → exit
+	// 127. The wrapper falls back to its os.Args[2] (the real shell path)
+	// when this is empty, which is correct on non-busybox systems.
+	if p.Argv0 != "" {
+		env = append(env, fmt.Sprintf("AGENTSH_UNIXWRAP_ARGV0=%s", p.Argv0))
+	}
 	for k, v := range resp.WrapperEnv {
 		if k == signalSockFDKey {
 			slog.Debug("kernelinstall: stripping signal sock fd from wrapper env (shim mode limitation)")

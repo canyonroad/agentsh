@@ -258,6 +258,133 @@ func TestInstall_StripsSignalSockFdFromPEnv(t *testing.T) {
 	t.Logf("wrapper env output (excerpt):\n%s", string(envOutput))
 }
 
+// TestInstall_PassesArgv0ToWrapper covers the v0.19.1 alpine docker-test
+// regression: on busybox-multicall systems (Alpine) the renamed shell at
+// /bin/sh.real is the busybox binary, and busybox derives the applet from
+// argv[0]'s basename. Without forwarding the original invocation name
+// ("/bin/sh") to the wrapper, the wrapper's syscall.Exec sets argv[0] to
+// "/bin/sh.real", busybox looks up applet "sh.real", fails, and exits 127.
+// This test verifies the fix: when InstallParams.Argv0 is set, the
+// AGENTSH_UNIXWRAP_ARGV0 env var is propagated to the wrapper. The
+// wrapper itself then substitutes argv[0]; that substitution is covered
+// by tests in cmd/agentsh-unixwrap.
+func TestInstall_PassesArgv0ToWrapper(t *testing.T) {
+	wrapperBin := buildFakeWrapperPrintEnv(t)
+
+	sockDir := t.TempDir()
+	notifySockPath := sockDir + "/notify.sock"
+	ln, err := net.Listen("unix", notifySockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, _ := ln.Accept()
+		if conn != nil {
+			buf := make([]byte, 1)
+			oob := make([]byte, 64)
+			conn.(*net.UnixConn).ReadMsgUnix(buf, oob) //nolint:errcheck
+			conn.Close()
+		}
+	}()
+
+	handler, _ := makeWrapInitHandler(200, types.WrapInitResponse{
+		WrapperBinary: wrapperBin,
+		NotifySocket:  notifySockPath,
+		WrapperEnv:    map[string]string{},
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	outFile, err := os.CreateTemp(t.TempDir(), "wrapper-env-*.txt")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	outPath := outFile.Name()
+	outFile.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeOn
+	p.Argv0 = "/bin/sh"
+	p.Env = []string{"FAKE_ENV_OUT=" + outPath}
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if res.Action != ResultExec {
+		t.Fatalf("expected ResultExec, got %v (reason: %s)", res.Action, res.Reason)
+	}
+
+	envOutput, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read wrapper env output: %v", err)
+	}
+	if !strings.Contains(string(envOutput), "AGENTSH_UNIXWRAP_ARGV0=/bin/sh\n") {
+		t.Errorf("AGENTSH_UNIXWRAP_ARGV0 was not propagated to wrapper env. Got:\n%s", string(envOutput))
+	}
+}
+
+// TestInstall_OmitsArgv0WhenEmpty covers the symmetric case: when
+// InstallParams.Argv0 is empty (older shim, agent-mode caller), the
+// AGENTSH_UNIXWRAP_ARGV0 env var must NOT be set. unixwrap's empty-string
+// path falls back to argv[0]=resolved-cmd-path, preserving prior behavior.
+func TestInstall_OmitsArgv0WhenEmpty(t *testing.T) {
+	wrapperBin := buildFakeWrapperPrintEnv(t)
+
+	sockDir := t.TempDir()
+	notifySockPath := sockDir + "/notify.sock"
+	ln, err := net.Listen("unix", notifySockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, _ := ln.Accept()
+		if conn != nil {
+			buf := make([]byte, 1)
+			oob := make([]byte, 64)
+			conn.(*net.UnixConn).ReadMsgUnix(buf, oob) //nolint:errcheck
+			conn.Close()
+		}
+	}()
+
+	handler, _ := makeWrapInitHandler(200, types.WrapInitResponse{
+		WrapperBinary: wrapperBin,
+		NotifySocket:  notifySockPath,
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	outFile, err := os.CreateTemp(t.TempDir(), "wrapper-env-*.txt")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	outPath := outFile.Name()
+	outFile.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeOn
+	p.Argv0 = "" // explicitly empty
+	p.Env = []string{"FAKE_ENV_OUT=" + outPath}
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if res.Action != ResultExec {
+		t.Fatalf("expected ResultExec, got %v (reason: %s)", res.Action, res.Reason)
+	}
+
+	envOutput, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read wrapper env output: %v", err)
+	}
+	if strings.Contains(string(envOutput), "AGENTSH_UNIXWRAP_ARGV0=") {
+		t.Errorf("AGENTSH_UNIXWRAP_ARGV0 must NOT be set when Argv0 is empty. Got:\n%s", string(envOutput))
+	}
+}
+
 // fakeWrapperPrintEnvSrc is a fake wrapper that writes its environment to the
 // file named by FAKE_ENV_OUT, sends the notify fd, reads the ACK, and exits 0.
 const fakeWrapperPrintEnvSrc = `package main

@@ -130,6 +130,10 @@ func main() {
 				ShellArgs:     os.Args[1:],
 				Env:           os.Environ(),
 				CallerUID:     os.Getuid(),
+				// Forward the user's original invocation name so the wrapper
+				// can preserve argv[0] semantics (busybox applet routing on
+				// Alpine, login-shell detection on others).
+				Argv0: argv0,
 			})
 			if installErr != nil {
 				fatalWithHint(126, "agentsh-shell-shim: kernel install: "+installErr.Error(),
