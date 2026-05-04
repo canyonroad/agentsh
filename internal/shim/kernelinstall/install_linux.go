@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,22 +36,83 @@ const signalSockFDKey = "AGENTSH_SIGNAL_SOCK_FD"
 // append in runRelay is honored.
 const argv0EnvKey = "AGENTSH_UNIXWRAP_ARGV0"
 
+// seccompFilterCount returns the number of seccomp filters already
+// installed on the calling process, parsed from /proc/self/status's
+// `Seccomp_filters:` line. Returns 0 on any read/parse error.
+//
+// Indirection via package var lets tests simulate the
+// inherited-filter state without forking a real child with a live
+// filter (which would also pollute the Go test runner's seccomp state
+// and break unrelated tests). Production calls
+// readKernelSeccompFilterCount, which is the only path that reads
+// /proc.
+var seccompFilterCount = readKernelSeccompFilterCount
+
+// readKernelSeccompFilterCount reads /proc/self/status and returns the
+// integer value of the Seccomp_filters: line (added in kernel 4.10).
+// The kernel reports this field unconditionally when seccomp is
+// compiled in — non-zero means at least one filter is already attached
+// to this task or inherited via execve. We treat any read or parse
+// failure as zero (best-effort): the gate is a defense-in-depth check,
+// not a security boundary.
+func readKernelSeccompFilterCount() int {
+	const key = "Seccomp_filters:"
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0
+	}
+	for _, raw := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(raw, key) {
+			continue
+		}
+		v := strings.TrimSpace(raw[len(key):])
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	return 0
+}
+
 // Install is the all-in-one entry point that the shim calls before launching
 // the user's command.  It:
 //
 //  1. Returns ResultSkip immediately when Mode == ModeOff.
-//  2. Calls wrap-init via the agentsh server to get a wrapper binary + socket.
-//  3. On failure, fails closed (ModeOn) or skips (ModeAuto).
-//  4. Runs the socketpair relay: mirrors internal/cli/wrap_linux.go
+//  2. Returns ResultSkip when the calling process already has a seccomp
+//     filter inherited (any Mode), because trying to install another
+//     filter on top of an inherited one fails on some kernels/runtimes
+//     (issue #282 EFAULT on Runloop kernel 6.18.5: nested
+//     `agentsh-shell-shim` invocation inside a process tree where
+//     `agentsh-unixwrap` already installed F1). The inherited filter is
+//     unforgeable evidence that policy enforcement is already active —
+//     re-installing would be redundant at best, and on hostile kernels
+//     the second `seccomp(SECCOMP_SET_MODE_FILTER, ...)` call rejects
+//     the program with EFAULT and breaks every wrapped exec. ModeOn
+//     "fail-closed" is satisfied here because we ARE filtered, just not
+//     by us.
+//  3. Calls wrap-init via the agentsh server to get a wrapper binary + socket.
+//  4. On failure, fails closed (ModeOn) or skips (ModeAuto).
+//  5. Runs the socketpair relay: mirrors internal/cli/wrap_linux.go
 //     platformSetupWrap, minus the signal-filter second socketpair.
-//  5. Returns ResultExec carrying the exit code from the wrapper process.
+//  6. Returns ResultExec carrying the exit code from the wrapper process.
 func Install(p InstallParams) (Result, error) {
 	// Step 1: mode gate
 	if p.Mode == ModeOff {
 		return Result{Action: ResultSkip, Reason: "mode=off"}, nil
 	}
 
-	// Step 2: call wrap-init
+	// Step 2: inherited-filter gate (#282). Unforgeable: the kernel
+	// itself reports the live filter chain count via /proc/self/status,
+	// regardless of any caller-controlled env var.
+	if n := seccompFilterCount(); n > 0 {
+		return Result{
+			Action: ResultSkip,
+			Reason: fmt.Sprintf("already filtered (Seccomp_filters=%d, inherited from parent)", n),
+		}, nil
+	}
+
+	// Step 3: call wrap-init
 	resp, err := callWrapInit(p)
 	if err != nil {
 		reason := fmt.Sprintf("wrap-init failed: %v", err)
@@ -62,7 +124,7 @@ func Install(p InstallParams) (Result, error) {
 		return Result{Action: ResultSkip, Reason: reason}, nil
 	}
 
-	// Step 3: check response completeness
+	// Step 4: check response completeness
 	if resp.WrapperBinary == "" || resp.NotifySocket == "" {
 		reason := "wrap-init returned empty WrapperBinary or NotifySocket"
 		if p.Mode == ModeOn {
@@ -71,7 +133,7 @@ func Install(p InstallParams) (Result, error) {
 		return Result{Action: ResultSkip, Reason: reason}, nil
 	}
 
-	// Step 4–7: socketpair relay
+	// Step 5–6: socketpair relay
 	return runRelay(p, resp)
 }
 
