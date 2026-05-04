@@ -2,7 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"io"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -84,5 +87,113 @@ func TestDetectConfigCmd(t *testing.T) {
 	}
 	if !strings.Contains(output, "security:") {
 		t.Error("config output missing security section")
+	}
+}
+
+// captureStdStreams runs fn with os.Stdout and os.Stderr redirected to
+// pipes, returning whatever was written to each stream. Use this when a
+// test must verify which actual standard stream a command wrote to —
+// cobra's SetOut/SetErr both feed cmd.Print*/Println via the same
+// outWriter, so they cannot distinguish the two streams (existing tests
+// in this file merge them deliberately).
+func captureStdStreams(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe stdout: %v", err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		_ = rOut.Close()
+		_ = wOut.Close()
+		t.Fatalf("os.Pipe stderr: %v", err)
+	}
+	origStdout, origStderr := os.Stdout, os.Stderr
+	os.Stdout = wOut
+	os.Stderr = wErr
+
+	var outBuf, errBuf bytes.Buffer
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = io.Copy(&outBuf, rOut) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(&errBuf, rErr) }()
+
+	defer func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	}()
+	fn()
+	_ = wOut.Close()
+	_ = wErr.Close()
+	wg.Wait()
+	return outBuf.String(), errBuf.String()
+}
+
+// TestDetectCmd_JSON_GoesToStdout verifies that with --output json, the
+// JSON document is written to the actual os.Stdout, NOT os.Stderr —
+// machine-parseable output must be on stdout so callers can pipe it into
+// JSON.parse / jq without merging streams. cobra's cmd.Print*/Println
+// route to OutOrStderr by default; without an explicit cmd.SetOut to
+// os.Stdout (or use of OutOrStdout) the JSON ends up on stderr — exactly
+// the symptom reported in #281 against v0.19.2-rc1 (stdout empty,
+// JSON on stderr).
+func TestDetectCmd_JSON_GoesToStdout(t *testing.T) {
+	stdout, stderr := captureStdStreams(t, func() {
+		cmd := newDetectCmd()
+		cmd.SetArgs([]string{"--output", "json"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute(): %v", err)
+		}
+	})
+
+	if !strings.HasPrefix(stdout, "{") {
+		t.Errorf("expected JSON on stdout, got\nstdout=%q\nstderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(stdout, `"platform"`) {
+		t.Errorf("stdout missing platform field; stdout=%q", stdout)
+	}
+	if strings.Contains(stderr, `"platform"`) {
+		t.Errorf("JSON document must NOT be on stderr; stderr=%q", stderr)
+	}
+}
+
+// TestDetectCmd_YAML_GoesToStdout is the YAML counterpart of
+// TestDetectCmd_JSON_GoesToStdout — same routing requirement: the YAML
+// document goes to stdout, never stderr.
+func TestDetectCmd_YAML_GoesToStdout(t *testing.T) {
+	stdout, stderr := captureStdStreams(t, func() {
+		cmd := newDetectCmd()
+		cmd.SetArgs([]string{"--output", "yaml"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute(): %v", err)
+		}
+	})
+
+	if !strings.Contains(stdout, "platform:") {
+		t.Errorf("expected YAML on stdout, got\nstdout=%q\nstderr=%q", stdout, stderr)
+	}
+	if strings.Contains(stderr, "platform:") {
+		t.Errorf("YAML document must NOT be on stderr; stderr=%q", stderr)
+	}
+}
+
+// TestDetectConfigCmd_StdoutDefault verifies that `agentsh detect config`
+// without an --output file path writes the generated config to stdout
+// (so `agentsh detect config > security.yaml` works as documented in the
+// command's Long help). Same #281 routing: data on stdout, never stderr.
+func TestDetectConfigCmd_StdoutDefault(t *testing.T) {
+	stdout, stderr := captureStdStreams(t, func() {
+		cmd := newDetectCmd()
+		cmd.SetArgs([]string{"config"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute(): %v", err)
+		}
+	})
+
+	if !strings.Contains(stdout, "security:") {
+		t.Errorf("expected config on stdout, got\nstdout=%q\nstderr=%q", stdout, stderr)
+	}
+	if strings.Contains(stderr, "security:") {
+		t.Errorf("config document must NOT be on stderr; stderr=%q", stderr)
 	}
 }

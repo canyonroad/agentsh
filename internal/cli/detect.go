@@ -43,7 +43,12 @@ Use 'agentsh detect config' to generate an optimized configuration.`,
 				return fmt.Errorf("format output: %w", err)
 			}
 
-			cmd.Println(string(output))
+			// Route the formatted document to stdout, not stderr — callers
+			// pipe `agentsh detect --output json | jq` and expect the
+			// document on stdout. cobra's cmd.Println uses OutOrStderr
+			// (defaults to os.Stderr), which broke that contract for #281
+			// on v0.19.2-rc1 (stdout empty, JSON on stderr).
+			fmt.Fprintln(cmd.OutOrStdout(), string(output))
 			return nil
 		},
 	}
@@ -84,11 +89,15 @@ Example:
 				if err := os.WriteFile(outputPath, config, 0644); err != nil {
 					return fmt.Errorf("write config to %s: %w", outputPath, err)
 				}
-				cmd.Printf("Configuration written to %s\n", outputPath)
+				fmt.Fprintf(cmd.OutOrStdout(), "Configuration written to %s\n", outputPath)
 				return nil
 			}
 
-			cmd.Print(string(config))
+			// Same routing fix as the parent detect command — when the
+			// generated config goes to stdout (no --output file), it must
+			// land on os.Stdout so `agentsh detect config > security.yaml`
+			// works as documented.
+			fmt.Fprint(cmd.OutOrStdout(), string(config))
 			return nil
 		},
 	}

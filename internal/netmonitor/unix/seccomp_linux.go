@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 	"unsafe"
 
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
@@ -273,6 +274,14 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 			"error", rcErr)
 	}
 
+	// Per-category rule counts surfaced in the pre-load diagnostic
+	// snapshot below. Useful when narrowing down which feature triggers a
+	// kernel rejection on hostile devbox kernels (issue #282 EFAULT) — a
+	// single "install seccomp filter: bad address" line is far less
+	// actionable than "filter had N rules across these categories with
+	// these flags."
+	ruleCounts := map[string]int{}
+
 	// Enable SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (kernel 6.0+).
 	// When active, non-fatal signals (including Go's ~10ms SIGURG preemption)
 	// cannot interrupt seccomp_do_user_notification, preventing ERESTARTSYS loops.
@@ -308,6 +317,7 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 				return nil, fmt.Errorf("add notify rule %v: %w", sc, err)
 			}
 		}
+		ruleCounts["unix_socket"] = len(rules)
 	}
 
 	// Execve interception via user-notify
@@ -322,6 +332,7 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 				return nil, fmt.Errorf("add execve rule %v: %w", sc, err)
 			}
 		}
+		ruleCounts["execve"] = len(execRules)
 	}
 
 	// File I/O monitoring via user-notify
@@ -343,11 +354,13 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 				return nil, fmt.Errorf("add file monitor rule %v: %w", sc, err)
 			}
 		}
-		for _, sc := range legacyFileSyscallList() {
+		legacy := legacyFileSyscallList()
+		for _, sc := range legacy {
 			if err := filt.AddRule(seccomp.ScmpSyscall(sc), trap); err != nil {
 				return nil, fmt.Errorf("add legacy file rule %v: %w", sc, err)
 			}
 		}
+		ruleCounts["file_monitor"] = len(fileRules) + len(legacy)
 	}
 
 	// Metadata syscalls via user-notify (when intercept_metadata is enabled)
@@ -364,6 +377,7 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 				return nil, fmt.Errorf("add metadata rule %v: %w", sc, err)
 			}
 		}
+		ruleCounts["metadata"] = len(metadataRules)
 	}
 
 	// mknodat is always included with file monitoring (create-category)
@@ -407,11 +421,13 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 			blockListMap[uint32(nr)] = action
 		}
 	}
+	ruleCounts["blocked_syscalls"] = len(cfg.BlockedSyscalls)
 
 	// Per-socket-family blocking on socket(2) and socketpair(2).
 	// libseccomp action-precedence (KILL > TRAP > ERRNO > … > NOTIFY) ensures
 	// these conditional rules take priority over the unconditional ActNotify
 	// rule on socket(2) added by UnixSocketEnabled.
+	familyRulesAdded := 0
 	for _, bf := range cfg.BlockedFamilies {
 		cond := seccomp.ScmpCondition{
 			Argument: 0,
@@ -432,6 +448,8 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 				slog.Warn("seccomp: failed to add family rule; family skipped",
 					"family", bf.Name, "syscall", sc, "error", addErr)
 				installed = false
+			} else {
+				familyRulesAdded++
 			}
 		}
 		if installed && (bf.Action == seccompkg.OnBlockLog || bf.Action == seccompkg.OnBlockLogAndKill) {
@@ -439,6 +457,7 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 			blockedFamilyMap[uint64(unix.SYS_SOCKETPAIR)<<32|uint64(bf.Family)] = bf
 		}
 	}
+	ruleCounts["blocked_families"] = familyRulesAdded
 
 	// Block io_uring to prevent seccomp bypass.
 	// Skip syscalls already in BlockedSyscalls to avoid duplicate rule errors.
@@ -453,6 +472,7 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 			unix.SYS_IO_URING_ENTER,
 			unix.SYS_IO_URING_REGISTER,
 		}
+		ioUringRulesAdded := 0
 		for _, nr := range ioUringSyscalls {
 			if blockedSet[nr] {
 				continue // already blocked via BlockedSyscalls
@@ -460,8 +480,19 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 			if err := filt.AddRule(seccomp.ScmpSyscall(nr), ioUringBlock); err != nil {
 				return nil, fmt.Errorf("add io_uring block rule %v: %w", nr, err)
 			}
+			ioUringRulesAdded++
 		}
+		ruleCounts["io_uring_block"] = ioUringRulesAdded
 	}
+
+	// Pre-load diagnostic snapshot. Logged at INFO so it lands in the
+	// wrapper's stderr/log capture even when slog level is Info-default.
+	// On hostile devbox kernels (#282 EFAULT on Runloop+Freestyle) a bare
+	// "install seccomp filter: bad address" tells us nothing about which
+	// rules or flags the kernel rejected — this snapshot lets the next
+	// reproduction pinpoint the exact filter shape that triggered the
+	// rejection without requiring strace/sysdig on the affected VM.
+	logFilterSnapshot(filt, cfg, waitKillSet, ruleCounts)
 
 	if err := loadWithRetryOnWaitKillFailure(filt, waitKillSet, filt.Load); err != nil {
 		return nil, err
@@ -507,13 +538,25 @@ func familyToScmpAction(a seccompkg.OnBlockAction) (seccomp.ScmpAction, error) {
 // underlying errno as ECANCELED — InstallFilterWithConfig sets that
 // flag.
 //
+// Each Load() attempt is logged with timing and the resulting errno so a
+// hostile-kernel rejection (issue #282 EFAULT on Runloop+Freestyle) lands
+// in the wrapper's stderr capture with enough detail to point at the
+// failing flag combination.
+//
 // loadFn is injected so tests can simulate Load() failures deterministically.
 // Production call sites pass `filt.Load`.
 func loadWithRetryOnWaitKillFailure(filt *seccomp.ScmpFilter, waitKillSet bool, loadFn func() error) error {
+	start := time.Now()
 	err := loadFn()
+	dur := time.Since(start)
 	if err == nil {
+		slog.Info("seccomp: filter Load succeeded",
+			"attempt", 1, "wait_kill", waitKillSet, "duration_ms", dur.Milliseconds())
 		return nil
 	}
+	slog.Warn("seccomp: filter Load failed",
+		"attempt", 1, "wait_kill", waitKillSet, "duration_ms", dur.Milliseconds(),
+		"errno", errnoString(err), "error", err)
 	if !waitKillSet {
 		return err
 	}
@@ -523,7 +566,121 @@ func loadWithRetryOnWaitKillFailure(filt *seccomp.ScmpFilter, waitKillSet bool, 
 	slog.Warn("seccomp: WaitKillable rejected at filter load time; falling back to SIGURG signal mask only",
 		"error", err)
 	if clearErr := filt.SetWaitKill(false); clearErr != nil {
+		slog.Warn("seccomp: SetWaitKill(false) failed; cannot retry without WaitKill",
+			"error", clearErr)
 		return err
 	}
-	return loadFn()
+	start = time.Now()
+	err = loadFn()
+	dur = time.Since(start)
+	if err == nil {
+		slog.Info("seccomp: filter Load succeeded on retry without WaitKill",
+			"attempt", 2, "duration_ms", dur.Milliseconds())
+		return nil
+	}
+	slog.Warn("seccomp: filter Load failed on retry without WaitKill",
+		"attempt", 2, "duration_ms", dur.Milliseconds(),
+		"errno", errnoString(err), "error", err)
+	return err
+}
+
+// errnoString returns a short stable string identifying the errno class
+// of err (e.g., "EFAULT", "EINVAL"), or "non-errno" if err is not a
+// syscall.Errno. Used in structured log fields so log scrapers and
+// engineers can search on the symbolic name rather than the localized
+// "bad address" message.
+func errnoString(err error) string {
+	var en unix.Errno
+	if !errors.As(err, &en) {
+		return "non-errno"
+	}
+	switch en {
+	case unix.EINVAL:
+		return "EINVAL"
+	case unix.EFAULT:
+		return "EFAULT"
+	case unix.EBUSY:
+		return "EBUSY"
+	case unix.EPERM:
+		return "EPERM"
+	case unix.EACCES:
+		return "EACCES"
+	case unix.ENOMEM:
+		return "ENOMEM"
+	case unix.ENOSYS:
+		return "ENOSYS"
+	case unix.ECANCELED:
+		return "ECANCELED"
+	case unix.ESRCH:
+		return "ESRCH"
+	}
+	return fmt.Sprintf("errno=%d", int(en))
+}
+
+// logFilterSnapshot emits an INFO-level structured snapshot of the
+// filter context just before Load() is invoked. Captures libseccomp
+// version + API level, kernel release, the rule-count breakdown by
+// category, and the set of flags about to be applied to the seccomp(2)
+// syscall. On the next devbox reproduction (issue #282 EFAULT) this
+// makes it possible to identify whether the rejection correlates with a
+// specific feature category, the WaitKill flag, libseccomp version, or
+// kernel release — without rebuilding with strace or asking the user
+// for further data collection.
+func logFilterSnapshot(filt *seccomp.ScmpFilter, cfg FilterConfig, waitKillSet bool, ruleCounts map[string]int) {
+	libMaj, libMin, libMicro := seccomp.GetLibraryVersion()
+	libVer := fmt.Sprintf("%d.%d.%d", libMaj, libMin, libMicro)
+
+	apiLevel, apiErr := seccomp.GetAPI()
+	apiStr := fmt.Sprintf("%d", apiLevel)
+	if apiErr != nil {
+		apiStr = "unavailable"
+	}
+
+	var kernel string
+	var utsname unix.Utsname
+	if err := unix.Uname(&utsname); err == nil {
+		kernel = unix.ByteSliceToString(utsname.Release[:])
+	}
+
+	// libseccomp-golang sets SCMP_FLTATR_CTL_TSYNC = 1 in NewFilter() with
+	// no exported getter; it is enabled when the kernel supports it. We
+	// surface "default(NewFilter)" to make it explicit in the snapshot
+	// rather than implying it was independently chosen.
+	tsync := "default(NewFilter)"
+	nnp := "unknown"
+	if v, err := filt.GetNoNewPrivsBit(); err == nil {
+		nnp = fmt.Sprintf("%t", v)
+	}
+	rawRC := "unknown"
+	if v, err := filt.GetRawRC(); err == nil {
+		rawRC = fmt.Sprintf("%t", v)
+	}
+
+	total := 0
+	for _, n := range ruleCounts {
+		total += n
+	}
+
+	slog.Info("seccomp: filter snapshot before Load",
+		"libseccomp_version", libVer,
+		"libseccomp_api", apiStr,
+		"kernel_release", kernel,
+		"attr_tsync", tsync,
+		"attr_no_new_privs", nnp,
+		"attr_raw_rc", rawRC,
+		"attr_wait_killable_recv", waitKillSet,
+		"rules_total", total,
+		"rules_unix_socket", ruleCounts["unix_socket"],
+		"rules_execve", ruleCounts["execve"],
+		"rules_file_monitor", ruleCounts["file_monitor"],
+		"rules_metadata", ruleCounts["metadata"],
+		"rules_blocked_syscalls", ruleCounts["blocked_syscalls"],
+		"rules_blocked_families", ruleCounts["blocked_families"],
+		"rules_io_uring_block", ruleCounts["io_uring_block"],
+		"cfg_unix_socket_enabled", cfg.UnixSocketEnabled,
+		"cfg_execve_enabled", cfg.ExecveEnabled,
+		"cfg_file_monitor_enabled", cfg.FileMonitorEnabled,
+		"cfg_intercept_metadata", cfg.InterceptMetadata,
+		"cfg_block_io_uring", cfg.BlockIOUring,
+	)
 }
