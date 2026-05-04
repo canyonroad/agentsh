@@ -17,11 +17,20 @@ const ptracerLibName = "libagentsh-ptracer.so"
 // This allows the server to use ProcessVMReadv on child processes under Yama
 // ptrace_scope=1, restoring seccomp path resolution for file monitoring.
 //
+// yamaActive gates the work: when Yama is not loaded, PR_SET_PTRACER is a
+// no-op and ProcessVMReadv falls back to standard Unix DAC, so the LD_PRELOAD
+// library is not needed and the function returns silently. This keeps the
+// happy path on non-Yama kernels noise-free (issue #281) while preserving
+// the actionable warning when Yama IS active and the library is missing.
+//
 // The library is searched for in:
 //  1. Same directory as the wrapper binary
 //  2. /usr/lib/agentsh/ (deb/rpm install path)
-func setupPtracerPreload(serverPID int) {
+func setupPtracerPreload(serverPID int, yamaActive bool) {
 	if serverPID <= 0 {
+		return
+	}
+	if !yamaActive {
 		return
 	}
 
