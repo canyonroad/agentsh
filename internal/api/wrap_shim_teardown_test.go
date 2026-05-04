@@ -30,7 +30,7 @@ func TestWrapInit_ShimMode_ListenerExitsAfterOneConnection(t *testing.T) {
 	// without requiring agentsh-unixwrap to be preinstalled on PATH.
 	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
 
-	app, mgr := newTestAppForWrap(t, cfg)
+	app, mgr := newTestAppForWrapWithPermissivePolicy(t, cfg)
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)

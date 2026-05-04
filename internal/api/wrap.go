@@ -116,6 +116,42 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// The handler will be cleaned up when the session ends or the connection closes.
 	ctx := context.Background()
 
+	// Shim mode: pre-check the agent command against policy before issuing
+	// the wrapper. The shim's kernel-install path replaces the existing
+	// `agentsh exec` flow with `wrap-init` + direct wrapper exec, which
+	// bypasses the Exec endpoint's CheckCommand pre-check that surfaces
+	// `command denied by policy` to the user. Without this guard, a denied
+	// command (e.g. `sh -c "shutdown now"`) routes around policy entirely:
+	// the shim invokes the wrapper, the wrapped shell spawns shutdown, and
+	// in-kernel enforcement may or may not catch it depending on whether
+	// it has the necessary privileges in the runtime environment.
+	//
+	// On deny, we return 403 so the shim's ModeAuto branch falls through
+	// to the existing `agentsh exec` path, which has its own CheckCommand
+	// pre-check and emits the user-visible policy denial. ModeOn still
+	// fail-closes via the same path.
+	//
+	// Agent mode (`agentsh wrap`) intentionally retains pre-existing
+	// behavior — it is invoked by an operator with explicit intent and
+	// has its own integration with policy elsewhere.
+	if req.Mode == "shim" {
+		engine := a.policyEngineFor(s)
+		if engine == nil {
+			// No policy engine configured for this session AND no global
+			// engine on the App — fail closed rather than letting the
+			// kernel-install path run without any policy gate. In
+			// production the App is always constructed with a global
+			// engine; reaching this branch means a misconfiguration.
+			return types.WrapInitResponse{}, http.StatusServiceUnavailable,
+				fmt.Errorf("shim wrap-init: no policy engine available for session")
+		}
+		dec := engine.CheckCommand(req.AgentCommand, req.AgentArgs)
+		if dec.PolicyDecision == types.DecisionDeny {
+			return types.WrapInitResponse{}, http.StatusForbidden,
+				fmt.Errorf("command denied by policy (rule=%s)", dec.Rule)
+		}
+	}
+
 	// Windows uses driver-based interception, not seccomp
 	if runtime.GOOS == "windows" {
 		return a.wrapInitWindows(ctx, s, sessionID, req)

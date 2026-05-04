@@ -320,6 +320,141 @@ func TestWrapInit_WrapperNotFound(t *testing.T) {
 	}
 }
 
+// TestWrapInit_ShimMode_PolicyDeny covers the v0.19.1 docker-test
+// regression: when the shim's kernel-install path calls wrap-init for a
+// command the policy denies, the server must return 403 so the shim's
+// ModeAuto branch falls through to the existing `agentsh exec` path
+// (which surfaces "command denied by policy" to the user). Without this
+// pre-check, wrap-init succeeded for denied commands and the wrapper
+// ran without the policy gate firing — regression introduced in #274.
+func TestWrapInit_ShimMode_PolicyDeny(t *testing.T) {
+	cfg := &config.Config{}
+	mgr := session.NewManager(5)
+	store := composite.New(mockEventStore{}, nil)
+	broker := events.NewBroker()
+	engine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []policy.CommandRule{
+			{Name: "block-system-commands", Commands: []string{"shutdown", "reboot"}, Decision: "deny"},
+			{Name: "allow-shells", Commands: []string{"sh", "bash", "sh.real", "bash.real"}, Decision: "allow"},
+		},
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// shim mode + denied inner command via shell-c derivation must return 403.
+	_, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/sh.real",
+		AgentArgs:    []string{"-c", "shutdown now"},
+		Mode:         "shim",
+	})
+	if err == nil {
+		t.Fatal("expected wrap-init to return policy denial for shutdown via shell-c")
+	}
+	if code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", code)
+	}
+	if !strings.Contains(err.Error(), "denied by policy") {
+		t.Errorf("error must surface policy denial; got %q", err.Error())
+	}
+}
+
+// TestWrapInit_ShimMode_PolicyAllow confirms the pre-check does not
+// reject allowed shim invocations. /bin/sh -c "echo hi" must pass the
+// policy gate so wrap-init proceeds normally.
+func TestWrapInit_ShimMode_PolicyAllow(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only beyond the policy pre-check; this test runs the post-check path")
+	}
+	cfg := &config.Config{}
+	// Force wrap-init to fail AFTER the policy pre-check (e.g. wrapper not
+	// found) so we observe the policy gate let us through without inheriting
+	// the platform's full wrapper-launch path.
+	cfg.Sandbox.UnixSockets.WrapperBin = "nonexistent-wrapper-binary-xyz-12345"
+	mgr := session.NewManager(5)
+	store := composite.New(mockEventStore{}, nil)
+	broker := events.NewBroker()
+	engine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []policy.CommandRule{
+			{Name: "allow-safe-commands", Commands: []string{"echo", "sh", "bash", "sh.real", "bash.real"}, Decision: "allow"},
+			{Name: "block-system-commands", Commands: []string{"shutdown"}, Decision: "deny"},
+		},
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/sh.real",
+		AgentArgs:    []string{"-c", "echo hi"},
+		Mode:         "shim",
+	})
+	// wrap-init goes past the policy pre-check, then fails at wrapper
+	// resolution with 503. Policy denial would have produced 403 — ensure
+	// we did NOT short-circuit there.
+	if code == http.StatusForbidden {
+		t.Fatalf("policy pre-check incorrectly denied an allowed command: %v", err)
+	}
+}
+
+// TestWrapInit_AgentMode_PolicyNotChecked verifies the pre-check is
+// scoped to Mode=="shim" only. The agentsh wrap path (Mode=="agent" or
+// empty) retains pre-existing behavior — pre-check would change the
+// semantics of `agentsh wrap` for any operator policy that does not
+// list the agent's outer binary.
+func TestWrapInit_AgentMode_PolicyNotChecked(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only beyond the policy pre-check")
+	}
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.WrapperBin = "nonexistent-wrapper-binary-xyz-12345"
+	mgr := session.NewManager(5)
+	store := composite.New(mockEventStore{}, nil)
+	broker := events.NewBroker()
+	engine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []policy.CommandRule{
+			{Name: "block-system-commands", Commands: []string{"shutdown"}, Decision: "deny"},
+		},
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Same denied command but Mode="" (agent default). Pre-check must NOT fire.
+	_, code, _ := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/sh.real",
+		AgentArgs:    []string{"-c", "shutdown now"},
+	})
+	if code == http.StatusForbidden {
+		t.Fatal("agent-mode wrap-init must not invoke shim-mode policy pre-check")
+	}
+}
+
+
 func TestWrapInit_RejectsNegativeCallerUID(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("negative caller uid validation is Linux-only")

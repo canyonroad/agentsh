@@ -6,8 +6,43 @@ import (
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/pkg/types"
 )
+
+// permissiveTestEngine returns a policy.Engine that allows the bash/sh
+// invocations these wrap-shim tests use, satisfying the shim-mode
+// pre-check added to wrapInitCore so the tests continue to exercise the
+// wrap-init response shape rather than the policy gate.
+func permissiveTestEngine(t *testing.T) *policy.Engine {
+	t.Helper()
+	e, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "permissive-test",
+		CommandRules: []policy.CommandRule{
+			{Name: "allow-test-commands", Commands: []string{"sh", "bash", "sh.real", "bash.real", "echo", "true"}, Decision: "allow"},
+		},
+	}, false, true)
+	if err != nil {
+		t.Fatalf("build permissive policy engine: %v", err)
+	}
+	return e
+}
+
+// newTestAppForWrapWithPermissivePolicy mirrors newTestAppForWrap but
+// installs a permissive policy engine so shim-mode wrap-init's pre-check
+// admits bash/sh test invocations.
+func newTestAppForWrapWithPermissivePolicy(t *testing.T, cfg *config.Config) (*App, *session.Manager) {
+	t.Helper()
+	mgr := session.NewManager(5)
+	store := composite.New(mockEventStore{}, nil)
+	broker := events.NewBroker()
+	app := NewApp(cfg, mgr, store, permissiveTestEngine(t), broker, nil, nil, nil, nil, nil, nil)
+	return app, mgr
+}
 
 // TestWrapInit_ShimMode_PopulatesWrapperBinary verifies that wrap-init with
 // Mode=="shim" returns the same shape of response as agent mode: a populated
@@ -21,7 +56,7 @@ func TestWrapInit_ShimMode_PopulatesWrapperBinary(t *testing.T) {
 	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
 	cfg.Sandbox.UnixSockets.Enabled = func(b bool) *bool { return &b }(true)
 
-	app, mgr := newTestAppForWrap(t, cfg)
+	app, mgr := newTestAppForWrapWithPermissivePolicy(t, cfg)
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -60,7 +95,7 @@ func TestWrapInit_ShimMode_NoFeaturesConfigured(t *testing.T) {
 	// anything" config — the server still hands back a populated wrapper
 	// response, leaving the install decision to the shim.
 
-	app, mgr := newTestAppForWrap(t, cfg)
+	app, mgr := newTestAppForWrapWithPermissivePolicy(t, cfg)
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
