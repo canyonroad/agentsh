@@ -1464,3 +1464,122 @@ func TestMainFilterUsesUserNotify_FamilyErrnoAndKill_NoNotify(t *testing.T) {
 		t.Error("mainFilterUsesUserNotify should return false when all families use errno/kill (kernel-side)")
 	}
 }
+
+// TestWrapInit_AllowExecuteIncludesAgentCommandDir covers the #283
+// regression on Tensorlake (and any environment where the shell-shim is
+// installed): wrap-init must include the parent directory of the
+// AgentCommand in the seccomp wrapper's AllowExecute list, otherwise
+// Landlock denies execve of the renamed real shell (e.g.,
+// /bin/bash.real) because typical policies use bare command names
+// (`commands: [bash, sh]`) and DeriveExecutePathsFromPolicy adds
+// nothing for those.
+//
+// Without this fix, every wrapped command on Tensorlake exits 1 with
+// `resolve command "/bin/bash.real": exec: ... permission denied` —
+// the EACCES surfaces from Go's exec.LookPath after Landlock has been
+// applied to unixwrap's process.
+func TestWrapInit_AllowExecuteIncludesAgentCommandDir(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+	if !capabilities.DetectLandlock().Available {
+		t.Skip("Landlock not available on this host")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	cfg.Landlock.Enabled = true
+
+	app, mgr := newTestAppForWrap(t, cfg)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, _, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/bash.real",
+	})
+	if err != nil {
+		t.Fatalf("wrapInitCore: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(resp.SeccompConfig), &parsed); err != nil {
+		t.Fatalf("unmarshal SeccompConfig: %v\n%s", err, resp.SeccompConfig)
+	}
+
+	rawAllow, _ := parsed["allow_execute"].([]any)
+	allow := make([]string, 0, len(rawAllow))
+	for _, p := range rawAllow {
+		if s, ok := p.(string); ok {
+			allow = append(allow, s)
+		}
+	}
+
+	found := false
+	for _, p := range allow {
+		if p == "/bin" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected /bin in allow_execute, got %v\nfull config: %s", allow, resp.SeccompConfig)
+	}
+}
+
+// TestWrapInit_AllowExecuteSkipsBareCommandName verifies the inverse:
+// when AgentCommand is a bare name (no slash, e.g., "echo"), wrap-init
+// does NOT add anything based on it — there is no parent directory to
+// derive, and resolving via PATH at exec time is the unixwrap caller's
+// responsibility. The list still contains whatever the policy and
+// global config supplied.
+func TestWrapInit_AllowExecuteSkipsBareCommandName(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+	if !capabilities.DetectLandlock().Available {
+		t.Skip("Landlock not available on this host")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	cfg.Landlock.Enabled = true
+
+	app, mgr := newTestAppForWrap(t, cfg)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, _, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "echo",
+	})
+	if err != nil {
+		t.Fatalf("wrapInitCore: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(resp.SeccompConfig), &parsed); err != nil {
+		t.Fatalf("unmarshal SeccompConfig: %v\n%s", err, resp.SeccompConfig)
+	}
+
+	// We don't assert the exact list (it depends on default policy +
+	// landlock config); we just confirm no spurious entry derived from
+	// the bare name was injected. "" or "." would be the most likely
+	// bug shapes if filepath.Dir was applied unguarded.
+	rawAllow, _ := parsed["allow_execute"].([]any)
+	for _, p := range rawAllow {
+		s, ok := p.(string)
+		if !ok {
+			continue
+		}
+		if s == "" || s == "." {
+			t.Errorf("allow_execute should not contain bare-name-derived %q; got list %v", s, rawAllow)
+		}
+	}
+}

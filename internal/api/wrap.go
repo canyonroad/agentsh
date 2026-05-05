@@ -408,6 +408,27 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		ExecveEnabled:       execveEnabled,
 	})
 
+	// Ensure the parent directory of the about-to-be-execed command is
+	// in AllowExecute. Without this, any Landlock-enabled session
+	// blocks the wrap path from invoking shells whose path is not
+	// already covered by a policy command rule with a slash. The
+	// shim's renamed real shells (/bin/bash.real, /bin/sh.real) are
+	// the canonical case (#283 on Tensorlake): typical policies use
+	// bare names (`commands: [bash, sh]`), so
+	// DeriveExecutePathsFromPolicy adds nothing for them, and Landlock
+	// denies execve of /bin/bash.real with EACCES.
+	//
+	// Bare-name AgentCommand values (no slash) are skipped — there is
+	// no parent directory to add, and resolving via PATH at exec time
+	// is the wrapper's responsibility. We also guard against the "/"
+	// and "." dirs that would broaden the allow list to root or cwd.
+	if seccompCfg.LandlockEnabled && strings.ContainsRune(req.AgentCommand, '/') {
+		dir := filepath.Dir(req.AgentCommand)
+		if dir != "" && dir != "." && dir != "/" && !containsString(seccompCfg.AllowExecute, dir) {
+			seccompCfg.AllowExecute = append(seccompCfg.AllowExecute, dir)
+		}
+	}
+
 	cfgJSON, err := json.Marshal(seccompCfg)
 	if err != nil {
 		return types.WrapInitResponse{}, http.StatusInternalServerError, err
@@ -558,6 +579,19 @@ func blockListUsesNotify(block []string, onBlock string) bool {
 		return false
 	}
 	return resolvableBlockListCount(block) > 0
+}
+
+// containsString returns true when s appears in xs. Used by wrapInitCore
+// to dedupe entries appended to AllowExecute (the AgentCommand parent
+// dir might already be present from policy or global config — adding it
+// twice is harmless but noisier in logs and serialized config).
+func containsString(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // blockedFamiliesUsesNotify reports whether any BlockedSocketFamilies entry
