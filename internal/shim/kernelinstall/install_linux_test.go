@@ -70,6 +70,122 @@ func TestInstall_ModeOff_ReturnsSkip(t *testing.T) {
 	}
 }
 
+// ─── Test InheritedFilter: caller already has seccomp filter → ResultSkip ────
+
+// TestInstall_AlreadyFiltered_ReturnsSkip covers the #282 root cause
+// confirmed by the rc1 (commit a4de5e1) diagnostic on Runloop:
+// agentsh CLI spawns unixwrap_1 (installs F1, success); unixwrap_1 execs
+// the user's command which goes through the shell-shim again, and the
+// shim's kernelinstall.Install is called *inside* a process tree that
+// already has F1 inherited via execve. Trying to install F2 on top
+// returns EFAULT on this kernel/runtime. The fix: kernelinstall must
+// detect the unforgeable Seccomp:2 + Seccomp_filters>=1 signal from
+// /proc/self/status and skip wrap-init entirely — the inherited filter
+// is already enforcing for this process and all its descendants, so a
+// second install is both redundant and harmful.
+//
+// We inject seccompFilterCount via a package-level var so the test can
+// simulate the inherited-filter state without forking a real child
+// process with a live filter installed (which would also pollute the
+// Go test runner's seccomp state and break unrelated tests).
+//
+// The httptest handler is registered but should NOT be hit. Reaching
+// it indicates the skip gate fired AFTER wrap-init was contacted, which
+// would still leak server load and side-effects (notify socket creation,
+// event emission) on every nested shim invocation.
+func TestInstall_AlreadyFiltered_ReturnsSkip(t *testing.T) {
+	handler, calls := makeWrapInitHandler(200, types.WrapInitResponse{
+		WrapperBinary: "/usr/bin/agentsh-unixwrap",
+		NotifySocket:  "/tmp/notify.sock",
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	orig := seccompFilterCount
+	seccompFilterCount = func() int { return 1 }
+	t.Cleanup(func() { seccompFilterCount = orig })
+
+	p := baseParams(srv)
+	p.Mode = ModeAuto
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ResultSkip {
+		t.Errorf("expected ResultSkip, got %v (reason=%q)", res.Action, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "already") {
+		t.Errorf("expected reason to mention already-filtered state, got %q", res.Reason)
+	}
+	if *calls != 0 {
+		t.Errorf("expected 0 HTTP calls (skip must happen before wrap-init), got %d", *calls)
+	}
+}
+
+// TestInstall_AlreadyFiltered_ModeOnAlsoSkips documents that inherited-
+// filter detection bypasses ModeOn's fail-closed semantics. ModeOn means
+// "must install or fail" — but if a filter is *already* installed via
+// inheritance, the policy intent is satisfied (the filter is
+// enforcing). Treating this as fail-closed would break the entire
+// nested-shim case for users who set shim_install=on, so we still skip.
+func TestInstall_AlreadyFiltered_ModeOnAlsoSkips(t *testing.T) {
+	handler, calls := makeWrapInitHandler(200, types.WrapInitResponse{
+		WrapperBinary: "/usr/bin/agentsh-unixwrap",
+		NotifySocket:  "/tmp/notify.sock",
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	orig := seccompFilterCount
+	seccompFilterCount = func() int { return 1 }
+	t.Cleanup(func() { seccompFilterCount = orig })
+
+	p := baseParams(srv)
+	p.Mode = ModeOn
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ResultSkip {
+		t.Errorf("ModeOn must still skip when a filter is inherited; got %v", res.Action)
+	}
+	if *calls != 0 {
+		t.Errorf("expected 0 HTTP calls, got %d", *calls)
+	}
+}
+
+// TestInstall_NotFiltered_ProceedsAsBefore guards against a regression
+// where the new gate accidentally fires on a clean process: when
+// seccompFilterCount returns 0 (no inherited filter), the existing
+// wrap-init/relay path must run — exactly the rc1 first-Load case
+// (parent_comm=agentsh, caller_seccomp_state="mode=0 filter_count=0")
+// that the rc1 diagnostic showed succeeding.
+func TestInstall_NotFiltered_ProceedsAsBefore(t *testing.T) {
+	handler, calls := makeWrapInitHandler(200, types.WrapInitResponse{}) // empty resp → ResultSkip via existing path
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	orig := seccompFilterCount
+	seccompFilterCount = func() int { return 0 }
+	t.Cleanup(func() { seccompFilterCount = orig })
+
+	p := baseParams(srv)
+	p.Mode = ModeAuto
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ResultSkip {
+		t.Errorf("expected ResultSkip from empty wrap-init response, got %v", res.Action)
+	}
+	if *calls != 1 {
+		t.Errorf("expected wrap-init to be called when no filter inherited, got %d calls", *calls)
+	}
+}
+
 // ─── Test 2: ModeAuto + server 500 → ResultSkip ─────────────────────────────
 
 func TestInstall_ModeAuto_WrapInitError_Skips(t *testing.T) {

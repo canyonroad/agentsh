@@ -240,25 +240,37 @@ func TestShimInstall_NestedInstallsCompose(t *testing.T) {
 	// once by the inner shim.  This proves the test is exercising filter
 	// stacking, not just exec-deny on the inner shim binary.
 	//
-	// KNOWN LIMITATION: when Landlock ABI v4+ is used, the outer wrapper
-	// applies a network policy that restricts TCP connections in the inner
-	// process.  The inner shim's wrap-init call to the httptest server is
-	// blocked by Landlock TCP restrictions — the inner shim fails closed
-	// (which is the correct security behaviour!) but it means this test can
+	// EXPECTED OUTCOME (after #282 fix landed 2026-05-04): the INNER
+	// shim's `kernelinstall.Install` detects via /proc/self/status that
+	// the calling process already has a filter inherited from the outer
+	// shim and returns ResultSkip *before* calling wrap-init. Stacking
+	// two `SECCOMP_RET_USER_NOTIF` filters returns EFAULT on real-world
+	// kernels (Runloop 6.18.5 + libseccomp 2.6.0 reported in #282) and
+	// is functionally redundant — the inherited outer filter already
+	// enforces for the inner process and its descendants. So `wrapCalls
+	// == 1` is the *correct* count, not a regression.
+	//
+	// KNOWN LIMITATION (pre-#282-fix and orthogonal to it): when
+	// Landlock ABI v4+ is used, the outer wrapper applies a network
+	// policy that restricts TCP connections in the inner process. The
+	// inner shim's wrap-init call to the httptest server is blocked by
+	// Landlock TCP restrictions — the inner shim fails closed (which is
+	// also correct security behaviour) but it means this test can
 	// currently only verify the security guarantee (no leak), not the
 	// install-twice path.
 	//
-	// To fully verify nested install, the test server would need to either:
+	// To force stacking and verify it on kernels that DO support it,
+	// the test server would need to either:
 	//   a) listen on a unix socket (exempted from Landlock TCP restrictions), or
 	//   b) use Landlock network rules that explicitly allowlist the test port.
 	// Neither is trivially achievable with the current httptest infrastructure.
 	wrapCalls := spec.wrapInitCalls.Load()
 	t.Logf("wrap-init call count: %d", wrapCalls)
-	if wrapCalls < 2 {
-		t.Logf("WARNING: expected >= 2 wrap-init calls (outer + inner shim), got %d", wrapCalls)
-		t.Logf("The inner shim's TCP connection to the test server is blocked by the outer")
-		t.Logf("Landlock policy — inner shim fails closed (correct behaviour) but means")
-		t.Logf("this test verifies the security guarantee (no leak) not the install-twice path.")
+	if wrapCalls < 1 {
+		t.Errorf("expected >= 1 wrap-init call (outer shim must always run), got %d", wrapCalls)
+	}
+	if wrapCalls > 1 {
+		t.Logf("note: inner shim also called wrap-init — current run did not exercise the #282 inherited-filter skip (probably no Landlock TCP block AND no inherited filter detected)")
 	}
 
 	t.Logf("PASS: nested shim exited non-zero, sentinel did not appear, wrap-init called %d time(s)", wrapCalls)
