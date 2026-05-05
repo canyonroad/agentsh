@@ -486,16 +486,18 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 		ruleCounts["io_uring_block"] = ioUringRulesAdded
 	}
 
-	// Pre-load diagnostic snapshot. Logged at INFO so it lands in the
-	// wrapper's stderr/log capture even when slog level is Info-default.
-	// On hostile devbox kernels (#282 EFAULT on Runloop+Freestyle) a bare
-	// "install seccomp filter: bad address" tells us nothing about which
-	// rules or flags the kernel rejected — this snapshot lets the next
-	// reproduction pinpoint the exact filter shape that triggered the
-	// rejection without requiring strace/sysdig on the affected VM.
-	logFilterSnapshot(filt, cfg, waitKillSet, ruleCounts)
+	// Pre-load diagnostic snapshot. Logged at DEBUG so it stays out of
+	// stderr captured by integration tests on the success path. The same
+	// fields are embedded inline in the WARN entry on Load failure (via
+	// loadWithRetryOnWaitKillFailure), so a hostile-kernel rejection
+	// (issue #282 EFAULT on Runloop+Freestyle) still lands in stderr
+	// with full context — without polluting the success path that the
+	// docker integration tests on Ubuntu rely on for `tail -n 1`
+	// assertions of the wrapped command's output.
+	snapshot := filterDiagnosticFields(filt, cfg, waitKillSet, ruleCounts)
+	slog.Debug("seccomp: filter snapshot before Load", snapshot...)
 
-	if err := loadWithRetryOnWaitKillFailure(filt, waitKillSet, filt.Load); err != nil {
+	if err := loadWithRetryOnWaitKillFailure(filt, waitKillSet, snapshot, filt.Load); err != nil {
 		return nil, err
 	}
 	fd, err := filt.GetNotifFd()
@@ -542,22 +544,30 @@ func familyToScmpAction(a seccompkg.OnBlockAction) (seccomp.ScmpAction, error) {
 // Each Load() attempt is logged with timing and the resulting errno so a
 // hostile-kernel rejection (issue #282 EFAULT on Runloop+Freestyle) lands
 // in the wrapper's stderr capture with enough detail to point at the
-// failing flag combination.
+// failing flag combination. Success-path lines log at DEBUG so they do
+// not pollute stderr captured by integration tests on the success path
+// — the diagnostic snapshot/timing is still available when the slog
+// level is set to debug. Failure-path lines log at WARN with the full
+// snapshot inline so a single visible line is enough to triage.
+//
+// snapshot is the slice of structured fields produced by
+// filterDiagnosticFields and is included in failure WARN entries.
 //
 // loadFn is injected so tests can simulate Load() failures deterministically.
 // Production call sites pass `filt.Load`.
-func loadWithRetryOnWaitKillFailure(filt *seccomp.ScmpFilter, waitKillSet bool, loadFn func() error) error {
+func loadWithRetryOnWaitKillFailure(filt *seccomp.ScmpFilter, waitKillSet bool, snapshot []any, loadFn func() error) error {
 	start := time.Now()
 	err := loadFn()
 	dur := time.Since(start)
 	if err == nil {
-		slog.Info("seccomp: filter Load succeeded",
+		slog.Debug("seccomp: filter Load succeeded",
 			"attempt", 1, "wait_kill", waitKillSet, "duration_ms", dur.Milliseconds())
 		return nil
 	}
 	slog.Warn("seccomp: filter Load failed",
-		"attempt", 1, "wait_kill", waitKillSet, "duration_ms", dur.Milliseconds(),
-		"errno", errnoString(err), "error", err)
+		appendSnapshot(snapshot,
+			"attempt", 1, "wait_kill", waitKillSet, "duration_ms", dur.Milliseconds(),
+			"errno", errnoString(err), "error", err)...)
 	if !waitKillSet {
 		return err
 	}
@@ -575,14 +585,27 @@ func loadWithRetryOnWaitKillFailure(filt *seccomp.ScmpFilter, waitKillSet bool, 
 	err = loadFn()
 	dur = time.Since(start)
 	if err == nil {
-		slog.Info("seccomp: filter Load succeeded on retry without WaitKill",
+		slog.Debug("seccomp: filter Load succeeded on retry without WaitKill",
 			"attempt", 2, "duration_ms", dur.Milliseconds())
 		return nil
 	}
 	slog.Warn("seccomp: filter Load failed on retry without WaitKill",
-		"attempt", 2, "duration_ms", dur.Milliseconds(),
-		"errno", errnoString(err), "error", err)
+		appendSnapshot(snapshot,
+			"attempt", 2, "duration_ms", dur.Milliseconds(),
+			"errno", errnoString(err), "error", err)...)
 	return err
+}
+
+// appendSnapshot returns a new slice that prepends snapshot's fields to
+// extra, used to embed the pre-Load diagnostic fields inline in a
+// failure-path WARN entry without copying the snapshot at every call
+// site. Returning a fresh slice avoids aliasing the caller's snapshot
+// when several WARN entries fire in the same process (retry path).
+func appendSnapshot(snapshot []any, extra ...any) []any {
+	out := make([]any, 0, len(snapshot)+len(extra))
+	out = append(out, snapshot...)
+	out = append(out, extra...)
+	return out
 }
 
 // errnoString returns a short stable string identifying the errno class
@@ -618,16 +641,23 @@ func errnoString(err error) string {
 	return fmt.Sprintf("errno=%d", int(en))
 }
 
-// logFilterSnapshot emits an INFO-level structured snapshot of the
-// filter context just before Load() is invoked. Captures libseccomp
+// filterDiagnosticFields builds the structured slog field list capturing
+// the filter context state just before Load() is invoked: libseccomp
 // version + API level, kernel release, the rule-count breakdown by
-// category, and the set of flags about to be applied to the seccomp(2)
-// syscall. On the next devbox reproduction (issue #282 EFAULT) this
-// makes it possible to identify whether the rejection correlates with a
-// specific feature category, the WaitKill flag, libseccomp version, or
-// kernel release — without rebuilding with strace or asking the user
-// for further data collection.
-func logFilterSnapshot(filt *seccomp.ScmpFilter, cfg FilterConfig, waitKillSet bool, ruleCounts map[string]int) {
+// category, the set of flags about to be applied to the seccomp(2)
+// syscall, and the calling process's prior seccomp state from
+// /proc/self/status (the unforgeable signal that distinguishes a clean
+// first install from a nested-install on top of an inherited filter,
+// per issue #282).
+//
+// The caller logs the slice at DEBUG just before Load (so the snapshot
+// is available when the user enables debug logging), and embeds it
+// inline in the WARN entry on Load failure (so a single visible line is
+// enough to triage). Returning fields rather than calling slog directly
+// avoids logging at INFO on the success path — which polluted stderr
+// captured by integration tests in v0.19.2-rc1 and broke their `tail
+// -n 1` assertions on the wrapped command's output.
+func filterDiagnosticFields(filt *seccomp.ScmpFilter, cfg FilterConfig, waitKillSet bool, ruleCounts map[string]int) []any {
 	libMaj, libMin, libMicro := seccomp.GetLibraryVersion()
 	libVer := fmt.Sprintf("%d.%d.%d", libMaj, libMin, libMicro)
 
@@ -662,15 +692,6 @@ func logFilterSnapshot(filt *seccomp.ScmpFilter, cfg FilterConfig, waitKillSet b
 		total += n
 	}
 
-	// Pre-install caller seccomp state — the key signal for the #282
-	// stacked-install hypothesis. If this snapshot fires from a process
-	// that already has Seccomp:2 + FilterCount>=1 inherited via execve,
-	// the kernel may reject the about-to-happen Load() with EFAULT (or
-	// the documented EBUSY) because we're stacking another USER_NOTIF
-	// filter on top. Distinguishing the FIRST install (clean state) from
-	// a NESTED install (state already set) is exactly what tells us
-	// whether the failing rc1 reproduction is a stacking issue or a
-	// kernel quirk in the filter content itself.
 	procState := readSelfSeccompState()
 	procStateStr := "unreadable"
 	if procState.Present {
@@ -681,7 +702,7 @@ func logFilterSnapshot(filt *seccomp.ScmpFilter, cfg FilterConfig, waitKillSet b
 	parentComm := readProcComm(ppid)
 	selfComm := readProcComm(pid)
 
-	slog.Info("seccomp: filter snapshot before Load",
+	return []any{
 		"libseccomp_version", libVer,
 		"libseccomp_api", apiStr,
 		"kernel_release", kernel,
@@ -707,5 +728,5 @@ func logFilterSnapshot(filt *seccomp.ScmpFilter, cfg FilterConfig, waitKillSet b
 		"cfg_file_monitor_enabled", cfg.FileMonitorEnabled,
 		"cfg_intercept_metadata", cfg.InterceptMetadata,
 		"cfg_block_io_uring", cfg.BlockIOUring,
-	)
+	}
 }
