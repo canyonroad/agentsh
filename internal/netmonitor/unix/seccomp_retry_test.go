@@ -35,7 +35,7 @@ func TestLoadWithRetryOnWaitKillFailure_RetriesOnWaitKillFailure(t *testing.T) {
 		return nil
 	}
 
-	if err := loadWithRetryOnWaitKillFailure(filt, true, loadFn); err != nil {
+	if err := loadWithRetryOnWaitKillFailure(filt, true, nil, loadFn); err != nil {
 		t.Fatalf("loadWithRetryOnWaitKillFailure: %v", err)
 	}
 	if calls != 2 {
@@ -68,7 +68,7 @@ func TestLoadWithRetryOnWaitKillFailure_NoRetryWhenWaitKillNotSet(t *testing.T) 
 		return origErr
 	}
 
-	err = loadWithRetryOnWaitKillFailure(filt, false, loadFn)
+	err = loadWithRetryOnWaitKillFailure(filt, false, nil, loadFn)
 	if !errors.Is(err, origErr) {
 		t.Fatalf("expected original error to propagate, got %v", err)
 	}
@@ -106,7 +106,7 @@ func TestLoadWithRetryOnWaitKillFailure_NoRetryOnNonEINVAL(t *testing.T) {
 		return unix.EBUSY
 	}
 
-	err = loadWithRetryOnWaitKillFailure(filt, true, loadFn)
+	err = loadWithRetryOnWaitKillFailure(filt, true, nil, loadFn)
 	if !errors.Is(err, unix.EBUSY) {
 		t.Fatalf("expected EBUSY to propagate, got %v", err)
 	}
@@ -143,7 +143,7 @@ func TestLoadWithRetryOnWaitKillFailure_SuccessFirstCall(t *testing.T) {
 		return nil
 	}
 
-	if err := loadWithRetryOnWaitKillFailure(filt, true, loadFn); err != nil {
+	if err := loadWithRetryOnWaitKillFailure(filt, true, nil, loadFn); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if calls != 1 {
