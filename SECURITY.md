@@ -994,6 +994,7 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-05-06 | v0.19.2: shim's kernelinstall path skips wrap-init when an ancestor's seccomp filter is already inherited (`/proc/self/status` `Seccomp_filters:`), avoiding nested-stacking failures masked as `ECANCELED` on Runloop devboxes (#282). Wrap-init now appends `dirname(AgentCommand)` to Landlock `allow_execute` (#283). `agentsh-unixwrap` resolves the command path before installing the seccomp filter so `exec.LookPath` probes are not intercepted by the file-monitor handler (#283 bug B). Seccomp install raw kernel errnos are surfaced via `SCMP_FLTATR_API_SYSRAWRC`; `WAIT_KILLABLE_RECV` retry is gated on `EINVAL` (#285). |
 | 2026-03-04 | Added execve hardening: path canonicalization via EvalSymlinks and transparent command unwrapping with dual evaluation |
 | 2026-02-13 | Added configurable deferred FUSE mounting for snapshot-restore environments |
 | 2026-01-11 | Added signal interception via seccomp user-notify for policy-based signal control (Linux) |

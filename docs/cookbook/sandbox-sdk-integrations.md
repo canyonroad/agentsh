@@ -93,12 +93,16 @@ Install proceeds (relay + exec)
 7. The user's command runs under both filters. The shim waits for the wrapper child
    to exit and propagates its exit code via `os.Exit`.
 
-Nested shim invocations (`bash -c "bash -c ..."`) install at every level. Filter
-stacking up to the kernel's 64-filter limit is allowed and comfortably covers
-realistic nesting depths. There is no portable, unforgeable way to detect "the
-active filter is already ours" (env-var markers are caller-controlled; the
-container's default seccomp profile already sets `Seccomp:2`), so always-install is
-the safe choice.
+Nested shim invocations (`bash -c "bash -c ..."`) used to install at every level
+and rely on filter stacking up to the kernel's 64-filter limit. As of v0.19.2
+(#288), the shim's kernelinstall path consults `/proc/self/status`
+`Seccomp_filters:` and **skips wrap-init when a filter has already been inherited
+from an ancestor** — that count is kernel-maintained and unforgeable from
+userland, unlike env-var markers. The first invocation in a session installs;
+nested shells inherit and short-circuit. This avoids the stacking failure mode
+that surfaced as masked `ECANCELED` (real `EFAULT`) on Runloop devboxes (#282).
+Env-var markers are still not used; the kernel-side filter count is the
+authority.
 
 ## Limitations
 
@@ -134,4 +138,9 @@ the safe choice.
 
 - Issue #267: sandbox-SDK sibling-process-tree enforcement gap
 - Issue #268: shim_install design and implementation tracking
+- Issue #282: nested-shim filter stacking failure on Runloop, fixed by the
+  `/proc/self/status` short-circuit in #288 (v0.19.2)
+- Issue #283: unixwrap pre-resolves the command path before installing the
+  seccomp filter so `exec.LookPath` probes are not intercepted by the
+  file-monitor handler (v0.19.2)
 - Design spec: `docs/superpowers/specs/2026-05-02-shim-kernel-enforcement-design.md`
