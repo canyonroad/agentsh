@@ -68,6 +68,32 @@ func main() {
 		log.Printf("warning: skipped unknown syscalls: %v", skipped)
 	}
 
+	// Pre-resolve the command path BEFORE installing the seccomp filter.
+	// resolveCommandPath calls exec.LookPath which stats the candidate
+	// (newfstatat) and may probe with faccessat2(X_OK). When
+	// InterceptMetadata is enabled the to-be-installed seccomp filter
+	// traps both syscalls via SECCOMP_RET_USER_NOTIF; the file-monitor
+	// handler then asks the policy engine and DENIES paths the policy
+	// has no rule for — including /bin/bash.real (the shim's renamed
+	// real shell), surfacing as
+	//   resolve command "/bin/bash.real": exec: ... permission denied
+	// (#283 bug B). Resolving here, before the filter is installed,
+	// keeps the path-resolution syscalls outside the notify scope.
+	// syscall.Exec at the end is a single execve — that's governed
+	// by the kernel's execve check independently and is filter-gated
+	// only when cfg.ExecveEnabled is true.
+	//
+	// applyArgv0Override is also moved up so the argv slice is fully
+	// computed before any filter setup happens; it only reads an env
+	// var and reshuffles strings, no filesystem I/O, but co-locating
+	// keeps the "all the exec arguments are ready" boundary clear.
+	cmd := os.Args[2]
+	cmdPath, err := resolveCommandPath(cmd)
+	if err != nil {
+		log.Fatalf("resolve command %q: %v", cmd, err)
+	}
+	args := applyArgv0Override(os.Args[2:], os.Getenv("AGENTSH_UNIXWRAP_ARGV0"))
+
 	// Build filter config.
 	onBlock, _ := seccompkg.ParseOnBlock(cfg.OnBlock)
 	filterCfg := unixmon.FilterConfig{
@@ -218,13 +244,11 @@ func main() {
 		blockSIGURG()
 	}
 
-	// Exec the real command.
-	cmd := os.Args[2]
-	cmdPath, err := resolveCommandPath(cmd)
-	if err != nil {
-		log.Fatalf("resolve command %q: %v", cmd, err)
-	}
-	args := applyArgv0Override(os.Args[2:], os.Getenv("AGENTSH_UNIXWRAP_ARGV0"))
+	// Exec the real command. cmdPath and args were pre-resolved at the
+	// top of main(), before the seccomp filter was installed, so
+	// resolveCommandPath's exec.LookPath probes (newfstatat /
+	// faccessat2 — see #283 bug B) do not get intercepted by the
+	// file-monitor notify handler.
 	if err := syscall.Exec(cmdPath, args, os.Environ()); err != nil {
 		log.Fatalf("exec %s failed: %v", cmd, err)
 	}
