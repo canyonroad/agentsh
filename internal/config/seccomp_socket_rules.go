@@ -10,10 +10,14 @@ import (
 const afNetlinkFamily = 16
 
 func ResolveSocketRules(in SandboxSeccompConfig) ([]seccomp.SocketRule, error) {
-	configs, err := effectiveSocketRuleConfigs(in)
+	effective, err := EffectiveSeccompRulesForConfig(in)
 	if err != nil {
 		return nil, err
 	}
+	return resolveSocketRuleConfigs(effective.SocketRules)
+}
+
+func resolveSocketRuleConfigs(configs []SandboxSeccompSocketRuleConfig) ([]seccomp.SocketRule, error) {
 	out := make([]seccomp.SocketRule, 0, len(configs))
 	seen := map[string]struct{}{}
 	for i, e := range configs {
@@ -59,32 +63,6 @@ func ResolveSocketRules(in SandboxSeccompConfig) ([]seccomp.SocketRule, error) {
 			rule.ProtocolName = protoName
 		}
 		out = append(out, rule)
-	}
-	return out, nil
-}
-
-func effectiveSocketRuleConfigs(in SandboxSeccompConfig) ([]SandboxSeccompSocketRuleConfig, error) {
-	out := make([]SandboxSeccompSocketRuleConfig, 0, len(in.SocketRules)+2*len(in.HardeningProfiles))
-	out = append(out, in.SocketRules...)
-	for i, profile := range in.HardeningProfiles {
-		switch profile {
-		case "dirtyfrag-conservative":
-			out = append(out,
-				SandboxSeccompSocketRuleConfig{
-					Name:   "dirtyfrag-conservative-rxrpc",
-					Family: "AF_RXRPC",
-					Action: "log_and_kill",
-				},
-				SandboxSeccompSocketRuleConfig{
-					Name:     "dirtyfrag-conservative-xfrm",
-					Family:   "AF_NETLINK",
-					Protocol: "NETLINK_XFRM",
-					Action:   "log_and_kill",
-				},
-			)
-		default:
-			return nil, fmt.Errorf("hardening_profiles[%d]: unknown profile %q", i, profile)
-		}
 	}
 	return out, nil
 }
