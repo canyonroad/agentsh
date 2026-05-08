@@ -285,3 +285,57 @@ func TestSetupSeccompWrapper_FileMonitorDefaults(t *testing.T) {
 		t.Fatalf("block_io_uring = %v, want true (JSON: %s)", got, seccompJSON)
 	}
 }
+
+func TestSetupSeccompWrapper_PtraceSync_MitigationSetFamilyLog(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("seccomp wrapper only available on Linux")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+
+	app := newTestAppForSeccomp(t, cfg)
+	addTestMitigationSet(t, cfg, "ptrace-sync-family", `
+version: 1
+id: ptrace-sync-family
+seccomp:
+  blocked_socket_families:
+    - family: AF_ALG
+      action: log
+`)
+	cfg.Sandbox.Ptrace.Enabled = true
+	cfg.Sandbox.Ptrace.Trace.Execve = true
+	cfg.Sandbox.Ptrace.Trace.File = false
+	cfg.Sandbox.Ptrace.Trace.Network = false
+	cfg.Sandbox.Ptrace.Trace.Signal = false
+	app.ptraceTracer = struct{}{}
+
+	req := types.ExecRequest{
+		Command: "/bin/echo",
+		Args:    []string{"hello"},
+	}
+
+	result := app.setupSeccompWrapper(req, "test-session", nil)
+	if result == nil || result.extraCfg == nil {
+		t.Fatal("expected non-nil wrapper setup result with extraCfg")
+	}
+	defer func() {
+		if result.extraCfg.notifyParentSock != nil {
+			result.extraCfg.notifyParentSock.Close()
+		}
+		for _, f := range result.extraCfg.extraFiles {
+			if f != nil {
+				f.Close()
+			}
+		}
+	}()
+
+	if !result.extraCfg.ptraceSync {
+		t.Fatal("expected ptrace sync when a mitigation-set socket family uses log")
+	}
+	if got := result.extraCfg.envInject["AGENTSH_PTRACE_SYNC"]; got != "1" {
+		t.Fatalf("AGENTSH_PTRACE_SYNC = %q, want 1", got)
+	}
+}
