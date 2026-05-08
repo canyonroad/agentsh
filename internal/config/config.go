@@ -494,6 +494,8 @@ type SandboxSeccompConfig struct {
 	// (opt-out). Populated via applyDefaults from
 	// seccomp.DefaultBlockedFamilies when nil.
 	BlockedSocketFamilies []SandboxSeccompSocketFamilyConfig `yaml:"blocked_socket_families"`
+	SocketRules           []SandboxSeccompSocketRuleConfig   `yaml:"socket_rules"`
+	HardeningProfiles     []string                           `yaml:"hardening_profiles"`
 }
 
 // SandboxSeccompUnixConfig configures unix socket monitoring via seccomp.
@@ -530,6 +532,14 @@ type SandboxSeccompFileMonitorConfig struct {
 type SandboxSeccompSocketFamilyConfig struct {
 	Family string `yaml:"family"` // AF_* name or numeric string
 	Action string `yaml:"action"` // errno|kill|log|log_and_kill (defaults to errno)
+}
+
+type SandboxSeccompSocketRuleConfig struct {
+	Name     string `yaml:"name"`
+	Family   string `yaml:"family"`
+	Type     string `yaml:"type,omitempty"`
+	Protocol string `yaml:"protocol,omitempty"`
+	Action   string `yaml:"action"`
 }
 
 // FileMonitorBoolWithDefault returns the value of a *bool field, or defaultVal if nil.
@@ -2311,6 +2321,9 @@ func validateConfig(cfg *Config) error {
 				return fmt.Errorf("sandbox.seccomp.blocked_socket_families[%d].action: %q is not valid (allowed: errno, kill, log, log_and_kill)", i, e.Action)
 			}
 		}
+	}
+	if _, err := ResolveSocketRules(cfg.Sandbox.Seccomp); err != nil {
+		return fmt.Errorf("sandbox.seccomp.%w", err)
 	}
 	return nil
 }
