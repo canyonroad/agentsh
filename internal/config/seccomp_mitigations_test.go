@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -25,6 +27,19 @@ func TestEffectiveSeccompRules_BuiltInDirtyFrag(t *testing.T) {
 	require.Equal(t, "AF_NETLINK", eff.SocketRules[1].Family)
 	require.Equal(t, "NETLINK_XFRM", eff.SocketRules[1].Protocol)
 	require.Equal(t, "log_and_kill", eff.SocketRules[1].Action)
+}
+
+func TestEffectiveSeccompRules_IgnoresMitigationDirsForTask2(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dirtyfrag-conservative.yaml"), []byte("not: active\n"), 0o600))
+
+	eff, err := EffectiveSeccompRulesForConfig(SandboxSeccompConfig{
+		MitigationSets: []string{"dirtyfrag-conservative"},
+		MitigationDirs: []string{dir},
+	})
+	require.NoError(t, err)
+	require.Len(t, eff.LoadedMitigations, 1)
+	require.Equal(t, "builtin", eff.LoadedMitigations[0].Source)
 }
 
 func TestResolveSocketRules_BuiltInDirtyFrag(t *testing.T) {

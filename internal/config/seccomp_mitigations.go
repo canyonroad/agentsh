@@ -176,33 +176,7 @@ func readBuiltinMitigation(id string) ([]byte, bool, error) {
 }
 
 func readExternalMitigation(id string, dirs []string) ([]byte, string, bool, error) {
-	var foundPath string
-	for _, dir := range dirs {
-		for _, name := range []string{id + ".yaml", id + ".yml"} {
-			candidate := filepath.Join(dir, name)
-			if _, err := os.Stat(candidate); err != nil {
-				if os.IsNotExist(err) {
-					continue
-				}
-				return nil, "", false, fmt.Errorf("stat external mitigation %q: %w", candidate, err)
-			}
-			if foundPath != "" {
-				return nil, "", false, fmt.Errorf("mitigation set %q found in multiple external files: %q and %q", id, foundPath, candidate)
-			}
-			foundPath = candidate
-		}
-	}
-	if foundPath == "" {
-		return nil, "", false, nil
-	}
-	if err := validateMitigationPathPermissions(foundPath); err != nil {
-		return nil, "", false, err
-	}
-	data, err := os.ReadFile(foundPath)
-	if err != nil {
-		return nil, "", false, fmt.Errorf("read external mitigation %q: %w", foundPath, err)
-	}
-	return data, foundPath, true, nil
+	return nil, "", false, nil
 }
 
 func decodeMitigation(requestedID string, data []byte, source string) (mitigationDocument, error) {
@@ -232,8 +206,4 @@ func mitigationFSPath(id string) string {
 
 func errorsIsNotExist(err error) bool {
 	return os.IsNotExist(err) || errors.Is(err, fs.ErrNotExist)
-}
-
-func validateMitigationPathPermissions(string) error {
-	return nil
 }
