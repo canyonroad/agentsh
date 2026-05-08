@@ -346,7 +346,7 @@ Fields:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `name` | yes | Stable rule name used in audit events; names must be unique after profile expansion |
+| `name` | yes | Stable rule name used in audit events; names must be unique after mitigation sets are expanded |
 | `family` | yes | `AF_*` name or numeric string |
 | `type` | no | `SOCK_*` name or numeric socket type; flags such as `SOCK_CLOEXEC` are masked out before matching |
 | `protocol` | no | Numeric protocol string, or a named `NETLINK_*` protocol when `family: AF_NETLINK` |
@@ -358,6 +358,8 @@ Named `NETLINK_*` protocol values are valid only with `family: AF_NETLINK`. A pr
 
 `sandbox.seccomp.mitigation_sets` loads named mitigation YAML files and expands them into ordinary seccomp rules. agentsh ships built-in mitigations and can also load external mitigation files from opt-in `mitigation_dirs`.
 
+External mitigation IDs are loaded from `<id>.yaml` or `<id>.yml` files in `mitigation_dirs`. Duplicate mitigation IDs across built-in and external sources are rejected.
+
 ```yaml
 sandbox:
   seccomp:
@@ -367,7 +369,7 @@ sandbox:
       - /etc/agentsh/mitigations
 ```
 
-The built-in `dirtyfrag-conservative` set is a conservative mitigation for the Openwall Dirty Frag advisory dated May 7, 2026. It expands to two `socket_rules`: one for `AF_RXRPC`, and one for `AF_NETLINK` with protocol `NETLINK_XFRM`. It does not block all `AF_NETLINK`.
+The built-in `dirtyfrag-conservative` set is a conservative mitigation for the Openwall Dirty Frag advisory dated May 7, 2026. It expands to two `socket_rules`: one for `AF_RXRPC`, and one for `AF_NETLINK` with protocol `NETLINK_XFRM`. Both rules use `action: log_and_kill`, so matching processes are killed and audit events are emitted. It does not block all `AF_NETLINK`.
 
 ### Socket Rule Audit Event
 

@@ -352,7 +352,7 @@ func runDirtyFragSocketRuleHelper(t *testing.T, mode string) {
 
 	if got := filt.SocketRules(); len(got) != 2 {
 		_ = filt.Close()
-		t.Fatalf("dirtyfrag profile socket rules not retained for notify; got %d", len(got))
+		t.Fatalf("dirtyfrag mitigation set socket rules not retained for notify; got %d", len(got))
 	}
 
 	restore := swapPidfdSeams(t,
