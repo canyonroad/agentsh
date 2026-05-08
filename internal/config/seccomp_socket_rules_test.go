@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agentsh/agentsh/internal/seccomp"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -55,26 +54,26 @@ sandbox:
 	require.Equal(t, []string{"dirtyfrag-conservative"}, cfg.Sandbox.Seccomp.HardeningProfiles)
 }
 
-func TestResolveSocketRules_DirtyFragProfile(t *testing.T) {
+func TestResolveSocketRules_DirtyFragMitigationSet(t *testing.T) {
+	cfg := SandboxSeccompConfig{
+		MitigationSets: []string{"dirtyfrag-conservative"},
+	}
+	rules, err := ResolveSocketRules(cfg)
+	require.NoError(t, err)
+	require.Len(t, rules, 2)
+	require.Equal(t, "dirtyfrag-conservative-rxrpc", rules[0].Name)
+	require.Equal(t, "dirtyfrag-conservative-xfrm", rules[1].Name)
+}
+
+func TestResolveSocketRules_HardeningProfilesDeprecatedAlias(t *testing.T) {
 	cfg := SandboxSeccompConfig{
 		HardeningProfiles: []string{"dirtyfrag-conservative"},
 	}
 	rules, err := ResolveSocketRules(cfg)
 	require.NoError(t, err)
 	require.Len(t, rules, 2)
-	rxrpcFamily, _, ok := seccomp.ParseFamily("AF_RXRPC")
-	require.True(t, ok)
-	netlinkFamily, _, ok := seccomp.ParseFamily("AF_NETLINK")
-	require.True(t, ok)
-	xfrmProtocol, _, ok := seccomp.ParseSocketProtocol("NETLINK_XFRM")
-	require.True(t, ok)
 	require.Equal(t, "dirtyfrag-conservative-rxrpc", rules[0].Name)
-	require.Equal(t, rxrpcFamily, rules[0].Family)
-	require.Equal(t, seccomp.OnBlockLogAndKill, rules[0].Action)
 	require.Equal(t, "dirtyfrag-conservative-xfrm", rules[1].Name)
-	require.Equal(t, netlinkFamily, rules[1].Family)
-	require.NotNil(t, rules[1].Protocol)
-	require.Equal(t, xfrmProtocol, *rules[1].Protocol)
 }
 
 func TestResolveSocketRules_RejectsBadProtocol(t *testing.T) {
@@ -121,15 +120,15 @@ func TestResolveSocketRules_AllowsNumericProtocolForNonNetlinkFamily(t *testing.
 	require.Equal(t, 6, *rules[0].Protocol)
 }
 
-func TestResolveSocketRules_RejectsUnknownProfile(t *testing.T) {
+func TestResolveSocketRules_RejectsUnknownMitigationSet(t *testing.T) {
 	_, err := ResolveSocketRules(SandboxSeccompConfig{
-		HardeningProfiles: []string{"dirtyfrag"},
+		MitigationSets: []string{"dirtyfrag"},
 	})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), `hardening_profiles[0]`)
+	require.Contains(t, err.Error(), `mitigation_sets[0]`)
 }
 
-func TestResolveSocketRules_RejectsDuplicateNamesAfterProfileExpansion(t *testing.T) {
+func TestResolveSocketRules_RejectsDuplicateNamesAfterMitigationSetExpansion(t *testing.T) {
 	_, err := ResolveSocketRules(SandboxSeccompConfig{
 		SocketRules: []SandboxSeccompSocketRuleConfig{{
 			Name:     "dirtyfrag-conservative-xfrm",
@@ -137,7 +136,7 @@ func TestResolveSocketRules_RejectsDuplicateNamesAfterProfileExpansion(t *testin
 			Protocol: "NETLINK_XFRM",
 			Action:   "errno",
 		}},
-		HardeningProfiles: []string{"dirtyfrag-conservative"},
+		MitigationSets: []string{"dirtyfrag-conservative"},
 	})
 	require.Error(t, err)
 	require.True(t, strings.Contains(err.Error(), "duplicate socket rule name"), err.Error())

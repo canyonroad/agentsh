@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 
+	"github.com/agentsh/agentsh/internal/seccomp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -88,6 +89,22 @@ func EffectiveSeccompRulesForConfig(in SandboxSeccompConfig) (EffectiveSeccompRu
 		out.LoadedMitigations = append(out.LoadedMitigations, info)
 	}
 	return out, nil
+}
+
+func ResolveEffectiveBlockedFamilies(in SandboxSeccompConfig) ([]seccomp.BlockedFamily, error) {
+	effective, err := EffectiveSeccompRulesForConfig(in)
+	if err != nil {
+		return nil, err
+	}
+	return ResolveBlockedFamilies(effective.BlockedSocketFamilies)
+}
+
+func EffectiveSyscallBlock(in SandboxSeccompConfig) ([]string, string, error) {
+	effective, err := EffectiveSeccompRulesForConfig(in)
+	if err != nil {
+		return nil, "", err
+	}
+	return effective.SyscallBlock, effective.SyscallOnBlock, nil
 }
 
 type requestedMitigationSet struct {

@@ -359,3 +359,106 @@ seccomp:
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "version must be 1")
 }
+
+func TestEffectiveSeccompRules_MergesExternalFamiliesAndSyscalls(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "mixed.yaml"), []byte(`
+version: 1
+id: mixed
+seccomp:
+  blocked_socket_families:
+    - family: AF_ALG
+      action: log
+  syscalls:
+    block:
+      - ptrace
+    on_block: log
+`), 0o600))
+
+	eff, err := EffectiveSeccompRulesForConfig(SandboxSeccompConfig{
+		MitigationSets: []string{"mixed"},
+		MitigationDirs: []string{dir},
+		Syscalls: SandboxSeccompSyscallConfig{
+			Block:   []string{"mount"},
+			OnBlock: "log",
+		},
+		BlockedSocketFamilies: []SandboxSeccompSocketFamilyConfig{{
+			Family: "AF_VSOCK",
+			Action: "errno",
+		}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"mount", "ptrace"}, eff.SyscallBlock)
+	require.Equal(t, "log", eff.SyscallOnBlock)
+	require.Len(t, eff.BlockedSocketFamilies, 2)
+	require.Equal(t, "AF_VSOCK", eff.BlockedSocketFamilies[0].Family)
+	require.Equal(t, "AF_ALG", eff.BlockedSocketFamilies[1].Family)
+}
+
+func TestEffectiveSeccompRules_RejectsSyscallOnBlockConflict(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "conflict.yaml"), []byte(`
+version: 1
+id: conflict
+seccomp:
+  syscalls:
+    block:
+      - ptrace
+    on_block: log_and_kill
+`), 0o600))
+
+	_, err := EffectiveSeccompRulesForConfig(SandboxSeccompConfig{
+		MitigationSets: []string{"conflict"},
+		MitigationDirs: []string{dir},
+		Syscalls: SandboxSeccompSyscallConfig{
+			OnBlock: "errno",
+		},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "conflicts with effective sandbox.seccomp.syscalls.on_block")
+}
+
+func TestResolveEffectiveBlockedFamilies_MitigationSet(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "family.yaml"), []byte(`
+version: 1
+id: family
+seccomp:
+  blocked_socket_families:
+    - family: AF_ALG
+      action: log
+`), 0o600))
+
+	families, err := ResolveEffectiveBlockedFamilies(SandboxSeccompConfig{
+		MitigationSets: []string{"family"},
+		MitigationDirs: []string{dir},
+	})
+	require.NoError(t, err)
+	require.Len(t, families, 1)
+	require.Equal(t, "AF_ALG", families[0].Name)
+	require.Equal(t, seccomp.OnBlockLog, families[0].Action)
+}
+
+func TestEffectiveSyscallBlock_MitigationSet(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "syscalls.yaml"), []byte(`
+version: 1
+id: syscalls
+seccomp:
+  syscalls:
+    block:
+      - ptrace
+`), 0o600))
+
+	block, action, err := EffectiveSyscallBlock(SandboxSeccompConfig{
+		MitigationSets: []string{"syscalls"},
+		MitigationDirs: []string{dir},
+		Syscalls: SandboxSeccompSyscallConfig{
+			Block:   []string{"mount"},
+			OnBlock: "errno",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"mount", "ptrace"}, block)
+	require.Equal(t, "errno", action)
+}

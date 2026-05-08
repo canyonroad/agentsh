@@ -2327,8 +2327,25 @@ func validateConfig(cfg *Config) error {
 			}
 		}
 	}
-	if _, err := ResolveSocketRules(cfg.Sandbox.Seccomp); err != nil {
+	effective, err := EffectiveSeccompRulesForConfig(cfg.Sandbox.Seccomp)
+	if err != nil {
 		return fmt.Errorf("sandbox.seccomp.%w", err)
+	}
+	if _, err := ResolveBlockedFamilies(effective.BlockedSocketFamilies); err != nil {
+		return fmt.Errorf("sandbox.seccomp.%w", err)
+	}
+	if _, err := resolveSocketRuleConfigs(effective.SocketRules); err != nil {
+		return fmt.Errorf("sandbox.seccomp.%w", err)
+	}
+	for _, loaded := range effective.LoadedMitigations {
+		slog.Info("seccomp mitigation loaded",
+			"id", loaded.ID,
+			"source", loaded.Source,
+			"path", loaded.Path,
+			"checksum", loaded.Checksum,
+			"socket_rules", loaded.SocketRules,
+			"blocked_socket_families", loaded.BlockedSocketFamilies,
+			"syscalls", loaded.Syscalls)
 	}
 	return nil
 }
