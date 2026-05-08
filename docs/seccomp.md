@@ -347,7 +347,7 @@ Fields:
 | `family` | yes | `AF_*` name or numeric string |
 | `type` | no | `SOCK_*` name or numeric socket type; flags such as `SOCK_CLOEXEC` are masked out before matching |
 | `protocol` | no | Numeric protocol string, or a named `NETLINK_*` protocol when `family: AF_NETLINK` |
-| `action` | yes | `errno`, `kill`, `log`, or `log_and_kill` |
+| `action` | no | `errno`, `kill`, `log`, or `log_and_kill`; defaults to `errno` when omitted |
 
 Named `NETLINK_*` protocol values are valid only with `family: AF_NETLINK`. A protocol-scoped netlink rule does not block other netlink protocols.
 
