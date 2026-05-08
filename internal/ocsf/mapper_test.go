@@ -35,6 +35,52 @@ func TestMap_UnmappedTypeReturnsErrUnmappedType(t *testing.T) {
 	}
 }
 
+func TestMap_seccomp_socket_rule_blockedFinding(t *testing.T) {
+	m := New()
+	ev := types.Event{
+		ID:        "ev-seccomp-socket-rule-1",
+		Type:      "seccomp_socket_rule_blocked",
+		Timestamp: time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC),
+		PID:       601,
+		Fields: map[string]any{
+			"rule_name":       "dirtyfrag-xfrm",
+			"family_name":     "AF_NETLINK",
+			"family_number":   16,
+			"protocol_name":   "NETLINK_XFRM",
+			"protocol_number": 6,
+			"syscall":         "socket",
+			"syscall_nr":      41,
+			"action":          "log",
+			"outcome":         "denied",
+			"arch":            "amd64",
+			"engine":          "seccomp",
+		},
+	}
+
+	mapped, err := m.Map(ev)
+	if err != nil {
+		t.Fatalf("Map(%q): %v", ev.Type, err)
+	}
+	if mapped.OCSFClassUID != ClassDetectionFinding {
+		t.Fatalf("class uid = %d, want %d", mapped.OCSFClassUID, ClassDetectionFinding)
+	}
+	if mapped.OCSFActivityID != FindingActivityCreate {
+		t.Fatalf("activity id = %d, want %d", mapped.OCSFActivityID, FindingActivityCreate)
+	}
+
+	msg, err := decodePayloadForGolden(mapped.OCSFClassUID, mapped.Payload)
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	finding, ok := msg.(*ocsfpb.DetectionFinding)
+	if !ok {
+		t.Fatalf("mapped payload type = %T, want *DetectionFinding", msg)
+	}
+	if got := finding.GetFindingInfo().GetTypes(); got != "policy_decision" {
+		t.Fatalf("finding type = %q, want policy_decision", got)
+	}
+}
+
 // TestMapDeterministic asserts that for any registered event, mapping
 // 1000 times produces byte-identical Payload. Run on a sample of
 // events covering every class. New event Types added in per-class
@@ -257,6 +303,10 @@ func goldenSampleEvents() []types.Event {
 			Policy: &types.PolicyInfo{Decision: "deny", Rule: "no-curl", Message: "curl is blocked"}},
 		{ID: "ev-seccomp-1", Type: "seccomp_blocked", Timestamp: t0, PID: 601,
 			Policy: &types.PolicyInfo{Decision: "deny", Rule: "syscall-block"}},
+		{ID: "ev-seccomp-socket-rule-1", Type: "seccomp_socket_rule_blocked", Timestamp: t0, PID: 601,
+			Fields: map[string]any{"rule_name": "dirtyfrag-xfrm", "family_name": "AF_NETLINK", "family_number": 16,
+				"protocol_name": "NETLINK_XFRM", "protocol_number": 6, "syscall": "socket",
+				"syscall_nr": 41, "action": "log", "outcome": "denied", "arch": "amd64", "engine": "seccomp"}},
 		{ID: "ev-agent-detect-1", Type: "agent_detected", Timestamp: t0, PID: 602,
 			Policy: &types.PolicyInfo{Decision: "warn", Message: "self-detection succeeded"}},
 		{ID: "ev-taint-created-1", Type: "taint_created", Timestamp: t0, PID: 603},

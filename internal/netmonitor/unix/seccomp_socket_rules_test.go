@@ -4,12 +4,15 @@ package unix
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
 	seccomp "github.com/seccomp/libseccomp-golang"
@@ -18,6 +21,7 @@ import (
 )
 
 const socketRuleHelperEnv = "AGENTSH_TEST_SOCKET_RULE_HELPER"
+const socketRuleHelperNotifyLog = "notify_log"
 
 func TestNotifySocketRules_FiltersNotifyActions(t *testing.T) {
 	rules := []seccompkg.SocketRule{
@@ -183,6 +187,158 @@ func TestInstallSocketRulesConditional_RejectsPartialInstall(t *testing.T) {
 	require.Equal(t, 1, added)
 	require.Empty(t, retained)
 	require.Len(t, recorder.calls, 2)
+}
+
+func TestSeccompSocketRuleBlock_Notify_LogDispatched(t *testing.T) {
+	if os.Getenv(socketRuleHelperEnv) == socketRuleHelperNotifyLog {
+		runSocketRuleHelperNotifyLog(t)
+		return
+	}
+
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify not supported: %v", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+
+	cmd := exec.Command(exe, "-test.run=^TestSeccompSocketRuleBlock_Notify_LogDispatched$", "-test.v")
+	cmd.Env = append(os.Environ(), socketRuleHelperEnv+"="+socketRuleHelperNotifyLog)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	runErr := cmd.Run()
+	combined := out.String()
+
+	if strings.Contains(combined, "SKIP:") {
+		t.Skipf("child skipped: %s", combined)
+	}
+
+	if runErr != nil {
+		lower := strings.ToLower(combined)
+		if strings.Contains(lower, "permission denied") ||
+			strings.Contains(lower, "operation not permitted") ||
+			strings.Contains(lower, "lacks user notify") ||
+			strings.Contains(lower, "skip") {
+			t.Skipf("host cannot install seccomp filter; skipping.\nhelper output:\n%s", combined)
+		}
+		t.Fatalf("helper subprocess failed: %v\noutput:\n%s", runErr, combined)
+	}
+
+	if !strings.Contains(combined, "socket_result=EAFNOSUPPORT") &&
+		!strings.Contains(combined, "socket_result=address family not supported") &&
+		!strings.Contains(combined, "errno=97") {
+		t.Errorf("expected matching socket tuple to return EAFNOSUPPORT; helper output:\n%s", combined)
+	}
+	if !strings.Contains(combined, "audit_event=seccomp_socket_rule_blocked") {
+		t.Errorf("expected seccomp_socket_rule_blocked audit event; helper output:\n%s", combined)
+	}
+	if strings.Contains(combined, "audit_event=seccomp_socket_family_blocked") {
+		t.Errorf("socket family event emitted — family dispatch shadowed socket tuple rule;\nhelper output:\n%s", combined)
+	}
+	if strings.Contains(combined, "audit_event=seccomp_blocked") {
+		t.Errorf("generic blocklist event emitted — generic dispatch shadowed socket tuple rule;\nhelper output:\n%s", combined)
+	}
+}
+
+func runSocketRuleHelperNotifyLog(t *testing.T) {
+	t.Helper()
+
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify not supported: %v", err)
+	}
+
+	typ := int(gounix.SOCK_RAW)
+	protocol := int(gounix.NETLINK_XFRM)
+	rule := seccompkg.SocketRule{
+		Name:         "dirtyfrag-xfrm",
+		Family:       gounix.AF_NETLINK,
+		FamilyName:   "AF_NETLINK",
+		Type:         &typ,
+		TypeName:     "SOCK_RAW",
+		Protocol:     &protocol,
+		ProtocolName: "NETLINK_XFRM",
+		Action:       seccompkg.OnBlockLog,
+	}
+	cfg := FilterConfig{
+		UnixSocketEnabled: false,
+		BlockedSyscalls:   []int{int(gounix.SYS_SOCKET)},
+		OnBlockAction:     seccompkg.OnBlockLog,
+		BlockedFamilies: []seccompkg.BlockedFamily{
+			{Family: gounix.AF_NETLINK, Action: seccompkg.OnBlockLog, Name: "AF_NETLINK"},
+		},
+		SocketRules: []seccompkg.SocketRule{rule},
+	}
+	filt, err := InstallFilterWithConfig(cfg)
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "permission") || strings.Contains(lower, "operation not permitted") {
+			t.Skipf("cannot install seccomp filter (privilege): %v", err)
+		}
+		t.Fatalf("InstallFilterWithConfig: %v", err)
+	}
+	defer filt.Close()
+
+	notifFD := filt.NotifFD()
+	if notifFD < 0 {
+		t.Fatalf("expected valid notify fd; got %d", notifFD)
+	}
+
+	bl := &BlockListConfig{
+		ActionByNr:  filt.BlockListMap(),
+		FamilyByKey: filt.BlockedFamilyMap(),
+		SocketRules: filt.SocketRules(),
+	}
+	if len(bl.SocketRules) == 0 {
+		t.Fatalf("SocketRules is empty; log socket rule should populate it")
+	}
+
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+	emitter := &captureEmitter{fn: func(typ string) {
+		mu.Lock()
+		events = append(events, typ)
+		mu.Unlock()
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	notifyFile := os.NewFile(uintptr(notifFD), "seccomp-notify")
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		ServeNotifyWithExecve(ctx, notifyFile, "test-socket-rule-notify", nil, emitter, nil, nil, bl)
+	}()
+
+	fd, _, errno := gounix.RawSyscall(
+		gounix.SYS_SOCKET,
+		uintptr(gounix.AF_NETLINK),
+		uintptr(gounix.SOCK_RAW|gounix.SOCK_CLOEXEC),
+		uintptr(gounix.NETLINK_XFRM),
+	)
+	if fd != ^uintptr(0) {
+		_ = gounix.Close(int(fd))
+		fmt.Printf("socket_result=OK (expected EAFNOSUPPORT)\n")
+	} else {
+		fmt.Printf("socket_result=%v (errno=%d)\n", errno, int(errno))
+	}
+
+	cancel()
+	select {
+	case <-handlerDone:
+	case <-time.After(2 * time.Second):
+		fmt.Printf("handler did not exit in time\n")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, ev := range events {
+		fmt.Printf("audit_event=%s\n", ev)
+	}
 }
 
 func TestSeccompSocketRuleBlock_ErrnoTuple(t *testing.T) {

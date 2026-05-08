@@ -226,14 +226,23 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		syscallNr := int32(req.Data.Syscall)
 		slog.Debug("ServeNotifyWithExecve: received notification", "session_id", sessID, "syscall_nr", syscallNr, "pid", req.Pid, "count", notifCount)
 
-		// Family dispatch FIRST for socket(2)/socketpair(2) — more specific than
-		// the generic syscall blocklist. If the operator configured both a generic
-		// on_block action for "socket" AND a per-family action for e.g. AF_ALG,
-		// the more-specific family rule must win. We check family before the
-		// generic blocklist only for these two syscalls; all others fall through
-		// to the generic check below unchanged.
-		// nil-safe: FamilyBlockListed returns (_, false) on a nil receiver or empty map.
+		// Socket dispatch order for socket(2)/socketpair(2): tuple rules first,
+		// family rules second, generic syscall block-list third. This preserves
+		// the most-specific configured decision and avoids duplicate events for a
+		// tuple hit when broad AF_NETLINK or generic socket rules are also present.
+		// nil-safe: both lookup methods return (_, false) on nil receivers.
 		if uint32(syscallNr) == uint32(unix.SYS_SOCKET) || uint32(syscallNr) == uint32(unix.SYS_SOCKETPAIR) {
+			if rule, ok := blockList.SocketRuleBlockListed(
+				uint32(req.Data.Syscall),
+				req.Data.Args[0],
+				req.Data.Args[1],
+				req.Data.Args[2],
+			); ok {
+				slog.Debug("ServeNotifyWithExecve: routing to socket-rule handler (pre-family)",
+					"session_id", sessID, "pid", req.Pid, "syscall_nr", syscallNr, "rule", rule.Name)
+				handleSocketRuleBlockNotify(ctx, int(scmpFD), req, rule, sessID, emit)
+				continue
+			}
 			if bf, ok := blockList.FamilyBlockListed(uint32(req.Data.Syscall), req.Data.Args[0]); ok {
 				slog.Debug("ServeNotifyWithExecve: routing to family-block handler (pre-blocklist)",
 					"session_id", sessID, "pid", req.Pid, "syscall_nr", syscallNr, "family", bf.Family)

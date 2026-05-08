@@ -13,12 +13,15 @@ import (
 )
 
 // buildBlockListConfigFor returns the per-session *BlockListConfig derived
-// from Sandbox.Seccomp.Syscalls and Sandbox.Seccomp.BlockedSocketFamilies.
+// from Sandbox.Seccomp.Syscalls, Sandbox.Seccomp.BlockedSocketFamilies, and
+// Sandbox.Seccomp.SocketRules/hardening_profiles.
 // When on_block is errno or kill the seccomp filter handles the action
 // kernel-side and no notify traps fire — an empty config is returned in that
 // case (nil-safe; IsBlockListed returns (_, false)).
 // Socket-family entries with log/log_and_kill actions are always included in
 // FamilyByKey regardless of the syscall on_block setting.
+// Socket tuple rules with log/log_and_kill actions are included in SocketRules
+// for userspace notify dispatch; errno/kill rules are kernel-side.
 //
 // Returns a non-nil *BlockListConfig (wrapped as any so the signature matches
 // the non-Linux stub) so callers can always probe len(ActionByNr) without a
@@ -58,6 +61,20 @@ func (a *App) buildBlockListConfigFor(sessionID string) any {
 				cfg.FamilyByKey[uint64(unix.SYS_SOCKET)<<32|uint64(bf.Family)] = bf
 				cfg.FamilyByKey[uint64(unix.SYS_SOCKETPAIR)<<32|uint64(bf.Family)] = bf
 			}
+		}
+	}
+
+	// Socket tuple block-list: log/log_and_kill rules route through notify.
+	socketRules, err := config.ResolveSocketRules(a.cfg.Sandbox.Seccomp)
+	if err != nil {
+		slog.Warn("blocklist: failed to resolve socket_rules for notify dispatch",
+			"session_id", sessionID, "error", err)
+	} else {
+		for _, rule := range socketRules {
+			if rule.Action != seccompkg.OnBlockLog && rule.Action != seccompkg.OnBlockLogAndKill {
+				continue
+			}
+			cfg.SocketRules = append(cfg.SocketRules, rule)
 		}
 	}
 

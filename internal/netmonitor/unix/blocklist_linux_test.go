@@ -257,6 +257,65 @@ func TestBlockListConfig_IsBlockListed(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestBlockListConfig_SocketRuleBlockListed(t *testing.T) {
+	typ := int(gounix.SOCK_RAW)
+	protocol := int(gounix.NETLINK_XFRM)
+	rule := seccompkg.SocketRule{
+		Name:         "dirtyfrag-xfrm",
+		Family:       gounix.AF_NETLINK,
+		FamilyName:   "AF_NETLINK",
+		Type:         &typ,
+		TypeName:     "SOCK_RAW",
+		Protocol:     &protocol,
+		ProtocolName: "NETLINK_XFRM",
+		Action:       seccompkg.OnBlockLog,
+	}
+
+	var nilCfg *BlockListConfig
+	_, ok := nilCfg.SocketRuleBlockListed(uint32(gounix.SYS_SOCKET), uint64(gounix.AF_NETLINK), uint64(gounix.SOCK_RAW), uint64(gounix.NETLINK_XFRM))
+	require.False(t, ok)
+
+	empty := &BlockListConfig{}
+	_, ok = empty.SocketRuleBlockListed(uint32(gounix.SYS_SOCKET), uint64(gounix.AF_NETLINK), uint64(gounix.SOCK_RAW), uint64(gounix.NETLINK_XFRM))
+	require.False(t, ok)
+
+	cfg := &BlockListConfig{SocketRules: []seccompkg.SocketRule{rule}}
+
+	got, ok := cfg.SocketRuleBlockListed(
+		uint32(gounix.SYS_SOCKET),
+		uint64(gounix.AF_NETLINK),
+		uint64(gounix.SOCK_RAW|gounix.SOCK_CLOEXEC),
+		uint64(gounix.NETLINK_XFRM),
+	)
+	require.True(t, ok, "socket(2) should match by family, masked type, and protocol")
+	require.Equal(t, "dirtyfrag-xfrm", got.Name)
+
+	got, ok = cfg.SocketRuleBlockListed(
+		uint32(gounix.SYS_SOCKETPAIR),
+		uint64(gounix.AF_NETLINK),
+		uint64(gounix.SOCK_RAW|gounix.SOCK_NONBLOCK),
+		uint64(gounix.NETLINK_XFRM),
+	)
+	require.True(t, ok, "socketpair(2) should preserve and match arg2 protocol")
+	require.Equal(t, "dirtyfrag-xfrm", got.Name)
+
+	_, ok = cfg.SocketRuleBlockListed(
+		uint32(gounix.SYS_SOCKETPAIR),
+		uint64(gounix.AF_NETLINK),
+		uint64(gounix.SOCK_RAW),
+		uint64(gounix.NETLINK_AUDIT),
+	)
+	require.False(t, ok, "socketpair(2) must not drop protocol when matching")
+
+	_, ok = cfg.SocketRuleBlockListed(
+		uint32(gounix.SYS_CONNECT),
+		uint64(gounix.AF_NETLINK),
+		uint64(gounix.SOCK_RAW),
+		uint64(gounix.NETLINK_XFRM),
+	)
+	require.False(t, ok, "non socket/socketpair syscalls must not match socket rules")
+}
+
 // TestResolveTGIDFromProc_MainThread verifies that reading /proc/<tid>/status
 // for the test process's own main-thread TID returns its own TGID.
 func TestResolveTGIDFromProc_MainThread(t *testing.T) {
@@ -386,4 +445,64 @@ func TestHandleFamilyBlockNotify_EmitsEngineField(t *testing.T) {
 	require.Equal(t, "AF_ALG", ev.Fields["family_name"])
 	require.Equal(t, "denied", ev.Fields["outcome"])
 	require.Equal(t, string(seccompkg.OnBlockLog), ev.Fields["action"])
+}
+
+func TestHandleSocketRuleBlockNotify_EmitsEventShapeAndEngine(t *testing.T) {
+	restoreValid := swapNotifIDValidFn(t, func(int, uint64) error { return nil })
+	defer restoreValid()
+
+	typ := int(gounix.SOCK_RAW)
+	protocol := int(gounix.NETLINK_XFRM)
+	rule := seccompkg.SocketRule{
+		Name:         "dirtyfrag-xfrm",
+		Family:       gounix.AF_NETLINK,
+		FamilyName:   "AF_NETLINK",
+		Type:         &typ,
+		TypeName:     "SOCK_RAW",
+		Protocol:     &protocol,
+		ProtocolName: "NETLINK_XFRM",
+		Action:       seccompkg.OnBlockLog,
+	}
+	req := &libseccomp.ScmpNotifReq{
+		ID:  84,
+		Pid: 4321,
+		Data: libseccomp.ScmpNotifData{
+			Syscall: libseccomp.ScmpSyscall(gounix.SYS_SOCKETPAIR),
+			Args: []uint64{
+				uint64(gounix.AF_NETLINK),
+				uint64(gounix.SOCK_RAW | gounix.SOCK_CLOEXEC),
+				uint64(gounix.NETLINK_XFRM),
+			},
+		},
+	}
+
+	sink := &blocklistTestEmitter{}
+	handleSocketRuleBlockNotify(context.Background(), -1, req, rule, "sess-socket-rule", sink)
+
+	evts := sink.Events()
+	require.NotEmpty(t, evts, "expected at least one event from handleSocketRuleBlockNotify")
+
+	ev := evts[0]
+	require.Equal(t, "seccomp_socket_rule_blocked", ev.Type)
+	require.Equal(t, "sess-socket-rule", ev.SessionID)
+	require.Equal(t, 4321, ev.PID)
+	require.Equal(t, "seccomp", ev.Source)
+	require.NotEmpty(t, ev.ID)
+	require.False(t, ev.Timestamp.IsZero())
+
+	require.Equal(t, "dirtyfrag-xfrm", ev.Fields["rule_name"])
+	require.Equal(t, "AF_NETLINK", ev.Fields["family_name"])
+	require.Equal(t, gounix.AF_NETLINK, ev.Fields["family_number"])
+	require.Equal(t, "SOCK_RAW", ev.Fields["type_name"])
+	require.Equal(t, gounix.SOCK_RAW, ev.Fields["type_number"])
+	require.Equal(t, "NETLINK_XFRM", ev.Fields["protocol_name"])
+	require.Equal(t, gounix.NETLINK_XFRM, ev.Fields["protocol_number"])
+	require.Equal(t, "socketpair", ev.Fields["syscall"])
+	require.Equal(t, uint32(gounix.SYS_SOCKETPAIR), ev.Fields["syscall_nr"])
+	require.Equal(t, string(seccompkg.OnBlockLog), ev.Fields["action"])
+	require.Equal(t, "denied", ev.Fields["outcome"])
+	require.Equal(t, "seccomp", ev.Fields["engine"])
+	arch, ok := ev.Fields["arch"].(string)
+	require.True(t, ok, "arch should be a string")
+	require.NotEmpty(t, arch)
 }

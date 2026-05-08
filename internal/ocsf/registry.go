@@ -78,12 +78,13 @@ var pendingTypes = map[string]struct{}{
 	"command_policy":                {},
 	"seccomp_blocked":               {},
 	"seccomp_socket_family_blocked": {},
+	"seccomp_socket_rule_blocked":   {},
 	"agent_detected":                {},
-	"taint_created":             {},
-	"taint_propagated":          {},
-	"taint_removed":             {},
-	"mcp_cross_server_blocked":  {},
-	"mcp_tool_call_intercepted": {},
+	"taint_created":                 {},
+	"taint_propagated":              {},
+	"taint_removed":                 {},
+	"mcp_cross_server_blocked":      {},
+	"mcp_tool_call_intercepted":     {},
 	// Application Activity (6005) — Task 22
 	"mcp_tool_called":             {},
 	"mcp_tool_seen":               {},
@@ -134,4 +135,3 @@ func register(t string, m Mapping) {
 	registry[t] = m
 	delete(pendingTypes, t)
 }
-

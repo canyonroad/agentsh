@@ -24,10 +24,13 @@ import (
 // should be taken when a block-listed syscall traps via USER_NOTIF.
 // FamilyByKey maps (syscall_nr<<32)|af_family → BlockedFamily for log/log_and_kill
 // socket-family rules that also route through the notify handler.
+// SocketRules carries notify-mode socket tuple rules that need userspace
+// dispatch after the kernel returns SECCOMP_RET_USER_NOTIF.
 // A nil receiver is treated as an empty configuration.
 type BlockListConfig struct {
 	ActionByNr  map[uint32]seccompkg.OnBlockAction
 	FamilyByKey map[uint64]seccompkg.BlockedFamily
+	SocketRules []seccompkg.SocketRule
 }
 
 // FamilyBlockListed returns the BlockedFamily for the (syscallNr, af_family) pair
@@ -39,6 +42,29 @@ func (c *BlockListConfig) FamilyBlockListed(syscallNr uint32, afFamily uint64) (
 	key := uint64(syscallNr)<<32 | afFamily
 	bf, ok := c.FamilyByKey[key]
 	return bf, ok
+}
+
+// SocketRuleBlockListed returns the first notify-mode socket tuple rule that
+// matches socket(2) or socketpair(2). Nil receiver returns (_, false).
+func (c *BlockListConfig) SocketRuleBlockListed(syscallNr uint32, family, typ, protocol uint64) (seccompkg.SocketRule, bool) {
+	if c == nil || len(c.SocketRules) == 0 {
+		return seccompkg.SocketRule{}, false
+	}
+	switch syscallNr {
+	case uint32(unix.SYS_SOCKET):
+		for _, rule := range c.SocketRules {
+			if rule.MatchesSocket(family, typ, protocol) {
+				return rule, true
+			}
+		}
+	case uint32(unix.SYS_SOCKETPAIR):
+		for _, rule := range c.SocketRules {
+			if rule.MatchesSocketpair(family, typ, protocol) {
+				return rule, true
+			}
+		}
+	}
+	return seccompkg.SocketRule{}, false
 }
 
 // notifIDValidFn is a test seam wrapping seccomp.NotifIDValid so unit tests
@@ -413,5 +439,108 @@ func handleFamilyBlockNotify(
 		}
 		slog.Warn("seccomp family-block: deny response failed",
 			"session_id", sessID, "tid", tid, "family", bf.Name, "error", err)
+	}
+}
+
+// handleSocketRuleBlockNotify processes a seccomp notification for a
+// socket/socketpair call that matched a configured socket tuple rule. It mirrors
+// handleFamilyBlockNotify, emits seccomp_socket_rule_blocked, and denies with
+// EAFNOSUPPORT so callers see the same errno as family-level blocks.
+func handleSocketRuleBlockNotify(
+	ctx context.Context,
+	fd int,
+	req *seccomp.ScmpNotifReq,
+	rule seccompkg.SocketRule,
+	sessID string,
+	emit Emitter,
+) {
+	if req == nil {
+		return
+	}
+
+	if err := notifIDValidFn(fd, req.ID); err != nil {
+		slog.Debug("seccomp socket-rule: notif id no longer valid",
+			"session_id", sessID, "pid", req.Pid, "rule", rule.Name, "error", err)
+		if derr := NotifRespondDeny(fd, req.ID, int32(unix.EAFNOSUPPORT)); derr != nil && !isENOENT(derr) {
+			slog.Warn("seccomp socket-rule: deny response failed after invalid id",
+				"session_id", sessID, "pid", req.Pid, "rule", rule.Name, "error", derr)
+		}
+		return
+	}
+
+	syscallNr := uint32(req.Data.Syscall)
+	scName := resolveSyscallName(syscallNr)
+	tid := int(req.Pid)
+
+	outcome := "denied"
+	if rule.Action == seccompkg.OnBlockLogAndKill {
+		targetPID := tid
+		if tgid, err := resolveTGIDFn(tid); err == nil {
+			targetPID = tgid
+		} else if errors.Is(err, unix.ESRCH) {
+			slog.Debug("seccomp socket-rule: TGID resolution ESRCH (target already exited)",
+				"session_id", sessID, "tid", tid, "rule", rule.Name)
+			targetPID = -1
+		} else {
+			slog.Warn("seccomp socket-rule: TGID resolution failed; falling back to TID",
+				"session_id", sessID, "tid", tid, "rule", rule.Name, "error", err)
+		}
+
+		if targetPID == -1 {
+			outcome = "killed"
+		} else {
+			outcome = attemptKill(fd, req.ID, targetPID, sessID, scName)
+		}
+	}
+
+	if emit != nil {
+		fields := map[string]any{
+			"rule_name":     rule.Name,
+			"family_name":   rule.FamilyName,
+			"family_number": rule.Family,
+			"syscall":       scName,
+			"syscall_nr":    syscallNr,
+			"action":        string(rule.Action),
+			"outcome":       outcome,
+			"arch":          runtime.GOARCH,
+			"engine":        "seccomp",
+		}
+		if rule.Type != nil {
+			fields["type_number"] = *rule.Type
+			if rule.TypeName != "" {
+				fields["type_name"] = rule.TypeName
+			}
+		}
+		if rule.Protocol != nil {
+			fields["protocol_number"] = *rule.Protocol
+			if rule.ProtocolName != "" {
+				fields["protocol_name"] = rule.ProtocolName
+			}
+		}
+		ev := types.Event{
+			ID:        fmt.Sprintf("seccomp-%d-%d", tid, time.Now().UnixNano()),
+			Timestamp: time.Now().UTC(),
+			Type:      "seccomp_socket_rule_blocked",
+			SessionID: sessID,
+			Source:    "seccomp",
+			PID:       tid,
+			Fields:    fields,
+		}
+		if err := emit.AppendEvent(context.Background(), ev); err != nil {
+			slog.Warn("seccomp socket-rule: AppendEvent failed",
+				"session_id", sessID, "tid", tid, "rule", rule.Name, "error", err)
+		}
+		emit.Publish(ev)
+	}
+
+	_ = ctx
+	if err := NotifRespondDeny(fd, req.ID, int32(unix.EAFNOSUPPORT)); err != nil {
+		if isENOENT(err) {
+			slog.Debug("seccomp socket-rule: deny response hit ENOENT (target already gone)",
+				"session_id", sessID, "tid", tid, "rule", rule.Name)
+			return
+		}
+		slog.Warn("seccomp socket-rule: deny response failed",
+			"session_id", sessID, "tid", tid, "rule", rule.Name, "error", err)
 	}
 }
