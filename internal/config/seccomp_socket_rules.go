@@ -7,6 +7,8 @@ import (
 	"github.com/agentsh/agentsh/internal/seccomp"
 )
 
+const afNetlinkFamily = 16
+
 func ResolveSocketRules(in SandboxSeccompConfig) ([]seccomp.SocketRule, error) {
 	configs, err := effectiveSocketRuleConfigs(in)
 	if err != nil {
@@ -49,6 +51,9 @@ func ResolveSocketRules(in SandboxSeccompConfig) ([]seccomp.SocketRule, error) {
 			proto, protoName, ok := seccomp.ParseSocketProtocol(e.Protocol)
 			if !ok {
 				return nil, fmt.Errorf("socket_rules[%d].protocol: %q is not valid", i, e.Protocol)
+			}
+			if strings.HasPrefix(protoName, "NETLINK_") && family != afNetlinkFamily {
+				return nil, fmt.Errorf("socket_rules[%d].protocol: %q requires family AF_NETLINK", i, e.Protocol)
 			}
 			rule.Protocol = &proto
 			rule.ProtocolName = protoName

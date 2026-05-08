@@ -35,13 +35,19 @@ func TestResolveSocketRules_DirtyFragProfile(t *testing.T) {
 	rules, err := ResolveSocketRules(cfg)
 	require.NoError(t, err)
 	require.Len(t, rules, 2)
+	rxrpcFamily, _, ok := seccomp.ParseFamily("AF_RXRPC")
+	require.True(t, ok)
+	netlinkFamily, _, ok := seccomp.ParseFamily("AF_NETLINK")
+	require.True(t, ok)
+	xfrmProtocol, _, ok := seccomp.ParseSocketProtocol("NETLINK_XFRM")
+	require.True(t, ok)
 	require.Equal(t, "dirtyfrag-conservative-rxrpc", rules[0].Name)
-	require.Equal(t, 33, rules[0].Family)
+	require.Equal(t, rxrpcFamily, rules[0].Family)
 	require.Equal(t, seccomp.OnBlockLogAndKill, rules[0].Action)
 	require.Equal(t, "dirtyfrag-conservative-xfrm", rules[1].Name)
-	require.Equal(t, 16, rules[1].Family)
+	require.Equal(t, netlinkFamily, rules[1].Family)
 	require.NotNil(t, rules[1].Protocol)
-	require.Equal(t, 6, *rules[1].Protocol)
+	require.Equal(t, xfrmProtocol, *rules[1].Protocol)
 }
 
 func TestResolveSocketRules_RejectsBadProtocol(t *testing.T) {
@@ -56,6 +62,36 @@ func TestResolveSocketRules_RejectsBadProtocol(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `socket_rules[0].protocol`)
 	require.Contains(t, err.Error(), "NETLINK_XFRMM")
+}
+
+func TestResolveSocketRules_RejectsNetlinkProtocolForNonNetlinkFamily(t *testing.T) {
+	_, err := ResolveSocketRules(SandboxSeccompConfig{
+		SocketRules: []SandboxSeccompSocketRuleConfig{{
+			Name:     "bad-family-protocol",
+			Family:   "AF_INET",
+			Protocol: "NETLINK_XFRM",
+			Action:   "errno",
+		}},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `socket_rules[0].protocol`)
+	require.Contains(t, err.Error(), "NETLINK_XFRM")
+	require.Contains(t, err.Error(), "AF_NETLINK")
+}
+
+func TestResolveSocketRules_AllowsNumericProtocolForNonNetlinkFamily(t *testing.T) {
+	rules, err := ResolveSocketRules(SandboxSeccompConfig{
+		SocketRules: []SandboxSeccompSocketRuleConfig{{
+			Name:     "tcp",
+			Family:   "AF_INET",
+			Protocol: "6",
+			Action:   "errno",
+		}},
+	})
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	require.NotNil(t, rules[0].Protocol)
+	require.Equal(t, 6, *rules[0].Protocol)
 }
 
 func TestResolveSocketRules_RejectsUnknownProfile(t *testing.T) {
