@@ -35,12 +35,12 @@ sandbox:
     mitigation_sets:
       - dirtyfrag-conservative
     mitigation_dirs:
-      - /etc/agentsh/mitigations
+      - admin-mitigations
 `)
 	var cfg Config
 	require.NoError(t, yaml.Unmarshal(data, &cfg))
 	require.Equal(t, []string{"dirtyfrag-conservative"}, cfg.Sandbox.Seccomp.MitigationSets)
-	require.Equal(t, []string{"/etc/agentsh/mitigations"}, cfg.Sandbox.Seccomp.MitigationDirs)
+	require.Equal(t, []string{"admin-mitigations"}, cfg.Sandbox.Seccomp.MitigationDirs)
 }
 
 func TestSandboxSeccompHardeningProfiles_DeprecatedAliasParseYAML(t *testing.T) {
