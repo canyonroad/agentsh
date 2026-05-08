@@ -2,7 +2,7 @@
 
 ## Problem
 
-The Dirty Frag work adds the right low-level primitive for advisory response: protocol-aware `socket_rules` that can block narrow `socket(2)` and `socketpair(2)` tuples. The current `hardening_profiles` implementation does not scale because each advisory becomes another hardcoded Go `switch` case.
+The Dirty Frag work adds the right low-level primitive for advisory response: protocol-aware `socket_rules` that can block narrow `socket(2)` and `socketpair(2)` tuples. Advisory mitigations should be data files, not dedicated Go code paths for each issue.
 
 agentsh needs a generic way to ship and load advisory mitigations while still letting users write explicit low-level rules. The mitigation mechanism should avoid parsing every shipped advisory on startup and should not force users to overblock broad resources such as all `AF_NETLINK` when a narrow protocol rule is enough.
 
@@ -25,7 +25,7 @@ agentsh needs a generic way to ship and load advisory mitigations while still le
 
 ## User Configuration
 
-Replace the advisory-specific `hardening_profiles` field with generic mitigation sets:
+Configure advisory mitigations with generic mitigation sets:
 
 ```yaml
 sandbox:
@@ -41,7 +41,7 @@ sandbox:
 
 `mitigation_dirs` is optional. When omitted, only built-in mitigations are available. External files are trusted local admin config, but they must pass permission checks, schema validation, and semantic rule validation.
 
-For compatibility inside the current branch, `hardening_profiles` can remain as a deprecated alias for `mitigation_sets`. Because this branch has not shipped, the preferred implementation is to rename the public docs and examples to `mitigation_sets` before merge.
+Because this branch has not shipped, no compatibility alias is needed. Stale configs that use the earlier `sandbox.seccomp.hardening_profiles` name should fail fast with an error that points to `sandbox.seccomp.mitigation_sets`.
 
 ## Mitigation YAML Format
 
@@ -154,7 +154,7 @@ The v1 schema leaves room for that extension without baking signature logic into
 
 ## Dirty Frag Built-In
 
-The current hardcoded `dirtyfrag-conservative` profile becomes a built-in YAML mitigation file:
+The Dirty Frag conservative rules ship as a built-in YAML mitigation file:
 
 ```yaml
 version: 1
@@ -193,6 +193,4 @@ Tests should cover:
 
 ## Migration
 
-Because `hardening_profiles` was introduced on the current feature branch and has not shipped, the cleanest path is to rename it to `mitigation_sets` before merge. If compatibility is desired anyway, `hardening_profiles` can remain as a deprecated alias that feeds the same resolver and emits a warning.
-
-Docs and `config.yml` should stop presenting `hardening_profiles` as the preferred interface.
+Because the earlier profile field was introduced only on the current feature branch and has not shipped, there is no public migration burden. Any local branch config that used the old name must be changed to `mitigation_sets`; agentsh should reject the old key instead of silently ignoring it.

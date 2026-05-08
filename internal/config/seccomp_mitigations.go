@@ -114,29 +114,21 @@ type requestedMitigationSet struct {
 }
 
 func requestedMitigationSetIDs(in SandboxSeccompConfig) ([]requestedMitigationSet, error) {
-	requests := make([]requestedMitigationSet, 0, len(in.MitigationSets)+len(in.HardeningProfiles))
+	requests := make([]requestedMitigationSet, 0, len(in.MitigationSets))
 	seen := map[string]struct{}{}
-	for _, source := range []struct {
-		field string
-		vals  []string
-	}{
-		{field: "mitigation_sets", vals: in.MitigationSets},
-		{field: "hardening_profiles", vals: in.HardeningProfiles},
-	} {
-		for i, id := range source.vals {
-			if !mitigationIDPattern.MatchString(id) {
-				return nil, fmt.Errorf("%s[%d]: invalid mitigation set id %q", source.field, i, id)
-			}
-			if _, ok := seen[id]; ok {
-				return nil, fmt.Errorf("duplicate mitigation set %q", id)
-			}
-			seen[id] = struct{}{}
-			requests = append(requests, requestedMitigationSet{
-				field: source.field,
-				index: i,
-				id:    id,
-			})
+	for i, id := range in.MitigationSets {
+		if !mitigationIDPattern.MatchString(id) {
+			return nil, fmt.Errorf("mitigation_sets[%d]: invalid mitigation set id %q", i, id)
 		}
+		if _, ok := seen[id]; ok {
+			return nil, fmt.Errorf("duplicate mitigation set %q", id)
+		}
+		seen[id] = struct{}{}
+		requests = append(requests, requestedMitigationSet{
+			field: "mitigation_sets",
+			index: i,
+			id:    id,
+		})
 	}
 	return requests, nil
 }

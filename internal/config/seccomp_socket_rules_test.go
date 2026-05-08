@@ -42,32 +42,21 @@ sandbox:
 	require.Equal(t, []string{"admin-mitigations"}, cfg.Sandbox.Seccomp.MitigationDirs)
 }
 
-func TestSandboxSeccompHardeningProfiles_DeprecatedAliasParseYAML(t *testing.T) {
-	data := []byte(`
+func TestLoad_RejectsHardeningProfiles(t *testing.T) {
+	_, err := loadFromString(t, `
 sandbox:
   seccomp:
     hardening_profiles:
       - dirtyfrag-conservative
 `)
-	var cfg Config
-	require.NoError(t, yaml.Unmarshal(data, &cfg))
-	require.Equal(t, []string{"dirtyfrag-conservative"}, cfg.Sandbox.Seccomp.HardeningProfiles)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sandbox.seccomp.hardening_profiles has been removed")
+	require.Contains(t, err.Error(), "sandbox.seccomp.mitigation_sets")
 }
 
 func TestResolveSocketRules_DirtyFragMitigationSet(t *testing.T) {
 	cfg := SandboxSeccompConfig{
 		MitigationSets: []string{"dirtyfrag-conservative"},
-	}
-	rules, err := ResolveSocketRules(cfg)
-	require.NoError(t, err)
-	require.Len(t, rules, 2)
-	require.Equal(t, "dirtyfrag-conservative-rxrpc", rules[0].Name)
-	require.Equal(t, "dirtyfrag-conservative-xfrm", rules[1].Name)
-}
-
-func TestResolveSocketRules_HardeningProfilesDeprecatedAlias(t *testing.T) {
-	cfg := SandboxSeccompConfig{
-		HardeningProfiles: []string{"dirtyfrag-conservative"},
 	}
 	rules, err := ResolveSocketRules(cfg)
 	require.NoError(t, err)

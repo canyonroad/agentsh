@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/seccomp"
@@ -71,15 +70,6 @@ func TestEffectiveSeccompRules_RejectsUnknownMitigationSet(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `mitigation_sets[0]`)
 	require.Contains(t, err.Error(), "dirtyfrag")
-}
-
-func TestEffectiveSeccompRules_RejectsDuplicateRequestedDeprecatedAliasMitigationSet(t *testing.T) {
-	_, err := EffectiveSeccompRulesForConfig(SandboxSeccompConfig{
-		MitigationSets:    []string{"dirtyfrag-conservative"},
-		HardeningProfiles: []string{"dirtyfrag-conservative"},
-	})
-	require.Error(t, err)
-	require.True(t, strings.Contains(err.Error(), "duplicate mitigation set"), err.Error())
 }
 
 func TestEffectiveSeccompRules_ExternalMitigation(t *testing.T) {

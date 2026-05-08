@@ -497,10 +497,6 @@ type SandboxSeccompConfig struct {
 	SocketRules           []SandboxSeccompSocketRuleConfig   `yaml:"socket_rules"`
 	MitigationSets        []string                           `yaml:"mitigation_sets"`
 	MitigationDirs        []string                           `yaml:"mitigation_dirs"`
-	// HardeningProfiles is a deprecated alias for MitigationSets. It exists
-	// only so config files written against the Dirty Frag feature branch fail
-	// less abruptly while the public name changes.
-	HardeningProfiles []string `yaml:"hardening_profiles"`
 }
 
 // SandboxSeccompUnixConfig configures unix socket monitoring via seccomp.
@@ -1316,6 +1312,9 @@ func Load(path string) (*Config, error) {
 
 	// Expand environment variables in config content (e.g., $HOME, ${HOME})
 	expanded := os.ExpandEnv(string(b))
+	if err := rejectRemovedConfigKeys([]byte(expanded)); err != nil {
+		return nil, err
+	}
 
 	var cfg Config
 	// Pre-seed ptrace performance defaults before YAML unmarshal.
@@ -1335,6 +1334,46 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+func rejectRemovedConfigKeys(data []byte) error {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if yamlMappingPathExists(&root, "sandbox", "seccomp", "hardening_profiles") {
+		return fmt.Errorf("sandbox.seccomp.hardening_profiles has been removed; use sandbox.seccomp.mitigation_sets")
+	}
+	return nil
+}
+
+func yamlMappingPathExists(node *yaml.Node, path ...string) bool {
+	if node == nil {
+		return false
+	}
+	if node.Kind == yaml.DocumentNode {
+		if len(node.Content) == 0 {
+			return false
+		}
+		node = node.Content[0]
+	}
+	for _, want := range path {
+		if node == nil || node.Kind != yaml.MappingNode {
+			return false
+		}
+		var next *yaml.Node
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == want {
+				next = node.Content[i+1]
+				break
+			}
+		}
+		if next == nil {
+			return false
+		}
+		node = next
+	}
+	return true
+}
+
 // LoadWithSource loads config from path and returns the config along with its source.
 // The source parameter indicates where this config path came from.
 func LoadWithSource(path string, source ConfigSource) (*Config, ConfigSource, error) {
@@ -1345,6 +1384,9 @@ func LoadWithSource(path string, source ConfigSource) (*Config, ConfigSource, er
 
 	// Expand environment variables in config content (e.g., $HOME, ${HOME})
 	expanded := os.ExpandEnv(string(b))
+	if err := rejectRemovedConfigKeys([]byte(expanded)); err != nil {
+		return nil, source, err
+	}
 
 	var cfg Config
 	// Pre-seed ptrace performance defaults before YAML unmarshal (same as Load).
