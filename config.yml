@@ -243,21 +243,12 @@ sandbox:
   seccomp:
     # Linux seccomp-bpf enforcement for syscall, file, and socket filters.
     enabled: false
-    # Enable this profile to apply the conservative Dirty Frag mitigation.
-    # It blocks AF_RXRPC and AF_NETLINK with protocol NETLINK_XFRM only;
-    # it does not block all AF_NETLINK traffic.
-    # hardening_profiles:
+    # Advisory mitigation sets. Built-ins are embedded in agentsh; external
+    # directories are optional and only requested IDs are loaded.
+    # mitigation_sets:
     #   - dirtyfrag-conservative
-    #
-    # Manual equivalent if you do not want to use the profile:
-    # socket_rules:
-    #   - name: dirtyfrag-conservative-rxrpc
-    #     family: AF_RXRPC
-    #     action: log_and_kill
-    #   - name: dirtyfrag-conservative-xfrm
-    #     family: AF_NETLINK
-    #     protocol: NETLINK_XFRM
-    #     action: log_and_kill
+    # mitigation_dirs:
+    #   - /etc/agentsh/mitigations
     # File I/O interception via seccomp-notify.
     # When enabled, seccomp intercepts file syscalls (openat, unlinkat, etc.)
     # and evaluates them against the active policy's file_rules.

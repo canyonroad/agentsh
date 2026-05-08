@@ -330,7 +330,7 @@ func runDirtyFragSocketRuleHelper(t *testing.T, mode string) {
 		t.Skipf("seccomp user-notify not supported: %v", err)
 	}
 
-	rules := dirtyFragProfileSocketRules(t)
+	rules := dirtyFragMitigationSetSocketRules(t)
 	cfg := FilterConfig{
 		UnixSocketEnabled: false,
 		BlockedSyscalls:   []int{int(gounix.SYS_SOCKET), int(gounix.SYS_SOCKETPAIR)},
@@ -423,11 +423,11 @@ func runDirtyFragSocketRuleHelper(t *testing.T, mode string) {
 	printCapturedAuditEvents(emitter.Events())
 }
 
-func dirtyFragProfileSocketRules(t *testing.T) []seccompkg.SocketRule {
+func dirtyFragMitigationSetSocketRules(t *testing.T) []seccompkg.SocketRule {
 	t.Helper()
 
 	rules, err := config.ResolveSocketRules(config.SandboxSeccompConfig{
-		HardeningProfiles: []string{"dirtyfrag-conservative"},
+		MitigationSets: []string{"dirtyfrag-conservative"},
 	})
 	require.NoError(t, err)
 	require.Len(t, rules, 2)

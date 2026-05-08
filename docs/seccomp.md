@@ -47,9 +47,12 @@ sandbox:
       - family: AF_VSOCK
         action: log_and_kill
 
-    # Optional hardening profile for the May 7, 2026 Openwall Dirty Frag advisory.
-    # hardening_profiles:
+    # Advisory mitigation sets. Built-ins are embedded in agentsh; external
+    # directories are optional and only requested IDs are loaded.
+    # mitigation_sets:
     #   - dirtyfrag-conservative
+    # mitigation_dirs:
+    #   - /etc/agentsh/mitigations
 
     # Lower-level socket tuple rules are also available as an alternative.
     # socket_rules:
@@ -351,20 +354,20 @@ Fields:
 
 Named `NETLINK_*` protocol values are valid only with `family: AF_NETLINK`. A protocol-scoped netlink rule does not block other netlink protocols.
 
-### Dirty Frag Conservative Profile
+### Mitigation Sets
 
-`sandbox.seccomp.hardening_profiles` currently supports `dirtyfrag-conservative`, a conservative mitigation for the Openwall Dirty Frag advisory dated May 7, 2026.
+`sandbox.seccomp.mitigation_sets` loads named mitigation YAML files and expands them into ordinary seccomp rules. agentsh ships built-in mitigations and can also load external mitigation files from opt-in `mitigation_dirs`.
 
-The profile expands to these two `socket_rules` entries:
+```yaml
+sandbox:
+  seccomp:
+    mitigation_sets:
+      - dirtyfrag-conservative
+    mitigation_dirs:
+      - /etc/agentsh/mitigations
+```
 
-| Rule | Match | Action |
-|---|---|---|
-| `dirtyfrag-conservative-rxrpc` | `family: AF_RXRPC` only; `type` and `protocol` are intentionally omitted | `log_and_kill` |
-| `dirtyfrag-conservative-xfrm` | `family: AF_NETLINK`, `protocol: NETLINK_XFRM` | `log_and_kill` |
-
-This does **not** block all `AF_NETLINK`. `NETLINK_ROUTE`, `NETLINK_GENERIC`, `NETLINK_AUDIT`, and other netlink protocols remain available unless separately blocked.
-
-Because the profile uses `log_and_kill`, a matching call emits `seccomp_socket_rule_blocked` and kills the offending process.
+The built-in `dirtyfrag-conservative` set is a conservative mitigation for the Openwall Dirty Frag advisory dated May 7, 2026. It expands to two `socket_rules`: one for `AF_RXRPC`, and one for `AF_NETLINK` with protocol `NETLINK_XFRM`. It does not block all `AF_NETLINK`.
 
 ### Socket Rule Audit Event
 

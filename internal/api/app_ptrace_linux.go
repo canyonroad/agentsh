@@ -200,7 +200,7 @@ func resolveFamilyCheckerForPtrace(cfg *config.Config, emit ptrace.FamilyEmitter
 }
 
 // resolveSocketRuleCheckerForPtrace resolves socket tuple rules to install on
-// the ptrace tracer. Returns nil when no raw rules or hardening profile rules
+// the ptrace tracer. Returns nil when no raw rules or mitigation set rules
 // are configured/effective.
 func resolveSocketRuleCheckerForPtrace(cfg *config.Config, emit ptrace.FamilyEmitter) (*ptrace.SocketRuleChecker, error) {
 	rules, err := config.ResolveSocketRules(cfg.Sandbox.Seccomp)

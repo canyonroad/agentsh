@@ -73,7 +73,7 @@ func TestEffectiveSeccompRules_RejectsUnknownMitigationSet(t *testing.T) {
 	require.Contains(t, err.Error(), "dirtyfrag")
 }
 
-func TestEffectiveSeccompRules_RejectsDuplicateRequestedMitigationSet(t *testing.T) {
+func TestEffectiveSeccompRules_RejectsDuplicateRequestedDeprecatedAliasMitigationSet(t *testing.T) {
 	_, err := EffectiveSeccompRulesForConfig(SandboxSeccompConfig{
 		MitigationSets:    []string{"dirtyfrag-conservative"},
 		HardeningProfiles: []string{"dirtyfrag-conservative"},
