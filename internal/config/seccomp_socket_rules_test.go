@@ -28,6 +28,33 @@ sandbox:
 	require.Equal(t, "log_and_kill", cfg.Sandbox.Seccomp.SocketRules[0].Action)
 }
 
+func TestSandboxSeccompMitigationSets_ParseYAML(t *testing.T) {
+	data := []byte(`
+sandbox:
+  seccomp:
+    mitigation_sets:
+      - dirtyfrag-conservative
+    mitigation_dirs:
+      - /etc/agentsh/mitigations
+`)
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal(data, &cfg))
+	require.Equal(t, []string{"dirtyfrag-conservative"}, cfg.Sandbox.Seccomp.MitigationSets)
+	require.Equal(t, []string{"/etc/agentsh/mitigations"}, cfg.Sandbox.Seccomp.MitigationDirs)
+}
+
+func TestSandboxSeccompHardeningProfiles_DeprecatedAliasParseYAML(t *testing.T) {
+	data := []byte(`
+sandbox:
+  seccomp:
+    hardening_profiles:
+      - dirtyfrag-conservative
+`)
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal(data, &cfg))
+	require.Equal(t, []string{"dirtyfrag-conservative"}, cfg.Sandbox.Seccomp.HardeningProfiles)
+}
+
 func TestResolveSocketRules_DirtyFragProfile(t *testing.T) {
 	cfg := SandboxSeccompConfig{
 		HardeningProfiles: []string{"dirtyfrag-conservative"},

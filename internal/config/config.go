@@ -495,7 +495,12 @@ type SandboxSeccompConfig struct {
 	// seccomp.DefaultBlockedFamilies when nil.
 	BlockedSocketFamilies []SandboxSeccompSocketFamilyConfig `yaml:"blocked_socket_families"`
 	SocketRules           []SandboxSeccompSocketRuleConfig   `yaml:"socket_rules"`
-	HardeningProfiles     []string                           `yaml:"hardening_profiles"`
+	MitigationSets        []string                           `yaml:"mitigation_sets"`
+	MitigationDirs        []string                           `yaml:"mitigation_dirs"`
+	// HardeningProfiles is a deprecated alias for MitigationSets. It exists
+	// only so config files written against the Dirty Frag feature branch fail
+	// less abruptly while the public name changes.
+	HardeningProfiles []string `yaml:"hardening_profiles"`
 }
 
 // SandboxSeccompUnixConfig configures unix socket monitoring via seccomp.
