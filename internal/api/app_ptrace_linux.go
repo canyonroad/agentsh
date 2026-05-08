@@ -70,7 +70,7 @@ func (a *App) initPtraceTracer() {
 		slog.Warn("initPtraceTracer: failed to resolve blocked_socket_families; socket-family blocking will not be enforced via ptrace",
 			"error", err)
 	} else {
-		families, _ := config.ResolveBlockedFamilies(a.cfg.Sandbox.Seccomp.BlockedSocketFamilies)
+		families, _ := config.ResolveEffectiveBlockedFamilies(a.cfg.Sandbox.Seccomp)
 		if familyChecker != nil {
 			slog.Info("socket-family blocking: wired FamilyChecker on ptrace tracer",
 				"families", len(families))
@@ -189,7 +189,7 @@ func (a *App) initPtraceTracer() {
 //
 // Extracted as a standalone function for testability.
 func resolveFamilyCheckerForPtrace(cfg *config.Config, emit ptrace.FamilyEmitter) (*ptrace.FamilyChecker, error) {
-	families, err := config.ResolveBlockedFamilies(cfg.Sandbox.Seccomp.BlockedSocketFamilies)
+	families, err := config.ResolveEffectiveBlockedFamilies(cfg.Sandbox.Seccomp)
 	if err != nil {
 		return nil, err
 	}
@@ -226,10 +226,7 @@ func (a *App) closePtraceTracer() {
 // Called from initPtraceTracer when ptrace is disabled, to cover the
 // case where seccomp is also absent.
 func (a *App) warnIfFamiliesOrphan() {
-	if len(a.cfg.Sandbox.Seccomp.BlockedSocketFamilies) == 0 {
-		return
-	}
-	families, err := config.ResolveBlockedFamilies(a.cfg.Sandbox.Seccomp.BlockedSocketFamilies)
+	families, err := config.ResolveEffectiveBlockedFamilies(a.cfg.Sandbox.Seccomp)
 	if err != nil || len(families) == 0 {
 		return
 	}

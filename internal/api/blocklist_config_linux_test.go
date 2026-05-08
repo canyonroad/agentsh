@@ -36,12 +36,12 @@ func TestBuildBlockListConfigFor_SocketRulesNotifyOnly(t *testing.T) {
 	require.Equal(t, seccompkg.OnBlockLogAndKill, bl.SocketRules[1].Action)
 }
 
-func TestBuildBlockListConfigFor_SocketRulesFromHardeningProfile(t *testing.T) {
+func TestBuildBlockListConfigFor_SocketRulesFromMitigationSet(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.Sandbox.Seccomp.HardeningProfiles = []string{"dirtyfrag-conservative"}
+	cfg.Sandbox.Seccomp.MitigationSets = []string{"dirtyfrag-conservative"}
 
 	app := &App{cfg: cfg}
-	bl, ok := app.buildBlockListConfigFor("sess-dirtyfrag-profile").(*unixmon.BlockListConfig)
+	bl, ok := app.buildBlockListConfigFor("sess-dirtyfrag-mitigation").(*unixmon.BlockListConfig)
 	require.True(t, ok)
 	require.NotNil(t, bl)
 
@@ -52,4 +52,39 @@ func TestBuildBlockListConfigFor_SocketRulesFromHardeningProfile(t *testing.T) {
 	require.Equal(t, seccompkg.OnBlockLogAndKill, bl.SocketRules[1].Action)
 	require.NotNil(t, bl.SocketRules[1].Protocol)
 	require.Equal(t, int(gounix.NETLINK_XFRM), *bl.SocketRules[1].Protocol)
+}
+
+func TestBuildBlockListConfigFor_MitigationSetSyscallsAndFamilies(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Sandbox.Seccomp.Syscalls.OnBlock = "log"
+	addTestMitigationSet(t, cfg, "api-blocklist", `
+version: 1
+id: api-blocklist
+seccomp:
+  syscalls:
+    block:
+      - ptrace
+  blocked_socket_families:
+    - family: AF_ALG
+      action: log
+`)
+
+	app := &App{cfg: cfg}
+	bl, ok := app.buildBlockListConfigFor("sess-mitigation-blocklist").(*unixmon.BlockListConfig)
+	require.True(t, ok)
+	require.NotNil(t, bl)
+
+	action, ok := bl.IsBlockListed(uint32(gounix.SYS_PTRACE))
+	require.True(t, ok)
+	require.Equal(t, seccompkg.OnBlockLog, action)
+
+	family, ok := bl.FamilyBlockListed(uint32(gounix.SYS_SOCKET), uint64(gounix.AF_ALG))
+	require.True(t, ok)
+	require.Equal(t, "AF_ALG", family.Name)
+	require.Equal(t, seccompkg.OnBlockLog, family.Action)
+
+	family, ok = bl.FamilyBlockListed(uint32(gounix.SYS_SOCKETPAIR), uint64(gounix.AF_ALG))
+	require.True(t, ok)
+	require.Equal(t, "AF_ALG", family.Name)
+	require.Equal(t, seccompkg.OnBlockLog, family.Action)
 }

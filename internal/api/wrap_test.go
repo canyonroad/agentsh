@@ -19,6 +19,7 @@ import (
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/stretchr/testify/require"
 )
 
 func newTestAppForWrap(t *testing.T, cfg *config.Config) (*App, *session.Manager) {
@@ -28,6 +29,14 @@ func newTestAppForWrap(t *testing.T, cfg *config.Config) (*App, *session.Manager
 	broker := events.NewBroker()
 	app := NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil, nil, nil)
 	return app, mgr
+}
+
+func addTestMitigationSet(t *testing.T, cfg *config.Config, id string, data string) {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, id+".yaml"), []byte(data), 0o600))
+	cfg.Sandbox.Seccomp.MitigationSets = append(cfg.Sandbox.Seccomp.MitigationSets, id)
+	cfg.Sandbox.Seccomp.MitigationDirs = append(cfg.Sandbox.Seccomp.MitigationDirs, dir)
 }
 
 func nonzeroTestUID() int {
@@ -896,6 +905,87 @@ func TestWrapInit_SeccompConfigContent(t *testing.T) {
 	}
 }
 
+func TestWrapInit_SeccompConfigContent_MitigationSetsForwardSocketRules(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	cfg.Sandbox.Seccomp.MitigationSets = []string{"dirtyfrag-conservative"}
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, _, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.SeccompConfig == "" {
+		t.Fatal("expected seccomp config")
+	}
+
+	var parsed seccompWrapperConfig
+	require.NoError(t, json.Unmarshal([]byte(resp.SeccompConfig), &parsed))
+	require.Len(t, parsed.SocketRules, 2)
+	require.Equal(t, "dirtyfrag-conservative-rxrpc", parsed.SocketRules[0].Name)
+	require.Equal(t, "dirtyfrag-conservative-xfrm", parsed.SocketRules[1].Name)
+}
+
+func TestWrapInit_SeccompConfigContent_MitigationSetsForwardSyscallsAndFamilies(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	cfg.Sandbox.Seccomp.Syscalls.OnBlock = "log"
+	addTestMitigationSet(t, cfg, "api-runtime", `
+version: 1
+id: api-runtime
+seccomp:
+  syscalls:
+    block:
+      - ptrace
+  blocked_socket_families:
+    - family: AF_ALG
+      action: log
+`)
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, _, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.SeccompConfig == "" {
+		t.Fatal("expected seccomp config")
+	}
+
+	var parsed seccompWrapperConfig
+	require.NoError(t, json.Unmarshal([]byte(resp.SeccompConfig), &parsed))
+	require.Equal(t, []string{"ptrace"}, parsed.BlockedSyscalls)
+	require.Equal(t, "log", parsed.OnBlock)
+	require.Len(t, parsed.BlockedFamilies, 1)
+	require.Equal(t, "AF_ALG", parsed.BlockedFamilies[0].Name)
+	require.Equal(t, "log", string(parsed.BlockedFamilies[0].Action))
+}
+
 func TestWrapInit_LongTMPDIR_LongSessionID(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("wrap is Linux-only")
@@ -1437,7 +1527,7 @@ func TestMainFilterUsesUserNotify_SocketRuleLog(t *testing.T) {
 	}
 }
 
-func TestMainFilterUsesUserNotify_SocketRuleHardeningProfile(t *testing.T) {
+func TestMainFilterUsesUserNotify_SocketRuleMitigationSet(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("mainFilterUsesUserNotify is Linux-only")
 	}
@@ -1446,10 +1536,57 @@ func TestMainFilterUsesUserNotify_SocketRuleHardeningProfile(t *testing.T) {
 	cfg.Sandbox.Seccomp.UnixSocket.Enabled = false
 	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &disabled
 	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &disabled
-	cfg.Sandbox.Seccomp.HardeningProfiles = []string{"dirtyfrag-conservative"}
+	cfg.Sandbox.Seccomp.MitigationSets = []string{"dirtyfrag-conservative"}
 	app := &App{cfg: cfg}
 	if !app.mainFilterUsesUserNotify(false) {
-		t.Fatal("mainFilterUsesUserNotify should return true when a hardening profile expands to log socket rules")
+		t.Fatal("mainFilterUsesUserNotify should return true when a mitigation set expands to log socket rules")
+	}
+}
+
+func TestMainFilterUsesUserNotify_MitigationSetSyscallLog(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mainFilterUsesUserNotify is Linux-only")
+	}
+	cfg := &config.Config{}
+	disabled := false
+	cfg.Sandbox.Seccomp.UnixSocket.Enabled = false
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &disabled
+	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &disabled
+	cfg.Sandbox.Seccomp.Syscalls.OnBlock = "log"
+	addTestMitigationSet(t, cfg, "notify-syscall", `
+version: 1
+id: notify-syscall
+seccomp:
+  syscalls:
+    block:
+      - ptrace
+`)
+	app := &App{cfg: cfg}
+	if !app.mainFilterUsesUserNotify(false) {
+		t.Fatal("mainFilterUsesUserNotify should return true when a mitigation set adds a log syscall block")
+	}
+}
+
+func TestMainFilterUsesUserNotify_MitigationSetFamilyLog(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mainFilterUsesUserNotify is Linux-only")
+	}
+	cfg := &config.Config{}
+	disabled := false
+	cfg.Sandbox.Seccomp.UnixSocket.Enabled = false
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &disabled
+	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &disabled
+	addTestMitigationSet(t, cfg, "notify-family", `
+version: 1
+id: notify-family
+seccomp:
+  blocked_socket_families:
+    - family: AF_ALG
+      action: log
+`)
+	app := &App{cfg: cfg}
+	if !app.mainFilterUsesUserNotify(false) {
+		t.Fatal("mainFilterUsesUserNotify should return true when a mitigation set adds a log socket family")
 	}
 }
 

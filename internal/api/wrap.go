@@ -558,10 +558,11 @@ func (a *App) mainFilterUsesUserNotify(execveEnabled bool) bool {
 	if config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata, false) {
 		return true
 	}
-	if blockListUsesNotify(a.cfg.Sandbox.Seccomp.Syscalls.Block, a.cfg.Sandbox.Seccomp.Syscalls.OnBlock) {
+	block, onBlock, err := config.EffectiveSyscallBlock(a.cfg.Sandbox.Seccomp)
+	if err == nil && blockListUsesNotify(block, onBlock) {
 		return true
 	}
-	if blockedFamiliesUsesNotify(a.cfg.Sandbox.Seccomp.BlockedSocketFamilies) {
+	if blockedFamiliesUseNotifyForSeccomp(a.cfg.Sandbox.Seccomp) {
 		return true
 	}
 	if seccompSocketRulesUseNotify(a.cfg.Sandbox.Seccomp) {
@@ -604,6 +605,20 @@ func containsString(xs []string, s string) bool {
 func blockedFamiliesUsesNotify(families []config.SandboxSeccompSocketFamilyConfig) bool {
 	for _, f := range families {
 		if f.Action == "log" || f.Action == "log_and_kill" {
+			return true
+		}
+	}
+	return false
+}
+
+func blockedFamiliesUseNotifyForSeccomp(seccompCfg config.SandboxSeccompConfig) bool {
+	families, err := config.ResolveEffectiveBlockedFamilies(seccompCfg)
+	if err != nil {
+		slog.Warn("seccomp: failed to resolve blocked_socket_families; socket family rules will not use user notify", "error", err)
+		return false
+	}
+	for _, f := range families {
+		if f.Action == seccomppkg.OnBlockLog || f.Action == seccomppkg.OnBlockLogAndKill {
 			return true
 		}
 	}
