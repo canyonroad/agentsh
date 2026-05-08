@@ -46,6 +46,20 @@ sandbox:
         action: errno        # errno | kill | log | log_and_kill (default: errno)
       - family: AF_VSOCK
         action: log_and_kill
+
+    # Optional hardening profile for the May 7, 2026 Openwall Dirty Frag advisory.
+    # hardening_profiles:
+    #   - dirtyfrag-conservative
+
+    # Lower-level socket tuple rules are also available as an alternative.
+    # socket_rules:
+    #   - name: dirtyfrag-conservative-rxrpc
+    #     family: AF_RXRPC
+    #     action: log_and_kill
+    #   - name: dirtyfrag-conservative-xfrm
+    #     family: AF_NETLINK
+    #     protocol: NETLINK_XFRM
+    #     action: log_and_kill
 ```
 
 ## Signal Interception
@@ -305,6 +319,81 @@ Config typos fail fast at startup with a clear error:
 sandbox.seccomp.blocked_socket_families[0].family: "AF_ALGOG" is not a valid AF_* name or number
 sandbox.seccomp.blocked_socket_families[1].action: "deny" is not valid (allowed: errno, kill, log, log_and_kill)
 ```
+
+## Socket Tuple Rules
+
+`sandbox.seccomp.socket_rules` blocks specific `socket(2)` and `socketpair(2)` tuples. Both syscalls match the same fields: `family`, optional `type`, and optional `protocol`.
+
+Use this when a mitigation should be narrower than an entire `AF_*` family. The manual syntax is:
+
+```yaml
+sandbox:
+  seccomp:
+    socket_rules:
+      - name: dirtyfrag-conservative-rxrpc
+        family: AF_RXRPC
+        action: log_and_kill
+      - name: dirtyfrag-conservative-xfrm
+        family: AF_NETLINK
+        protocol: NETLINK_XFRM
+        action: log_and_kill
+```
+
+Fields:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | Stable rule name used in audit events; names must be unique after profile expansion |
+| `family` | yes | `AF_*` name or numeric string |
+| `type` | no | `SOCK_*` name or numeric socket type; flags such as `SOCK_CLOEXEC` are masked out before matching |
+| `protocol` | no | Numeric protocol string, or a named `NETLINK_*` protocol when `family: AF_NETLINK` |
+| `action` | yes | `errno`, `kill`, `log`, or `log_and_kill` |
+
+Named `NETLINK_*` protocol values are valid only with `family: AF_NETLINK`. A protocol-scoped netlink rule does not block other netlink protocols.
+
+### Dirty Frag Conservative Profile
+
+`sandbox.seccomp.hardening_profiles` currently supports `dirtyfrag-conservative`, a conservative mitigation for the Openwall Dirty Frag advisory dated May 7, 2026.
+
+The profile expands to these two `socket_rules` entries:
+
+| Rule | Match | Action |
+|---|---|---|
+| `dirtyfrag-conservative-rxrpc` | `family: AF_RXRPC` only; `type` and `protocol` are intentionally omitted | `log_and_kill` |
+| `dirtyfrag-conservative-xfrm` | `family: AF_NETLINK`, `protocol: NETLINK_XFRM` | `log_and_kill` |
+
+This does **not** block all `AF_NETLINK`. `NETLINK_ROUTE`, `NETLINK_GENERIC`, `NETLINK_AUDIT`, and other netlink protocols remain available unless separately blocked.
+
+Because the profile uses `log_and_kill`, a matching call emits `seccomp_socket_rule_blocked` and kills the offending process.
+
+### Socket Rule Audit Event
+
+`log` and `log_and_kill` socket rules emit `seccomp_socket_rule_blocked`; `errno` and `kill` are enforced kernel-side and do not emit an event.
+
+```json
+{
+  "type": "seccomp_socket_rule_blocked",
+  "timestamp": "2026-05-07T18:00:00Z",
+  "session_id": "sess_abc123",
+  "source": "seccomp",
+  "pid": 12345,
+  "fields": {
+    "rule_name": "dirtyfrag-conservative-xfrm",
+    "family_name": "AF_NETLINK",
+    "family_number": 16,
+    "protocol_name": "NETLINK_XFRM",
+    "protocol_number": 6,
+    "syscall": "socket",
+    "syscall_nr": 41,
+    "action": "log_and_kill",
+    "outcome": "killed",
+    "arch": "amd64",
+    "engine": "seccomp"
+  }
+}
+```
+
+`type_name` / `type_number` appear only when the matching rule includes `type`; `protocol_name` / `protocol_number` appear only when it includes `protocol`. Current socket-rule events are emitted by the seccomp engine, so `engine` is `seccomp`.
 
 ## Audit Events
 
