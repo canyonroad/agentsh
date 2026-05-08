@@ -403,7 +403,7 @@ func runDirtyFragSocketRuleHelper(t *testing.T, mode string) {
 
 	switch mode {
 	case socketRuleHelperDirtyFragNetlinkXFRM:
-		fd, _, errno := gounix.RawSyscall(
+		fd, _, errno := gounix.Syscall(
 			gounix.SYS_SOCKET,
 			uintptr(gounix.AF_NETLINK),
 			uintptr(gounix.SOCK_RAW|gounix.SOCK_CLOEXEC),
@@ -411,7 +411,7 @@ func runDirtyFragSocketRuleHelper(t *testing.T, mode string) {
 		)
 		printRawSyscallResult("socket_result", fd, errno)
 	case socketRuleHelperDirtyFragNetlinkRoute:
-		fd, _, errno := gounix.RawSyscall(
+		fd, _, errno := gounix.Syscall(
 			gounix.SYS_SOCKET,
 			uintptr(gounix.AF_NETLINK),
 			uintptr(gounix.SOCK_RAW|gounix.SOCK_CLOEXEC),
@@ -419,7 +419,7 @@ func runDirtyFragSocketRuleHelper(t *testing.T, mode string) {
 		)
 		printRawSyscallResult("socket_result", fd, errno)
 	case socketRuleHelperDirtyFragRXRPC:
-		fd, _, errno := gounix.RawSyscall(
+		fd, _, errno := gounix.Syscall(
 			gounix.SYS_SOCKET,
 			uintptr(gounix.AF_RXRPC),
 			uintptr(gounix.SOCK_DGRAM|gounix.SOCK_CLOEXEC),
@@ -432,7 +432,7 @@ func runDirtyFragSocketRuleHelper(t *testing.T, mode string) {
 		// the end-to-end assertion about protocol arg2 without depending on a
 		// successful host socketpair implementation.
 		var pair [2]int
-		fd, _, errno := gounix.RawSyscall6(
+		fd, _, errno := gounix.Syscall6(
 			gounix.SYS_SOCKETPAIR,
 			uintptr(gounix.AF_NETLINK),
 			uintptr(gounix.SOCK_RAW|gounix.SOCK_CLOEXEC),
