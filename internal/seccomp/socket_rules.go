@@ -3,9 +3,12 @@ package seccomp
 import "strconv"
 
 const (
-	SocketTypeMask         = 0xf
+	// SocketTypeMask isolates the SOCK_* type bits from socket flags.
+	SocketTypeMask = 0xf
+	// SocketTypeFlagNonblock is the SOCK_NONBLOCK type flag.
 	SocketTypeFlagNonblock = 0x800
-	SocketTypeFlagCloexec  = 0x80000
+	// SocketTypeFlagCloexec is the SOCK_CLOEXEC type flag.
+	SocketTypeFlagCloexec = 0x80000
 )
 
 // SocketRule describes a socket or socketpair operation to block.
