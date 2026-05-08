@@ -206,39 +206,8 @@ func TestSeccompSocketRuleBlock_Notify_LogDispatched(t *testing.T) {
 		t.Skipf("seccomp user-notify not supported: %v", err)
 	}
 
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
-	}
-
-	cmd := exec.Command(exe, "-test.run=^TestSeccompSocketRuleBlock_Notify_LogDispatched$", "-test.v")
-	cmd.Env = append(os.Environ(), socketRuleHelperEnv+"="+socketRuleHelperNotifyLog)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	runErr := cmd.Run()
-	combined := out.String()
-
-	if strings.Contains(combined, "SKIP:") {
-		t.Skipf("child skipped: %s", combined)
-	}
-
-	if runErr != nil {
-		lower := strings.ToLower(combined)
-		if strings.Contains(lower, "permission denied") ||
-			strings.Contains(lower, "operation not permitted") ||
-			strings.Contains(lower, "lacks user notify") ||
-			strings.Contains(lower, "skip") {
-			t.Skipf("host cannot install seccomp filter; skipping.\nhelper output:\n%s", combined)
-		}
-		t.Fatalf("helper subprocess failed: %v\noutput:\n%s", runErr, combined)
-	}
-
-	if !strings.Contains(combined, "socket_result=EAFNOSUPPORT") &&
-		!strings.Contains(combined, "socket_result=address family not supported") &&
-		!strings.Contains(combined, "errno=97") {
-		t.Errorf("expected matching socket tuple to return EAFNOSUPPORT; helper output:\n%s", combined)
-	}
+	combined := runSocketRuleHelperSubprocess(t, socketRuleHelperNotifyLog)
+	requireResultEAFNOSUPPORT(t, combined, "socket_result")
 	if !strings.Contains(combined, "audit_event=seccomp_socket_rule_blocked") {
 		t.Errorf("expected seccomp_socket_rule_blocked audit event; helper output:\n%s", combined)
 	}
@@ -684,7 +653,7 @@ func runSocketRuleHelperNotifyLog(t *testing.T) {
 		ServeNotifyWithExecve(ctx, notifyFile, "test-socket-rule-notify", nil, emitter, nil, nil, bl)
 	}()
 
-	fd, _, errno := gounix.RawSyscall(
+	fd, _, errno := gounix.Syscall(
 		gounix.SYS_SOCKET,
 		uintptr(gounix.AF_NETLINK),
 		uintptr(gounix.SOCK_RAW|gounix.SOCK_CLOEXEC),
