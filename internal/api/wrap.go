@@ -563,6 +563,9 @@ func (a *App) mainFilterUsesUserNotify(execveEnabled bool) bool {
 	if blockedFamiliesUsesNotify(a.cfg.Sandbox.Seccomp.BlockedSocketFamilies) {
 		return true
 	}
+	if socketRulesUsesNotify(a.cfg.Sandbox.Seccomp.SocketRules) {
+		return true
+	}
 	return false
 }
 
@@ -600,6 +603,15 @@ func containsString(xs []string, s string) bool {
 func blockedFamiliesUsesNotify(families []config.SandboxSeccompSocketFamilyConfig) bool {
 	for _, f := range families {
 		if f.Action == "log" || f.Action == "log_and_kill" {
+			return true
+		}
+	}
+	return false
+}
+
+func socketRulesUsesNotify(rules []config.SandboxSeccompSocketRuleConfig) bool {
+	for _, r := range rules {
+		if r.Action == "log" || r.Action == "log_and_kill" {
 			return true
 		}
 	}
@@ -754,4 +766,3 @@ func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketP
 	slog.Info("wrap: received signal fd", "session_id", sessionID, "fd", signalFD.Fd())
 	startSignalHandlerForWrap(ctx, signalFD, sessionID, a, s)
 }
-

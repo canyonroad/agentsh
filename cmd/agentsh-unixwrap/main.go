@@ -104,6 +104,7 @@ func main() {
 		BlockIOUring:       cfg.BlockIOUring,
 		BlockedSyscalls:    blockedNrs,
 		BlockedFamilies:    cfg.BlockedFamilies,
+		SocketRules:        cfg.SocketRules,
 		OnBlockAction:      onBlock,
 	}
 

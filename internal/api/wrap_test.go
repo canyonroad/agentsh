@@ -608,7 +608,6 @@ func TestWrapInit_AgentMode_PolicyNotChecked(t *testing.T) {
 	}
 }
 
-
 func TestWrapInit_RejectsNegativeCallerUID(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("negative caller uid validation is Linux-only")
@@ -1392,6 +1391,49 @@ func TestBlockedFamiliesUsesNotify(t *testing.T) {
 				t.Errorf("blockedFamiliesUsesNotify(%v) = %v, want %v", tc.families, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSocketRulesUsesNotify(t *testing.T) {
+	cases := []struct {
+		name  string
+		rules []config.SandboxSeccompSocketRuleConfig
+		want  bool
+	}{
+		{name: "empty", rules: nil, want: false},
+		{name: "errno", rules: []config.SandboxSeccompSocketRuleConfig{{Name: "x", Family: "AF_RXRPC", Action: "errno"}}, want: false},
+		{name: "kill", rules: []config.SandboxSeccompSocketRuleConfig{{Name: "x", Family: "AF_RXRPC", Action: "kill"}}, want: false},
+		{name: "log", rules: []config.SandboxSeccompSocketRuleConfig{{Name: "x", Family: "AF_RXRPC", Action: "log"}}, want: true},
+		{name: "log_and_kill", rules: []config.SandboxSeccompSocketRuleConfig{{Name: "x", Family: "AF_RXRPC", Action: "log_and_kill"}}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := socketRulesUsesNotify(tc.rules)
+			if got != tc.want {
+				t.Fatalf("socketRulesUsesNotify() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMainFilterUsesUserNotify_SocketRuleLog(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mainFilterUsesUserNotify is Linux-only")
+	}
+	cfg := &config.Config{}
+	disabled := false
+	cfg.Sandbox.Seccomp.UnixSocket.Enabled = false
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &disabled
+	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &disabled
+	cfg.Sandbox.Seccomp.SocketRules = []config.SandboxSeccompSocketRuleConfig{{
+		Name:     "dirtyfrag-xfrm",
+		Family:   "AF_NETLINK",
+		Protocol: "NETLINK_XFRM",
+		Action:   "log",
+	}}
+	app := &App{cfg: cfg}
+	if !app.mainFilterUsesUserNotify(false) {
+		t.Fatal("mainFilterUsesUserNotify should return true when a socket rule uses log")
 	}
 }
 

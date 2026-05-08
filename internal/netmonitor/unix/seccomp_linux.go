@@ -239,6 +239,7 @@ type FilterConfig struct {
 	BlockIOUring       bool  // io_uring_setup/enter/register → EPERM
 	BlockedSyscalls    []int // syscall numbers to block; action controlled by OnBlockAction
 	BlockedFamilies    []seccompkg.BlockedFamily
+	SocketRules        []seccompkg.SocketRule
 	OnBlockAction      seccompkg.OnBlockAction
 }
 

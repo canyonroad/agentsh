@@ -19,6 +19,7 @@ type seccompWrapperConfig struct {
 	FileMonitorEnabled  bool                      `json:"file_monitor_enabled"`
 	BlockedSyscalls     []string                  `json:"blocked_syscalls"`
 	BlockedFamilies     []seccompkg.BlockedFamily `json:"blocked_families,omitempty"`
+	SocketRules         []seccompkg.SocketRule    `json:"socket_rules,omitempty"`
 	OnBlock             string                    `json:"on_block,omitempty"`
 
 	// File monitor sub-options
@@ -66,6 +67,12 @@ func (a *App) buildSeccompWrapperConfig(s *session.Session, p seccompWrapperPara
 		} else {
 			seccompCfg.BlockedFamilies = families
 		}
+	}
+
+	if rules, err := config.ResolveSocketRules(a.cfg.Sandbox.Seccomp); err != nil {
+		slog.Warn("seccomp: failed to resolve socket_rules; socket rules will not be blocked", "error", err)
+	} else {
+		seccompCfg.SocketRules = rules
 	}
 
 	fmDefault := config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE, false)

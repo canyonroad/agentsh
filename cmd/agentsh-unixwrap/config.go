@@ -18,6 +18,7 @@ type WrapperConfig struct {
 	FileMonitorEnabled  bool                      `json:"file_monitor_enabled"`
 	BlockedSyscalls     []string                  `json:"blocked_syscalls"`
 	BlockedFamilies     []seccompkg.BlockedFamily `json:"blocked_families,omitempty"`
+	SocketRules         []seccompkg.SocketRule    `json:"socket_rules,omitempty"`
 	OnBlock             string                    `json:"on_block,omitempty"`
 
 	InterceptMetadata bool `json:"intercept_metadata,omitempty"`
