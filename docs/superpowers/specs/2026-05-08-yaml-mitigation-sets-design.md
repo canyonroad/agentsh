@@ -77,6 +77,8 @@ The first version supports:
 
 Unknown YAML fields are errors. Empty mitigation files are errors because they create a false sense of protection.
 
+The existing syscall block primitive has one `on_block` action for the whole effective syscall block list. A mitigation that adds `seccomp.syscalls.block` can omit `on_block` to use the effective `sandbox.seccomp.syscalls.on_block`, or can set `on_block` only when it matches that effective action. A mismatch is a config error. Per-syscall actions are out of scope for v1.
+
 ## File Resolution
 
 Mitigation IDs must match:
@@ -120,7 +122,7 @@ User-authored rules and selected mitigations are merged into one effective secco
 3. Final duplicate rule names are rejected.
 4. For seccomp install ordering, narrow `socket_rules` continue to install before broad socket family rules.
 
-There is no implicit action override in v1. Mitigation files choose their own actions. Users who need a different action can copy the YAML into an external directory under a new ID and select that ID.
+There is no implicit action override in v1. Mitigation files choose their own actions for primitives that already carry per-rule actions, such as `socket_rules` and `blocked_socket_families`. Syscall blocks use the single existing effective `syscalls.on_block` action. Users who need a different mitigation action can copy the YAML into an external directory under a new ID and select that ID.
 
 ## Observability
 
