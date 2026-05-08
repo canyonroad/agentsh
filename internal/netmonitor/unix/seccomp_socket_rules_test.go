@@ -13,8 +13,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
+	"github.com/agentsh/agentsh/internal/config"
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
+	"github.com/agentsh/agentsh/pkg/types"
 	seccomp "github.com/seccomp/libseccomp-golang"
 	"github.com/stretchr/testify/require"
 	gounix "golang.org/x/sys/unix"
@@ -22,6 +25,10 @@ import (
 
 const socketRuleHelperEnv = "AGENTSH_TEST_SOCKET_RULE_HELPER"
 const socketRuleHelperNotifyLog = "notify_log"
+const socketRuleHelperDirtyFragNetlinkXFRM = "dirtyfrag_netlink_xfrm"
+const socketRuleHelperDirtyFragNetlinkRoute = "dirtyfrag_netlink_route"
+const socketRuleHelperDirtyFragRXRPC = "dirtyfrag_rxrpc"
+const socketRuleHelperDirtyFragSocketpairXFRM = "dirtyfrag_socketpair_xfrm"
 
 func TestNotifySocketRules_FiltersNotifyActions(t *testing.T) {
 	rules := []seccompkg.SocketRule{
@@ -240,6 +247,369 @@ func TestSeccompSocketRuleBlock_Notify_LogDispatched(t *testing.T) {
 	}
 	if strings.Contains(combined, "audit_event=seccomp_blocked") {
 		t.Errorf("generic blocklist event emitted — generic dispatch shadowed socket tuple rule;\nhelper output:\n%s", combined)
+	}
+}
+
+func TestDirtyFragNetlinkXFRM_ProfileLogAndKillSeccompSocketRule(t *testing.T) {
+	if os.Getenv(socketRuleHelperEnv) == socketRuleHelperDirtyFragNetlinkXFRM {
+		runDirtyFragSocketRuleHelper(t, socketRuleHelperDirtyFragNetlinkXFRM)
+		return
+	}
+
+	combined := runSocketRuleHelperSubprocess(t, socketRuleHelperDirtyFragNetlinkXFRM)
+	requireResultEAFNOSUPPORT(t, combined, "socket_result")
+	require.Contains(t, combined, "audit_event=seccomp_socket_rule_blocked")
+	require.Contains(t, combined, "audit_rule=dirtyfrag-conservative-xfrm")
+	require.Contains(t, combined, "audit_action=log_and_kill")
+	require.Contains(t, combined, "audit_protocol=NETLINK_XFRM")
+	require.NotContains(t, combined, "audit_event=seccomp_socket_family_blocked")
+	require.NotContains(t, combined, "audit_event=seccomp_blocked")
+}
+
+func TestDirtyFragNetlinkRoute_DoesNotDispatchSocketRule(t *testing.T) {
+	if os.Getenv(socketRuleHelperEnv) == socketRuleHelperDirtyFragNetlinkRoute {
+		runDirtyFragSocketRuleHelper(t, socketRuleHelperDirtyFragNetlinkRoute)
+		return
+	}
+
+	combined := runSocketRuleHelperSubprocess(t, socketRuleHelperDirtyFragNetlinkRoute)
+	require.Contains(t, combined, "socket_result=")
+	require.NotContains(t, combined, "audit_event=seccomp_socket_rule_blocked")
+	require.NotContains(t, combined, "audit_rule=dirtyfrag-conservative-xfrm")
+}
+
+func TestDirtyFragRXRPC_ProfileFamilyOnlyRuleDispatchesAsSocketRule(t *testing.T) {
+	if os.Getenv(socketRuleHelperEnv) == socketRuleHelperDirtyFragRXRPC {
+		runDirtyFragSocketRuleHelper(t, socketRuleHelperDirtyFragRXRPC)
+		return
+	}
+
+	combined := runSocketRuleHelperSubprocess(t, socketRuleHelperDirtyFragRXRPC)
+	requireResultEAFNOSUPPORT(t, combined, "socket_result")
+	require.Contains(t, combined, "audit_event=seccomp_socket_rule_blocked")
+	require.Contains(t, combined, "audit_rule=dirtyfrag-conservative-rxrpc")
+	require.Contains(t, combined, "audit_action=log_and_kill")
+	require.Contains(t, combined, "audit_family=AF_RXRPC")
+	require.NotContains(t, combined, "audit_event=seccomp_socket_family_blocked")
+	require.NotContains(t, combined, "audit_event=seccomp_blocked")
+}
+
+func TestDirtyFragSocketpairNetlinkXFRM_ProfileProtocolRule(t *testing.T) {
+	if os.Getenv(socketRuleHelperEnv) == socketRuleHelperDirtyFragSocketpairXFRM {
+		runDirtyFragSocketRuleHelper(t, socketRuleHelperDirtyFragSocketpairXFRM)
+		return
+	}
+
+	combined := runSocketRuleHelperSubprocess(t, socketRuleHelperDirtyFragSocketpairXFRM)
+	requireResultEAFNOSUPPORT(t, combined, "socketpair_result")
+	require.Contains(t, combined, "audit_event=seccomp_socket_rule_blocked")
+	require.Contains(t, combined, "audit_rule=dirtyfrag-conservative-xfrm")
+	require.Contains(t, combined, "audit_protocol=NETLINK_XFRM")
+	require.Contains(t, combined, "audit_syscall=socketpair")
+	require.NotContains(t, combined, "audit_event=seccomp_socket_family_blocked")
+	require.NotContains(t, combined, "audit_event=seccomp_blocked")
+}
+
+func runSocketRuleHelperSubprocess(t *testing.T, mode string) string {
+	t.Helper()
+
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify not supported: %v", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^"+t.Name()+"$", "-test.v")
+	cmd.Env = append(os.Environ(), socketRuleHelperEnv+"="+mode)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	runErr := cmd.Run()
+	combined := out.String()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("helper subprocess timed out\noutput:\n%s", combined)
+	}
+	if strings.Contains(combined, "SKIP:") {
+		t.Skipf("child skipped: %s", combined)
+	}
+	if runErr != nil {
+		lower := strings.ToLower(combined)
+		if strings.Contains(lower, "permission denied") ||
+			strings.Contains(lower, "operation not permitted") ||
+			strings.Contains(lower, "lacks user notify") ||
+			strings.Contains(lower, "notification ioctl blocked") ||
+			strings.Contains(lower, "skip") {
+			t.Skipf("host cannot run seccomp notify helper; skipping.\nhelper output:\n%s", combined)
+		}
+		t.Fatalf("helper subprocess failed: %v\noutput:\n%s", runErr, combined)
+	}
+
+	return combined
+}
+
+func runDirtyFragSocketRuleHelper(t *testing.T, mode string) {
+	t.Helper()
+
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify not supported: %v", err)
+	}
+
+	rules := dirtyFragProfileSocketRules(t)
+	cfg := FilterConfig{
+		UnixSocketEnabled: false,
+		BlockedSyscalls:   []int{int(gounix.SYS_SOCKET), int(gounix.SYS_SOCKETPAIR)},
+		OnBlockAction:     seccompkg.OnBlockLog,
+		BlockedFamilies: []seccompkg.BlockedFamily{
+			{Family: gounix.AF_NETLINK, Action: seccompkg.OnBlockLog, Name: "AF_NETLINK"},
+			{Family: gounix.AF_RXRPC, Action: seccompkg.OnBlockLog, Name: "AF_RXRPC"},
+		},
+		SocketRules: rules,
+	}
+	filt, err := InstallFilterWithConfig(cfg)
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "permission") || strings.Contains(lower, "operation not permitted") {
+			t.Skipf("cannot install seccomp filter (privilege): %v", err)
+		}
+		t.Fatalf("InstallFilterWithConfig: %v", err)
+	}
+
+	if got := filt.SocketRules(); len(got) != 2 {
+		_ = filt.Close()
+		t.Fatalf("dirtyfrag profile socket rules not retained for notify; got %d", len(got))
+	}
+
+	restore := swapPidfdSeams(t,
+		func(pid int) (int, error) { return openDevNullFD(t), nil },
+		func(pidfd int, sig gounix.Signal) error { return nil },
+	)
+	defer restore()
+
+	emitter := &captureEventsEmitter{}
+	bl := &BlockListConfig{
+		ActionByNr:  filt.BlockListMap(),
+		FamilyByKey: filt.BlockedFamilyMap(),
+		SocketRules: filt.SocketRules(),
+	}
+	stopNotify := startSocketRuleNotifyHelper(t, filt, bl, emitter)
+	defer stopNotify()
+
+	switch mode {
+	case socketRuleHelperDirtyFragNetlinkXFRM:
+		fd, _, errno := gounix.RawSyscall(
+			gounix.SYS_SOCKET,
+			uintptr(gounix.AF_NETLINK),
+			uintptr(gounix.SOCK_RAW|gounix.SOCK_CLOEXEC),
+			uintptr(gounix.NETLINK_XFRM),
+		)
+		printRawSyscallResult("socket_result", fd, errno)
+	case socketRuleHelperDirtyFragNetlinkRoute:
+		fd, _, errno := gounix.RawSyscall(
+			gounix.SYS_SOCKET,
+			uintptr(gounix.AF_NETLINK),
+			uintptr(gounix.SOCK_RAW|gounix.SOCK_CLOEXEC),
+			uintptr(gounix.NETLINK_ROUTE),
+		)
+		printRawSyscallResult("socket_result", fd, errno)
+	case socketRuleHelperDirtyFragRXRPC:
+		fd, _, errno := gounix.RawSyscall(
+			gounix.SYS_SOCKET,
+			uintptr(gounix.AF_RXRPC),
+			uintptr(gounix.SOCK_DGRAM|gounix.SOCK_CLOEXEC),
+			0,
+		)
+		printRawSyscallResult("socket_result", fd, errno)
+	case socketRuleHelperDirtyFragSocketpairXFRM:
+		// Linux does not create AF_NETLINK socketpairs, but seccomp evaluates
+		// the syscall arguments before the kernel rejects the family. This keeps
+		// the end-to-end assertion about protocol arg2 without depending on a
+		// successful host socketpair implementation.
+		var pair [2]int
+		fd, _, errno := gounix.RawSyscall6(
+			gounix.SYS_SOCKETPAIR,
+			uintptr(gounix.AF_NETLINK),
+			uintptr(gounix.SOCK_RAW|gounix.SOCK_CLOEXEC),
+			uintptr(gounix.NETLINK_XFRM),
+			uintptr(unsafe.Pointer(&pair[0])),
+			0,
+			0,
+		)
+		if fd != ^uintptr(0) {
+			_ = gounix.Close(pair[0])
+			_ = gounix.Close(pair[1])
+		}
+		printRawSyscallResult("socketpair_result", fd, errno)
+	default:
+		t.Fatalf("unknown dirtyfrag helper mode %q", mode)
+	}
+
+	stopNotify()
+	printCapturedAuditEvents(emitter.Events())
+}
+
+func dirtyFragProfileSocketRules(t *testing.T) []seccompkg.SocketRule {
+	t.Helper()
+
+	rules, err := config.ResolveSocketRules(config.SandboxSeccompConfig{
+		HardeningProfiles: []string{"dirtyfrag-conservative"},
+	})
+	require.NoError(t, err)
+	require.Len(t, rules, 2)
+	return rules
+}
+
+func startSocketRuleNotifyHelper(t *testing.T, filt *Filter, bl *BlockListConfig, emitter Emitter) func() {
+	t.Helper()
+
+	notifFD := filt.NotifFD()
+	if notifFD < 0 {
+		t.Fatalf("expected valid notify fd; got %d", notifFD)
+	}
+	if err := ProbeNotifReceive(notifFD); err != nil {
+		_ = filt.Close()
+		if errors.Is(err, ErrNotifyBlocked) {
+			t.Skipf("seccomp notification ioctl blocked: %v", err)
+		}
+		t.Fatalf("probe seccomp notification fd: %v", err)
+	}
+
+	notifyFile := os.NewFile(uintptr(notifFD), "seccomp-notify")
+	if notifyFile == nil {
+		_ = filt.Close()
+		t.Fatalf("os.NewFile returned nil for notify fd %d", notifFD)
+	}
+	filt.fd = -1
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if capture, ok := emitter.(*captureEventsEmitter); ok {
+		var cancelOnce sync.Once
+		capture.SetOnEvent(func() {
+			cancelOnce.Do(cancel)
+		})
+	}
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		ServeNotifyWithExecve(ctx, notifyFile, "test-dirtyfrag-socket-rules", nil, emitter, nil, nil, bl)
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			_ = notifyFile.Close()
+			select {
+			case <-handlerDone:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("seccomp notify handler did not exit in time")
+			}
+		})
+	}
+}
+
+func printRawSyscallResult(label string, fd uintptr, errno gounix.Errno) {
+	if fd != ^uintptr(0) {
+		_ = gounix.Close(int(fd))
+		fmt.Printf("%s=OK\n", label)
+		return
+	}
+	fmt.Printf("%s=%v (errno=%d)\n", label, errno, int(errno))
+}
+
+func requireResultEAFNOSUPPORT(t *testing.T, combined, label string) {
+	t.Helper()
+
+	if !strings.Contains(combined, label+"=EAFNOSUPPORT") &&
+		!strings.Contains(combined, label+"=address family not supported") &&
+		!strings.Contains(combined, "errno=97") {
+		t.Fatalf("expected %s to return EAFNOSUPPORT; helper output:\n%s", label, combined)
+	}
+}
+
+type captureEventsEmitter struct {
+	mu      sync.Mutex
+	events  []types.Event
+	onEvent func()
+}
+
+func (e *captureEventsEmitter) AppendEvent(_ context.Context, ev types.Event) error {
+	e.add(ev)
+	return nil
+}
+
+func (e *captureEventsEmitter) Publish(ev types.Event) {
+	e.add(ev)
+}
+
+func (e *captureEventsEmitter) add(ev types.Event) {
+	e.mu.Lock()
+	e.events = append(e.events, ev)
+	onEvent := e.onEvent
+	e.mu.Unlock()
+
+	if onEvent != nil {
+		onEvent()
+	}
+}
+
+func (e *captureEventsEmitter) Events() []types.Event {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]types.Event, len(e.events))
+	copy(out, e.events)
+	return out
+}
+
+func (e *captureEventsEmitter) SetOnEvent(fn func()) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.onEvent = fn
+}
+
+func printCapturedAuditEvents(events []types.Event) {
+	seen := map[string]struct{}{}
+	for _, ev := range events {
+		key := fmt.Sprintf(
+			"%s|%v|%v|%v|%v|%v|%v",
+			ev.Type,
+			ev.Fields["rule_name"],
+			ev.Fields["action"],
+			ev.Fields["family_name"],
+			ev.Fields["protocol_name"],
+			ev.Fields["syscall"],
+			ev.Fields["outcome"],
+		)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		fmt.Printf("audit_event=%s\n", ev.Type)
+		if v, ok := ev.Fields["rule_name"]; ok {
+			fmt.Printf("audit_rule=%v\n", v)
+		}
+		if v, ok := ev.Fields["action"]; ok {
+			fmt.Printf("audit_action=%v\n", v)
+		}
+		if v, ok := ev.Fields["family_name"]; ok {
+			fmt.Printf("audit_family=%v\n", v)
+		}
+		if v, ok := ev.Fields["protocol_name"]; ok {
+			fmt.Printf("audit_protocol=%v\n", v)
+		}
+		if v, ok := ev.Fields["syscall"]; ok {
+			fmt.Printf("audit_syscall=%v\n", v)
+		}
+		if v, ok := ev.Fields["outcome"]; ok {
+			fmt.Printf("audit_outcome=%v\n", v)
+		}
 	}
 }
 
