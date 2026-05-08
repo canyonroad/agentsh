@@ -77,7 +77,23 @@ func selectFamilyBlockingEngine(
 	cfg *config.SandboxConfig,
 	caps *capabilities.SecurityCapabilities,
 ) familyEngine {
-	return selectSocketBlockingEngine(len(families) > 0, cfg, caps)
+	if len(families) == 0 {
+		return familyEngineNone
+	}
+
+	seccompAvailable := caps != nil && caps.Seccomp
+	seccompEnabled := cfg != nil && cfg.Seccomp.Enabled
+	if seccompAvailable && seccompEnabled && wrapperWillRun(cfg) {
+		return familyEngineSeccomp
+	}
+
+	ptraceAvailable := caps != nil && caps.Ptrace
+	ptraceEnabled := cfg != nil && cfg.Ptrace.Enabled
+	if ptraceAvailable && ptraceEnabled {
+		return familyEnginePtrace
+	}
+
+	return familyEngineNone
 }
 
 func selectSocketRuleBlockingEngine(
@@ -85,21 +101,12 @@ func selectSocketRuleBlockingEngine(
 	cfg *config.SandboxConfig,
 	caps *capabilities.SecurityCapabilities,
 ) familyEngine {
-	return selectSocketBlockingEngine(len(rules) > 0, cfg, caps)
-}
-
-func selectSocketBlockingEngine(
-	configured bool,
-	cfg *config.SandboxConfig,
-	caps *capabilities.SecurityCapabilities,
-) familyEngine {
-	if !configured {
+	if len(rules) == 0 {
 		return familyEngineNone
 	}
 
 	seccompAvailable := caps != nil && caps.Seccomp
-	seccompEnabled := cfg != nil && cfg.Seccomp.Enabled
-	if seccompAvailable && seccompEnabled && wrapperWillRun(cfg) {
+	if seccompAvailable && wrapperWillRun(cfg) {
 		return familyEngineSeccomp
 	}
 

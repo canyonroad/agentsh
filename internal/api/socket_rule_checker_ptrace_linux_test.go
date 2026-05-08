@@ -141,6 +141,25 @@ func TestResolveSocketRuleCheckerForPtrace_WarnIfSocketRulesOrphan_NoWarnWhenWra
 	}
 }
 
+func TestResolveSocketRuleCheckerForPtrace_WarnIfSocketRulesOrphan_NoWarnWhenWrapperRunsWithSeccompDisabled(t *testing.T) {
+	withPresentWrapper(t)
+	cfg := &config.Config{}
+	cfg.Sandbox.Seccomp.Enabled = false
+	cfg.Sandbox.Ptrace.Enabled = false
+	cfg.Sandbox.Seccomp.HardeningProfiles = []string{"dirtyfrag-conservative"}
+	enabled := true
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	app := &App{cfg: cfg}
+
+	warned := app.warnIfSocketRulesOrphanWithCaps(&capabilities.SecurityCapabilities{
+		Seccomp: true,
+		Ptrace:  false,
+	})
+	if warned {
+		t.Fatal("must not warn when unix_sockets wrapper can enforce socket rules even with sandbox.seccomp.enabled=false")
+	}
+}
+
 func TestResolveSocketRuleCheckerForPtrace_WarnIfSocketRulesOrphan_NoWarnWhenPtraceEnabled(t *testing.T) {
 	withMissingWrapper(t)
 	cfg := &config.Config{}
