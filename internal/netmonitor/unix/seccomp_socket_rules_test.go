@@ -219,7 +219,7 @@ func TestSeccompSocketRuleBlock_Notify_LogDispatched(t *testing.T) {
 	}
 }
 
-func TestDirtyFragNetlinkXFRM_ProfileLogAndKillSeccompSocketRule(t *testing.T) {
+func TestDirtyFragNetlinkXFRM_MitigationSetLogAndKillSeccompSocketRule(t *testing.T) {
 	if os.Getenv(socketRuleHelperEnv) == socketRuleHelperDirtyFragNetlinkXFRM {
 		runDirtyFragSocketRuleHelper(t, socketRuleHelperDirtyFragNetlinkXFRM)
 		return
@@ -247,7 +247,7 @@ func TestDirtyFragNetlinkRoute_DoesNotDispatchSocketRule(t *testing.T) {
 	require.NotContains(t, combined, "audit_rule=dirtyfrag-conservative-xfrm")
 }
 
-func TestDirtyFragRXRPC_ProfileFamilyOnlyRuleDispatchesAsSocketRule(t *testing.T) {
+func TestDirtyFragRXRPC_MitigationSetFamilyOnlyRuleDispatchesAsSocketRule(t *testing.T) {
 	if os.Getenv(socketRuleHelperEnv) == socketRuleHelperDirtyFragRXRPC {
 		runDirtyFragSocketRuleHelper(t, socketRuleHelperDirtyFragRXRPC)
 		return
@@ -263,7 +263,7 @@ func TestDirtyFragRXRPC_ProfileFamilyOnlyRuleDispatchesAsSocketRule(t *testing.T
 	require.NotContains(t, combined, "audit_event=seccomp_blocked")
 }
 
-func TestDirtyFragSocketpairNetlinkXFRM_ProfileProtocolRule(t *testing.T) {
+func TestDirtyFragSocketpairNetlinkXFRM_MitigationSetProtocolRule(t *testing.T) {
 	if os.Getenv(socketRuleHelperEnv) == socketRuleHelperDirtyFragSocketpairXFRM {
 		runDirtyFragSocketRuleHelper(t, socketRuleHelperDirtyFragSocketpairXFRM)
 		return
