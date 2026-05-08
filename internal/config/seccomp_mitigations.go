@@ -181,11 +181,15 @@ func readExternalMitigation(id string, dirs []string) ([]byte, string, bool, err
 	for _, dir := range dirs {
 		for _, name := range []string{id + ".yaml", id + ".yml"} {
 			candidate := filepath.Join(dir, name)
-			if _, err := os.Stat(candidate); err != nil {
+			info, err := os.Stat(candidate)
+			if err != nil {
 				if os.IsNotExist(err) {
 					continue
 				}
 				return nil, "", false, fmt.Errorf("stat external mitigation %q: %w", candidate, err)
+			}
+			if !info.Mode().IsRegular() {
+				return nil, "", false, fmt.Errorf("external mitigation path %q is not a regular file", candidate)
 			}
 			if foundPath != "" {
 				return nil, "", false, fmt.Errorf("mitigation set %q found in multiple external files: %q and %q", id, foundPath, candidate)

@@ -108,6 +108,31 @@ seccomp:
 	require.Equal(t, path, eff.LoadedMitigations[0].Path)
 }
 
+func TestEffectiveSeccompRules_ExternalMitigationYMLFallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "local-yml.yml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+id: local-yml
+seccomp:
+  socket_rules:
+    - name: local-yml
+      family: AF_RXRPC
+      action: log
+`), 0o600))
+
+	eff, err := EffectiveSeccompRulesForConfig(SandboxSeccompConfig{
+		MitigationSets: []string{"local-yml"},
+		MitigationDirs: []string{dir},
+	})
+	require.NoError(t, err)
+	require.Len(t, eff.SocketRules, 1)
+	require.Equal(t, "local-yml", eff.SocketRules[0].Name)
+	require.Len(t, eff.LoadedMitigations, 1)
+	require.Equal(t, "external", eff.LoadedMitigations[0].Source)
+	require.Equal(t, path, eff.LoadedMitigations[0].Path)
+}
+
 func TestEffectiveSeccompRules_RejectsInvalidMitigationID(t *testing.T) {
 	for _, id := range []string{"../dirtyfrag", "/dirtyfrag", "DirtyFrag", ""} {
 		t.Run(id, func(t *testing.T) {
@@ -194,6 +219,52 @@ seccomp:
 	require.Contains(t, err.Error(), "exists as both built-in and external")
 }
 
+func TestEffectiveSeccompRules_RejectsDuplicateExternalFiles(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`
+version: 1
+id: dupe
+seccomp:
+  socket_rules:
+    - name: dupe
+      family: AF_RXRPC
+`)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dupe.yaml"), data, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dupe.yml"), data, 0o600))
+
+	_, err := EffectiveSeccompRulesForConfig(SandboxSeccompConfig{
+		MitigationSets: []string{"dupe"},
+		MitigationDirs: []string{dir},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "multiple external files")
+}
+
+func TestEffectiveSeccompRules_RejectsNonRegularExternalMitigationPathOnUnix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix special files are not portable to Windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pipe.yaml")
+	createExternalMitigationFIFO(t, path)
+	stopWriter := startExternalMitigationFIFOWriter(t, path, []byte(`
+version: 1
+id: pipe
+seccomp:
+  socket_rules:
+    - name: pipe
+      family: AF_RXRPC
+`))
+	defer stopWriter()
+
+	_, err := EffectiveSeccompRulesForConfig(SandboxSeccompConfig{
+		MitigationSets: []string{"pipe"},
+		MitigationDirs: []string{dir},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a regular file")
+}
+
 func TestEffectiveSeccompRules_RejectsWorldWritableExternalFileOnUnix(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix mode bits are not portable to Windows")
@@ -212,6 +283,32 @@ seccomp:
 
 	_, err := EffectiveSeccompRulesForConfig(SandboxSeccompConfig{
 		MitigationSets: []string{"unsafe"},
+		MitigationDirs: []string{dir},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "world-writable")
+}
+
+func TestEffectiveSeccompRules_RejectsWorldWritableExternalDirectoryOnUnix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits are not portable to Windows")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "unsafe-dir.yaml"), []byte(`
+version: 1
+id: unsafe-dir
+seccomp:
+  socket_rules:
+    - name: unsafe-dir
+      family: AF_RXRPC
+`), 0o600))
+	require.NoError(t, os.Chmod(dir, 0o777))
+	defer func() {
+		require.NoError(t, os.Chmod(dir, 0o700))
+	}()
+
+	_, err := EffectiveSeccompRulesForConfig(SandboxSeccompConfig{
+		MitigationSets: []string{"unsafe-dir"},
 		MitigationDirs: []string{dir},
 	})
 	require.Error(t, err)
