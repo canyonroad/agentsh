@@ -18,6 +18,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/landlock"
+	seccomppkg "github.com/agentsh/agentsh/internal/seccomp"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/go-chi/chi/v5"
@@ -563,7 +564,7 @@ func (a *App) mainFilterUsesUserNotify(execveEnabled bool) bool {
 	if blockedFamiliesUsesNotify(a.cfg.Sandbox.Seccomp.BlockedSocketFamilies) {
 		return true
 	}
-	if socketRulesUsesNotify(a.cfg.Sandbox.Seccomp.SocketRules) {
+	if seccompSocketRulesUseNotify(a.cfg.Sandbox.Seccomp) {
 		return true
 	}
 	return false
@@ -610,8 +611,21 @@ func blockedFamiliesUsesNotify(families []config.SandboxSeccompSocketFamilyConfi
 }
 
 func socketRulesUsesNotify(rules []config.SandboxSeccompSocketRuleConfig) bool {
+	return seccompSocketRulesUseNotify(config.SandboxSeccompConfig{SocketRules: rules})
+}
+
+func seccompSocketRulesUseNotify(seccompCfg config.SandboxSeccompConfig) bool {
+	rules, err := config.ResolveSocketRules(seccompCfg)
+	if err != nil {
+		slog.Warn("seccomp: failed to resolve socket_rules; socket rules will not use user notify", "error", err)
+		return false
+	}
+	return resolvedSocketRulesUseNotify(rules)
+}
+
+func resolvedSocketRulesUseNotify(rules []seccomppkg.SocketRule) bool {
 	for _, r := range rules {
-		if r.Action == "log" || r.Action == "log_and_kill" {
+		if r.Action == seccomppkg.OnBlockLog || r.Action == seccomppkg.OnBlockLogAndKill {
 			return true
 		}
 	}

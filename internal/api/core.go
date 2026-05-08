@@ -192,7 +192,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		seccompCfg.InterceptMetadata ||
 		blockListUsesNotify(seccompCfg.BlockedSyscalls, seccompCfg.OnBlock) ||
 		blockedFamiliesUsesNotify(a.cfg.Sandbox.Seccomp.BlockedSocketFamilies) ||
-		socketRulesUsesNotify(a.cfg.Sandbox.Seccomp.SocketRules)
+		seccompSocketRulesUseNotify(a.cfg.Sandbox.Seccomp)
 	// AGENTSH_PTRACE_SYNC goes into envInject (not env) so it overrides any
 	// user-supplied value. envInject deduplicates keys before appending.
 	ptraceSyncValue := "0"

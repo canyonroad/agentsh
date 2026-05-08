@@ -1437,6 +1437,22 @@ func TestMainFilterUsesUserNotify_SocketRuleLog(t *testing.T) {
 	}
 }
 
+func TestMainFilterUsesUserNotify_SocketRuleHardeningProfile(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mainFilterUsesUserNotify is Linux-only")
+	}
+	cfg := &config.Config{}
+	disabled := false
+	cfg.Sandbox.Seccomp.UnixSocket.Enabled = false
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &disabled
+	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &disabled
+	cfg.Sandbox.Seccomp.HardeningProfiles = []string{"dirtyfrag-conservative"}
+	app := &App{cfg: cfg}
+	if !app.mainFilterUsesUserNotify(false) {
+		t.Fatal("mainFilterUsesUserNotify should return true when a hardening profile expands to log socket rules")
+	}
+}
+
 // TestMainFilterUsesUserNotify_FamilyLog verifies that mainFilterUsesUserNotify
 // returns true when the config contains a family with a log action, even when
 // all other notify-triggering options are disabled. This guards against the
