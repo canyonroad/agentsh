@@ -43,7 +43,7 @@ func NewSocketRuleCheckerWithEmitter(rules []seccomp.SocketRule, emit FamilyEmit
 		},
 	}
 	if len(rules) > 0 {
-		c.rules = append([]seccomp.SocketRule(nil), rules...)
+		c.rules = cloneSocketRules(rules)
 	}
 	return c
 }
@@ -58,17 +58,40 @@ func (c *SocketRuleChecker) Check(syscall, family, typ, protocol uint64) (seccom
 	case uint64(unix.SYS_SOCKET):
 		for _, rule := range c.rules {
 			if rule.MatchesSocket(family, typ, protocol) {
-				return rule, true
+				return cloneSocketRule(rule), true
 			}
 		}
 	case uint64(unix.SYS_SOCKETPAIR):
 		for _, rule := range c.rules {
 			if rule.MatchesSocketpair(family, typ, protocol) {
-				return rule, true
+				return cloneSocketRule(rule), true
 			}
 		}
 	}
 	return seccomp.SocketRule{}, false
+}
+
+func cloneSocketRules(rules []seccomp.SocketRule) []seccomp.SocketRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]seccomp.SocketRule, len(rules))
+	for i, rule := range rules {
+		out[i] = cloneSocketRule(rule)
+	}
+	return out
+}
+
+func cloneSocketRule(rule seccomp.SocketRule) seccomp.SocketRule {
+	if rule.Type != nil {
+		typ := *rule.Type
+		rule.Type = &typ
+	}
+	if rule.Protocol != nil {
+		protocol := *rule.Protocol
+		rule.Protocol = &protocol
+	}
+	return rule
 }
 
 // Apply executes the blocking action for a matched socket tuple rule.

@@ -74,6 +74,60 @@ func TestSocketRuleChecker_Check_SocketpairUsesProtocolArg2(t *testing.T) {
 	}
 }
 
+func TestSocketRuleChecker_ConstructionCopiesRulePointers(t *testing.T) {
+	typ := unix.SOCK_RAW
+	proto := unix.NETLINK_XFRM
+	rules := []seccomp.SocketRule{{
+		Name:         "dirtyfrag-xfrm",
+		Family:       unix.AF_NETLINK,
+		FamilyName:   "AF_NETLINK",
+		Type:         &typ,
+		TypeName:     "SOCK_RAW",
+		Protocol:     &proto,
+		ProtocolName: "NETLINK_XFRM",
+		Action:       seccomp.OnBlockLogAndKill,
+	}}
+
+	c := NewSocketRuleChecker(rules)
+	typ = unix.SOCK_DGRAM
+	proto = unix.NETLINK_ROUTE
+
+	if _, ok := c.Check(uint64(unix.SYS_SOCKET), uint64(unix.AF_NETLINK), uint64(unix.SOCK_RAW), uint64(unix.NETLINK_XFRM)); !ok {
+		t.Fatal("checker should retain original Type/Protocol values after caller mutates input pointers")
+	}
+	if _, ok := c.Check(uint64(unix.SYS_SOCKET), uint64(unix.AF_NETLINK), uint64(unix.SOCK_DGRAM), uint64(unix.NETLINK_ROUTE)); ok {
+		t.Fatal("checker should not observe caller mutations to input Type/Protocol pointers")
+	}
+}
+
+func TestSocketRuleChecker_CheckReturnsRuleCopy(t *testing.T) {
+	rule := seccomp.SocketRule{
+		Name:         "dirtyfrag-xfrm",
+		Family:       unix.AF_NETLINK,
+		FamilyName:   "AF_NETLINK",
+		Type:         intPtr(unix.SOCK_RAW),
+		TypeName:     "SOCK_RAW",
+		Protocol:     intPtr(unix.NETLINK_XFRM),
+		ProtocolName: "NETLINK_XFRM",
+		Action:       seccomp.OnBlockLogAndKill,
+	}
+	c := NewSocketRuleChecker([]seccomp.SocketRule{rule})
+
+	got, ok := c.Check(uint64(unix.SYS_SOCKET), uint64(unix.AF_NETLINK), uint64(unix.SOCK_RAW), uint64(unix.NETLINK_XFRM))
+	if !ok {
+		t.Fatal("expected initial socket rule match")
+	}
+	*got.Type = unix.SOCK_DGRAM
+	*got.Protocol = unix.NETLINK_ROUTE
+
+	if _, ok := c.Check(uint64(unix.SYS_SOCKET), uint64(unix.AF_NETLINK), uint64(unix.SOCK_RAW), uint64(unix.NETLINK_XFRM)); !ok {
+		t.Fatal("mutating returned rule pointers should not mutate checker-owned rule")
+	}
+	if _, ok := c.Check(uint64(unix.SYS_SOCKET), uint64(unix.AF_NETLINK), uint64(unix.SOCK_DGRAM), uint64(unix.NETLINK_ROUTE)); ok {
+		t.Fatal("checker should not observe mutations to a rule returned by Check")
+	}
+}
+
 func TestSocketRuleChecker_ApplyLogEmitsPtraceEventAndDenies(t *testing.T) {
 	rule := seccomp.SocketRule{
 		Name:         "dirtyfrag-xfrm",

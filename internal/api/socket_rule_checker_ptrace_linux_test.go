@@ -5,6 +5,7 @@ package api
 import (
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/seccomp"
 	"golang.org/x/sys/unix"
@@ -81,5 +82,78 @@ func TestResolveSocketRuleCheckerForPtrace_ErrorOnInvalidConfig(t *testing.T) {
 	}
 	if checker != nil {
 		t.Fatalf("expected nil checker on error, got %+v", checker)
+	}
+}
+
+func TestResolveSocketRuleCheckerForPtrace_WarnIfSocketRulesOrphan_RawRules(t *testing.T) {
+	withMissingWrapper(t)
+	cfg := &config.Config{}
+	cfg.Sandbox.Seccomp.Enabled = true
+	cfg.Sandbox.Ptrace.Enabled = false
+	cfg.Sandbox.Seccomp.SocketRules = []config.SandboxSeccompSocketRuleConfig{{
+		Name:     "dirtyfrag-xfrm",
+		Family:   "AF_NETLINK",
+		Protocol: "NETLINK_XFRM",
+		Action:   "log_and_kill",
+	}}
+	app := &App{cfg: cfg}
+
+	warned := app.warnIfSocketRulesOrphanWithCaps(&capabilities.SecurityCapabilities{
+		Seccomp: true,
+		Ptrace:  false,
+	})
+	if !warned {
+		t.Fatal("expected orphan warning for socket_rules when ptrace is disabled and wrapper is missing")
+	}
+}
+
+func TestResolveSocketRuleCheckerForPtrace_WarnIfSocketRulesOrphan_HardeningProfile(t *testing.T) {
+	withMissingWrapper(t)
+	cfg := &config.Config{}
+	cfg.Sandbox.Seccomp.Enabled = true
+	cfg.Sandbox.Ptrace.Enabled = false
+	cfg.Sandbox.Seccomp.HardeningProfiles = []string{"dirtyfrag-conservative"}
+	app := &App{cfg: cfg}
+
+	warned := app.warnIfSocketRulesOrphanWithCaps(&capabilities.SecurityCapabilities{
+		Seccomp: true,
+		Ptrace:  false,
+	})
+	if !warned {
+		t.Fatal("expected orphan warning for dirtyfrag-conservative socket rules when ptrace is disabled and wrapper is missing")
+	}
+}
+
+func TestResolveSocketRuleCheckerForPtrace_WarnIfSocketRulesOrphan_NoWarnWhenWrapperWillRun(t *testing.T) {
+	withPresentWrapper(t)
+	cfg := &config.Config{}
+	cfg.Sandbox.Seccomp.Enabled = true
+	cfg.Sandbox.Ptrace.Enabled = false
+	cfg.Sandbox.Seccomp.HardeningProfiles = []string{"dirtyfrag-conservative"}
+	app := &App{cfg: cfg}
+
+	warned := app.warnIfSocketRulesOrphanWithCaps(&capabilities.SecurityCapabilities{
+		Seccomp: true,
+		Ptrace:  false,
+	})
+	if warned {
+		t.Fatal("must not warn when seccomp wrapper will enforce socket rules")
+	}
+}
+
+func TestResolveSocketRuleCheckerForPtrace_WarnIfSocketRulesOrphan_NoWarnWhenPtraceEnabled(t *testing.T) {
+	withMissingWrapper(t)
+	cfg := &config.Config{}
+	cfg.Sandbox.Seccomp.Enabled = true
+	cfg.Sandbox.Ptrace.Enabled = true
+	cfg.Sandbox.Seccomp.HardeningProfiles = []string{"dirtyfrag-conservative"}
+	app := &App{cfg: cfg}
+
+	warned := app.warnIfSocketRulesOrphanWithCaps(&capabilities.SecurityCapabilities{
+		Seccomp: true,
+		Ptrace:  true,
+	})
+	if warned {
+		t.Fatal("must not warn when ptrace is enabled and available to enforce socket rules")
 	}
 }

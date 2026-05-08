@@ -42,6 +42,7 @@ func (a *App) initPtraceTracer() {
 		// Even when ptrace is disabled, check if socket-family blocking is
 		// configured but has no enforcement engine available, and warn.
 		a.warnIfFamiliesOrphan()
+		a.warnIfSocketRulesOrphan()
 		return
 	}
 
@@ -238,4 +239,29 @@ func (a *App) warnIfFamiliesOrphan() {
 			"(seccomp and ptrace both unavailable or disabled); families will not be blocked",
 			"families", len(families))
 	}
+}
+
+// warnIfSocketRulesOrphan emits a warning when socket tuple rules are
+// configured but neither seccomp nor ptrace is available/enabled.
+// Called from initPtraceTracer when ptrace is disabled, to cover the
+// case where seccomp is also absent or the wrapper will not run.
+func (a *App) warnIfSocketRulesOrphan() {
+	_ = a.warnIfSocketRulesOrphanWithCaps(capabilities.DetectSecurityCapabilities())
+}
+
+func (a *App) warnIfSocketRulesOrphanWithCaps(caps *capabilities.SecurityCapabilities) bool {
+	if a == nil || a.cfg == nil {
+		return false
+	}
+	rules, err := config.ResolveSocketRules(a.cfg.Sandbox.Seccomp)
+	if err != nil || len(rules) == 0 {
+		return false
+	}
+	if selectSocketRuleBlockingEngine(rules, &a.cfg.Sandbox, caps) != familyEngineNone {
+		return false
+	}
+	slog.Warn("socket tuple blocking is configured but no enforcement engine is available on this host "+
+		"(seccomp and ptrace both unavailable or disabled); socket rules will not be blocked",
+		"rules", len(rules))
+	return true
 }

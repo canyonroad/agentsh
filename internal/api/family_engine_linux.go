@@ -77,7 +77,23 @@ func selectFamilyBlockingEngine(
 	cfg *config.SandboxConfig,
 	caps *capabilities.SecurityCapabilities,
 ) familyEngine {
-	if len(families) == 0 {
+	return selectSocketBlockingEngine(len(families) > 0, cfg, caps)
+}
+
+func selectSocketRuleBlockingEngine(
+	rules []seccompkg.SocketRule,
+	cfg *config.SandboxConfig,
+	caps *capabilities.SecurityCapabilities,
+) familyEngine {
+	return selectSocketBlockingEngine(len(rules) > 0, cfg, caps)
+}
+
+func selectSocketBlockingEngine(
+	configured bool,
+	cfg *config.SandboxConfig,
+	caps *capabilities.SecurityCapabilities,
+) familyEngine {
+	if !configured {
 		return familyEngineNone
 	}
 
