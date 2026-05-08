@@ -3,7 +3,12 @@
 package unix
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
@@ -11,6 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 	gounix "golang.org/x/sys/unix"
 )
+
+const socketRuleHelperEnv = "AGENTSH_TEST_SOCKET_RULE_HELPER"
 
 func TestNotifySocketRules_FiltersNotifyActions(t *testing.T) {
 	rules := []seccompkg.SocketRule{
@@ -163,6 +170,110 @@ func TestInstallSocketRuleConditional_ReportsPartialFailure(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, 1, added)
 	require.Len(t, recorder.calls, 2)
+}
+
+func TestInstallSocketRulesConditional_RejectsPartialInstall(t *testing.T) {
+	rule := seccompkg.SocketRule{Name: "partial", Family: 62, Action: seccompkg.OnBlockLog}
+	recorder := &recordingConditionalAdder{failOnCall: 2}
+
+	retained, added, err := installSocketRulesConditional(recorder, []seccompkg.SocketRule{rule})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "partial")
+	require.Equal(t, 1, added)
+	require.Empty(t, retained)
+	require.Len(t, recorder.calls, 2)
+}
+
+func TestSeccompSocketRuleBlock_ErrnoTuple(t *testing.T) {
+	if os.Getenv(socketRuleHelperEnv) == "errno_tuple" {
+		runSocketRuleHelperErrnoTuple(t)
+		return
+	}
+
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify not supported: %v", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+
+	cmd := exec.Command(exe, "-test.run=^TestSeccompSocketRuleBlock_ErrnoTuple$", "-test.v")
+	cmd.Env = append(os.Environ(), socketRuleHelperEnv+"=errno_tuple")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	runErr := cmd.Run()
+	combined := out.String()
+
+	if strings.Contains(combined, "SKIP:") {
+		t.Skipf("child skipped: %s", combined)
+	}
+	if runErr != nil {
+		lower := strings.ToLower(combined)
+		if strings.Contains(lower, "permission denied") ||
+			strings.Contains(lower, "operation not permitted") ||
+			strings.Contains(lower, "lacks user notify") ||
+			strings.Contains(lower, "skip") {
+			t.Skipf("host cannot install seccomp filter; skipping.\nhelper output:\n%s", combined)
+		}
+		t.Fatalf("helper subprocess failed: %v\noutput:\n%s", runErr, combined)
+	}
+
+	if !strings.Contains(combined, "socket_result=EAFNOSUPPORT") &&
+		!strings.Contains(combined, "socket_result=address family not supported") &&
+		!strings.Contains(combined, "errno=97") {
+		t.Errorf("expected matching socket tuple to return EAFNOSUPPORT; helper output:\n%s", combined)
+	}
+}
+
+func runSocketRuleHelperErrnoTuple(t *testing.T) {
+	t.Helper()
+
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify not supported: %v", err)
+	}
+
+	typ := int(gounix.SOCK_RAW)
+	protocol := int(gounix.NETLINK_XFRM)
+	cfg := FilterConfig{
+		SocketRules: []seccompkg.SocketRule{
+			{
+				Name:         "netlink_xfrm",
+				Family:       gounix.AF_NETLINK,
+				FamilyName:   "AF_NETLINK",
+				Type:         &typ,
+				TypeName:     "SOCK_RAW",
+				Protocol:     &protocol,
+				ProtocolName: "NETLINK_XFRM",
+				Action:       seccompkg.OnBlockErrno,
+			},
+		},
+	}
+	filt, err := InstallFilterWithConfig(cfg)
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "permission") || strings.Contains(lower, "operation not permitted") {
+			t.Skipf("cannot install seccomp filter (privilege): %v", err)
+		}
+		t.Fatalf("InstallFilterWithConfig: %v", err)
+	}
+	defer filt.Close()
+
+	fd, _, errno := gounix.RawSyscall(
+		gounix.SYS_SOCKET,
+		uintptr(gounix.AF_NETLINK),
+		uintptr(gounix.SOCK_RAW|gounix.SOCK_CLOEXEC),
+		uintptr(gounix.NETLINK_XFRM),
+	)
+	if fd != ^uintptr(0) {
+		_ = gounix.Close(int(fd))
+		fmt.Printf("socket_result=OK (expected EAFNOSUPPORT)\n")
+		return
+	}
+	fmt.Printf("socket_result=%v (errno=%d)\n", errno, int(errno))
 }
 
 func TestFilterDiagnosticFields_RulesSocketRules(t *testing.T) {

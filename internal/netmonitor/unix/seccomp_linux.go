@@ -441,24 +441,9 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	// family-only rules so later dispatch can evaluate the most specific
 	// configured tuples first. Kernel action precedence still determines the
 	// result when actions differ, preserving existing blocked-family behavior.
-	socketRulesAdded := 0
-	for _, sr := range cfg.SocketRules {
-		socketAction, err := familyToScmpAction(sr.Action)
-		if err != nil {
-			slog.Warn("seccomp: skipping socket rule with unknown action",
-				"rule", sr.Name, "family", sr.FamilyName, "action", sr.Action, "error", err)
-			continue
-		}
-		added, addErr := installSocketRuleConditional(filt, sr, socketAction)
-		socketRulesAdded += added
-		if addErr != nil {
-			slog.Warn("seccomp: failed to add socket rule; rule skipped",
-				"rule", sr.Name, "family", sr.FamilyName, "action", sr.Action, "error", addErr)
-			continue
-		}
-		if socketRuleUsesNotify(sr) {
-			socketRules = append(socketRules, cloneSocketRule(sr))
-		}
+	socketRules, socketRulesAdded, err := installSocketRulesConditional(filt, cfg.SocketRules)
+	if err != nil {
+		return nil, err
 	}
 	ruleCounts["socket_rules"] = socketRulesAdded
 
@@ -568,20 +553,44 @@ type conditionalRuleAdder interface {
 	AddRuleConditional(seccomp.ScmpSyscall, seccomp.ScmpAction, []seccomp.ScmpCondition) error
 }
 
+func installSocketRulesConditional(adder conditionalRuleAdder, rules []seccompkg.SocketRule) ([]seccompkg.SocketRule, int, error) {
+	retained := []seccompkg.SocketRule{}
+	rulesAdded := 0
+	for _, rule := range rules {
+		action, err := familyToScmpAction(rule.Action)
+		if err != nil {
+			slog.Warn("seccomp: skipping socket rule with unknown action",
+				"rule", rule.Name, "family", rule.FamilyName, "action", rule.Action, "error", err)
+			continue
+		}
+		added, addErr := installSocketRuleConditional(adder, rule, action)
+		rulesAdded += added
+		if addErr != nil {
+			if added > 0 {
+				return nil, rulesAdded, fmt.Errorf("partial socket rule install for %q: %w", rule.Name, addErr)
+			}
+			return nil, rulesAdded, fmt.Errorf("add socket rule %q: %w", rule.Name, addErr)
+		}
+		if socketRuleUsesNotify(rule) {
+			retained = append(retained, cloneSocketRule(rule))
+		}
+	}
+	if len(retained) == 0 {
+		return nil, rulesAdded, nil
+	}
+	return retained, rulesAdded, nil
+}
+
 func installSocketRuleConditional(adder conditionalRuleAdder, rule seccompkg.SocketRule, action seccomp.ScmpAction) (int, error) {
 	conditions := socketRuleConditions(rule)
 	added := 0
-	var firstErr error
 	for _, sc := range []int{unix.SYS_SOCKET, unix.SYS_SOCKETPAIR} {
 		if err := adder.AddRuleConditional(seccomp.ScmpSyscall(sc), action, conditions); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("add conditional rule for syscall %d: %w", sc, err)
-			}
-			continue
+			return added, fmt.Errorf("add conditional rule for syscall %d: %w", sc, err)
 		}
 		added++
 	}
-	return added, firstErr
+	return added, nil
 }
 
 func socketRuleConditions(rule seccompkg.SocketRule) []seccomp.ScmpCondition {
