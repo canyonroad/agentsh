@@ -28,6 +28,7 @@ var nameTable = map[string]int{
 	"AF_CAN":       29,
 	"AF_TIPC":      30,
 	"AF_BLUETOOTH": 31,
+	"AF_RXRPC":     33,
 	"AF_ALG":       38,
 	"AF_VSOCK":     40,
 	"AF_KCM":       41,
