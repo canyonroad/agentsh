@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -176,7 +177,33 @@ func readBuiltinMitigation(id string) ([]byte, bool, error) {
 }
 
 func readExternalMitigation(id string, dirs []string) ([]byte, string, bool, error) {
-	return nil, "", false, nil
+	var foundPath string
+	for _, dir := range dirs {
+		for _, name := range []string{id + ".yaml", id + ".yml"} {
+			candidate := filepath.Join(dir, name)
+			if _, err := os.Stat(candidate); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return nil, "", false, fmt.Errorf("stat external mitigation %q: %w", candidate, err)
+			}
+			if foundPath != "" {
+				return nil, "", false, fmt.Errorf("mitigation set %q found in multiple external files: %q and %q", id, foundPath, candidate)
+			}
+			foundPath = candidate
+		}
+	}
+	if foundPath == "" {
+		return nil, "", false, nil
+	}
+	if err := validateMitigationPathPermissions(foundPath); err != nil {
+		return nil, "", false, err
+	}
+	data, err := os.ReadFile(foundPath)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("read external mitigation %q: %w", foundPath, err)
+	}
+	return data, foundPath, true, nil
 }
 
 func decodeMitigation(requestedID string, data []byte, source string) (mitigationDocument, error) {
@@ -185,6 +212,14 @@ func decodeMitigation(requestedID string, data []byte, source string) (mitigatio
 	dec.KnownFields(true)
 	if err := dec.Decode(&doc); err != nil {
 		return mitigationDocument{}, fmt.Errorf("parse mitigation %q: %w", source, err)
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return mitigationDocument{}, fmt.Errorf("parse mitigation %q: %w", source, err)
+		}
+	} else {
+		return mitigationDocument{}, fmt.Errorf("mitigation %q: multiple YAML documents are not allowed", source)
 	}
 	if doc.Version != 1 {
 		return mitigationDocument{}, fmt.Errorf("mitigation %q: version must be 1", source)
