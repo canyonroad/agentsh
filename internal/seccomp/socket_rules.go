@@ -8,6 +8,7 @@ const (
 	SocketTypeFlagCloexec  = 0x80000
 )
 
+// SocketRule describes a socket or socketpair operation to block.
 type SocketRule struct {
 	Name         string        `json:"name,omitempty"`
 	Family       int           `json:"family"`
@@ -44,6 +45,7 @@ var socketTypeNameTable = map[string]int{
 	"SOCK_SEQPACKET": 5,
 }
 
+// ParseSocketProtocol resolves a socket protocol name or numeric value.
 func ParseSocketProtocol(value string) (nr int, name string, ok bool) {
 	if value == "" {
 		return 0, "", false
@@ -52,12 +54,13 @@ func ParseSocketProtocol(value string) (nr int, name string, ok bool) {
 		return n, value, true
 	}
 	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed < 0 || parsed >= 64 {
+	if err != nil || parsed < 0 || parsed > 255 {
 		return 0, "", false
 	}
 	return parsed, "", true
 }
 
+// ParseSocketType resolves a SOCK_* type name or numeric value.
 func ParseSocketType(value string) (nr int, name string, ok bool) {
 	if value == "" {
 		return 0, "", false
@@ -72,6 +75,7 @@ func ParseSocketType(value string) (nr int, name string, ok bool) {
 	return parsed, "", true
 }
 
+// MatchesSocket reports whether r applies to a socket syscall.
 func (r SocketRule) MatchesSocket(family, typ, protocol uint64) bool {
 	if uint64(r.Family) != family {
 		return false
@@ -85,14 +89,15 @@ func (r SocketRule) MatchesSocket(family, typ, protocol uint64) bool {
 	return true
 }
 
-func (r SocketRule) MatchesSocketpair(family, typ uint64) bool {
-	if r.Protocol != nil {
-		return false
-	}
+// MatchesSocketpair reports whether r applies to a socketpair syscall.
+func (r SocketRule) MatchesSocketpair(family, typ, protocol uint64) bool {
 	if uint64(r.Family) != family {
 		return false
 	}
 	if r.Type != nil && uint64(*r.Type) != (typ&SocketTypeMask) {
+		return false
+	}
+	if r.Protocol != nil && uint64(*r.Protocol) != protocol {
 		return false
 	}
 	return true

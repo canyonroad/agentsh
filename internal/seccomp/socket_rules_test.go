@@ -22,8 +22,10 @@ func TestParseSocketProtocol(t *testing.T) {
 		{"NETLINK_XFRM", 6, "NETLINK_XFRM", true},
 		{"NETLINK_ROUTE", 0, "NETLINK_ROUTE", true},
 		{"6", 6, "", true},
+		{"255", 255, "", true},
 		{"NETLINK_NOT_REAL", 0, "", false},
 		{"-1", 0, "", false},
+		{"256", 0, "", false},
 		{"9999", 0, "", false},
 	}
 	for _, tc := range cases {
@@ -79,8 +81,11 @@ func TestSocketRuleMatches(t *testing.T) {
 	if rule.MatchesSocket(16, 0, 0) {
 		t.Fatal("NETLINK_ROUTE must not match NETLINK_XFRM rule")
 	}
-	if rule.MatchesSocketpair(16, 0) {
-		t.Fatal("protocol-constrained rules must not match socketpair")
+	if !rule.MatchesSocketpair(16, 0, 6) {
+		t.Fatal("expected NETLINK_XFRM socketpair to match")
+	}
+	if rule.MatchesSocketpair(16, 0, 0) {
+		t.Fatal("NETLINK_ROUTE socketpair must not match NETLINK_XFRM rule")
 	}
 }
 
