@@ -88,7 +88,7 @@ func narrowTracedSyscallNumbers(cfg *TracerConfig) []int {
 	if cfg.MaskTracerPid || (cfg.TraceNetwork && cfg.NetworkHandler != nil) {
 		nums = append(nums, unix.SYS_CLOSE)
 	}
-	if cfg.FamilyChecker != nil {
+	if cfg.FamilyChecker != nil || cfg.SocketRuleChecker != nil {
 		nums = append(nums, unix.SYS_SOCKET, unix.SYS_SOCKETPAIR)
 	}
 

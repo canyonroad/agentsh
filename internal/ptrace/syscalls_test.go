@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/seccomp"
 	"golang.org/x/sys/unix"
 )
 
@@ -234,4 +235,45 @@ func TestNarrowTracedSyscallNumbers_CloseWithNetworkHandler(t *testing.T) {
 		}
 	}
 	t.Error("SYS_CLOSE missing when TraceNetwork=true and NetworkHandler is set")
+}
+
+func TestNarrowTracedSyscallNumbers_FamilyCheckerIncludesSocketCalls(t *testing.T) {
+	cfg := &TracerConfig{
+		FamilyChecker: NewFamilyChecker([]seccomp.BlockedFamily{
+			{Family: unix.AF_ALG, Action: seccomp.OnBlockErrno, Name: "AF_ALG"},
+		}),
+	}
+	nums := narrowTracedSyscallNumbers(cfg)
+
+	if !containsSyscall(nums, unix.SYS_SOCKET) {
+		t.Fatal("SYS_SOCKET missing when FamilyChecker is configured")
+	}
+	if !containsSyscall(nums, unix.SYS_SOCKETPAIR) {
+		t.Fatal("SYS_SOCKETPAIR missing when FamilyChecker is configured")
+	}
+}
+
+func TestNarrowTracedSyscallNumbers_SocketRuleCheckerIncludesSocketCalls(t *testing.T) {
+	cfg := &TracerConfig{
+		SocketRuleChecker: NewSocketRuleChecker([]seccomp.SocketRule{
+			{Family: unix.AF_NETLINK, Action: seccomp.OnBlockLogAndKill, Protocol: intPtr(unix.NETLINK_XFRM)},
+		}),
+	}
+	nums := narrowTracedSyscallNumbers(cfg)
+
+	if !containsSyscall(nums, unix.SYS_SOCKET) {
+		t.Fatal("SYS_SOCKET missing when SocketRuleChecker is configured")
+	}
+	if !containsSyscall(nums, unix.SYS_SOCKETPAIR) {
+		t.Fatal("SYS_SOCKETPAIR missing when SocketRuleChecker is configured")
+	}
+}
+
+func containsSyscall(nums []int, want int) bool {
+	for _, got := range nums {
+		if got == want {
+			return true
+		}
+	}
+	return false
 }

@@ -16,7 +16,7 @@ import (
 )
 
 // ptraceFamilyEmitter adapts the API's event store/broker to the
-// ptrace.FamilyEmitter interface so family-block audit events reach the
+// ptrace.FamilyEmitter interface so ptrace socket audit events reach the
 // same sink as the seccomp engine's events.
 type ptraceFamilyEmitter struct {
 	store  eventStore
@@ -82,23 +82,34 @@ func (a *App) initPtraceTracer() {
 		}
 	}
 
+	socketRuleChecker, err := resolveSocketRuleCheckerForPtrace(a.cfg, emit)
+	if err != nil {
+		slog.Warn("initPtraceTracer: failed to resolve socket_rules; socket tuple rules will not be enforced via ptrace",
+			"error", err)
+	} else if socketRuleChecker != nil {
+		rules, _ := config.ResolveSocketRules(a.cfg.Sandbox.Seccomp)
+		slog.Info("socket tuple blocking: wired SocketRuleChecker on ptrace tracer",
+			"rules", len(rules))
+	}
+
 	tr := ptrace.NewTracer(ptrace.TracerConfig{
-		AttachMode:       cfg.AttachMode,
-		TraceExecve:      cfg.Trace.Execve,
-		TraceFile:        cfg.Trace.File,
-		TraceNetwork:     cfg.Trace.Network,
-		TraceSignal:      cfg.Trace.Signal,
-		MaskTracerPid:    false, // validation rejects non-"off" values for now
-		SeccompPrefilter: cfg.Performance.SeccompPrefilter,
-		ArgLevelFilter:   cfg.Performance.ArgLevelFilter,
-		MaxTracees:       cfg.Performance.MaxTracees,
-		MaxHoldMs:        cfg.Performance.MaxHoldMs,
-		OnAttachFailure:  cfg.OnAttachFailure,
-		ExecHandler:      router,
-		FileHandler:      router,
-		NetworkHandler:   router,
-		SignalHandler:    router,
-		FamilyChecker:    familyChecker,
+		AttachMode:        cfg.AttachMode,
+		TraceExecve:       cfg.Trace.Execve,
+		TraceFile:         cfg.Trace.File,
+		TraceNetwork:      cfg.Trace.Network,
+		TraceSignal:       cfg.Trace.Signal,
+		MaskTracerPid:     false, // validation rejects non-"off" values for now
+		SeccompPrefilter:  cfg.Performance.SeccompPrefilter,
+		ArgLevelFilter:    cfg.Performance.ArgLevelFilter,
+		MaxTracees:        cfg.Performance.MaxTracees,
+		MaxHoldMs:         cfg.Performance.MaxHoldMs,
+		OnAttachFailure:   cfg.OnAttachFailure,
+		ExecHandler:       router,
+		FileHandler:       router,
+		NetworkHandler:    router,
+		SignalHandler:     router,
+		SocketRuleChecker: socketRuleChecker,
+		FamilyChecker:     familyChecker,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -185,6 +196,20 @@ func resolveFamilyCheckerForPtrace(cfg *config.Config, emit ptrace.FamilyEmitter
 		return nil, nil
 	}
 	return ptrace.NewFamilyCheckerWithEmitter(families, emit), nil
+}
+
+// resolveSocketRuleCheckerForPtrace resolves socket tuple rules to install on
+// the ptrace tracer. Returns nil when no raw rules or hardening profile rules
+// are configured/effective.
+func resolveSocketRuleCheckerForPtrace(cfg *config.Config, emit ptrace.FamilyEmitter) (*ptrace.SocketRuleChecker, error) {
+	rules, err := config.ResolveSocketRules(cfg.Sandbox.Seccomp)
+	if err != nil {
+		return nil, err
+	}
+	if len(rules) == 0 {
+		return nil, nil
+	}
+	return ptrace.NewSocketRuleCheckerWithEmitter(rules, emit), nil
 }
 
 // closePtraceTracer stops the ptrace tracer if running.

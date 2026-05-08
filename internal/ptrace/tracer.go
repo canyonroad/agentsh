@@ -124,26 +124,27 @@ type SignalResult struct {
 
 // TracerConfig holds configuration for the ptrace tracer.
 type TracerConfig struct {
-	AttachMode       string
-	TargetPID        int
-	TargetPIDFile    string
-	TraceExecve      bool
-	TraceFile        bool
-	TraceNetwork     bool
-	TraceSignal      bool
-	MaskTracerPid    bool
-	SeccompPrefilter bool
-	ArgLevelFilter   bool
-	MaxTracees       int
-	MaxHoldMs        int
-	OnAttachFailure  string
-	ReadyFile        string // Path to write after successful attach (sentinel for workload readiness)
-	ExecHandler      ExecHandler
-	FileHandler      FileHandler
-	NetworkHandler   NetworkHandler
-	SignalHandler    SignalHandler
-	FamilyChecker    *FamilyChecker // nil disables socket-family blocking
-	Metrics          Metrics
+	AttachMode        string
+	TargetPID         int
+	TargetPIDFile     string
+	TraceExecve       bool
+	TraceFile         bool
+	TraceNetwork      bool
+	TraceSignal       bool
+	MaskTracerPid     bool
+	SeccompPrefilter  bool
+	ArgLevelFilter    bool
+	MaxTracees        int
+	MaxHoldMs         int
+	OnAttachFailure   string
+	ReadyFile         string // Path to write after successful attach (sentinel for workload readiness)
+	ExecHandler       ExecHandler
+	FileHandler       FileHandler
+	NetworkHandler    NetworkHandler
+	SignalHandler     SignalHandler
+	SocketRuleChecker *SocketRuleChecker // nil disables socket tuple-rule blocking
+	FamilyChecker     *FamilyChecker     // nil disables socket-family blocking
+	Metrics           Metrics
 }
 
 // TraceeState tracks the state of a single traced thread.
@@ -998,39 +999,76 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 
 // dispatchSyscall routes a syscall to the appropriate handler.
 func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *SyscallContext) {
-	// Socket-family blocking: check before all other handlers so that
-	// FamilyChecker rules take precedence over the generic network handler.
-	// SYS_SOCKET and SYS_SOCKETPAIR pass the AF_* family as arg0.
-	if t.cfg.FamilyChecker != nil &&
-		(nr == unix.SYS_SOCKET || nr == unix.SYS_SOCKETPAIR) {
+	// Socket tuple rules are the most-specific socket policy. Check them
+	// before family rules and the generic network handler so protocol-specific
+	// Dirty Frag rules are not shadowed by broad AF_* entries.
+	if nr == unix.SYS_SOCKET || nr == unix.SYS_SOCKETPAIR {
 		family := sc.Info.Args[0]
-		if bf, ok := t.cfg.FamilyChecker.Check(uint64(nr), family); ok {
-			tgid := tid
-			var sessionID string
-			t.mu.Lock()
-			if state := t.tracees[tid]; state != nil {
-				tgid = state.TGID
-				sessionID = state.SessionID
-			}
-			t.mu.Unlock()
+		typ := sc.Info.Args[1]
+		protocol := sc.Info.Args[2]
+		if t.cfg.SocketRuleChecker != nil {
+			if rule, ok := t.cfg.SocketRuleChecker.Check(uint64(nr), family, typ, protocol); ok {
+				tgid := tid
+				var sessionID string
+				t.mu.Lock()
+				if state := t.tracees[tid]; state != nil {
+					tgid = state.TGID
+					sessionID = state.SessionID
+				}
+				t.mu.Unlock()
 
-			err := t.cfg.FamilyChecker.Apply(tid, tgid, t, bf.Action, nr, bf, sessionID)
-			switch {
-			case errors.Is(err, PtraceKillRequested):
-				// Apply already delivered SIGKILL via Tgkill; allow the tracee
-				// to run so it receives the signal.
-				t.allowSyscall(tid)
-			case errors.Is(err, ptraceAlreadyResumed):
-				// denySyscall already resumed the tracee — nothing more to do.
-			case err != nil:
-				slog.Warn("ptrace: family check apply failed",
-					"tid", tid, "family", bf.Name, "error", err)
-				t.allowSyscall(tid)
-			default:
-				// Unknown action: allow proceeds.
-				t.allowSyscall(tid)
+				err := t.cfg.SocketRuleChecker.Apply(tid, tgid, t, rule.Action, nr, rule, sessionID)
+				switch {
+				case errors.Is(err, PtraceKillRequested):
+					// Apply already delivered SIGKILL via Tgkill; allow the tracee
+					// to run so it receives the signal.
+					t.allowSyscall(tid)
+				case errors.Is(err, ptraceAlreadyResumed):
+					// denySyscall already resumed the tracee — nothing more to do.
+				case err != nil:
+					slog.Warn("ptrace: socket rule apply failed",
+						"tid", tid, "rule", rule.Name, "error", err)
+					t.allowSyscall(tid)
+				default:
+					// Unknown action: allow proceeds.
+					t.allowSyscall(tid)
+				}
+				return
 			}
-			return
+		}
+
+		// Socket-family blocking: check before all other handlers so that
+		// FamilyChecker rules take precedence over the generic network handler.
+		// SYS_SOCKET and SYS_SOCKETPAIR pass the AF_* family as arg0.
+		if t.cfg.FamilyChecker != nil {
+			if bf, ok := t.cfg.FamilyChecker.Check(uint64(nr), family); ok {
+				tgid := tid
+				var sessionID string
+				t.mu.Lock()
+				if state := t.tracees[tid]; state != nil {
+					tgid = state.TGID
+					sessionID = state.SessionID
+				}
+				t.mu.Unlock()
+
+				err := t.cfg.FamilyChecker.Apply(tid, tgid, t, bf.Action, nr, bf, sessionID)
+				switch {
+				case errors.Is(err, PtraceKillRequested):
+					// Apply already delivered SIGKILL via Tgkill; allow the tracee
+					// to run so it receives the signal.
+					t.allowSyscall(tid)
+				case errors.Is(err, ptraceAlreadyResumed):
+					// denySyscall already resumed the tracee — nothing more to do.
+				case err != nil:
+					slog.Warn("ptrace: family check apply failed",
+						"tid", tid, "family", bf.Name, "error", err)
+					t.allowSyscall(tid)
+				default:
+					// Unknown action: allow proceeds.
+					t.allowSyscall(tid)
+				}
+				return
+			}
 		}
 	}
 
