@@ -44,3 +44,25 @@ func TestResolution_FoldEmptyIsQualified(t *testing.T) {
 		t.Errorf("Fold(nil) = %s, want qualified_syntactic", got)
 	}
 }
+
+func TestParseResolution(t *testing.T) {
+	cases := []struct {
+		in   string
+		want Resolution
+		ok   bool
+	}{
+		{"qualified_syntactic", ResolutionQualified, true},
+		{"unqualified_syntactic", ResolutionUnqualified, true},
+		{"ambiguous_after_search_path", ResolutionAmbiguousAfterSearchPath, true},
+		{"maybe_temp_shadowed", ResolutionMaybeTempShadowed, true},
+		{"unresolved", ResolutionUnresolved, true},
+		{"", 0, false},
+		{"nonsense", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := ParseResolution(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("ParseResolution(%q) = (%v, %v), want (%v, %v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}

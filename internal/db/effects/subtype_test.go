@@ -113,3 +113,24 @@ func TestSubtype_NoneIsZero(t *testing.T) {
 		t.Errorf("SubtypeNone.String() should be empty, got %q", s.String())
 	}
 }
+
+func TestParseSubtype(t *testing.T) {
+	cases := []struct {
+		in   string
+		want Subtype
+		ok   bool
+	}{
+		{"set", SubtypeSet, true},
+		{"set_search_path", SubtypeSetSearchPath, true},
+		{"discard_plans", SubtypeDiscardPlans, true},
+		{"create_subscription", SubtypeCreateSubscription, true},
+		{"", SubtypeNone, false},
+		{"not_a_subtype", SubtypeNone, false},
+	}
+	for _, c := range cases {
+		got, ok := ParseSubtype(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("ParseSubtype(%q) = (%v, %v), want (%v, %v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
