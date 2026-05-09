@@ -59,6 +59,12 @@ type Policy struct {
 	DBServices              yaml.Node `yaml:"db_services,omitempty"`
 	DatabaseRules           yaml.Node `yaml:"database_rules,omitempty"`
 	DatabaseConnectionRules yaml.Node `yaml:"database_connection_rules,omitempty"`
+
+	// Policies stores the opaque policies: block so KnownFields(true) in
+	// LoadFromBytes accepts YAML containing sub-blocks owned by other packages
+	// (e.g. policies.db is owned by internal/db/policy). Each sub-package
+	// reads its own slice via yaml.Marshal/Unmarshal round-trip.
+	Policies yaml.Node `yaml:"policies,omitempty"`
 }
 
 type FileRule struct {
