@@ -157,3 +157,61 @@ func TestValidate_AllErrorsJoin(t *testing.T) {
 	// Sanity: errors.Is over the joined error.
 	_ = errors.Unwrap(err)
 }
+
+func TestValidate_WarnAuditOnDangerous(t *testing.T) {
+	stmt := []*StatementRule{{Name: "aud-drop", Operations: []string{"DROP"}, Decision: "audit"}}
+	ws, err := helperValidate(t, nil, stmt, nil)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	found := false
+	for _, w := range ws {
+		if w.Code == "audit_on_dangerous" && w.Rule == "aud-drop" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want audit_on_dangerous warning for aud-drop, got %v", ws)
+	}
+}
+
+func TestValidate_WarnAuditOnDangerous_SilencedByAcknowledgement(t *testing.T) {
+	stmt := []*StatementRule{{
+		Name: "aud-drop", Operations: []string{"DROP"}, Decision: "audit",
+		AcknowledgeAuditOnDangerous: true,
+	}}
+	ws, err := helperValidate(t, nil, stmt, nil)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	for _, w := range ws {
+		if w.Code == "audit_on_dangerous" {
+			t.Errorf("acknowledge_audit_on_dangerous: true should silence the warning, got %+v", w)
+		}
+	}
+}
+
+func TestValidate_WarnApproveOnReplication(t *testing.T) {
+	conn := []*ConnectionRule{{Name: "rep-appr", MatchKind: "replication", Decision: "approve"}}
+	ws, err := helperValidate(t, nil, nil, conn)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	found := false
+	for _, w := range ws {
+		if w.Code == "approve_on_replication" && w.Rule == "rep-appr" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want approve_on_replication warning for rep-appr, got %v", ws)
+	}
+}
+
+func TestValidate_ApproveTimeoutExceedsMax_ConnectionRule(t *testing.T) {
+	conn := []*ConnectionRule{{Name: "slow", Decision: "approve", Timeout: 700 * time.Second}}
+	_, err := helperValidate(t, nil, nil, conn)
+	if err == nil || !strings.Contains(err.Error(), "approve_timeout_exceeds_max") {
+		t.Fatalf("want approve_timeout_exceeds_max for connection rule, got %v", err)
+	}
+}
