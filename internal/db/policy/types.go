@@ -16,6 +16,10 @@ type ServiceID string
 // DecisionVerb mirrors the §10.1 verbs. Implicit deny is *not* a separate
 // verb; it is encoded as Verb == VerbDeny with RuleName == "" (see §7 of the
 // design doc and Decision below).
+//
+// The numeric ordering (Allow < Audit < Approve < Deny) encodes
+// restrictiveness — the evaluator's hot path uses integer comparison
+// (max(verb, ...)) to fold per-effect verdicts. Do not reorder these values.
 type DecisionVerb uint8
 
 const (
@@ -172,8 +176,15 @@ type RuleSet struct {
 	redaction  RedactionConfig
 }
 
-// Redaction returns the policies.db block configuration.
-func (rs *RuleSet) Redaction() RedactionConfig { return rs.redaction }
+// Redaction returns the policies.db block configuration. Returns the zero
+// value when rs is nil so startup code holding a not-yet-loaded *RuleSet
+// does not panic.
+func (rs *RuleSet) Redaction() RedactionConfig {
+	if rs == nil {
+		return RedactionConfig{}
+	}
+	return rs.redaction
+}
 
 // Service returns the named db_service definition, if present.
 func (rs *RuleSet) Service(id ServiceID) (DBService, bool) {
