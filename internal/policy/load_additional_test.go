@@ -31,3 +31,28 @@ func TestResolvePolicyPathNotFound(t *testing.T) {
 		t.Fatalf("expected not found error")
 	}
 }
+
+func TestLoadAcceptsDBRuleFamilies(t *testing.T) {
+	yaml := []byte(`
+version: 1
+name: db-test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+database_rules:
+  - name: r1
+    db_service: appdb
+    operations: [READ]
+    decision: allow
+database_connection_rules:
+  - name: c1
+    db_service: appdb
+    decision: allow
+`)
+	if _, err := LoadFromBytes(yaml); err != nil {
+		t.Fatalf("LoadFromBytes rejected DB rule families: %v", err)
+	}
+}

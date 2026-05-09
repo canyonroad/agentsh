@@ -52,6 +52,13 @@ type Policy struct {
 
 	// HTTP services: unified path/verb filtering + credential substitution.
 	HTTPServices []HTTPService `yaml:"http_services,omitempty"`
+
+	// DB access (Phase 1, Plan 02). Stored opaquely as yaml.Node so this
+	// package does not depend on internal/db/policy. Decoding and validation
+	// live in internal/db/policy.Decode.
+	DBServices              yaml.Node `yaml:"db_services,omitempty"`
+	DatabaseRules           yaml.Node `yaml:"database_rules,omitempty"`
+	DatabaseConnectionRules yaml.Node `yaml:"database_connection_rules,omitempty"`
 }
 
 type FileRule struct {
