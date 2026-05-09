@@ -68,6 +68,12 @@ const (
 
 // evaluateEffect runs the three-pass §10.2 algorithm for a single effect.
 func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effectDecision {
+	// An effect with no objects cannot be covered by any rule (coverage is per-object,
+	// per §10.2). Treat as implicit deny — fail-closed posture.
+	if len(e.Objects) == 0 {
+		return effectDecision{verb: verbImplicitDeny}
+	}
+
 	// Pass 1 — deny. Walk rules in policy file order; first matching object wins.
 	// Deny rules short-circuit: the entire effect is denied as soon as one rule
 	// matches any object.
@@ -91,7 +97,7 @@ func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effec
 
 	// Pass 2 — coverage. For each object, collect non-deny rules that cover it.
 	// coverage[i] holds the covering rules for e.Objects[i].
-	coverage := make(map[int][](*compiledStatementRule), len(e.Objects))
+	coverage := make(map[int][]*compiledStatementRule, len(e.Objects))
 	for i, o := range e.Objects {
 		for _, r := range applicable {
 			if r.verb == VerbDeny {
@@ -150,8 +156,8 @@ func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effec
 					auditSeen[r.src.Name] = true
 					auditRules = append(auditRules, r)
 				}
-			// VerbAllow contributes nothing to the verb escalation but
-			// provides coverage. The allow primary rule is coverage[0][0].
+			// VerbAllow contributes coverage but no verb escalation. The primary
+			// rule for an allow outcome is selected later (coverage[0][0]).
 			}
 		}
 	}
@@ -278,12 +284,13 @@ func foldEffects(stmt effects.ClassifiedStatement, perEffect []effectDecision) D
 	}
 }
 
-// compareInternalVerb returns +1 if a is more restrictive than b, -1 if less,
-// 0 if equal.
+// compareInternalVerb returns +1, -1, or 0 like Compare-style helpers.
+// Defined as a function (instead of inline `>`) so call sites read as
+// "this is a tiebreak comparison" rather than "this is integer math".
 //
-// Ordering: verbAllow < verbAudit < verbApprove < verbImplicitDeny < verbDeny.
-// verbImplicitDeny ranks just below verbDeny so explicit deny beats implicit
-// deny on ties, keeping RuleName non-empty whenever possible.
+// Order: allow < audit < approve < implicit_deny < deny. implicit_deny
+// ranks just below explicit deny so the explicit deny path wins ties
+// (preserving Decision.RuleName).
 func compareInternalVerb(a, b internalVerb) int {
 	if a > b {
 		return 1
