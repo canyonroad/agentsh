@@ -43,3 +43,14 @@ func Fold(rs []Resolution) Resolution {
 	}
 	return worst
 }
+
+// ParseResolution parses the canonical lowercase resolution-tag name.
+// Returns ok=false on unknown input (including the empty string).
+func ParseResolution(name string) (Resolution, bool) {
+	for i, n := range resolutionNames {
+		if n == name {
+			return Resolution(i), true
+		}
+	}
+	return 0, false
+}

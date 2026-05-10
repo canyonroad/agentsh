@@ -193,3 +193,18 @@ func (s Subtype) Group() Group {
 	}
 	return 0
 }
+
+// ParseSubtype parses the canonical lowercase subtype name. The empty string
+// returns (SubtypeNone, false) — operators wishing to match group-level only
+// should leave the rule's subtypes clause absent. Returns ok=false on unknown.
+func ParseSubtype(name string) (Subtype, bool) {
+	if name == "" {
+		return SubtypeNone, false
+	}
+	for s, info := range subtypeTable {
+		if info.name == name {
+			return s, true
+		}
+	}
+	return SubtypeNone, false
+}
