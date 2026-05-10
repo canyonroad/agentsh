@@ -6,7 +6,6 @@ import (
 )
 
 func TestBackend_ParsesSimpleSelect(t *testing.T) {
-	t.Skip("re-enabled in Task 5 once ast_walk lands")
 	p := New(DialectPostgres)
 	got, err := p.Classify("SELECT 1", SessionState{}, Options{})
 	if err != nil {

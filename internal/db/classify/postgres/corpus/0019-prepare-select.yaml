@@ -1,0 +1,11 @@
+name: prepare-select
+spec_ref: §7.3 PREPARE
+description: PREPARE recurses into its inner query; raw_verb is PREPARE_<inner>.
+sql: "PREPARE q AS SELECT * FROM customers"
+expected_classification:
+  - raw_verb: PREPARE_SELECT
+    primary_group: read
+    effects:
+      - group: read
+        objects:
+          - { kind: table, name: customers }

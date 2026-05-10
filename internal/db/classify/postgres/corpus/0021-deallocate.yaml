@@ -1,0 +1,11 @@
+name: deallocate
+spec_ref: §7.3 DEALLOCATE
+description: DEALLOCATE maps to session/discard_plans per §7.3.
+sql: "DEALLOCATE q"
+expected_classification:
+  - raw_verb: DEALLOCATE
+    primary_group: session
+    primary_subtype: discard_plans
+    effects:
+      - group: session
+        subtype: discard_plans

@@ -183,13 +183,6 @@ func unknownStatement(backend effects.ParserBackend, msg string) effects.Classif
 	}
 }
 
-// classifyRawStmt is the AST-walk entry point. Real implementation lands in
-// Task 5 (ast_walk.go); this stub returns unknown so the dispatcher pipeline
-// is testable end-to-end (parse -> dispatch -> unknown classification).
-func classifyRawStmt(d Dialect, raw *pg_query.RawStmt, sess SessionState, opts Options, backend effects.ParserBackend) effects.ClassifiedStatement {
-	return unknownStatement(backend, "unmapped form: classifier not yet implemented (Task 5)")
-}
-
 // redshiftFirstKeyword is invoked from classifyWithBackend on Redshift parse
 // failure. Real implementation lands in Task 14; this stub returns ok=false to
 // mean "fall through to unknown".

@@ -1,0 +1,16 @@
+name: merge
+spec_ref: §7.3 MERGE
+description: MERGE — primary modify effect on target, secondary read on source.
+sql: |
+  MERGE INTO target USING source ON target.id = source.id
+  WHEN MATCHED THEN UPDATE SET v = source.v
+expected_classification:
+  - raw_verb: MERGE
+    primary_group: modify
+    effects:
+      - group: modify
+        objects:
+          - { kind: table, name: target }
+      - group: read
+        objects:
+          - { kind: table, name: source }

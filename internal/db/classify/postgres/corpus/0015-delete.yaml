@@ -1,0 +1,14 @@
+name: delete
+spec_ref: §7.3 DELETE
+description: DELETE — primary delete effect; sample policy denies.
+sql: "DELETE FROM users WHERE id = 1"
+expected_classification:
+  - raw_verb: DELETE
+    primary_group: delete
+    effects:
+      - group: delete
+        objects:
+          - { kind: table, name: users }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

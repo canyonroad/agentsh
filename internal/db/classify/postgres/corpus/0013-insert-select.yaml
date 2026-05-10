@@ -1,0 +1,14 @@
+name: insert-select
+spec_ref: §7.3 INSERT, §20 multi-effect
+description: INSERT … SELECT — write + secondary read.
+sql: "INSERT INTO audit_log SELECT * FROM users"
+expected_classification:
+  - raw_verb: INSERT
+    primary_group: write
+    effects:
+      - group: write
+        objects:
+          - { kind: table, name: audit_log }
+      - group: read
+        objects:
+          - { kind: table, name: users }

@@ -1,0 +1,18 @@
+name: select-after-search-path-change
+spec_ref: §6.1 ambiguous_after_search_path
+description: |
+  Unqualified SELECT against a search_path that diverges from the connection
+  default — resolution is ambiguous_after_search_path.
+sql: "SELECT * FROM users"
+session:
+  search_path: ["app", "public"]
+  default_search_path: ["public"]
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: read
+    top_resolution: ambiguous_after_search_path
+    effects:
+      - group: read
+        objects:
+          - { kind: table, name: users }
+        resolution: ambiguous_after_search_path

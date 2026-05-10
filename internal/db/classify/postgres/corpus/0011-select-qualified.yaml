@@ -1,0 +1,12 @@
+name: select-qualified
+spec_ref: §7.3 SELECT
+description: Schema-qualified SELECT yields qualified_syntactic resolution.
+sql: "SELECT * FROM public.customers"
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: read
+    effects:
+      - group: read
+        objects:
+          - { kind: table, schema: public, name: customers }
+        resolution: qualified_syntactic

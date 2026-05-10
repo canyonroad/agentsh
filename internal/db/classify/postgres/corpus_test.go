@@ -10,8 +10,6 @@ import (
 )
 
 func TestCorpus(t *testing.T) {
-	t.Skip("re-enabled in Task 5 once ast_walk lands")
-
 	rows, err := corpus.LoadAll("corpus")
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)

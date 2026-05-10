@@ -1,0 +1,10 @@
+name: explain
+spec_ref: §7.3 EXPLAIN
+description: Plain EXPLAIN classifies as read.
+sql: "EXPLAIN SELECT * FROM customers"
+expected_classification:
+  - raw_verb: EXPLAIN
+    primary_group: read
+    effects:
+      - group: read
+        resolution: qualified_syntactic
