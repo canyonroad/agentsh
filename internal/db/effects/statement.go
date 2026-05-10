@@ -25,9 +25,10 @@ func (b ParserBackend) String() string {
 // the input to the policy evaluator (Plan 02). Effects must be in canonical
 // order per Order(); the first entry is the primary effect.
 type ClassifiedStatement struct {
-	Effects       []Effect
-	RawVerb       string        // hint, e.g. "CREATE_SUBSCRIPTION" — informational only
-	ParserBackend ParserBackend // which parser produced this
+	Effects       []Effect      `json:"effects"`
+	RawVerb       string        `json:"raw_verb,omitempty"`
+	ParserBackend ParserBackend `json:"parser_backend,omitempty"`
+	Error         string        `json:"error,omitempty"`
 }
 
 // Primary returns the first (canonical) effect. ok=false on empty effects list.

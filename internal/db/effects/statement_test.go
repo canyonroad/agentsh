@@ -1,7 +1,11 @@
 // internal/db/effects/statement_test.go
 package effects
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+)
 
 func TestClassifiedStatement_Primary(t *testing.T) {
 	s := ClassifiedStatement{
@@ -47,4 +51,42 @@ func TestParserBackend_String(t *testing.T) {
 			t.Errorf("ParserBackend(%d).String() = %q, want %q", b, got, name)
 		}
 	}
+}
+
+func TestClassifiedStatement_ErrorField(t *testing.T) {
+	t.Run("zero value is empty string", func(t *testing.T) {
+		var cs ClassifiedStatement
+		if cs.Error != "" {
+			t.Fatalf("zero value Error = %q, want \"\"", cs.Error)
+		}
+	})
+
+	t.Run("JSON omits empty Error", func(t *testing.T) {
+		cs := ClassifiedStatement{Effects: []Effect{{Group: GroupRead}}}
+		b, err := json.Marshal(cs)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		if bytes.Contains(b, []byte(`"error"`)) {
+			t.Fatalf("empty Error leaked into JSON: %s", b)
+		}
+	})
+
+	t.Run("JSON round-trips populated Error", func(t *testing.T) {
+		in := ClassifiedStatement{
+			Effects: []Effect{{Group: GroupUnknown}},
+			Error:   "parse: syntax error at end of input",
+		}
+		b, err := json.Marshal(in)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var out ClassifiedStatement
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if out.Error != in.Error {
+			t.Fatalf("Error round-trip: got %q want %q", out.Error, in.Error)
+		}
+	})
 }
