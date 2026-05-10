@@ -114,38 +114,29 @@ type redactionYAML struct {
 	ApprovalStatementPreviewChars int    `yaml:"approval_statement_preview_chars,omitempty"`
 }
 
-// policiesPeek peeks at the policies.db sub-block. We do *not* add a typed
-// Policies field to internal/policy.Policy here — too much surface for a
-// single sub-block — and instead re-decode the full bytes into a transient
-// shape. Plan 02 owns only the db sub-block.
-type policiesPeek struct {
-	Policies struct {
-		DB redactionYAML `yaml:"db,omitempty"`
-	} `yaml:"policies,omitempty"`
+// dbPoliciesWrapper is the on-disk shape of the policies block as far as
+// internal/db/policy cares — only the db sub-block is owned here.
+type dbPoliciesWrapper struct {
+	DB redactionYAML `yaml:"db,omitempty"`
 }
 
-// decodeRedaction reads the policies.db sub-block from the source policy.
-// Defaults: LogStatements=parameters_redacted, ApprovalStatementPreview=
-// parameters_redacted (YAML alias "redacted"), ApprovalStatementChars=200.
+// decodeRedaction reads the policies.db sub-block. Defaults: LogStatements=
+// parameters_redacted, ApprovalStatementPreview=parameters_redacted (YAML
+// alias "redacted"), ApprovalStatementChars=200.
 func decodeRedaction(p *rootpolicy.Policy) (RedactionConfig, error) {
 	out := RedactionConfig{
 		LogStatements:            RedactParametersRedacted,
 		ApprovalStatementPreview: RedactParametersRedacted,
 		ApprovalStatementChars:   200,
 	}
-	// The redaction config lives under policies.db, which internal/policy does
-	// not currently own. Decode by re-marshalling and re-decoding the
-	// policy.Policy via yaml.Marshal/Unmarshal — slow, but Decode runs once at
-	// load time and avoids a second mutable field on internal/policy.Policy.
-	bs, err := yaml.Marshal(p)
-	if err != nil {
-		return out, fmt.Errorf("decode redaction (marshal): %w", err)
+	if p.Policies.IsZero() {
+		return out, nil
 	}
-	var peek policiesPeek
-	if err := yaml.Unmarshal(bs, &peek); err != nil {
-		return out, fmt.Errorf("decode redaction (unmarshal): %w", err)
+	var w dbPoliciesWrapper
+	if err := strictDecode(p.Policies, &w); err != nil {
+		return out, fmt.Errorf("decode policies.db: %w", err)
 	}
-	rb := peek.Policies.DB
+	rb := w.DB
 	if rb.LogStatements != "" {
 		t, ok := ParseRedactionTier(rb.LogStatements)
 		if !ok {

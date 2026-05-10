@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	rootpolicy "github.com/agentsh/agentsh/internal/policy"
 )
 
 // helperValidate runs validate against the decoded shapes; tests construct
@@ -213,5 +215,41 @@ func TestValidate_ApproveTimeoutExceedsMax_ConnectionRule(t *testing.T) {
 	_, err := helperValidate(t, nil, nil, conn)
 	if err == nil || !strings.Contains(err.Error(), "approve_timeout_exceeds_max") {
 		t.Fatalf("want approve_timeout_exceeds_max for connection rule, got %v", err)
+	}
+}
+
+func TestValidate_GlobCompileViaDecode(t *testing.T) {
+	src := `version: 1
+name: t
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: x:1, tls_mode: terminate_reissue}
+database_rules:
+  - {name: r, db_service: appdb, objects: ["["], operations: [READ], decision: allow}
+`
+	p, err := rootpolicy.LoadFromBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	_, _, err = Decode(p)
+	if err == nil || !strings.Contains(err.Error(), "glob_compile") {
+		t.Fatalf("want glob_compile error, got %v", err)
+	}
+}
+
+func TestValidate_MessageTemplateParseViaDecode(t *testing.T) {
+	src := `version: 1
+name: t
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: x:1, tls_mode: terminate_reissue}
+database_rules:
+  - {name: r, db_service: appdb, operations: [READ], decision: deny, message: "{{.Unclosed"}
+`
+	p, err := rootpolicy.LoadFromBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	_, _, err = Decode(p)
+	if err == nil || !strings.Contains(err.Error(), "message_template_parse") {
+		t.Fatalf("want message_template_parse error, got %v", err)
 	}
 }

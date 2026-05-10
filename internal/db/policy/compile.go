@@ -92,6 +92,10 @@ func (f serviceFilter) matches(id ServiceID, svc *DBService) bool {
 }
 
 // messageContext is the data passed to a rule's message template.
+//
+// StatementPreview is wired by Plan 03+ when ClassifiedStatement gains a
+// statement-text field. In Plan 02 it is always the empty string; templates
+// that reference {{.StatementPreview}} render as an empty value.
 type messageContext struct {
 	Operation        string
 	Subtype          string
