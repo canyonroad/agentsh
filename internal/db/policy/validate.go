@@ -162,9 +162,19 @@ func validateConnectionRule(r *ConnectionRule, svcs map[ServiceID]*DBService) ([
 			svc = s
 		}
 	}
-	if svc != nil && svc.TLSMode == "passthrough" {
-		if len(r.DBUser) > 0 || r.Database != "" || r.ApplicationName != "" {
-			errs = append(errs, fmt.Errorf("conn_passthrough_field_unavailable: database_connection_rules[%q]: db_user/database/application_name not visible under passthrough", r.Name))
+	if svc != nil {
+		// Named service: check only that specific service.
+		if err := validateConnectionRuleVsService(r, svc); err != nil {
+			errs = append(errs, err)
+		}
+	} else if r.DBService == "" {
+		// Wildcard rule (no db_service): reject if any passthrough service exists
+		// and the rule uses invisible fields — the rule can never fire there.
+		for _, s := range svcs {
+			if err := validateConnectionRuleVsService(r, s); err != nil {
+				errs = append(errs, fmt.Errorf("%w (triggered by service %q)", err, s.Name))
+				break
+			}
 		}
 	}
 
@@ -207,6 +217,28 @@ func validateConnectionRule(r *ConnectionRule, svcs map[ServiceID]*DBService) ([
 	}
 
 	return errs, warns
+}
+
+// validateConnectionRuleVsService returns a non-nil error if the rule matches
+// a field that is invisible under the service's tls_mode.
+// Per spec §13.2: db_user, database, application_name are not visible under
+// tls_mode: passthrough (they are sent in the StartupMessage after TLS
+// negotiation). client_identity and SNI are visible pre-handshake and remain
+// valid under all tls_mode values.
+func validateConnectionRuleVsService(r *ConnectionRule, svc *DBService) error {
+	if svc.TLSMode != "passthrough" {
+		return nil
+	}
+	if len(r.DBUser) > 0 {
+		return fmt.Errorf("conn_passthrough_field_unavailable: database_connection_rules[%q]: db_user/database/application_name not visible under passthrough", r.Name)
+	}
+	if r.Database != "" {
+		return fmt.Errorf("conn_passthrough_field_unavailable: database_connection_rules[%q]: db_user/database/application_name not visible under passthrough", r.Name)
+	}
+	if r.ApplicationName != "" {
+		return fmt.Errorf("conn_passthrough_field_unavailable: database_connection_rules[%q]: db_user/database/application_name not visible under passthrough", r.Name)
+	}
+	return nil
 }
 
 // hasHighRisk reports whether the alias-expanded group set includes any

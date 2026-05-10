@@ -218,6 +218,171 @@ func TestValidate_ApproveTimeoutExceedsMax_ConnectionRule(t *testing.T) {
 	}
 }
 
+func TestValidate_PassthroughInvisibleFieldRule(t *testing.T) {
+	tests := []struct {
+		name         string
+		yaml         string
+		wantError    bool
+		wantCode     string
+		wantContains []string
+	}{
+		{
+			name: "db_user under passthrough rejected",
+			yaml: `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: passthrough
+database_connection_rules:
+  - name: r1
+    db_service: appdb
+    db_user: ["admin"]
+    decision: deny
+`,
+			wantError: true,
+			wantCode:  "conn_passthrough_field_unavailable",
+		},
+		{
+			name: "database under passthrough rejected",
+			yaml: `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: passthrough
+database_connection_rules:
+  - name: r1
+    db_service: appdb
+    database: prod
+    decision: deny
+`,
+			wantError: true,
+			wantCode:  "conn_passthrough_field_unavailable",
+		},
+		{
+			name: "application_name under passthrough rejected",
+			yaml: `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: passthrough
+database_connection_rules:
+  - name: r1
+    db_service: appdb
+    application_name: psql
+    decision: deny
+`,
+			wantError: true,
+			wantCode:  "conn_passthrough_field_unavailable",
+		},
+		{
+			name: "client_identity under passthrough is allowed (visible pre-handshake)",
+			yaml: `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: passthrough
+database_connection_rules:
+  - name: r1
+    db_service: appdb
+    client_identity: agent
+    decision: deny
+`,
+			wantError: false,
+		},
+		{
+			name: "db_user under terminate_reissue is allowed",
+			yaml: `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+database_connection_rules:
+  - name: r1
+    db_service: appdb
+    db_user: ["admin"]
+    decision: deny
+`,
+			wantError: false,
+		},
+		{
+			name: "db_user wildcard rule rejected when any service is passthrough",
+			yaml: `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: passthrough
+  otherdb:
+    family: postgres
+    dialect: postgres
+    upstream: db2.internal:5432
+    tls_mode: terminate_reissue
+database_connection_rules:
+  - name: r1
+    db_user: ["admin"]
+    decision: deny
+`,
+			wantError:    true,
+			wantContains: []string{"conn_passthrough_field_unavailable", "triggered by service"},
+		},
+		{
+			name: "db_user wildcard rule allowed when no service is passthrough",
+			yaml: `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+database_connection_rules:
+  - name: r1
+    db_user: ["admin"]
+    decision: deny
+`,
+			wantError: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rp, err := rootpolicy.LoadFromBytes([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("LoadFromBytes: %v", err)
+			}
+			_, _, err = Decode(rp)
+			gotErr := err != nil
+			if gotErr != tc.wantError {
+				t.Fatalf("Decode error = %v, wantError = %v", err, tc.wantError)
+			}
+			if tc.wantCode != "" && !strings.Contains(err.Error(), tc.wantCode) {
+				t.Fatalf("Decode error = %q, wantCode contains %q", err.Error(), tc.wantCode)
+			}
+			for _, want := range tc.wantContains {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("Decode error = %q, wantContains %q", err.Error(), want)
+				}
+			}
+		})
+	}
+}
+
 func TestValidate_GlobCompileViaDecode(t *testing.T) {
 	src := `version: 1
 name: t
