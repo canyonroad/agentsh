@@ -1,0 +1,16 @@
+name: create-role
+spec_ref: §7.3 CREATE ROLE
+description: CREATE ROLE → privilege(create_role) with role object.
+sql: "CREATE ROLE alice"
+expected_classification:
+  - raw_verb: CREATE_ROLE
+    primary_group: privilege
+    primary_subtype: create_role
+    effects:
+      - group: privilege
+        subtype: create_role
+        objects:
+          - { kind: role, name: alice }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-dangerous

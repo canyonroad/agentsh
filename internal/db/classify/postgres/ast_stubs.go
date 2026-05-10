@@ -16,28 +16,6 @@ func stub(cs *effects.ClassifiedStatement, family string) {
 	cs.Error = "unmapped form: " + family + " not yet implemented"
 }
 
-// ---- privilege (Task 8) ----
-
-func classifyGrant(cs *effects.ClassifiedStatement, _ *pg_query.GrantStmt) { stub(cs, "grant") }
-func classifyGrantRole(cs *effects.ClassifiedStatement, _ *pg_query.GrantRoleStmt) {
-	stub(cs, "grant_role")
-}
-func classifyCreateRole(cs *effects.ClassifiedStatement, _ *pg_query.CreateRoleStmt) {
-	stub(cs, "create_role")
-}
-func classifyAlterRole(cs *effects.ClassifiedStatement, _ *pg_query.AlterRoleStmt) {
-	stub(cs, "alter_role")
-}
-func classifyDropRole(cs *effects.ClassifiedStatement, _ *pg_query.DropRoleStmt) {
-	stub(cs, "drop_role")
-}
-func classifyAlterSystem(cs *effects.ClassifiedStatement, _ *pg_query.AlterSystemStmt) {
-	stub(cs, "alter_system")
-}
-func classifySecurityLabel(cs *effects.ClassifiedStatement, _ *pg_query.SecLabelStmt) {
-	stub(cs, "security_label")
-}
-
 // ---- COPY (Task 9) ----
 
 func classifyCopy(cs *effects.ClassifiedStatement, _ *pg_query.CopyStmt, _ SessionState, _ Options) {

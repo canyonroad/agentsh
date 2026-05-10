@@ -1,0 +1,18 @@
+name: grant-role
+spec_ref: §7.3 GRANT (role membership) / §20 disambiguation
+description: |
+  GRANT pg_read_server_files TO bob is a role-membership grant — primary
+  group MUST be privilege, NOT a function call. §20 disambiguation case.
+sql: "GRANT pg_read_server_files TO bob"
+expected_classification:
+  - raw_verb: GRANT_ROLE
+    primary_group: privilege
+    primary_subtype: grant
+    effects:
+      - group: privilege
+        subtype: grant
+        objects:
+          - { kind: role, name: pg_read_server_files }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-dangerous

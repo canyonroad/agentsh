@@ -1,0 +1,16 @@
+name: revoke-table
+spec_ref: §7.3 REVOKE
+description: REVOKE SELECT ON table FROM role → privilege(revoke).
+sql: "REVOKE SELECT ON customers FROM bob"
+expected_classification:
+  - raw_verb: REVOKE
+    primary_group: privilege
+    primary_subtype: revoke
+    effects:
+      - group: privilege
+        subtype: revoke
+        objects:
+          - { kind: table, name: customers }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-dangerous

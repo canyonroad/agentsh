@@ -1,0 +1,16 @@
+name: alter-role
+spec_ref: §7.3 ALTER ROLE
+description: ALTER ROLE … WITH PASSWORD → privilege(alter_role).
+sql: "ALTER ROLE alice WITH PASSWORD 'x'"
+expected_classification:
+  - raw_verb: ALTER_ROLE
+    primary_group: privilege
+    primary_subtype: alter_role
+    effects:
+      - group: privilege
+        subtype: alter_role
+        objects:
+          - { kind: role, name: alice }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-dangerous

@@ -1,0 +1,18 @@
+name: alter-system
+spec_ref: §7.3 ALTER SYSTEM / §20 disambiguation
+description: |
+  ALTER SYSTEM SET → primary group MUST be privilege with subtype alter_system,
+  NOT schema_alter. §20 disambiguation case.
+sql: "ALTER SYSTEM SET shared_buffers='128MB'"
+expected_classification:
+  - raw_verb: ALTER_SYSTEM
+    primary_group: privilege
+    primary_subtype: alter_system
+    effects:
+      - group: privilege
+        subtype: alter_system
+        objects:
+          - { kind: guc, name: shared_buffers }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-dangerous
