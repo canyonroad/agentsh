@@ -159,11 +159,6 @@ func TestApplyStatement_ResetRole(t *testing.T) {
 		Role:        "alice",
 		DefaultRole: "",
 	}
-	// RESET role goes through the per-GUC reset path; only search_path reset
-	// mutates tracked state. To clear role, the user must RESET ROLE — which
-	// pg_query parses as VAR_RESET on name "role" (not search_path), so this
-	// is intentionally a no-op for tracking purposes. Use DiscardAll/ResetAll
-	// to clear role.
 	cs := effects.ClassifiedStatement{
 		Effects: []effects.Effect{{
 			Group:   effects.GroupSession,
@@ -173,8 +168,27 @@ func TestApplyStatement_ResetRole(t *testing.T) {
 		RawVerb: "RESET=role",
 	}
 	got := ApplyStatement(in, cs)
-	if got.Role != "alice" {
-		t.Fatalf("RESET role: got %q want %q (only ResetAll/DiscardAll clear role)", got.Role, "alice")
+	if got.Role != "" {
+		t.Fatalf("RESET role: got %q want %q", got.Role, "")
+	}
+}
+
+func TestApplyStatement_SetRoleNone(t *testing.T) {
+	in := SessionState{
+		Role:        "alice",
+		DefaultRole: "",
+	}
+	cs := effects.ClassifiedStatement{
+		Effects: []effects.Effect{{
+			Group:   effects.GroupSession,
+			Subtype: effects.SubtypeSetRole,
+			Objects: []effects.ObjectRef{{Kind: effects.ObjectGUC, Name: "role"}},
+		}},
+		RawVerb: "SET_ROLE=none",
+	}
+	got := ApplyStatement(in, cs)
+	if got.Role != "" {
+		t.Fatalf("SET ROLE NONE: got %q want %q", got.Role, "")
 	}
 }
 

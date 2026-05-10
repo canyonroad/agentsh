@@ -199,13 +199,21 @@ func applySessionEffect(s *SessionState, e effects.Effect, rawVerb string) {
 	case effects.SubtypeSetSearchPath:
 		s.SearchPath = parseSearchPath(rawVerb)
 	case effects.SubtypeSetRole:
-		s.Role = parseAfterEqual(rawVerb)
+		v := parseAfterEqual(rawVerb)
+		if strings.EqualFold(v, "none") {
+			s.Role = s.DefaultRole
+		} else {
+			s.Role = v
+		}
 	case effects.SubtypeSetSessionAuthorization:
 		s.Role = parseAfterEqual(rawVerb)
 	case effects.SubtypeReset:
-		// Specific GUC reset: only search_path resets affect tracked state.
+		// Specific GUC reset: search_path and role resets affect tracked state.
 		if hasGUC(e.Objects, "search_path") {
 			s.SearchPath = append([]string(nil), s.DefaultSearchPath...)
+		}
+		if hasGUC(e.Objects, "role") {
+			s.Role = s.DefaultRole
 		}
 	case effects.SubtypeResetAll, effects.SubtypeDiscardAll:
 		s.SearchPath = append([]string(nil), s.DefaultSearchPath...)
