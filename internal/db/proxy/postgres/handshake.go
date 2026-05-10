@@ -55,16 +55,6 @@ func (pc *proxyConn) dispatchStartup(ctx context.Context) error {
 	}
 }
 
-// handleSSLRequest is plumbed by Task 6 (tls.go). The stub here writes 'N'
-// (refuse SSL) so a plaintext client falls through to StartupMessage. Task
-// 6 replaces this with the terminate_* TLS handshake.
-func (pc *proxyConn) handleSSLRequest(ctx context.Context) error {
-	if _, err := pc.conn.Write([]byte{'N'}); err != nil {
-		return fmt.Errorf("write SSL 'N': %w", err)
-	}
-	return nil
-}
-
 // handleStartupMessage parses the parameters and either denies replication,
 // proceeds to connection-rule eval (Task 7), or surfaces the not-yet-wired
 // error.
