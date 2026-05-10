@@ -1,0 +1,16 @@
+name: create-table
+spec_ref: §7.3 CREATE TABLE
+description: Plain CREATE TABLE — schema_create(create_table) on bare table.
+sql: "CREATE TABLE foo (id int, v text)"
+expected_classification:
+  - raw_verb: CREATE_TABLE
+    primary_group: schema_create
+    primary_subtype: create_table
+    effects:
+      - group: schema_create
+        subtype: create_table
+        objects:
+          - { kind: table, name: foo }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

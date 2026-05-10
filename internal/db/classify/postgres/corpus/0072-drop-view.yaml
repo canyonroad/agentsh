@@ -1,0 +1,16 @@
+name: drop-view
+spec_ref: §7.3 DROP VIEW
+description: DROP VIEW → schema_destroy(drop_view).
+sql: "DROP VIEW v"
+expected_classification:
+  - raw_verb: DROP_VIEW
+    primary_group: schema_destroy
+    primary_subtype: drop_view
+    effects:
+      - group: schema_destroy
+        subtype: drop_view
+        objects:
+          - { kind: view, name: v }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

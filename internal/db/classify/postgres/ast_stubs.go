@@ -16,48 +16,6 @@ func stub(cs *effects.ClassifiedStatement, family string) {
 	cs.Error = "unmapped form: " + family + " not yet implemented"
 }
 
-// ---- DDL (Task 7) ----
-
-func classifyCreateTable(cs *effects.ClassifiedStatement, _ *pg_query.CreateStmt, _ SessionState) {
-	stub(cs, "create_table")
-}
-func classifyAlter(cs *effects.ClassifiedStatement, _ *pg_query.AlterTableStmt, _ SessionState) {
-	stub(cs, "alter")
-}
-func classifyDrop(cs *effects.ClassifiedStatement, _ *pg_query.DropStmt, _ SessionState) {
-	stub(cs, "drop")
-}
-func classifyTruncate(cs *effects.ClassifiedStatement, _ *pg_query.TruncateStmt, _ SessionState) {
-	stub(cs, "truncate")
-}
-func classifyCreateIndex(cs *effects.ClassifiedStatement, _ *pg_query.IndexStmt, _ SessionState) {
-	stub(cs, "create_index")
-}
-func classifyCreateView(cs *effects.ClassifiedStatement, _ *pg_query.ViewStmt, _ SessionState) {
-	stub(cs, "create_view")
-}
-func classifyCreateSchema(cs *effects.ClassifiedStatement, _ *pg_query.CreateSchemaStmt) {
-	stub(cs, "create_schema")
-}
-func classifyCreateFunction(cs *effects.ClassifiedStatement, _ *pg_query.CreateFunctionStmt) {
-	stub(cs, "create_function")
-}
-func classifyCreateExtension(cs *effects.ClassifiedStatement, _ *pg_query.CreateExtensionStmt) {
-	stub(cs, "create_extension")
-}
-func classifyCreateDatabase(cs *effects.ClassifiedStatement, _ *pg_query.CreatedbStmt) {
-	stub(cs, "create_database")
-}
-func classifyDropDatabase(cs *effects.ClassifiedStatement, _ *pg_query.DropdbStmt) {
-	stub(cs, "drop_database")
-}
-func classifyCreatePublication(cs *effects.ClassifiedStatement, _ *pg_query.CreatePublicationStmt) {
-	stub(cs, "create_publication")
-}
-func classifyAlterPublication(cs *effects.ClassifiedStatement, _ *pg_query.AlterPublicationStmt) {
-	stub(cs, "alter_publication")
-}
-
 // ---- privilege (Task 8) ----
 
 func classifyGrant(cs *effects.ClassifiedStatement, _ *pg_query.GrantStmt) { stub(cs, "grant") }

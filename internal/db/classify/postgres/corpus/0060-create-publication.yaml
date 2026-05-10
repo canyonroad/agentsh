@@ -1,0 +1,16 @@
+name: create-publication
+spec_ref: §7.3 CREATE PUBLICATION
+description: CREATE PUBLICATION maps to schema_create(create_publication).
+sql: "CREATE PUBLICATION p FOR TABLE users"
+expected_classification:
+  - raw_verb: CREATE_PUBLICATION
+    primary_group: schema_create
+    primary_subtype: create_publication
+    effects:
+      - group: schema_create
+        subtype: create_publication
+        objects:
+          - { kind: publication, name: p }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

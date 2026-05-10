@@ -1,0 +1,16 @@
+name: truncate
+spec_ref: §7.3 TRUNCATE
+description: TRUNCATE on a single table → schema_destroy(truncate).
+sql: "TRUNCATE foo"
+expected_classification:
+  - raw_verb: TRUNCATE
+    primary_group: schema_destroy
+    primary_subtype: truncate
+    effects:
+      - group: schema_destroy
+        subtype: truncate
+        objects:
+          - { kind: table, name: foo }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

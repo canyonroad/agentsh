@@ -1,0 +1,12 @@
+name: create-trigger
+spec_ref: §7.3 CREATE TRIGGER
+description: CREATE TRIGGER maps to schema_create at group level (no subtype).
+sql: "CREATE TRIGGER t BEFORE INSERT ON foo FOR EACH ROW EXECUTE FUNCTION fn()"
+expected_classification:
+  - raw_verb: CREATE_TRIGGER
+    primary_group: schema_create
+    effects:
+      - group: schema_create
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

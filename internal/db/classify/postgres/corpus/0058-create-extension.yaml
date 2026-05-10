@@ -1,0 +1,16 @@
+name: create-extension
+spec_ref: §7.3 CREATE EXTENSION
+description: CREATE EXTENSION maps to schema_create(create_extension).
+sql: "CREATE EXTENSION pgcrypto"
+expected_classification:
+  - raw_verb: CREATE_EXTENSION
+    primary_group: schema_create
+    primary_subtype: create_extension
+    effects:
+      - group: schema_create
+        subtype: create_extension
+        objects:
+          - { kind: schema, name: pgcrypto }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

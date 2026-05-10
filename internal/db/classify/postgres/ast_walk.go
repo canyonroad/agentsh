@@ -62,8 +62,14 @@ func classifyRawStmt(d Dialect, raw *pg_query.RawStmt, sess SessionState, opts O
 	// ---- DDL ----
 	case *pg_query.Node_CreateStmt:
 		classifyCreateTable(&cs, n.CreateStmt, sess)
+	case *pg_query.Node_CreateTableAsStmt:
+		classifyCreateTableAs(&cs, n.CreateTableAsStmt, sess, opts)
 	case *pg_query.Node_AlterTableStmt:
 		classifyAlter(&cs, n.AlterTableStmt, sess)
+	case *pg_query.Node_RenameStmt:
+		classifyRename(&cs, n.RenameStmt, sess)
+	case *pg_query.Node_CommentStmt:
+		classifyComment(&cs, n.CommentStmt)
 	case *pg_query.Node_DropStmt:
 		classifyDrop(&cs, n.DropStmt, sess)
 	case *pg_query.Node_TruncateStmt:
@@ -86,6 +92,18 @@ func classifyRawStmt(d Dialect, raw *pg_query.RawStmt, sess SessionState, opts O
 		classifyCreatePublication(&cs, n.CreatePublicationStmt)
 	case *pg_query.Node_AlterPublicationStmt:
 		classifyAlterPublication(&cs, n.AlterPublicationStmt)
+	case *pg_query.Node_CreateSeqStmt:
+		classifyCreateSequence(&cs, n.CreateSeqStmt, sess)
+	case *pg_query.Node_CreateTrigStmt:
+		classifyCreateTrigger(&cs, n.CreateTrigStmt, sess)
+	case *pg_query.Node_CompositeTypeStmt:
+		classifyCompositeType(&cs, n.CompositeTypeStmt, sess)
+	case *pg_query.Node_CreateEnumStmt:
+		classifyCreateEnum(&cs, n.CreateEnumStmt)
+	case *pg_query.Node_CreateDomainStmt:
+		classifyCreateDomain(&cs, n.CreateDomainStmt)
+	case *pg_query.Node_DefineStmt:
+		classifyDefine(&cs, n.DefineStmt)
 
 	// ---- privilege ----
 	case *pg_query.Node_GrantStmt:

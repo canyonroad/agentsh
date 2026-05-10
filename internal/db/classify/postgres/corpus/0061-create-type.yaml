@@ -1,0 +1,16 @@
+name: create-type
+spec_ref: §7.3 CREATE TYPE
+description: |
+  CREATE TYPE … AS ENUM maps to schema_create at group level — no subtype is
+  defined for type creation in §7.3.
+sql: "CREATE TYPE color AS ENUM ('r','g','b')"
+expected_classification:
+  - raw_verb: CREATE_TYPE
+    primary_group: schema_create
+    effects:
+      - group: schema_create
+        objects:
+          - { kind: table, name: color }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

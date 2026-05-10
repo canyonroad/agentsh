@@ -1,0 +1,14 @@
+name: alter-table
+spec_ref: §7.3 ALTER TABLE
+description: ALTER TABLE … (any cmd) maps to schema_alter (no subtype).
+sql: "ALTER TABLE foo SET LOGGED"
+expected_classification:
+  - raw_verb: ALTER_TABLE
+    primary_group: schema_alter
+    effects:
+      - group: schema_alter
+        objects:
+          - { kind: table, name: foo }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

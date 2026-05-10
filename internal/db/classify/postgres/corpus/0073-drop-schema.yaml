@@ -1,0 +1,16 @@
+name: drop-schema
+spec_ref: §7.3 DROP SCHEMA
+description: DROP SCHEMA → schema_destroy(drop_schema).
+sql: "DROP SCHEMA app"
+expected_classification:
+  - raw_verb: DROP_SCHEMA
+    primary_group: schema_destroy
+    primary_subtype: drop_schema
+    effects:
+      - group: schema_destroy
+        subtype: drop_schema
+        objects:
+          - { kind: schema, name: app }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations
