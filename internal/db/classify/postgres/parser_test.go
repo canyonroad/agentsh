@@ -7,7 +7,6 @@ import (
 )
 
 func TestNew_ReturnsParserPerDialect(t *testing.T) {
-	t.Skip("re-enabled in Task 3 once backends are wired")
 	for _, d := range []Dialect{DialectPostgres, DialectAuroraPostgres, DialectCockroachDB, DialectRedshift} {
 		p := New(d)
 		if p == nil {

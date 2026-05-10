@@ -6,6 +6,9 @@ package postgres
 
 import (
 	"fmt"
+	"strings"
+
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 
 	"github.com/agentsh/agentsh/internal/db/effects"
 )
@@ -120,11 +123,76 @@ func ApplyStatement(s SessionState, c effects.ClassifiedStatement) SessionState 
 	return applySession(s, c)
 }
 
-// Temporary stubs until Tasks 3 (backends) and Task 6 (session) ship.
-// Both are removed/replaced when their owning tasks land.
-func newParser(d Dialect) Parser {
-	panic("not implemented: backend not yet wired (Task 3)")
-}
+// Temporary stub until Task 6 ships. Removed/replaced when its owning task lands.
 func applySession(s SessionState, c effects.ClassifiedStatement) SessionState {
 	return s
+}
+
+// classifyWithBackend is shared between libpgquery.go and wasm.go.
+// It owns the dialect-aware error path (Redshift fallback) and the
+// per-RawStmt dispatch loop.
+func classifyWithBackend(
+	dialect Dialect,
+	sql string,
+	sess SessionState,
+	opts Options,
+	parse func(string) (*pg_query.ParseResult, error),
+	backend effects.ParserBackend,
+) ([]effects.ClassifiedStatement, error) {
+	if strings.TrimSpace(sql) == "" {
+		return nil, nil
+	}
+
+	res, err := parse(sql)
+	if err != nil {
+		// SQL-level parse failure for postgres / aurora / cockroachdb:
+		// produce a single unknown statement carrying the parser message.
+		// Redshift dialect attempts the first-keyword fallback (Task 14).
+		if dialect == DialectRedshift {
+			if cs, ok := redshiftFirstKeyword(sql, backend); ok {
+				return []effects.ClassifiedStatement{cs}, nil
+			}
+		}
+		return []effects.ClassifiedStatement{
+			unknownStatement(backend, "parse: "+err.Error()),
+		}, nil
+	}
+
+	if res == nil || len(res.Stmts) == 0 {
+		return nil, nil
+	}
+
+	out := make([]effects.ClassifiedStatement, 0, len(res.Stmts))
+	for _, raw := range res.Stmts {
+		cs := classifyRawStmt(dialect, raw, sess, opts, backend)
+		out = append(out, cs)
+	}
+	return out, nil
+}
+
+// unknownStatement returns the spec §7.8 unknown-classification value with the
+// given message.
+func unknownStatement(backend effects.ParserBackend, msg string) effects.ClassifiedStatement {
+	return effects.ClassifiedStatement{
+		Effects: []effects.Effect{{
+			Group:      effects.GroupUnknown,
+			Resolution: effects.ResolutionUnresolved,
+		}},
+		ParserBackend: backend,
+		Error:         msg,
+	}
+}
+
+// classifyRawStmt is the AST-walk entry point. Real implementation lands in
+// Task 5 (ast_walk.go); this stub returns unknown so the dispatcher pipeline
+// is testable end-to-end (parse -> dispatch -> unknown classification).
+func classifyRawStmt(d Dialect, raw *pg_query.RawStmt, sess SessionState, opts Options, backend effects.ParserBackend) effects.ClassifiedStatement {
+	return unknownStatement(backend, "unmapped form: classifier not yet implemented (Task 5)")
+}
+
+// redshiftFirstKeyword is invoked from classifyWithBackend on Redshift parse
+// failure. Real implementation lands in Task 14; this stub returns ok=false to
+// mean "fall through to unknown".
+func redshiftFirstKeyword(sql string, backend effects.ParserBackend) (effects.ClassifiedStatement, bool) {
+	return effects.ClassifiedStatement{}, false
 }
