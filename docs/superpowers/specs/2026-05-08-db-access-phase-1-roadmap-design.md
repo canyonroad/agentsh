@@ -10,15 +10,15 @@ This document is the *roadmap*, not the spec. It commits to plan decomposition, 
 
 ## 1. Decomposition
 
-Seven plans, with Plan 04 split into three sub-plans during 2026-05-10 brainstorming. Plans 01–03 are pure libraries; Plan 04a introduces the first socket (no protocol semantics); Plan 04b adds handshake and TLS; Plan 04c adds the Simple Query path; Plans 05–06 are siblings on top of Plan 04c; Plan 07 closes the loop with unavoidability and integration tests.
+Seven plans, with Plan 04 split into four sub-plans across two brainstorming passes. Plans 01–03 are pure libraries; Plan 04a introduces the first socket (no protocol semantics); Plan 04b adds inbound handshake + TLS termination; Plan 04b₂ adds upstream wiring + passthrough mode + replication/cancel; Plan 04c adds the Simple Query path; Plans 05–06 are siblings on top of Plan 04c; Plan 07 closes the loop with unavoidability and integration tests.
 
 ```
 [01 taxonomy/effects]──┐
                        ├─→[03 pg classifier]─┐
 [02 policy evaluator]──┘                     │
-                                             ├─→[04a listener]─→[04b handshake+TLS]─→[04c simple+events]─┬─→[05 extended+tx]─┐
-                                                                                                         ├─→[06 cancel mapping]─┤
-                                                                                                                              └─→[07 unavoidability+listener-hardening+integration]
+                                             ├─→[04a listener]─→[04b inbound h/s+TLS]─→[04b₂ upstream+passthrough]─→[04c simple+events]─┬─→[05 extended+tx]─┐
+                                                                                                                                        ├─→[06 cancel mapping]─┤
+                                                                                                                                                             └─→[07 unavoidability+listener-hardening+integration]
 ```
 
 Dependency notes:
@@ -26,15 +26,16 @@ Dependency notes:
 - Plan 01 unblocks Plans 02 and 03.
 - Plan 02 depends only on Plan 01 — it operates on `ClassifiedStatement`, which Plan 01 defines.
 - Plan 03 depends on Plans 01 and 02. The §23.1 golden corpus rows include `expected_decision_under_sample_policy`, so Plan 02's evaluator and `corpus/sample-policy.yaml` must be merged before Plan 03's CI gate can be wired.
-- **Plan 04 was split during brainstorming on 2026-05-10** when the unified scope became too large for a single plan. The three sub-plans are sequential: 04a (listener skeleton, no protocol), 04b (handshake + TLS + upstream auth), 04c (Simple Query + DBEvent emission). The shared design doc `2026-05-10-db-plan-04-pg-proxy-skeleton-design.md` covers all three; each sub-plan has its own implementation plan.
-- Plan 04a depends on Plans 01–02 only (no classifier needed for an empty listener). Plan 04b depends on 04a. Plan 04c depends on 04b and on Plan 03 (Simple Query path needs the classifier).
+- **Plan 04 was split during brainstorming on 2026-05-10** when the unified scope became too large for a single plan. The original three sub-plans were sequential: 04a (listener skeleton, no protocol), 04b (handshake + TLS + upstream auth), 04c (Simple Query + DBEvent emission). The shared design doc `2026-05-10-db-plan-04-pg-proxy-skeleton-design.md` covers all four sub-plans; each has its own implementation plan.
+- **Plan 04b was further split during writing-plans on 2026-05-10** into 04b (inbound handshake + TLS termination only; passthrough mode rejected at `Server.New`; allow path returns `ErrorResponse(0A000, UPSTREAM_NOT_YET_WIRED)`) and 04b₂ (upstream TCP dial, upstream TLS, auth-byte forwarding, SCRAM-SHA-256-PLUS fail-closed, post-handshake byte-passthrough, passthrough TLS mode end-to-end, replication opt-in, CancelRequest dispatch, degraded_visibility events, per-mode spine round-trip test). Aggregate scope unchanged versus the original 04b.
+- Plan 04a depends on Plans 01–02 only (no classifier needed for an empty listener). Plan 04b depends on 04a. Plan 04b₂ depends on 04b. Plan 04c depends on 04b₂ and on Plan 03 (Simple Query path needs the classifier).
 - Plans 05 and 06 are siblings on top of Plan 04c. Extended Query / transaction state (Plan 05) and CancelRequest mapping (Plan 06) touch different parts of the proxy and may proceed in parallel after Plan 04c lands.
 - Plan 07 depends on Plans 04c–06 — integration tests need a real proxy.
 
 Externally visible behavior:
 
 - Plans 01–03 ship on `main` with no behavior change (types, pure functions, CLI tool only).
-- Plans 04a–04c ship behind `policies.db.unavoidability: off` (default). With flag = `off`, no listener is bound and the package is a no-op. With flag = `observe`, listeners bind from Plan 04a, complete handshakes from Plan 04b, and emit `db_statement` events from Plan 04c.
+- Plans 04a–04c ship behind `policies.db.unavoidability: off` (default). With flag = `off`, no listener is bound and the package is a no-op. With flag = `observe`, listeners bind from Plan 04a, complete *inbound* handshakes from Plan 04b (returning `0A000` after StartupMessage), complete *full* handshakes through to upstream `ReadyForQuery` from Plan 04b₂, and emit `db_statement` events from Plan 04c.
 - Plan 04c introduces recognition of `db_services` config end-to-end (declared services intercept queries when flag is `observe`).
 - Plan 07 ships the unavoidability bundle and makes `enforce` the recommended high-assurance default.
 
