@@ -630,6 +630,8 @@ Each rule matches against an individual effect — its `group`, `subtype`, and `
 
 **Rationale for the `app-deny-mutations` + `app-deny-dangerous` overlap in the sample:** the first rule provides a clear user-facing message tuned to the most common app-DB violations (`DELETE`, `CREATE`, etc.); the second is a backstop covering the broader risk class via the `DANGEROUS` alias. Either alone would work; both together give a clearer error to the agent on common violations and a defense-in-depth backstop for less-common dangerous operations.
 
+**Why no broad `deny session` catch-all rule:** strict-coverage already enforces "deny anything not explicitly allowed." Any session subtype/object pair the `app-allow-safe-session-settings` rule does not cover produces an implicit deny (e.g., `SET work_mem` → `Verb=deny, RuleName=""`, since `work_mem` is not in the allow rule's `objects`). A broad `decision: deny, operations: [session]` rule with no constraints would *also* match the safe settings the allow rule covers and — because deny wins over allow per §10.2 — would deny `SET TimeZone='UTC'` too. Operators who want a custom message on uncovered session settings should narrow the deny rule with explicit `subtypes:` or `objects:` clauses.
+
 ```yaml
 database_rules:
   - name: app-read-and-update
@@ -659,12 +661,6 @@ database_rules:
     subtypes: [set_search_path, set_role, set_session_authorization]
     decision: deny
     message: "search_path / role manipulation not allowed"
-
-  - name: app-deny-other-session-settings
-    db_service: appdb
-    operations: [session]
-    decision: deny
-    message: "Only specific session settings are allowed; requested {{.Object}}"
 
   - name: app-deny-mutations            # specific user-facing rule for common cases
     db_service: appdb
@@ -717,13 +713,13 @@ Connection rules evaluate at connection establishment time. They are the only ru
 database_connection_rules:
   - name: legacy-connect-readonly-agent-only
     db_service: legacy_pg
-    db_user: ["readonly_agent"]
+    client_identity: "readonly-agent"
     decision: allow
 
   - name: legacy-deny-other
     db_service: legacy_pg
     decision: deny
-    message: "legacy_pg is restricted to the readonly_agent identity"
+    message: "legacy_pg is restricted to the readonly-agent identity"
 
   - name: warehouse-connect-allow
     db_service: warehouse
@@ -867,7 +863,7 @@ The asymmetry is deliberate.
 | `CREATE SUBSCRIPTION sub CONNECTION '...' PUBLICATION pub` | `unsafe_io:{sub, host:port}, schema_create:{sub}` | both→deny (DANGEROUS / CREATE rules) | **deny** |
 | `UPDATE users SET name='x' WHERE id=1` | `modify:{users}` | modify→allow (UPDATE rule) | **allow** |
 | `SET TimeZone='UTC'` | `session(set):{timezone}` | matches `app-allow-safe-session-settings`→allow | **allow** |
-| `SET work_mem='64MB'` | `session(set):{work_mem}` | matches `app-deny-other-session-settings`→deny | **deny** |
+| `SET work_mem='64MB'` | `session(set):{work_mem}` | read→implicit_deny (`work_mem` not in `app-allow-safe-session-settings.objects`) | **deny** (implicit) |
 | `SET search_path = pg_catalog, public` | `session(set_search_path):{pg_catalog, public}` | matches `app-deny-search-path-and-role-changes`→deny | **deny** |
 
 ### 10.3 Statement-text redaction

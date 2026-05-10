@@ -3096,12 +3096,6 @@ database_rules:
     decision: deny
     message: "search_path / role manipulation not allowed"
 
-  - name: app-deny-other-session-settings
-    db_service: appdb
-    operations: [session]
-    decision: deny
-    message: "Only specific session settings are allowed; requested {{.Object}}"
-
   - name: app-deny-mutations
     db_service: appdb
     operations: [DELETE, CREATE, DROP, ALTER, EXPORT]
@@ -3131,13 +3125,13 @@ database_rules:
 database_connection_rules:
   - name: legacy-connect-readonly-agent-only
     db_service: legacy_pg
-    db_user: [readonly_agent]
+    client_identity: "readonly-agent"
     decision: allow
 
   - name: legacy-deny-other
     db_service: legacy_pg
     decision: deny
-    message: "legacy_pg is restricted to the readonly_agent identity"
+    message: "legacy_pg is restricted to the readonly-agent identity"
 
   - name: warehouse-connect-allow
     db_service: warehouse
