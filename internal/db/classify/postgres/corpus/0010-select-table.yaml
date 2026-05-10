@@ -1,0 +1,18 @@
+name: select-table
+spec_ref: §7.3 SELECT
+description: Unqualified SELECT against a search_path matching the default.
+sql: "SELECT * FROM customers"
+session:
+  search_path: ["public"]
+  default_search_path: ["public"]
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: read
+    effects:
+      - group: read
+        objects:
+          - { kind: table, name: customers }
+        resolution: unqualified_syntactic
+expected_decision_under_sample_policy:
+  verb: allow
+  rule_name: app-read-and-update

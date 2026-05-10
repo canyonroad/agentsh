@@ -1,0 +1,13 @@
+name: set-search-path
+spec_ref: §7.4 SET / RESET
+description: SET search_path = app, public — primary session/set_search_path with a guc object reference.
+sql: "SET search_path = app, public"
+expected_classification:
+  - raw_verb: SET_SEARCH_PATH=app,public
+    primary_group: session
+    primary_subtype: set_search_path
+    effects:
+      - group: session
+        subtype: set_search_path
+        objects:
+          - { kind: guc, name: search_path }

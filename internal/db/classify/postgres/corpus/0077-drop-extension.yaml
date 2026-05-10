@@ -1,0 +1,16 @@
+name: drop-extension
+spec_ref: §7.3 DROP EXTENSION
+description: |
+  DROP EXTENSION → schema_destroy at group level. Spec §7.3 doesn't define a
+  drop_extension subtype.
+sql: "DROP EXTENSION pgcrypto"
+expected_classification:
+  - raw_verb: DROP_EXTENSION
+    primary_group: schema_destroy
+    effects:
+      - group: schema_destroy
+        objects:
+          - { kind: schema, name: pgcrypto }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

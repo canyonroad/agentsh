@@ -1,0 +1,10 @@
+name: select-literal-1
+spec_ref: §7.3 SELECT
+description: Trivial SELECT to smoke-test the harness.
+sql: "SELECT 1"
+dialect: postgres
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: read
+    effects:
+      - group: read

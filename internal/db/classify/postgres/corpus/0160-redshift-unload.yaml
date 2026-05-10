@@ -1,0 +1,21 @@
+name: redshift-unload
+spec_ref: §7.3 Redshift UNLOAD
+description: |
+  Redshift UNLOAD to S3 — first-keyword fallback used because pg_query
+  rejects the syntax. Effects after canonical ordering: unsafe_io primary
+  (Critical, ranks above BulkExport in the within-tier order), bulk_export
+  secondary, read tertiary.
+sql: "UNLOAD ('SELECT * FROM customers') TO 's3://bucket/customers.csv' IAM_ROLE 'arn:aws:iam::123:role/redshift'"
+dialect: redshift
+expected_classification:
+  - raw_verb: UNLOAD
+    primary_group: unsafe_io
+    effects:
+      - group: unsafe_io
+        objects:
+          - { kind: filesystem_path, path: "s3://bucket/customers.csv" }
+      - group: bulk_export
+        subtype: unload_to_s3
+        objects:
+          - { kind: filesystem_path, path: "s3://bucket/customers.csv" }
+      - group: read

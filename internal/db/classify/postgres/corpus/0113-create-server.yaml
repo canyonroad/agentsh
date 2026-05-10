@@ -1,0 +1,24 @@
+name: create-server
+spec_ref: §7.3 CREATE SERVER, Appendix B unsafe_io
+description: |
+  CREATE SERVER ... FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host '...', port '...').
+  Primary unsafe_io(create_server) carries the server plus an external_endpoint
+  pulled from the OPTIONS DefElems; secondary schema_create reflects the
+  catalog write.
+sql: "CREATE SERVER s FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'remote.example', port '5432')"
+expected_classification:
+  - raw_verb: CREATE_SERVER
+    primary_group: unsafe_io
+    primary_subtype: create_server
+    effects:
+      - group: unsafe_io
+        subtype: create_server
+        objects:
+          - { kind: server, name: s }
+          - { kind: external_endpoint, host: remote.example, port: 5432 }
+      - group: schema_create
+        objects:
+          - { kind: server, name: s }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

@@ -1,0 +1,16 @@
+name: create-database
+spec_ref: §7.3 CREATE DATABASE
+description: CREATE DATABASE maps to schema_create(create_database).
+sql: "CREATE DATABASE app"
+expected_classification:
+  - raw_verb: CREATE_DATABASE
+    primary_group: schema_create
+    primary_subtype: create_database
+    effects:
+      - group: schema_create
+        subtype: create_database
+        objects:
+          - { kind: schema, name: app }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

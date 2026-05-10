@@ -1,0 +1,17 @@
+name: create-temp-table-on-commit-drop
+spec_ref: §7.3 CREATE TEMP TABLE … ON COMMIT DROP
+description: |
+  CREATE TEMP TABLE with ON COMMIT DROP — still classified as
+  schema_create/create_table on the temp object. The auto-drop semantics are
+  realized by the session lifecycle (Plan 04 territory); the classifier only
+  emits the structural effect.
+sql: "CREATE TEMP TABLE scratch (id int) ON COMMIT DROP"
+expected_classification:
+  - raw_verb: CREATE_TEMP_TABLE
+    primary_group: schema_create
+    primary_subtype: create_table
+    effects:
+      - group: schema_create
+        subtype: create_table
+        objects:
+          - { kind: table, name: scratch }

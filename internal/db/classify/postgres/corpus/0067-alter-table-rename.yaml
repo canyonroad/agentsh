@@ -1,0 +1,15 @@
+name: alter-table-rename
+spec_ref: §7.3 RENAME
+description: |
+  ALTER TABLE … RENAME TO parses as RenameStmt; classifier emits schema_alter
+  (no subtype).
+sql: "ALTER TABLE foo RENAME TO bar"
+expected_classification:
+  - primary_group: schema_alter
+    effects:
+      - group: schema_alter
+        objects:
+          - { kind: table, name: foo }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

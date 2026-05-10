@@ -1,0 +1,25 @@
+name: copy-delete-returning-to-stdout
+spec_ref: §7.3 COPY (DELETE ... RETURNING) TO STDOUT, §20 effect-set bypass
+description: |
+  COPY (DELETE FROM users RETURNING *) TO STDOUT — the §20 effect-set bypass
+  case. Inner DELETE keeps its delete + read effects, and the outer COPY
+  emits a bulk_export. Canonical ordering puts the Critical bulk_export first,
+  then the High-tier delete, then the Low-tier read. Sample policy denies on
+  the delete effect (app-deny-mutations matches DELETE).
+sql: "COPY (DELETE FROM users RETURNING *) TO STDOUT"
+expected_classification:
+  - raw_verb: COPY_QUERY_TO_STDOUT
+    primary_group: bulk_export
+    primary_subtype: copy_to_stdout
+    effects:
+      - group: bulk_export
+        subtype: copy_to_stdout
+      - group: delete
+        objects:
+          - { kind: table, name: users }
+      - group: read
+        objects:
+          - { kind: table, name: users }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

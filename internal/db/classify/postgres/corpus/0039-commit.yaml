@@ -1,0 +1,9 @@
+name: commit
+spec_ref: §7.4 BEGIN / COMMIT / ROLLBACK
+description: COMMIT — primary transaction effect; applySession clears InTransaction.
+sql: "COMMIT"
+expected_classification:
+  - raw_verb: COMMIT
+    primary_group: transaction
+    effects:
+      - group: transaction

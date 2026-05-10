@@ -1,0 +1,21 @@
+name: drop-subscription
+spec_ref: §7.3 DROP SUBSCRIPTION
+description: |
+  DROP SUBSCRIPTION emits unsafe_io(drop_subscription) + schema_destroy.
+  No external_endpoint is recovered (the conninfo isn't repeated in a drop).
+sql: "DROP SUBSCRIPTION sub"
+expected_classification:
+  - raw_verb: DROP_SUBSCRIPTION
+    primary_group: unsafe_io
+    primary_subtype: drop_subscription
+    effects:
+      - group: unsafe_io
+        subtype: drop_subscription
+        objects:
+          - { kind: subscription, name: sub }
+      - group: schema_destroy
+        objects:
+          - { kind: subscription, name: sub }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

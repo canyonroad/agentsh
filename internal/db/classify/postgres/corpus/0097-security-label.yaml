@@ -1,0 +1,14 @@
+name: security-label
+spec_ref: §7.3 SECURITY LABEL
+description: SECURITY LABEL FOR provider ON COLUMN → privilege(security_label).
+sql: "SECURITY LABEL FOR provider ON COLUMN tab.col IS 'classified'"
+expected_classification:
+  - raw_verb: SECURITY_LABEL
+    primary_group: privilege
+    primary_subtype: security_label
+    effects:
+      - group: privilege
+        subtype: security_label
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-dangerous

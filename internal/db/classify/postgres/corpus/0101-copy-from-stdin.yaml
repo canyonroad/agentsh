@@ -1,0 +1,14 @@
+name: copy-from-stdin
+spec_ref: §7.3 COPY ... FROM STDIN, Appendix B bulk_load
+description: |
+  COPY t FROM STDIN — primary bulk_load(copy_from_stdin); no other effects.
+sql: "COPY users FROM STDIN"
+expected_classification:
+  - raw_verb: COPY_FROM_STDIN
+    primary_group: bulk_load
+    primary_subtype: copy_from_stdin
+    effects:
+      - group: bulk_load
+        subtype: copy_from_stdin
+        objects:
+          - { kind: table, name: users }

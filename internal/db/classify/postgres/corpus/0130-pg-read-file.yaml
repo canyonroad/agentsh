@@ -1,0 +1,22 @@
+name: pg-read-file
+spec_ref: §7.3 SELECT pg_read_file, Appendix B unsafe_io/server_file_read
+description: |
+  SELECT pg_read_file('/etc/passwd') — primary unsafe_io(server_file_read)
+  with a filesystem_path object carrying the literal first argument.
+  Secondary read effect is emitted by classifySelect for the (empty)
+  relation list; canonical ordering promotes unsafe_io ahead of read.
+  Sample policy denies via DANGEROUS on app-deny-dangerous.
+sql: "SELECT pg_read_file('/etc/passwd')"
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: unsafe_io
+    primary_subtype: server_file_read
+    effects:
+      - group: unsafe_io
+        subtype: server_file_read
+        objects:
+          - { kind: filesystem_path, path: /etc/passwd }
+      - group: read
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

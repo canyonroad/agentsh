@@ -1,0 +1,18 @@
+name: select-into
+spec_ref: §7.3 SELECT INTO
+description: |
+  SELECT … INTO is parsed as SelectStmt with IntoClause; classifier emits a
+  primary schema_create/create_table effect plus a secondary read.
+sql: "SELECT * INTO new_customers FROM customers"
+expected_classification:
+  - raw_verb: SELECT_INTO
+    primary_group: schema_create
+    primary_subtype: create_table
+    effects:
+      - group: schema_create
+        subtype: create_table
+        objects:
+          - { kind: table, name: new_customers }
+      - group: read
+        objects:
+          - { kind: table, name: customers }

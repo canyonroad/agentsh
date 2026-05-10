@@ -1,0 +1,16 @@
+name: create-function
+spec_ref: §7.3 CREATE FUNCTION
+description: CREATE FUNCTION qualified by schema → schema_create(create_function).
+sql: "CREATE FUNCTION public.f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE SQL"
+expected_classification:
+  - raw_verb: CREATE_FUNCTION
+    primary_group: schema_create
+    primary_subtype: create_function
+    effects:
+      - group: schema_create
+        subtype: create_function
+        objects:
+          - { kind: function, schema: public, name: f }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

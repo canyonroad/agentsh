@@ -1,0 +1,11 @@
+name: insert
+spec_ref: §7.3 INSERT
+description: Plain INSERT VALUES — primary write effect on target table.
+sql: "INSERT INTO audit_log VALUES (1, 'note')"
+expected_classification:
+  - raw_verb: INSERT
+    primary_group: write
+    effects:
+      - group: write
+        objects:
+          - { kind: table, name: audit_log }

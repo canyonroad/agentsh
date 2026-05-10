@@ -1,0 +1,17 @@
+name: truncate-multiple
+spec_ref: §7.3 TRUNCATE
+description: TRUNCATE on multiple tables — one ObjectRef per relation.
+sql: "TRUNCATE foo, bar"
+expected_classification:
+  - raw_verb: TRUNCATE
+    primary_group: schema_destroy
+    primary_subtype: truncate
+    effects:
+      - group: schema_destroy
+        subtype: truncate
+        objects:
+          - { kind: table, name: foo }
+          - { kind: table, name: bar }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

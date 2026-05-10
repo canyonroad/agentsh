@@ -1,0 +1,22 @@
+name: copy-from-program
+spec_ref: §7.3 COPY ... FROM PROGRAM, Appendix B unsafe_io
+description: |
+  COPY t FROM PROGRAM 'gunzip /tmp/x.gz' — primary unsafe_io(copy_from_program)
+  with the table and a program object; secondary bulk_load.
+sql: "COPY users FROM PROGRAM 'gunzip /tmp/x.gz'"
+expected_classification:
+  - raw_verb: COPY_FROM_PROGRAM
+    primary_group: unsafe_io
+    primary_subtype: copy_from_program
+    effects:
+      - group: unsafe_io
+        subtype: copy_from_program
+        objects:
+          - { kind: table, name: users }
+          - { kind: program, argv0: gunzip }
+      - group: bulk_load
+        objects:
+          - { kind: table, name: users }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

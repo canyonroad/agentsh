@@ -1,0 +1,15 @@
+name: call
+spec_ref: §7.3 CALL, Appendix B procedural/call
+description: |
+  CALL my_proc(1) — primary procedural/call effect. Sample policy denies
+  procedural via app-deny-dangerous (DANGEROUS includes procedural).
+sql: "CALL my_proc(1)"
+expected_classification:
+  - raw_verb: CALL
+    primary_group: procedural
+    primary_subtype: call
+    effects:
+      - group: procedural
+        subtype: call
+expected_decision_under_sample_policy:
+  verb: deny

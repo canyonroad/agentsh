@@ -1,0 +1,22 @@
+name: alter-tablespace-set-options
+spec_ref: §7.3 ALTER TABLESPACE
+description: |
+  ALTER TABLESPACE ts SET (random_page_cost = 1) tweaks per-tablespace planner
+  GUCs. Per spec §7.3 this is pure schema_alter — there's no on-disk path
+  rewrite, so unsafe_io is not raised. (PostgreSQL itself rejects ALTER
+  TABLESPACE … SET LOCATION …, so the spec's "alter_tablespace" unsafe_io row
+  has no surface form; we keep the subtype on the schema_alter effect for
+  symmetry with the rest of the family.)
+sql: "ALTER TABLESPACE ts SET (random_page_cost = 1)"
+expected_classification:
+  - raw_verb: ALTER_TABLESPACE
+    primary_group: schema_alter
+    primary_subtype: alter_tablespace
+    effects:
+      - group: schema_alter
+        subtype: alter_tablespace
+        objects:
+          - { kind: tablespace, name: ts }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

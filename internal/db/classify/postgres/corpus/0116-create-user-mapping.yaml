@@ -1,0 +1,23 @@
+name: create-user-mapping
+spec_ref: §7.3 CREATE USER MAPPING, Appendix B privilege+unsafe_io
+description: |
+  CREATE USER MAPPING binds a local role to credentials on a foreign server.
+  Primary unsafe_io(create_user_mapping) carries the synthetic user_mapping
+  ObjectRef "<role>@<server>" plus the local role; secondary privilege.
+sql: "CREATE USER MAPPING FOR alice SERVER s OPTIONS (user 'remote_user', password 'remote_pw')"
+expected_classification:
+  - raw_verb: CREATE_USER_MAPPING
+    primary_group: unsafe_io
+    primary_subtype: create_user_mapping
+    effects:
+      - group: unsafe_io
+        subtype: create_user_mapping
+        objects:
+          - { kind: user_mapping, name: alice@s }
+          - { kind: role, name: alice }
+      - group: privilege
+        objects:
+          - { kind: user_mapping, name: alice@s }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

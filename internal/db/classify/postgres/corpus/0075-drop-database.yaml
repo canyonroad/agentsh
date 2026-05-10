@@ -1,0 +1,16 @@
+name: drop-database
+spec_ref: §7.3 DROP DATABASE
+description: DROP DATABASE → schema_destroy(drop_database).
+sql: "DROP DATABASE app"
+expected_classification:
+  - raw_verb: DROP_DATABASE
+    primary_group: schema_destroy
+    primary_subtype: drop_database
+    effects:
+      - group: schema_destroy
+        subtype: drop_database
+        objects:
+          - { kind: schema, name: app }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

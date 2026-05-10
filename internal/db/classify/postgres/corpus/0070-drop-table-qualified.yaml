@@ -1,0 +1,18 @@
+name: drop-table-qualified
+spec_ref: §7.3 DROP TABLE
+description: DROP TABLE with explicit schema prefix.
+sql: "DROP TABLE public.foo"
+expected_classification:
+  - raw_verb: DROP_TABLE
+    primary_group: schema_destroy
+    primary_subtype: drop_table
+    top_resolution: qualified_syntactic
+    effects:
+      - group: schema_destroy
+        subtype: drop_table
+        objects:
+          - { kind: table, schema: public, name: foo }
+        resolution: qualified_syntactic
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

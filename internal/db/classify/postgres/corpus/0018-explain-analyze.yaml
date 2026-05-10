@@ -1,0 +1,11 @@
+name: explain-analyze
+spec_ref: §7.3 EXPLAIN ANALYZE
+description: EXPLAIN ANALYZE recurses into the inner statement; primary group matches the inner DELETE.
+sql: "EXPLAIN ANALYZE DELETE FROM users"
+expected_classification:
+  - raw_verb: EXPLAIN_ANALYZE
+    primary_group: delete
+    effects:
+      - group: delete
+        objects:
+          - { kind: table, name: users }

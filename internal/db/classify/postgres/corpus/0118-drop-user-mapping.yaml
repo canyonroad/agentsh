@@ -1,0 +1,22 @@
+name: drop-user-mapping
+spec_ref: §7.3 DROP USER MAPPING
+description: |
+  DROP USER MAPPING removes the role/server binding. Primary
+  unsafe_io(drop_user_mapping) + secondary privilege.
+sql: "DROP USER MAPPING FOR alice SERVER s"
+expected_classification:
+  - raw_verb: DROP_USER_MAPPING
+    primary_group: unsafe_io
+    primary_subtype: drop_user_mapping
+    effects:
+      - group: unsafe_io
+        subtype: drop_user_mapping
+        objects:
+          - { kind: user_mapping, name: alice@s }
+          - { kind: role, name: alice }
+      - group: privilege
+        objects:
+          - { kind: user_mapping, name: alice@s }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

@@ -1,0 +1,14 @@
+name: select-join-multi-object
+spec_ref: §20 multi-object coverage
+description: |
+  SELECT joining two tables — the read effect carries both objects in source
+  order. The walker descends into JoinExpr.Larg/Rarg.
+sql: "SELECT * FROM customers c JOIN orders o ON c.id = o.customer_id"
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: read
+    effects:
+      - group: read
+        objects:
+          - { kind: table, name: customers }
+          - { kind: table, name: orders }

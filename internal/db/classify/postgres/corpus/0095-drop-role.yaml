@@ -1,0 +1,16 @@
+name: drop-role
+spec_ref: §7.3 DROP ROLE
+description: DROP ROLE → privilege(drop_role).
+sql: "DROP ROLE alice"
+expected_classification:
+  - raw_verb: DROP_ROLE
+    primary_group: privilege
+    primary_subtype: drop_role
+    effects:
+      - group: privilege
+        subtype: drop_role
+        objects:
+          - { kind: role, name: alice }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-dangerous

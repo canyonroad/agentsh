@@ -1,0 +1,9 @@
+name: rollback
+spec_ref: §7.4 BEGIN / COMMIT / ROLLBACK
+description: ROLLBACK — primary transaction effect; applySession clears InTransaction.
+sql: "ROLLBACK"
+expected_classification:
+  - raw_verb: ROLLBACK
+    primary_group: transaction
+    effects:
+      - group: transaction

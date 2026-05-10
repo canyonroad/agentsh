@@ -1,0 +1,14 @@
+name: create-sequence
+spec_ref: §7.3 CREATE SEQUENCE
+description: CREATE SEQUENCE maps to schema_create at group level (no subtype).
+sql: "CREATE SEQUENCE s START 1"
+expected_classification:
+  - raw_verb: CREATE_SEQUENCE
+    primary_group: schema_create
+    effects:
+      - group: schema_create
+        objects:
+          - { kind: sequence, name: s }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

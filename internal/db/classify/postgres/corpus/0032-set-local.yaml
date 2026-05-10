@@ -1,0 +1,13 @@
+name: set-local
+spec_ref: §7.4 SET LOCAL
+description: SET LOCAL search_path — transaction-scoped; classifier tags as session/set_local but applySession does not mutate state.
+sql: "SET LOCAL search_path = app"
+expected_classification:
+  - raw_verb: "SET_LOCAL=search_path:app"
+    primary_group: session
+    primary_subtype: set_local
+    effects:
+      - group: session
+        subtype: set_local
+        objects:
+          - { kind: guc, name: search_path }

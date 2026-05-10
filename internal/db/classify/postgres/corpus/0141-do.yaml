@@ -1,0 +1,15 @@
+name: do-anonymous-block
+spec_ref: §7.3 DO, Appendix B procedural/do_or_anon
+description: |
+  DO $$ ... $$ — anonymous procedural block. Maps to procedural/do_or_anon.
+  Sample policy denies via app-deny-dangerous.
+sql: "DO $$ BEGIN PERFORM 1; END $$"
+expected_classification:
+  - raw_verb: DO
+    primary_group: procedural
+    primary_subtype: do_or_anon
+    effects:
+      - group: procedural
+        subtype: do_or_anon
+expected_decision_under_sample_policy:
+  verb: deny

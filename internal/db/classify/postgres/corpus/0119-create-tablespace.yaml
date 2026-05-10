@@ -1,0 +1,24 @@
+name: create-tablespace
+spec_ref: §7.3 CREATE TABLESPACE, Appendix B unsafe_io
+description: |
+  CREATE TABLESPACE … LOCATION '/path' creates a catalog reference to a
+  filesystem path the server will write into. Primary
+  unsafe_io(create_tablespace) carries both the tablespace and the path;
+  secondary schema_create reflects the catalog write.
+sql: "CREATE TABLESPACE ts LOCATION '/mnt/ssd'"
+expected_classification:
+  - raw_verb: CREATE_TABLESPACE
+    primary_group: unsafe_io
+    primary_subtype: create_tablespace
+    effects:
+      - group: unsafe_io
+        subtype: create_tablespace
+        objects:
+          - { kind: tablespace, name: ts }
+          - { kind: filesystem_path, path: /mnt/ssd }
+      - group: schema_create
+        objects:
+          - { kind: tablespace, name: ts }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

@@ -1,0 +1,27 @@
+name: copy-to-program
+spec_ref: §7.3 COPY ... TO PROGRAM, Appendix B unsafe_io
+description: |
+  COPY t TO PROGRAM 'gzip > /tmp/x.gz' — primary unsafe_io(copy_to_program)
+  with the table and a program object whose argv0 is the first
+  whitespace-split token of the command; secondary bulk_export plus a read
+  of the source table.
+sql: "COPY users TO PROGRAM 'gzip > /tmp/x.gz'"
+expected_classification:
+  - raw_verb: COPY_TO_PROGRAM
+    primary_group: unsafe_io
+    primary_subtype: copy_to_program
+    effects:
+      - group: unsafe_io
+        subtype: copy_to_program
+        objects:
+          - { kind: table, name: users }
+          - { kind: program, argv0: gzip }
+      - group: bulk_export
+        objects:
+          - { kind: table, name: users }
+      - group: read
+        objects:
+          - { kind: table, name: users }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

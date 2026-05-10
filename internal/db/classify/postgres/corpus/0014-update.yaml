@@ -1,0 +1,14 @@
+name: update
+spec_ref: §7.3 UPDATE
+description: Plain UPDATE — primary modify effect on target table.
+sql: "UPDATE users SET active = false WHERE id = 1"
+expected_classification:
+  - raw_verb: UPDATE
+    primary_group: modify
+    effects:
+      - group: modify
+        objects:
+          - { kind: table, name: users }
+expected_decision_under_sample_policy:
+  verb: allow
+  rule_name: app-read-and-update

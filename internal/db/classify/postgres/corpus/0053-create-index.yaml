@@ -1,0 +1,16 @@
+name: create-index
+spec_ref: §7.3 CREATE INDEX
+description: CREATE INDEX maps to schema_create(create_index) on the index object.
+sql: "CREATE INDEX idx_users_email ON public.users(email)"
+expected_classification:
+  - raw_verb: CREATE_INDEX
+    primary_group: schema_create
+    primary_subtype: create_index
+    effects:
+      - group: schema_create
+        subtype: create_index
+        objects:
+          - { kind: index, schema: public, name: idx_users_email }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

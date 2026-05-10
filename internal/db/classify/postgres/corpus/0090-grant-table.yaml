@@ -1,0 +1,16 @@
+name: grant-table
+spec_ref: §7.3 GRANT
+description: GRANT SELECT ON table TO role → privilege(grant).
+sql: "GRANT SELECT ON customers TO bob"
+expected_classification:
+  - raw_verb: GRANT
+    primary_group: privilege
+    primary_subtype: grant
+    effects:
+      - group: privilege
+        subtype: grant
+        objects:
+          - { kind: table, name: customers }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-dangerous

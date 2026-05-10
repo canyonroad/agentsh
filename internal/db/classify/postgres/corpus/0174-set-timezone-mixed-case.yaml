@@ -1,0 +1,19 @@
+name: set-timezone-mixed-case
+spec_ref: §7.4 GUC normalization
+description: |
+  SET TimeZone='UTC' — the GUC name is normalized to lowercase per §7.4 so
+  policy rules can match canonically against "timezone" regardless of how
+  the client cased the SET keyword.
+sql: "SET TimeZone='UTC'"
+expected_classification:
+  - raw_verb: "SET=UTC"
+    primary_group: session
+    primary_subtype: set
+    effects:
+      - group: session
+        subtype: set
+        objects:
+          - { kind: guc, name: timezone }
+expected_decision_under_sample_policy:
+  verb: allow
+  rule_name: app-allow-safe-session-settings

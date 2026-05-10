@@ -1,0 +1,19 @@
+name: drop-temp-table
+spec_ref: §7.3 DROP TABLE on temp lifecycle
+description: |
+  DROP TABLE on a name registered in the session's TempTables — classifier
+  still emits schema_destroy on the table; the resolution is
+  maybe_temp_shadowed because the bare name shadows any base-schema match.
+sql: "DROP TABLE scratch"
+session:
+  temp_tables: ["scratch"]
+expected_classification:
+  - raw_verb: DROP_TABLE
+    primary_group: schema_destroy
+    primary_subtype: drop_table
+    effects:
+      - group: schema_destroy
+        subtype: drop_table
+        objects:
+          - { kind: table, name: scratch }
+        resolution: maybe_temp_shadowed

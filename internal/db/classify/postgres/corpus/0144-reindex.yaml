@@ -1,0 +1,12 @@
+name: reindex
+spec_ref: §7.3 REINDEX, Appendix B maintenance
+description: |
+  REINDEX TABLE foo — single maintenance effect. Sample policy: implicit deny.
+sql: "REINDEX TABLE foo"
+expected_classification:
+  - raw_verb: REINDEX
+    primary_group: maintenance
+    effects:
+      - group: maintenance
+expected_decision_under_sample_policy:
+  verb: deny

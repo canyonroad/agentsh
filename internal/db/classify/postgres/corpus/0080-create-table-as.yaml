@@ -1,0 +1,21 @@
+name: create-table-as
+spec_ref: §7.3 CREATE TABLE AS SELECT
+description: |
+  CREATE TABLE AS SELECT — primary schema_create(create_table) + secondary
+  read on the source relation per spec §7.3.
+sql: "CREATE TABLE snap AS SELECT * FROM users"
+expected_classification:
+  - raw_verb: CREATE_TABLE_AS
+    primary_group: schema_create
+    primary_subtype: create_table
+    effects:
+      - group: schema_create
+        subtype: create_table
+        objects:
+          - { kind: table, name: snap }
+      - group: read
+        objects:
+          - { kind: table, name: users }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

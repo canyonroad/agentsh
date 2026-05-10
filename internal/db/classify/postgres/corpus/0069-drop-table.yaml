@@ -1,0 +1,16 @@
+name: drop-table
+spec_ref: §7.3 DROP TABLE
+description: DROP TABLE → schema_destroy(drop_table).
+sql: "DROP TABLE foo"
+expected_classification:
+  - raw_verb: DROP_TABLE
+    primary_group: schema_destroy
+    primary_subtype: drop_table
+    effects:
+      - group: schema_destroy
+        subtype: drop_table
+        objects:
+          - { kind: table, name: foo }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

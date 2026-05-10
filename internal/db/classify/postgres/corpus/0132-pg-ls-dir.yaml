@@ -1,0 +1,19 @@
+name: pg-ls-dir
+spec_ref: §7.3 SELECT pg_ls_dir, Appendix B unsafe_io/server_file_read
+description: |
+  pg_ls_dir('/tmp') — directory listing primitive, classified as
+  unsafe_io/server_file_read with the literal directory path.
+sql: "SELECT pg_ls_dir('/tmp')"
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: unsafe_io
+    primary_subtype: server_file_read
+    effects:
+      - group: unsafe_io
+        subtype: server_file_read
+        objects:
+          - { kind: filesystem_path, path: /tmp }
+      - group: read
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

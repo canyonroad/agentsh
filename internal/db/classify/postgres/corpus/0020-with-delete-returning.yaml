@@ -1,0 +1,20 @@
+name: with-delete-returning
+spec_ref: §7.3 WITH … DELETE RETURNING, §20 CTE composition
+description: |
+  Data-modifying CTE composed with an outer SELECT — the CTE body's
+  delete/read effects propagate to the outer statement; canonical ordering
+  promotes delete (high tier) ahead of the outer read.
+sql: "WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d"
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: delete
+    effects:
+      - group: delete
+        objects:
+          - { kind: table, name: users }
+      - group: read
+        objects:
+          - { kind: table, name: d }
+      - group: read
+        objects:
+          - { kind: table, name: users }

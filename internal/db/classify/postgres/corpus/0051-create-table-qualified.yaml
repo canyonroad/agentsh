@@ -1,0 +1,18 @@
+name: create-table-qualified
+spec_ref: §7.3 CREATE TABLE
+description: CREATE TABLE with explicit schema — resolution=qualified.
+sql: "CREATE TABLE public.foo (id int)"
+expected_classification:
+  - raw_verb: CREATE_TABLE
+    primary_group: schema_create
+    primary_subtype: create_table
+    top_resolution: qualified_syntactic
+    effects:
+      - group: schema_create
+        subtype: create_table
+        objects:
+          - { kind: table, schema: public, name: foo }
+        resolution: qualified_syntactic
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

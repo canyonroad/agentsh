@@ -1,0 +1,16 @@
+name: alter-publication
+spec_ref: §7.3 ALTER PUBLICATION
+description: ALTER PUBLICATION → schema_alter(alter_publication).
+sql: "ALTER PUBLICATION p ADD TABLE users"
+expected_classification:
+  - raw_verb: ALTER_PUBLICATION
+    primary_group: schema_alter
+    primary_subtype: alter_publication
+    effects:
+      - group: schema_alter
+        subtype: alter_publication
+        objects:
+          - { kind: publication, name: p }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

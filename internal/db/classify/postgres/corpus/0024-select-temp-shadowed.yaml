@@ -1,0 +1,17 @@
+name: select-temp-shadowed
+spec_ref: §6.1 maybe_temp_shadowed
+description: |
+  Unqualified SELECT references a name in the session's temp-table set —
+  resolution is maybe_temp_shadowed.
+sql: "SELECT * FROM users"
+session:
+  temp_tables: ["users"]
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: read
+    top_resolution: maybe_temp_shadowed
+    effects:
+      - group: read
+        objects:
+          - { kind: table, name: users }
+        resolution: maybe_temp_shadowed

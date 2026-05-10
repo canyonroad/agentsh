@@ -1,0 +1,11 @@
+name: discard-temp
+spec_ref: §7.4 DISCARD
+description: DISCARD TEMP — clears tracked temp tables only; role and search_path are preserved.
+sql: "DISCARD TEMP"
+expected_classification:
+  - raw_verb: DISCARD_TEMP
+    primary_group: session
+    primary_subtype: discard_temp
+    effects:
+      - group: session
+        subtype: discard_temp

@@ -1,0 +1,13 @@
+name: set-role
+spec_ref: §7.4 SET ROLE
+description: SET ROLE alice — session/set_role with the role guc object.
+sql: "SET ROLE alice"
+expected_classification:
+  - raw_verb: SET_ROLE=alice
+    primary_group: session
+    primary_subtype: set_role
+    effects:
+      - group: session
+        subtype: set_role
+        objects:
+          - { kind: guc, name: role }

@@ -1,0 +1,13 @@
+name: comment-on-table
+spec_ref: §7.3 COMMENT ON
+description: COMMENT ON TABLE → schema_alter (no subtype).
+sql: "COMMENT ON TABLE foo IS 'audit log'"
+expected_classification:
+  - primary_group: schema_alter
+    effects:
+      - group: schema_alter
+        objects:
+          - { kind: table, name: foo }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations
