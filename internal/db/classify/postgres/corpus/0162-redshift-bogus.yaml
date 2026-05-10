@@ -1,0 +1,15 @@
+name: redshift-bogus
+spec_ref: §7.7, §7.8 Redshift fallback → unknown
+description: |
+  Redshift dialect with garbage SQL. pg_query rejects it; the first-keyword
+  fallback also returns ok=false because it is neither UNLOAD nor
+  COPY ... FROM 's3://...'. The dispatcher emits the parse-failure unknown
+  classification with error prefix "parse:".
+sql: "WUT IS THIS"
+dialect: redshift
+expected_classification:
+  - primary_group: unknown
+    error_prefix: "parse:"
+    effects:
+      - group: unknown
+        resolution: unresolved

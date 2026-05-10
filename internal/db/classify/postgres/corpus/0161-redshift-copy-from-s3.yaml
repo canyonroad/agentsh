@@ -1,0 +1,15 @@
+name: redshift-copy-from-s3
+spec_ref: §7.3 Redshift COPY FROM s3://
+description: Redshift COPY FROM S3 — bulk_load primary; first-keyword fallback.
+sql: "COPY events FROM 's3://logs/events.json' IAM_ROLE 'arn:aws:iam::123:role/redshift'"
+dialect: redshift
+expected_classification:
+  - raw_verb: COPY_FROM_S3
+    primary_group: bulk_load
+    primary_subtype: copy_from_s3
+    effects:
+      - group: bulk_load
+        subtype: copy_from_s3
+        objects:
+          - { kind: table, name: events }
+          - { kind: filesystem_path, path: "s3://logs/events.json" }

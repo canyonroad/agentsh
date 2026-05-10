@@ -178,9 +178,4 @@ func unknownStatement(backend effects.ParserBackend, msg string) effects.Classif
 	}
 }
 
-// redshiftFirstKeyword is invoked from classifyWithBackend on Redshift parse
-// failure. Real implementation lands in Task 14; this stub returns ok=false to
-// mean "fall through to unknown".
-func redshiftFirstKeyword(sql string, backend effects.ParserBackend) (effects.ClassifiedStatement, bool) {
-	return effects.ClassifiedStatement{}, false
-}
+// redshiftFirstKeyword is implemented in redshift.go.
