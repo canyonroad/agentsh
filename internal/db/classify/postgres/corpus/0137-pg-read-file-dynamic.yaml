@@ -1,0 +1,24 @@
+name: pg-read-file-dynamic
+spec_ref: §7.3 / §7 unknown_dynamic resolution, Appendix B unsafe_io
+description: |
+  Non-literal first argument: SELECT pg_read_file(file_col) FROM t. The
+  walker still emits the unsafe_io effect (so policy can deny "any
+  unsafe_io"), but the filesystem_path object has empty path and the
+  effect's resolution is unresolved.
+sql: "SELECT pg_read_file(file_col) FROM t"
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: unsafe_io
+    primary_subtype: server_file_read
+    effects:
+      - group: unsafe_io
+        subtype: server_file_read
+        resolution: unresolved
+        objects:
+          - { kind: filesystem_path }
+      - group: read
+        objects:
+          - { kind: table, name: t }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

@@ -369,10 +369,10 @@ func appendCTEEffects(cs *effects.ClassifiedStatement, with *pg_query.WithClause
 
 func hasReturningList(list []*pg_query.Node) bool { return len(list) > 0 }
 
-// ---- Task-13 / Task-11 stubs ----
+// ---- Task-13 stub ----
 //
-// containsUnknownFunctionCall and appendUnsafeIO are owned by later tasks;
-// stub them here so the DML handlers compile and corpus rows pass.
+// containsUnknownFunctionCall is owned by Task 13 (escalation knob); stub it
+// here so the DML handlers compile until that task lands.
 
 func containsUnknownFunctionCall(s *pg_query.SelectStmt, allow map[string]struct{}) bool {
 	return collectFuncCallsAny(s, allow)
@@ -380,6 +380,3 @@ func containsUnknownFunctionCall(s *pg_query.SelectStmt, allow map[string]struct
 
 // collectFuncCallsAny is the real escalation walker (Task 13). Stub returns false.
 func collectFuncCallsAny(_ *pg_query.SelectStmt, _ map[string]struct{}) bool { return false }
-
-// appendUnsafeIO is the real unsafe-IO walker (Task 11). Stub is a no-op.
-func appendUnsafeIO(_ *effects.ClassifiedStatement, _ *pg_query.SelectStmt, _ SessionState) {}

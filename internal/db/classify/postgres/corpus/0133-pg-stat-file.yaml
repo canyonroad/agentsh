@@ -1,0 +1,19 @@
+name: pg-stat-file
+spec_ref: §7.3 SELECT pg_stat_file, Appendix B unsafe_io/server_file_read
+description: |
+  pg_stat_file('/etc/hosts') — file-stat primitive, classified as
+  unsafe_io/server_file_read.
+sql: "SELECT pg_stat_file('/etc/hosts')"
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: unsafe_io
+    primary_subtype: server_file_read
+    effects:
+      - group: unsafe_io
+        subtype: server_file_read
+        objects:
+          - { kind: filesystem_path, path: /etc/hosts }
+      - group: read
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

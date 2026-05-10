@@ -1,0 +1,20 @@
+name: lo-export
+spec_ref: §7.3 SELECT lo_export, Appendix B unsafe_io/large_object_io
+description: |
+  lo_export(oid, '/path') — large-object IO with the path as the SECOND
+  argument (oid is first). The classifier extracts arg-index 1 for this
+  function specifically.
+sql: "SELECT lo_export(12345, '/tmp/out')"
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: unsafe_io
+    primary_subtype: large_object_io
+    effects:
+      - group: unsafe_io
+        subtype: large_object_io
+        objects:
+          - { kind: filesystem_path, path: /tmp/out }
+      - group: read
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations
