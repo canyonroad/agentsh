@@ -23,3 +23,10 @@ func (p *cgoParser) Classify(sql string, sess SessionState, opts Options) ([]eff
 func parseCGO(sql string) (*pg_query.ParseResult, error) {
 	return pg_query.Parse(sql)
 }
+
+// parseSQL is the package-internal dispatch to the active backend. Used by
+// unit tests that need raw AST access; production code goes through
+// classifyWithBackend.
+func parseSQL(sql string) (*pg_query.ParseResult, error) {
+	return parseCGO(sql)
+}

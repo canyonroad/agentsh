@@ -12,7 +12,7 @@ import (
 // first RawStmt. Fails the test if the parse doesn't shape to a SELECT.
 func extractSelectStmt(t *testing.T, sql string) *pg_query.SelectStmt {
 	t.Helper()
-	tree, err := pg_query.Parse(sql)
+	tree, err := parseSQL(sql)
 	if err != nil {
 		t.Fatalf("parse(%q): %v", sql, err)
 	}

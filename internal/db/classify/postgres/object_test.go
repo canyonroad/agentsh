@@ -70,7 +70,7 @@ func TestExtractRelation_QualifiedAndUnqualified(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.sql+"|"+tc.res.String(), func(t *testing.T) {
-			res, err := pg_query.Parse(tc.sql)
+			res, err := parseSQL(tc.sql)
 			if err != nil {
 				t.Fatalf("Parse: %v", err)
 			}
