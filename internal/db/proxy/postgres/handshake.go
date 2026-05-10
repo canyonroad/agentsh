@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+
+	"github.com/agentsh/agentsh/internal/db/policy"
 )
 
 // Magic numbers from the Postgres frontend/backend protocol; same values
@@ -68,7 +70,18 @@ func (pc *proxyConn) handleStartupMessage(ctx context.Context, m *pgproto3.Start
 	if pc.state.replication {
 		return pc.synthesizeError(replicationDenyErrorCode, replicationDenyMessage)
 	}
-	// Task 7 plugs in: connect-rule eval ahead of the not-yet-wired error.
+	d := pc.evaluateConnect(ctx)
+	if d.Verb == policy.VerbDeny {
+		// §13.3 deny under terminate_* modes: synthesize ErrorResponse(28000).
+		// Passthrough is rejected at Server.New so we always have a TLS-terminated
+		// connection here.
+		msg := d.Reason
+		if msg == "" {
+			msg = "AgentSH DB proxy: connection denied by policy"
+		}
+		return pc.synthesizeError(connectionDenyErrorCode, msg)
+	}
+	// Allow / audit / approve: Plan 04b ends here; Plan 04b₂ dials upstream.
 	return pc.synthesizeError(upstreamNotYetWiredErrorCode, upstreamNotYetWiredMessage)
 }
 
