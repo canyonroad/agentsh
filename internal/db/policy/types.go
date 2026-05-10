@@ -200,6 +200,20 @@ func (rs *RuleSet) Service(id ServiceID) (DBService, bool) {
 	return *s, true
 }
 
+// AllServices returns a copy of every declared db_service. Order is not
+// guaranteed; callers that need stable ordering should sort by Name.
+// Returns nil when rs is nil.
+func (rs *RuleSet) AllServices() []DBService {
+	if rs == nil || len(rs.services) == 0 {
+		return nil
+	}
+	out := make([]DBService, 0, len(rs.services))
+	for _, s := range rs.services {
+		out = append(out, *s)
+	}
+	return out
+}
+
 // Unavoidability returns the policies.db.unavoidability mode. Returns
 // UnavoidabilityOff when rs is nil so startup code holding a not-yet-loaded
 // *RuleSet does not panic.

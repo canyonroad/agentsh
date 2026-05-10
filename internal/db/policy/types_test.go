@@ -1,6 +1,10 @@
 package policy
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/agentsh/agentsh/internal/policy"
+)
 
 func TestDecisionVerbString(t *testing.T) {
 	cases := []struct {
@@ -68,5 +72,48 @@ func TestParseRedactionTier(t *testing.T) {
 		if got != c.want || ok != c.ok {
 			t.Errorf("ParseRedactionTier(%q) = (%v, %v), want (%v, %v)", c.in, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+func TestRuleSet_AllServices(t *testing.T) {
+	yaml := `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+  reportsdb:
+    family: postgres
+    dialect: postgres
+    upstream: reports.internal:5432
+    tls_mode: passthrough
+`
+	rp, err := policy.LoadFromBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	rs, _, err := Decode(rp)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	got := rs.AllServices()
+	if len(got) != 2 {
+		t.Fatalf("AllServices len = %d, want 2", len(got))
+	}
+	seen := map[string]bool{}
+	for _, s := range got {
+		seen[s.Name] = true
+	}
+	if !seen["appdb"] || !seen["reportsdb"] {
+		t.Errorf("AllServices missing expected names: %+v", got)
+	}
+}
+
+func TestRuleSet_AllServices_Nil(t *testing.T) {
+	var rs *RuleSet
+	if got := rs.AllServices(); got != nil {
+		t.Errorf("nil receiver: got %+v, want nil", got)
 	}
 }
