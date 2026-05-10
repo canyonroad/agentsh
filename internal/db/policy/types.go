@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/db/effects"
+	"github.com/agentsh/agentsh/internal/db/service"
 )
 
 // ServiceID is the operator-supplied identifier of a db_service.
@@ -170,10 +171,11 @@ type Warning struct {
 // Internals are private; callers consume via Evaluate / EvaluateConnection /
 // Redaction / Service.
 type RuleSet struct {
-	services   map[ServiceID]*DBService
-	statement  []*compiledStatementRule
-	connection []*compiledConnectionRule
-	redaction  RedactionConfig
+	services       map[ServiceID]*DBService
+	statement      []*compiledStatementRule
+	connection     []*compiledConnectionRule
+	redaction      RedactionConfig
+	unavoidability service.Unavoidability
 }
 
 // Redaction returns the policies.db block configuration. Returns the zero
@@ -196,4 +198,14 @@ func (rs *RuleSet) Service(id ServiceID) (DBService, bool) {
 		return DBService{}, false
 	}
 	return *s, true
+}
+
+// Unavoidability returns the policies.db.unavoidability mode. Returns
+// UnavoidabilityOff when rs is nil so startup code holding a not-yet-loaded
+// *RuleSet does not panic.
+func (rs *RuleSet) Unavoidability() service.Unavoidability {
+	if rs == nil {
+		return service.UnavoidabilityOff
+	}
+	return rs.unavoidability
 }
