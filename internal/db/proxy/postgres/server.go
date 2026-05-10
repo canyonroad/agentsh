@@ -306,8 +306,11 @@ func (s *Server) handleConn(ctx context.Context, svc Service, conn net.Conn) {
 		s.emitListenerAuthFail(ctx, svc, uid, pid, "uid_mismatch")
 		return
 	}
-	// Plan 04a: peercred passed; close the conn (handshake lands in 04b).
-	// The deferred Close in acceptLoop handles the actual close.
+	pc := newProxyConn(s, svc, conn, uid)
+	if err := pc.run(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+		s.logger.Warn("postgres.Server: proxyConn exited with error", "service", svc.Name, "err", err)
+	}
+	_ = pid // pid only used for the auth-fail event; keep it captured for future use
 }
 
 // emitListenerAuthFail emits a db_listener_auth_fail lifecycle event via the
