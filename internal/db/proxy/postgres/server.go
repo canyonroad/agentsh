@@ -15,7 +15,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/db/policy"
@@ -61,10 +64,22 @@ type Config struct {
 type Server struct {
 	cfg      Config
 	logger   *slog.Logger
-	sentinel bool // true when Unavoidability == off; Start/Shutdown are no-ops
+	sentinel bool // true when Unavoidability == off; Start blocks on ctx, Shutdown is a no-op
+
 	mu       sync.Mutex
 	started  bool
 	shutdown bool
+
+	// Populated under mu before started=true so Shutdown always sees them.
+	cancel    context.CancelFunc
+	eg        *errgroup.Group
+	listeners map[string]*unixListener
+	conns     *activeConns
+
+	// done is closed by Start when it returns (including early-error paths
+	// after the started guard commits). Shutdown selects on it to drain
+	// accept loops without calling eg.Wait directly.
+	done chan struct{}
 }
 
 // New validates cfg and returns a *Server. When cfg.Unavoidability ==
@@ -78,7 +93,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("postgres.New: StateDir is required")
 	}
 	if cfg.Unavoidability == service.UnavoidabilityOff {
-		return &Server{cfg: cfg, logger: cfg.Logger, sentinel: true}, nil
+		return &Server{cfg: cfg, logger: cfg.Logger, sentinel: true, done: make(chan struct{})}, nil
 	}
 	if cfg.Sink == nil {
 		return nil, errors.New("postgres.New: Sink is required when Unavoidability != off")
@@ -97,12 +112,13 @@ func New(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("postgres.New: services[%d].Listen.Path is empty for unix listener", i)
 		}
 	}
-	return &Server{cfg: cfg, logger: cfg.Logger}, nil
+	return &Server{cfg: cfg, logger: cfg.Logger, done: make(chan struct{})}, nil
 }
 
 // Start binds listeners and runs accept loops until ctx is cancelled.
-// Returns nil for sentinel servers. Returns the first listener-bind error;
-// subsequent listeners are torn down.
+// For sentinel servers (Unavoidability == off), blocks until ctx is cancelled
+// and returns ctx.Err(). Returns the first listener-bind error; subsequent
+// listeners are torn down.
 //
 // Plan 04a: connection handler is a no-op that closes the conn after the
 // peercred check. Plan 04b plugs in the real handshake handler.
@@ -112,30 +128,151 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		return errors.New("postgres.Server: Start called twice")
 	}
+	if s.shutdown {
+		s.mu.Unlock()
+		return errors.New("postgres.Server: Start after Shutdown")
+	}
+
+	// Initialise all run-state fields while still holding the lock, before
+	// setting started=true. This closes the window where Shutdown could run
+	// between started=true and the fields being populated, and find cancel==nil.
+	runCtx, cancel := context.WithCancel(ctx)
+	eg := new(errgroup.Group)
+	s.cancel = cancel
+	s.eg = eg
+	s.conns = newActiveConns()
+	s.listeners = make(map[string]*unixListener)
 	s.started = true
 	s.mu.Unlock()
 
+	// done is closed when Start returns, regardless of how it exits. This
+	// lets Shutdown drain without calling eg.Wait itself (Finding 2).
+	defer close(s.done)
+
 	if s.sentinel {
 		s.logger.Info("postgres.Server: sentinel mode (Unavoidability == off); not binding listeners")
-		return nil
+		<-runCtx.Done()
+		return runCtx.Err()
 	}
 
-	// Listener bind + accept loop is implemented in Task 5.
-	return errors.New("postgres.Server.Start: listener bind not yet implemented (Plan 04a Task 5)")
+	// Bind all listeners up-front; a partial failure tears the rest down.
+	// Indexed by service name so a future tcp-listener service does not
+	// disturb the alignment between cfg.Services and bound listeners.
+	bound := make(map[string]*unixListener, len(s.cfg.Services))
+	for _, svc := range s.cfg.Services {
+		if svc.Listen.Kind != "unix" {
+			s.logger.Warn("postgres.Server: skipping non-unix listener (Plan 04a binds unix only)",
+				"service", svc.Name, "kind", svc.Listen.Kind)
+			continue
+		}
+		ln, err := bindUnixListener(svc.Listen.Path)
+		if err != nil {
+			for _, b := range bound {
+				_ = b.Close()
+			}
+			return fmt.Errorf("bind listener for service %q: %w", svc.Name, err)
+		}
+		bound[svc.Name] = ln
+		s.logger.Info("postgres.Server: bound listener", "service", svc.Name, "path", svc.Listen.Path)
+	}
+
+	// Hand listeners over to the Server so Shutdown can close them.
+	// If Shutdown already ran during the bind phase, runCtx is already
+	// cancelled; close anything we just bound and return.
+	s.mu.Lock()
+	s.listeners = bound
+	alreadyShutdown := s.shutdown
+	s.mu.Unlock()
+
+	if alreadyShutdown {
+		for _, ln := range bound {
+			_ = ln.Close()
+		}
+		return runCtx.Err()
+	}
+
+	for _, svc := range s.cfg.Services {
+		ln, ok := bound[svc.Name]
+		if !ok {
+			continue
+		}
+		svcCopy := svc
+		lnCopy := ln
+		eg.Go(func() error {
+			return s.acceptLoop(runCtx, svcCopy, lnCopy)
+		})
+	}
+
+	err := eg.Wait()
+	if errors.Is(err, context.Canceled) {
+		err = nil
+	}
+	return err
 }
 
 // Shutdown stops accept loops, waits for in-flight conns to close, and
 // unlinks Unix sockets. Returns nil for sentinel servers.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.shutdown {
+		s.mu.Unlock()
 		return nil
 	}
 	s.shutdown = true
-	if s.sentinel {
+	cancel := s.cancel
+	listeners := s.listeners
+	conns := s.conns
+	sentinel := s.sentinel
+	s.mu.Unlock()
+
+	if cancel == nil {
+		// Start was never called; nothing to do.
 		return nil
 	}
-	// Implemented in Task 5.
+	cancel()
+	if sentinel {
+		return nil
+	}
+	for _, ln := range listeners {
+		_ = ln.Close()
+	}
+	if conns != nil {
+		conns.CloseAll()
+	}
+	// Wait for Start (and therefore all accept loops) to finish, bounded
+	// by the caller's deadline. Only Start calls eg.Wait; Shutdown waits
+	// on the done channel that Start closes on its way out.
+	select {
+	case <-s.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	return nil
+}
+
+func (s *Server) acceptLoop(ctx context.Context, svc Service, ln *unixListener) error {
+	for {
+		conn, err := ln.Accept(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			s.logger.Warn("postgres.Server: accept error", "service", svc.Name, "err", err)
+			return err
+		}
+		s.conns.Add(conn)
+		go func() {
+			defer s.conns.Remove(conn)
+			defer conn.Close()
+			s.handleConn(ctx, svc, conn)
+		}()
+	}
+}
+
+// handleConn is the per-connection handler. Plan 04a Task 5 is a no-op
+// (the conn is closed by the deferred Close in acceptLoop). Task 6
+// inserts the SO_PEERCRED + UID-equality check; Plan 04b plugs in the
+// real handshake.
+func (s *Server) handleConn(ctx context.Context, svc Service, conn net.Conn) {
+	// intentionally empty for Plan 04a Task 5
 }
