@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -80,6 +81,10 @@ type Server struct {
 	// after the started guard commits). Shutdown selects on it to drain
 	// accept loops without calling eg.Wait directly.
 	done chan struct{}
+
+	// uidAllowed reports whether a peer uid is permitted to connect.
+	// Default: equality with os.Getuid(). Overrideable in tests.
+	uidAllowed func(uint32) bool
 }
 
 // New validates cfg and returns a *Server. When cfg.Unavoidability ==
@@ -93,7 +98,9 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("postgres.New: StateDir is required")
 	}
 	if cfg.Unavoidability == service.UnavoidabilityOff {
-		return &Server{cfg: cfg, logger: cfg.Logger, sentinel: true, done: make(chan struct{})}, nil
+		srv := &Server{cfg: cfg, logger: cfg.Logger, sentinel: true, done: make(chan struct{})}
+		srv.uidAllowed = func(uid uint32) bool { return uid == uint32(os.Getuid()) }
+		return srv, nil
 	}
 	if cfg.Sink == nil {
 		return nil, errors.New("postgres.New: Sink is required when Unavoidability != off")
@@ -112,13 +119,19 @@ func New(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("postgres.New: services[%d].Listen.Path is empty for unix listener", i)
 		}
 	}
-	return &Server{cfg: cfg, logger: cfg.Logger, done: make(chan struct{})}, nil
+	return &Server{
+		cfg:        cfg,
+		logger:     cfg.Logger,
+		done:       make(chan struct{}),
+		uidAllowed: func(uid uint32) bool { return uid == uint32(os.Getuid()) },
+	}, nil
 }
 
 // Start binds listeners and runs accept loops until ctx is cancelled.
-// For sentinel servers (Unavoidability == off), blocks until ctx is cancelled
-// and returns ctx.Err(). Returns the first listener-bind error; subsequent
-// listeners are torn down.
+// For sentinel servers (Unavoidability == off), Start binds no listeners and
+// blocks on ctx.Done() so callers can use a single goroutine pattern
+// regardless of mode; returns ctx.Err().
+// Returns the first listener-bind error; subsequent listeners are torn down.
 //
 // Plan 04a: connection handler is a no-op that closes the conn after the
 // peercred check. Plan 04b plugs in the real handshake handler.
@@ -269,10 +282,46 @@ func (s *Server) acceptLoop(ctx context.Context, svc Service, ln *unixListener) 
 	}
 }
 
-// handleConn is the per-connection handler. Plan 04a Task 5 is a no-op
-// (the conn is closed by the deferred Close in acceptLoop). Task 6
-// inserts the SO_PEERCRED + UID-equality check; Plan 04b plugs in the
-// real handshake.
+// handleConn is the per-connection handler. Reads SO_PEERCRED from the peer,
+// compares the peer uid to the proxy's own uid, and on mismatch silently
+// closes the conn while emitting a db_listener_auth_fail lifecycle event.
+// Plan 04a: successful peercred is a no-op (conn closed by deferred Close in
+// acceptLoop). Plan 04b plugs in the real handshake.
 func (s *Server) handleConn(ctx context.Context, svc Service, conn net.Conn) {
-	// intentionally empty for Plan 04a Task 5
+	uid, pid, err := readPeerCred(conn)
+	if err != nil {
+		s.logger.Warn("postgres.Server: peercred read failed; closing", "service", svc.Name, "err", err)
+		s.emitListenerAuthFail(ctx, svc, 0, 0, "peercred_read_failed")
+		return
+	}
+	if !s.uidAllowed(uid) {
+		s.emitListenerAuthFail(ctx, svc, uid, pid, "uid_mismatch")
+		return
+	}
+	// Plan 04a: peercred passed; close the conn (handshake lands in 04b).
+	// The deferred Close in acceptLoop handles the actual close.
+}
+
+// emitListenerAuthFail emits a db_listener_auth_fail lifecycle event via the
+// configured Sink. The ctx is the per-connection runCtx, which Shutdown
+// cancels — under shutdown races the event may be dropped (the sink emit
+// returns context.Canceled and we log warn). Acceptable for Plan 04a; Plan
+// 04b's real sink may want a background ctx with a short timeout to ensure
+// shutdown-race events still survive.
+func (s *Server) emitListenerAuthFail(ctx context.Context, svc Service, uid uint32, pid int32, reason string) {
+	if s.cfg.Sink == nil {
+		return
+	}
+	ev := events.LifecycleEvent{
+		EventID:   newEventID(),
+		Timestamp: timeNow(),
+		DBService: svc.Name,
+		Kind:      "db_listener_auth_fail",
+		Reason:    reason,
+		PeerUID:   uid,
+		PeerPID:   pid,
+	}
+	if err := s.cfg.Sink.EmitLifecycle(ctx, ev); err != nil {
+		s.logger.Warn("postgres.Server: sink emit failed", "kind", ev.Kind, "err", err)
+	}
 }
