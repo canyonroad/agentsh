@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -307,10 +308,13 @@ func (s *Server) handleConn(ctx context.Context, svc Service, conn net.Conn) {
 		return
 	}
 	pc := newProxyConn(s, svc, conn, uid)
-	if err := pc.run(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+	if err := pc.run(ctx); err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, net.ErrClosed) &&
+		!errors.Is(err, io.EOF) &&
+		!errors.Is(err, io.ErrUnexpectedEOF) {
 		s.logger.Warn("postgres.Server: proxyConn exited with error", "service", svc.Name, "err", err)
 	}
-	_ = pid // pid only used for the auth-fail event; keep it captured for future use
 }
 
 // emitListenerAuthFail emits a db_listener_auth_fail lifecycle event via the

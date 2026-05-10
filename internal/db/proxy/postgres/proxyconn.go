@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"net"
+	"strconv"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 )
@@ -68,23 +69,9 @@ func clientIdentityFromUID(uid uint32) string {
 	return formatUID(uid)
 }
 
-// formatUID returns "uid:N". Implemented without strconv to keep the
-// import set minimal in Task 4; Task 7 may swap to strconv.FormatUint
-// if it grows callers that already use strconv.
+// formatUID returns "uid:N". Delegates to strconv.FormatUint for conversion.
 func formatUID(uid uint32) string {
-	const digits = "0123456789"
-	if uid == 0 {
-		return "uid:0"
-	}
-	var buf [12]byte
-	pos := len(buf)
-	v := uid
-	for v > 0 {
-		pos--
-		buf[pos] = digits[v%10]
-		v /= 10
-	}
-	return "uid:" + string(buf[pos:])
+	return "uid:" + strconv.FormatUint(uint64(uid), 10)
 }
 
 // run is the per-connection driver. Task 5 replaces this body with the
