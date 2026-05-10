@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,16 +40,7 @@ func TestLifecycleEvent_OmitsEmptySNIHostname(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	if got := string(bs); contains(got, "sni_hostname") {
+	if got := string(bs); strings.Contains(got, "sni_hostname") {
 		t.Errorf("sni_hostname must be omitted when empty; got %s", got)
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

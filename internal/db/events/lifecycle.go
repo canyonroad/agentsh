@@ -26,8 +26,8 @@ type LifecycleEvent struct {
 	// Handshake/error specific (Plan 04b). Zero when not applicable.
 	ErrorCode string `json:"error_code,omitempty"`
 
-	// TLS SNI from inbound ClientHello (Plan 04b). Best-effort under
-	// passthrough; recorded under terminate_* when the client sets it.
-	// Spec §13.2 footnote: SNI is advisory.
+	// TLS SNI extracted from the inbound ClientHello. Empty when the client
+	// omitted SNI or the connection is not TLS. Spec §13.2 footnote: SNI
+	// is advisory; do not gate access decisions on it.
 	SNIHostname string `json:"sni_hostname,omitempty"`
 }
