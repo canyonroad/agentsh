@@ -89,9 +89,10 @@ func (pc *proxyConn) handleStartupMessage(ctx context.Context, m *pgproto3.Start
 // and a final close. Used by deny paths and the not-yet-wired stub.
 func (pc *proxyConn) synthesizeError(sqlstate, message string) error {
 	resp := &pgproto3.ErrorResponse{
-		Severity: "FATAL",
-		Code:     sqlstate,
-		Message:  message,
+		Severity:            "FATAL",
+		SeverityUnlocalized: "FATAL", // wire field 'V' for PG 9.6+ machine-readable parsing
+		Code:                sqlstate,
+		Message:             message,
 	}
 	pc.backend.Send(resp)
 	if err := pc.backend.Flush(); err != nil {
@@ -106,8 +107,11 @@ func (pc *proxyConn) synthesizeError(sqlstate, message string) error {
 // Error codes Plan 04b synthesizes. Documented here so Plan 04b₂ can
 // reuse where relevant.
 const (
-	replicationDenyErrorCode     = "28000"
-	replicationDenyMessage       = "AgentSH DB proxy: replication mode denied by default; declare an opt-in connection rule (Plan 04b₂)"
+	// 0A000 (feature_not_supported) — replication is denied because Plan 04b
+	// does not yet route the replication protocol; not an authentication
+	// failure (28000), which would mislead operators debugging policy.
+	replicationDenyErrorCode     = "0A000"
+	replicationDenyMessage       = "AgentSH DB proxy: replication mode is not yet supported; opt-in path lands in Plan 04b₂"
 	upstreamNotYetWiredErrorCode = "0A000"
 	upstreamNotYetWiredMessage   = "AgentSH DB proxy: upstream wiring not yet shipped (Plan 04b is inbound-only; Plan 04b₂ adds upstream)"
 	connectionDenyErrorCode      = "28000"
