@@ -1,0 +1,95 @@
+version: 1
+name: db-access-sample
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+    deny_mode_in_tx: terminate
+    allow_function_call_protocol: false
+  warehouse:
+    family: postgres
+    dialect: redshift
+    upstream: warehouse.cluster.region.redshift.amazonaws.com:5439
+    tls_mode: terminate_reissue
+  legacy_pg:
+    family: postgres
+    dialect: postgres
+    upstream: legacy.internal:5432
+    tls_mode: passthrough
+
+database_rules:
+  - name: app-read-and-update
+    db_service: appdb
+    operations: [READ, UPDATE]
+    decision: allow
+
+  - name: app-allow-tx-control
+    db_service: appdb
+    operations: [transaction]
+    decision: allow
+
+  - name: app-allow-safe-session-settings
+    db_service: appdb
+    operations: [session]
+    subtypes: [set, reset, set_local,
+               discard_plans, discard_all, discard_temp, discard_sequences]
+    objects: ["application_name", "timezone", "datestyle", "client_encoding",
+              "statement_timeout", "lock_timeout",
+              "idle_in_transaction_session_timeout",
+              "default_transaction_isolation"]
+    decision: allow
+
+  - name: app-deny-search-path-and-role-changes
+    db_service: appdb
+    operations: [session]
+    subtypes: [set_search_path, set_role, set_session_authorization]
+    decision: deny
+    message: "search_path / role manipulation not allowed"
+
+  - name: app-deny-mutations
+    db_service: appdb
+    operations: [DELETE, CREATE, DROP, ALTER, EXPORT]
+    decision: deny
+    message: "Agent is read+update only on appdb. Requested: {{.Operation}}"
+
+  - name: app-deny-dangerous
+    db_service: appdb
+    operations: [DANGEROUS]
+    decision: deny
+
+  - name: warehouse-read-only
+    db_service: warehouse
+    operations: [READ]
+    decision: allow
+
+  - name: warehouse-deny-everything-else
+    db_service: warehouse
+    operations: ["*"]
+    decision: deny
+
+  - name: catch-all-unknown
+    operations: [unknown]
+    decision: deny
+    message: "Statement could not be classified. Failing closed."
+
+database_connection_rules:
+  - name: legacy-connect-readonly-agent-only
+    db_service: legacy_pg
+    client_identity: "readonly-agent"
+    decision: allow
+
+  - name: legacy-deny-other
+    db_service: legacy_pg
+    decision: deny
+    message: "legacy_pg is restricted to the readonly-agent identity"
+
+  - name: warehouse-connect-allow
+    db_service: warehouse
+    decision: allow
+
+  - name: appdb-allow-self-cancels
+    db_service: appdb
+    match_kind: cancel
+    decision: allow
