@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -24,6 +25,7 @@ import (
 	"github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/db/policy"
 	"github.com/agentsh/agentsh/internal/db/service"
+	"github.com/agentsh/agentsh/internal/db/tlsleaf"
 )
 
 // Service is the proxy-internal flattened view of one db_service. The proxy
@@ -85,6 +87,9 @@ type Server struct {
 	// uidAllowed reports whether a peer uid is permitted to connect.
 	// Default: equality with os.Getuid(). Overrideable in tests.
 	uidAllowed func(uint32) bool
+
+	caMu  sync.Mutex
+	caRef *tlsleaf.CA
 }
 
 // New validates cfg and returns a *Server. When cfg.Unavoidability ==
@@ -111,6 +116,9 @@ func New(cfg Config) (*Server, error) {
 	for i, svc := range cfg.Services {
 		if svc.Name == "" {
 			return nil, fmt.Errorf("postgres.New: services[%d].Name is empty", i)
+		}
+		if svc.TLSMode == "passthrough" {
+			return nil, fmt.Errorf("postgres.New: services[%d] (%s) tls_mode: passthrough requires upstream wiring (Plan 04b₂); declare a terminate_* mode or wait for 04b₂", i, svc.Name)
 		}
 		if svc.Listen.Kind != "unix" && svc.Listen.Kind != "tcp" {
 			return nil, fmt.Errorf("postgres.New: services[%d].Listen.Kind = %q; want unix or tcp", i, svc.Listen.Kind)
@@ -324,4 +332,23 @@ func (s *Server) emitListenerAuthFail(ctx context.Context, svc Service, uid uint
 	if err := s.cfg.Sink.EmitLifecycle(ctx, ev); err != nil {
 		s.logger.Warn("postgres.Server: sink emit failed", "kind", ev.Kind, "err", err)
 	}
+}
+
+// ca returns the CA, loading or generating it on first call. Concurrent
+// callers see the same instance.
+func (s *Server) ca() (*tlsleaf.CA, error) {
+	s.caMu.Lock()
+	defer s.caMu.Unlock()
+	if s.caRef != nil {
+		return s.caRef, nil
+	}
+	ca, err := tlsleaf.LoadOrCreate(s.cfg.StateDir, timeNow)
+	if err != nil {
+		return nil, fmt.Errorf("postgres.Server: load CA: %w", err)
+	}
+	s.caRef = ca
+	s.logger.Info("postgres.Server: CA loaded",
+		"key", filepath.Join(s.cfg.StateDir, "db-ca.key"),
+		"cert", filepath.Join(s.cfg.StateDir, "db-ca.crt"))
+	return ca, nil
 }

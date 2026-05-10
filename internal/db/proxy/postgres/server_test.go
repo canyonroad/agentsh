@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,5 +180,68 @@ func TestServer_StartTwice_ReturnsError(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if err := s.Start(ctx); err == nil {
 		t.Fatal("second Start: want error, got nil")
+	}
+}
+
+func TestServer_New_RejectsPassthroughService(t *testing.T) {
+	cfg := Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           &events.SyncSink{},
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: "db.internal:5432",
+			TLSMode:  "passthrough",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "x.sock")},
+			Service:  policy.DBService{Name: "appdb", TLSMode: "passthrough"},
+		}},
+	}
+	_, err := New(cfg)
+	if err == nil {
+		t.Fatal("New (passthrough): want error referencing Plan 04b₂, got nil")
+	}
+	if !strings.Contains(err.Error(), "passthrough") {
+		t.Errorf("New error = %q; want it to mention passthrough", err)
+	}
+}
+
+func TestServer_LazyCALoad(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       dir,
+		Sink:           &events.SyncSink{},
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: "db.internal:5432",
+			TLSMode:  "terminate_reissue",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "appdb.sock")},
+			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_reissue"},
+		}},
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ca, err := srv.ca()
+	if err != nil {
+		t.Fatalf("ca() first call: %v", err)
+	}
+	if ca == nil {
+		t.Fatal("ca() returned nil")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "db-ca.crt")); err != nil {
+		t.Errorf("db-ca.crt missing after lazy load: %v", err)
+	}
+	again, err := srv.ca()
+	if err != nil {
+		t.Fatalf("ca() second call: %v", err)
+	}
+	if again != ca {
+		t.Error("ca() did not return cached pointer on second call")
 	}
 }
