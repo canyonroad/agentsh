@@ -1,0 +1,23 @@
+name: drop-server
+spec_ref: §7.3 DROP SERVER
+description: |
+  DROP SERVER ... is parsed by pg_query as DropStmt with
+  RemoveType=OBJECT_FOREIGN_SERVER. Routed via classifyDrop to the
+  external-IO handler so the unsafe_io effect lights up alongside the
+  schema_destroy.
+sql: "DROP SERVER s"
+expected_classification:
+  - raw_verb: DROP_SERVER
+    primary_group: unsafe_io
+    primary_subtype: drop_server
+    effects:
+      - group: unsafe_io
+        subtype: drop_server
+        objects:
+          - { kind: server, name: s }
+      - group: schema_destroy
+        objects:
+          - { kind: server, name: s }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

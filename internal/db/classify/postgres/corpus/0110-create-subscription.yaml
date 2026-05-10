@@ -1,0 +1,25 @@
+name: create-subscription
+spec_ref: §7.3 CREATE SUBSCRIPTION, Appendix B unsafe_io
+description: |
+  CREATE SUBSCRIPTION ... CONNECTION 'host=... port=...' opens a logical
+  replication slot to a remote host. Primary unsafe_io(create_subscription)
+  carries the subscription plus an external_endpoint extracted from the
+  conninfo; secondary schema_create reflects the catalog write. Sample
+  policy denies via app-deny-mutations (CREATE alias).
+sql: "CREATE SUBSCRIPTION sub CONNECTION 'host=upstream.example port=5432' PUBLICATION pub"
+expected_classification:
+  - raw_verb: CREATE_SUBSCRIPTION
+    primary_group: unsafe_io
+    primary_subtype: create_subscription
+    effects:
+      - group: unsafe_io
+        subtype: create_subscription
+        objects:
+          - { kind: subscription, name: sub }
+          - { kind: external_endpoint, host: upstream.example, port: 5432 }
+      - group: schema_create
+        objects:
+          - { kind: subscription, name: sub }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

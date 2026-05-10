@@ -362,13 +362,19 @@ func TestClassifyDropExtension(t *testing.T) {
 	}
 }
 
-func TestClassifyDropSubscription_DefersToTask10(t *testing.T) {
-	// DROP SUBSCRIPTION uses DropSubscriptionStmt (a different node), so the
-	// dispatcher hits the Task 10 stub. Just confirm we don't crash and Error
-	// is set.
+func TestClassifyDropSubscription_RoutedToTask10Handler(t *testing.T) {
+	// DROP SUBSCRIPTION uses DropSubscriptionStmt (a different node from the
+	// generic DropStmt). It now routes to the Task 10 handler in
+	// ast_external.go which emits unsafe_io(drop_subscription) + schema_destroy.
 	cs := classifyOne(t, "DROP SUBSCRIPTION s", SessionState{})
-	if cs.Error == "" {
-		t.Fatalf("expected non-empty Error for unimplemented Task 10 path")
+	if cs.Error != "" {
+		t.Fatalf("unexpected Error: %q", cs.Error)
+	}
+	if len(cs.Effects) != 2 ||
+		cs.Effects[0].Group != effects.GroupUnsafeIO ||
+		cs.Effects[0].Subtype != effects.SubtypeDropSubscription ||
+		cs.Effects[1].Group != effects.GroupSchemaDestroy {
+		t.Fatalf("effects: %+v", cs.Effects)
 	}
 }
 

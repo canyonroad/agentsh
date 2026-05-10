@@ -16,39 +16,6 @@ func stub(cs *effects.ClassifiedStatement, family string) {
 	cs.Error = "unmapped form: " + family + " not yet implemented"
 }
 
-// ---- external-IO DDL (Task 10) ----
-
-func classifyCreateSubscription(cs *effects.ClassifiedStatement, _ *pg_query.CreateSubscriptionStmt) {
-	stub(cs, "create_subscription")
-}
-func classifyAlterSubscription(cs *effects.ClassifiedStatement, _ *pg_query.AlterSubscriptionStmt) {
-	stub(cs, "alter_subscription")
-}
-func classifyDropSubscription(cs *effects.ClassifiedStatement, _ *pg_query.DropSubscriptionStmt) {
-	stub(cs, "drop_subscription")
-}
-func classifyCreateServer(cs *effects.ClassifiedStatement, _ *pg_query.CreateForeignServerStmt) {
-	stub(cs, "create_server")
-}
-func classifyAlterServer(cs *effects.ClassifiedStatement, _ *pg_query.AlterForeignServerStmt) {
-	stub(cs, "alter_server")
-}
-func classifyCreateUserMapping(cs *effects.ClassifiedStatement, _ *pg_query.CreateUserMappingStmt) {
-	stub(cs, "create_user_mapping")
-}
-func classifyAlterUserMapping(cs *effects.ClassifiedStatement, _ *pg_query.AlterUserMappingStmt) {
-	stub(cs, "alter_user_mapping")
-}
-func classifyDropUserMapping(cs *effects.ClassifiedStatement, _ *pg_query.DropUserMappingStmt) {
-	stub(cs, "drop_user_mapping")
-}
-func classifyCreateTablespace(cs *effects.ClassifiedStatement, _ *pg_query.CreateTableSpaceStmt) {
-	stub(cs, "create_tablespace")
-}
-func classifyAlterTablespace(cs *effects.ClassifiedStatement, _ *pg_query.AlterTableSpaceOptionsStmt) {
-	stub(cs, "alter_tablespace")
-}
-
 // ---- procedural / maintenance / lock / notify (Task 12) ----
 
 func classifyCall(cs *effects.ClassifiedStatement, _ *pg_query.CallStmt) { stub(cs, "call") }

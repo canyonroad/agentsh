@@ -1,0 +1,22 @@
+name: drop-tablespace
+spec_ref: §7.3 DROP TABLESPACE
+description: |
+  DROP TABLESPACE detaches the catalog entry. Parsed as a dedicated
+  DropTableSpaceStmt (not a generic DropStmt). Primary
+  unsafe_io(drop_tablespace) + secondary schema_destroy.
+sql: "DROP TABLESPACE ts"
+expected_classification:
+  - raw_verb: DROP_TABLESPACE
+    primary_group: unsafe_io
+    primary_subtype: drop_tablespace
+    effects:
+      - group: unsafe_io
+        subtype: drop_tablespace
+        objects:
+          - { kind: tablespace, name: ts }
+      - group: schema_destroy
+        objects:
+          - { kind: tablespace, name: ts }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

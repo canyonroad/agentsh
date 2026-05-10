@@ -1,0 +1,22 @@
+name: alter-user-mapping
+spec_ref: §7.3 ALTER USER MAPPING
+description: |
+  ALTER USER MAPPING rotates credentials on an existing mapping. Primary
+  unsafe_io(alter_user_mapping) + secondary privilege.
+sql: "ALTER USER MAPPING FOR alice SERVER s OPTIONS (SET user 'new_user')"
+expected_classification:
+  - raw_verb: ALTER_USER_MAPPING
+    primary_group: unsafe_io
+    primary_subtype: alter_user_mapping
+    effects:
+      - group: unsafe_io
+        subtype: alter_user_mapping
+        objects:
+          - { kind: user_mapping, name: alice@s }
+          - { kind: role, name: alice }
+      - group: privilege
+        objects:
+          - { kind: user_mapping, name: alice@s }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

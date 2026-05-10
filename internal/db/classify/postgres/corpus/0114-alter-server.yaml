@@ -1,0 +1,23 @@
+name: alter-server
+spec_ref: §7.3 ALTER SERVER
+description: |
+  ALTER SERVER s OPTIONS (SET host '...') rewrites the FDW endpoint.
+  Primary unsafe_io(alter_server) + secondary schema_alter; the new host
+  is exposed as external_endpoint for policy match.
+sql: "ALTER SERVER s OPTIONS (SET host 'new.example')"
+expected_classification:
+  - raw_verb: ALTER_SERVER
+    primary_group: unsafe_io
+    primary_subtype: alter_server
+    effects:
+      - group: unsafe_io
+        subtype: alter_server
+        objects:
+          - { kind: server, name: s }
+          - { kind: external_endpoint, host: new.example }
+      - group: schema_alter
+        objects:
+          - { kind: server, name: s }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

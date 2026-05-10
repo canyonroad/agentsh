@@ -146,6 +146,8 @@ func classifyRawStmt(d Dialect, raw *pg_query.RawStmt, sess SessionState, opts O
 		classifyCreateTablespace(&cs, n.CreateTableSpaceStmt)
 	case *pg_query.Node_AlterTableSpaceOptionsStmt:
 		classifyAlterTablespace(&cs, n.AlterTableSpaceOptionsStmt)
+	case *pg_query.Node_DropTableSpaceStmt:
+		classifyDropTablespace(&cs, n.DropTableSpaceStmt)
 
 	// ---- procedural / maintenance / lock / notify ----
 	case *pg_query.Node_CallStmt:

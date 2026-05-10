@@ -8,9 +8,11 @@
 //   - call extractRelation / extractQualifiedName to build ObjectRef + resolution;
 //   - emit one Effect per spec §7.3 row (group + optional subtype + objects).
 //
-// Forms whose pg_query.RemoveType / Objtype is owned by Task 10 (subscriptions
-// / foreign servers / user mappings / tablespaces) fall through to the
-// dispatcher's empty-Effects guard with a diagnostic Error.
+// Generic DropStmt covers most DROP shapes; the OBJECT_FOREIGN_SERVER branch
+// delegates to classifyDropServer in ast_external.go so the unsafe_io effect
+// for that family lights up. OBJECT_SUBSCRIPTION / OBJECT_USER_MAPPING /
+// OBJECT_TABLESPACE never reach DropStmt — pg_query parses each into its
+// own dedicated node, dispatched directly from ast_walk.go.
 package postgres
 
 import (
@@ -51,7 +53,8 @@ func classifyCreateTable(cs *effects.ClassifiedStatement, s *pg_query.CreateStmt
 // disambiguates (OBJECT_TABLE vs OBJECT_MATVIEW).
 //
 // Spec §7.3: CTAS → primary schema_create(create_table) + secondary read.
-//            CREATE MATERIALIZED VIEW → primary schema_create(create_materialized_view) + secondary read.
+//
+//	CREATE MATERIALIZED VIEW → primary schema_create(create_materialized_view) + secondary read.
 func classifyCreateTableAs(cs *effects.ClassifiedStatement, s *pg_query.CreateTableAsStmt, sess SessionState, opts Options) {
 	if s == nil || s.Into == nil {
 		cs.Effects = []effects.Effect{{Group: effects.GroupUnknown, Resolution: effects.ResolutionUnresolved}}
@@ -469,10 +472,11 @@ func classifyAlterPublication(cs *effects.ClassifiedStatement, s *pg_query.Alter
 // classifyDrop maps DROP TABLE / INDEX / VIEW / FUNCTION / SCHEMA / etc.
 // (everything pg_query represents as DropStmt, dispatched on RemoveType).
 //
-// Subscriptions / foreign servers / user mappings / tablespaces are owned by
-// Task 10 — for those we leave Effects empty + Error set so the dispatcher's
-// empty-Effects guard kicks in. (Their dedicated DropSubscriptionStmt /
-// DropTableSpaceStmt / DropUserMappingStmt nodes route to Task 10 handlers.)
+// OBJECT_FOREIGN_SERVER delegates to classifyDropServer in ast_external.go so
+// the unsafe_io effect surfaces. OBJECT_SUBSCRIPTION / OBJECT_USER_MAPPING /
+// OBJECT_TABLESPACE never reach this function — pg_query parses each into
+// its own dedicated node (DropSubscriptionStmt / DropUserMappingStmt /
+// DropTableSpaceStmt), routed directly from ast_walk.go.
 func classifyDrop(cs *effects.ClassifiedStatement, s *pg_query.DropStmt, sess SessionState) {
 	if s == nil {
 		cs.Effects = []effects.Effect{{Group: effects.GroupUnknown, Resolution: effects.ResolutionUnresolved}}
@@ -515,10 +519,17 @@ func classifyDrop(cs *effects.ClassifiedStatement, s *pg_query.DropStmt, sess Se
 		// These are List<schema?, parent_relation, name> in pg_query;
 		// we extract the trailing name as the primary identifier.
 		emitDropFromQualifiedNames(cs, s, "DROP_"+strings.TrimPrefix(s.RemoveType.String(), "OBJECT_"), effects.SubtypeNone, effects.ObjectFunction)
+	case pg_query.ObjectType_OBJECT_FOREIGN_SERVER:
+		// DROP SERVER → unsafe_io(drop_server) + schema_destroy. Implementation
+		// lives in ast_external.go alongside the rest of the foreign-server
+		// handlers.
+		classifyDropServer(cs, s)
 	default:
-		// OBJECT_SUBSCRIPTION / OBJECT_FOREIGN_SERVER / OBJECT_USER_MAPPING /
-		// OBJECT_TABLESPACE land in Task 10. Surface as unmapped so the
-		// dispatcher's empty-Effects guard fires with a clear diagnostic.
+		// OBJECT_USER_MAPPING / OBJECT_SUBSCRIPTION / OBJECT_TABLESPACE land
+		// in dedicated DropUserMappingStmt / DropSubscriptionStmt /
+		// DropTableSpaceStmt parser nodes routed by the dispatcher in
+		// ast_walk.go; pg_query never emits a DropStmt for those. Anything
+		// else here is genuinely unmapped — surface a clear diagnostic.
 		cs.Effects = nil
 		cs.Error = "unmapped form: drop kind " + s.RemoveType.String()
 	}

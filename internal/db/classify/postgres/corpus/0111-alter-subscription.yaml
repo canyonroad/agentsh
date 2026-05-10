@@ -1,0 +1,24 @@
+name: alter-subscription-connection
+spec_ref: §7.3 ALTER SUBSCRIPTION
+description: |
+  ALTER SUBSCRIPTION ... CONNECTION '<conninfo>' rewrites the upstream
+  endpoint. Primary unsafe_io(alter_subscription) plus secondary schema_alter.
+  The new host/port are extracted into ObjectExternalEndpoint so per-host
+  policies can match on the rewrite.
+sql: "ALTER SUBSCRIPTION sub CONNECTION 'host=new.example port=5432'"
+expected_classification:
+  - raw_verb: ALTER_SUBSCRIPTION
+    primary_group: unsafe_io
+    primary_subtype: alter_subscription
+    effects:
+      - group: unsafe_io
+        subtype: alter_subscription
+        objects:
+          - { kind: subscription, name: sub }
+          - { kind: external_endpoint, host: new.example, port: 5432 }
+      - group: schema_alter
+        objects:
+          - { kind: subscription, name: sub }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations
