@@ -1,0 +1,23 @@
+name: insert-select-resolution-divergence
+spec_ref: §6.1 per-effect resolution divergence
+description: |
+  INSERT into a fully-qualified table from an unqualified source while
+  search_path differs from default. Write effect resolves
+  qualified_syntactic; read effect resolves ambiguous_after_search_path —
+  one ClassifiedStatement carrying two distinct per-effect resolutions.
+sql: "INSERT INTO public.audit_log SELECT * FROM users"
+session:
+  search_path: ["app", "public"]
+  default_search_path: ["public"]
+expected_classification:
+  - raw_verb: INSERT
+    primary_group: write
+    effects:
+      - group: write
+        objects:
+          - { kind: table, schema: public, name: audit_log }
+        resolution: qualified_syntactic
+      - group: read
+        objects:
+          - { kind: table, name: users }
+        resolution: ambiguous_after_search_path

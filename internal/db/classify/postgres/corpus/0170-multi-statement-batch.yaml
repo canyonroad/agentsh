@@ -1,0 +1,28 @@
+name: multi-statement-batch
+spec_ref: §20 multi-statement batches (mixed)
+description: |
+  Semicolon-separated batch — classifier returns one ClassifiedStatement per
+  RawStmt in source order. Verifies the per-RawStmt dispatch loop in
+  classifyWithBackend.
+sql: "BEGIN; SELECT * FROM customers; INSERT INTO audit VALUES (1); COMMIT"
+expected_classification:
+  - raw_verb: BEGIN
+    primary_group: transaction
+    effects:
+      - group: transaction
+  - raw_verb: SELECT
+    primary_group: read
+    effects:
+      - group: read
+        objects:
+          - { kind: table, name: customers }
+  - raw_verb: INSERT
+    primary_group: write
+    effects:
+      - group: write
+        objects:
+          - { kind: table, name: audit }
+  - raw_verb: COMMIT
+    primary_group: transaction
+    effects:
+      - group: transaction

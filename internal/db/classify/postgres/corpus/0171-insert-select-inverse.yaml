@@ -1,0 +1,17 @@
+name: insert-select-inverse
+spec_ref: §20 per-effect object attribution
+description: |
+  Inverse of 0013: INSERT INTO users SELECT * FROM audit_log — verifies that
+  the write effect is attributed to the INSERT target (users) and the read
+  effect to the SELECT source (audit_log), not the other way around.
+sql: "INSERT INTO users SELECT * FROM audit_log"
+expected_classification:
+  - raw_verb: INSERT
+    primary_group: write
+    effects:
+      - group: write
+        objects:
+          - { kind: table, name: users }
+      - group: read
+        objects:
+          - { kind: table, name: audit_log }
