@@ -184,8 +184,7 @@ func applySession(s SessionState, c effects.ClassifiedStatement) SessionState {
 	for _, e := range c.Effects {
 		if e.Group != effects.GroupSession && e.Group != effects.GroupTransaction {
 			// Non-session/transaction effects: only CREATE TEMP TABLE / DROP
-			// TABLE mutate session state. (CREATE TEMP TABLE classification
-			// lands in Task 7; this code is dormant until then.)
+			// TABLE mutate session state (TempTables tracking).
 			applyTempLifecycle(&out, e, c.RawVerb)
 			continue
 		}
@@ -236,8 +235,8 @@ func applySessionEffect(s *SessionState, e effects.Effect, rawVerb string) {
 }
 
 // applyTempLifecycle mutates TempTables on CREATE TEMP TABLE / DROP TABLE.
-// Dormant until Task 7 ships CREATE TEMP TABLE classification with a RawVerb
-// like "CREATE_TEMP_TABLE".
+// CREATE TEMP TABLE classification encodes "TEMP" into RawVerb so this hook
+// can disambiguate temp from non-temp without re-walking the AST.
 func applyTempLifecycle(s *SessionState, e effects.Effect, rawVerb string) {
 	if e.Subtype == effects.SubtypeCreateTable && strings.Contains(rawVerb, "TEMP") {
 		for _, o := range e.Objects {

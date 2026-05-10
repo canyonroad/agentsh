@@ -54,8 +54,8 @@ func classifySelect(cs *effects.ClassifiedStatement, s *pg_query.SelectStmt, ses
 		cs.Effects = append(cs.Effects, effects.Effect{Group: effects.GroupProcedural})
 	}
 
-	// Detect unsafe-IO function calls (pg_read_file, lo_*, dblink) — handled
-	// by ast_unsafe_io.go's appendUnsafeIO. No-op stub until Task 11.
+	// Detect unsafe-IO function calls (pg_read_file, lo_*, dblink) anywhere
+	// inside the projection / WHERE / sub-selects. See ast_unsafe_io.go.
 	appendUnsafeIO(cs, s, sess)
 
 	if len(cs.Effects) == 0 {

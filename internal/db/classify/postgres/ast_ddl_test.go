@@ -362,10 +362,10 @@ func TestClassifyDropExtension(t *testing.T) {
 	}
 }
 
-func TestClassifyDropSubscription_RoutedToTask10Handler(t *testing.T) {
+func TestClassifyDropSubscription_RoutedToExternalHandler(t *testing.T) {
 	// DROP SUBSCRIPTION uses DropSubscriptionStmt (a different node from the
-	// generic DropStmt). It now routes to the Task 10 handler in
-	// ast_external.go which emits unsafe_io(drop_subscription) + schema_destroy.
+	// generic DropStmt). It routes to the dedicated handler in ast_external.go
+	// which emits unsafe_io(drop_subscription) + schema_destroy.
 	cs := classifyOne(t, "DROP SUBSCRIPTION s", SessionState{})
 	if cs.Error != "" {
 		t.Fatalf("unexpected Error: %q", cs.Error)

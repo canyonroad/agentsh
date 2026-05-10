@@ -1,8 +1,9 @@
 // Package postgres — ast_walk.go owns the central RawStmt → handler dispatch.
 // Each one-of variant of pg_query.Node maps to a per-family classifier living
-// in its own ast_*.go file. Handlers that haven't been implemented yet exist
-// as no-op stubs in ast_stubs.go; replacing a stub with a real handler is the
-// per-task contract for Tasks 6–13.
+// in its own ast_*.go file (ast_dml.go, ast_session.go, ast_ddl.go,
+// ast_privilege.go, ast_copy.go, ast_external.go, ast_misc.go,
+// ast_unsafe_io.go). Unmapped node types fall through to an unknown effect
+// with a diagnostic Error — see classifyRawStmt below.
 package postgres
 
 import (
