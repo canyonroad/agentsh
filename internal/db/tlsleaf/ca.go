@@ -43,6 +43,11 @@ type CA struct {
 // LoadOrCreate loads the CA from stateDir if both files are present, or
 // generates a fresh CA on first call and persists it (key 0600, cert 0644).
 // stateDir must already exist; the parent of any sub-path is not created.
+//
+// Manual recovery: if a crash leaves the StateDir with only one of the
+// two files (key without cert, or vice versa), LoadOrCreate refuses to
+// regenerate. Remove the orphaned file by hand and call LoadOrCreate
+// again.
 func LoadOrCreate(stateDir string, clock func() time.Time) (*CA, error) {
 	if clock == nil {
 		clock = time.Now
@@ -148,15 +153,10 @@ func (c *CA) Cert() *x509.Certificate {
 	return c.cert
 }
 
-// Key returns the CA private key. Test-internal use only; production code
-// uses IssueLeaf instead.
-func (c *CA) Key() *rsa.PrivateKey {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.key
-}
-
-// Now returns the configured clock's notion of "now". Used by leaf.go.
+// Now returns the configured clock's notion of "now", or time.Now if no
+// clock was injected. Useful when external callers want to align timestamps
+// with the same clock the CA was constructed with; internal callers in
+// leaf.go read c.clk directly under the existing lock.
 func (c *CA) Now() time.Time {
 	c.mu.Lock()
 	clk := c.clk

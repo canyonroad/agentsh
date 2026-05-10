@@ -56,7 +56,7 @@ func (c *CA) issueLeafLocked(hostname string) (*tls.Certificate, error) {
 		Subject:      pkix.Name{CommonName: hostname},
 		NotBefore:    t.Add(-1 * time.Hour),
 		NotAfter:     t.Add(leafValidFor),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:     []string{hostname},
 	}

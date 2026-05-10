@@ -36,8 +36,14 @@ func TestIssueLeaf_SAN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrCreate: %v", err)
 	}
-	leaf, _ := ca.IssueLeaf("db.example.com")
-	parsed, _ := x509.ParseCertificate(leaf.Certificate[0])
+	leaf, err := ca.IssueLeaf("db.example.com")
+	if err != nil {
+		t.Fatalf("IssueLeaf: %v", err)
+	}
+	parsed, err := x509.ParseCertificate(leaf.Certificate[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
 	if len(parsed.DNSNames) != 1 || parsed.DNSNames[0] != "db.example.com" {
 		t.Errorf("DNSNames = %v, want [db.example.com]", parsed.DNSNames)
 	}
@@ -49,8 +55,14 @@ func TestIssueLeaf_CacheReturnsSameCert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrCreate: %v", err)
 	}
-	a, _ := ca.IssueLeaf("host-a")
-	b, _ := ca.IssueLeaf("host-a")
+	a, err := ca.IssueLeaf("host-a")
+	if err != nil {
+		t.Fatalf("IssueLeaf (first): %v", err)
+	}
+	b, err := ca.IssueLeaf("host-a")
+	if err != nil {
+		t.Fatalf("IssueLeaf (second): %v", err)
+	}
 	if string(a.Certificate[0]) != string(b.Certificate[0]) {
 		t.Error("cache miss: different bytes for same hostname")
 	}
@@ -58,9 +70,18 @@ func TestIssueLeaf_CacheReturnsSameCert(t *testing.T) {
 
 func TestIssueLeaf_DifferentHostsDifferentCerts(t *testing.T) {
 	dir := t.TempDir()
-	ca, _ := LoadOrCreate(dir, time.Now)
-	a, _ := ca.IssueLeaf("host-a")
-	b, _ := ca.IssueLeaf("host-b")
+	ca, err := LoadOrCreate(dir, time.Now)
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	a, err := ca.IssueLeaf("host-a")
+	if err != nil {
+		t.Fatalf("IssueLeaf host-a: %v", err)
+	}
+	b, err := ca.IssueLeaf("host-b")
+	if err != nil {
+		t.Fatalf("IssueLeaf host-b: %v", err)
+	}
 	if string(a.Certificate[0]) == string(b.Certificate[0]) {
 		t.Error("different hostnames produced identical certificates")
 	}

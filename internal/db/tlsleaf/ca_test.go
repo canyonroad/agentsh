@@ -1,7 +1,12 @@
 package tlsleaf
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -56,13 +61,46 @@ func TestLoadOrCreate_SecondCallLoads(t *testing.T) {
 	}
 }
 
-func TestLoadOrCreate_RejectsNonCAExistingCert(t *testing.T) {
+func TestLoadOrCreate_CertOnlyOnDisk_ReturnsIncomplete(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "db-ca.crt"), []byte("not a cert"), 0o644); err != nil {
 		t.Fatalf("write garbage cert: %v", err)
 	}
 	if _, err := LoadOrCreate(dir, time.Now); err == nil {
-		t.Fatal("LoadOrCreate over corrupted cert: want error, got nil")
+		t.Fatal("LoadOrCreate over incomplete CA pair: want error, got nil")
+	}
+}
+
+func TestLoadOrCreate_RejectsNonCAExistingCert(t *testing.T) {
+	dir := t.TempDir()
+
+	// Generate a non-CA self-signed cert and persist it alongside its key.
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "not-a-ca"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IsCA:         false,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	crtPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(filepath.Join(dir, "db-ca.key"), keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "db-ca.crt"), crtPEM, 0o644); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+
+	if _, err := LoadOrCreate(dir, time.Now); err == nil {
+		t.Fatal("LoadOrCreate over non-CA cert: want error, got nil")
 	}
 }
 
