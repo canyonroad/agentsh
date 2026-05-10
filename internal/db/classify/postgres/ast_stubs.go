@@ -16,15 +16,6 @@ func stub(cs *effects.ClassifiedStatement, family string) {
 	cs.Error = "unmapped form: " + family + " not yet implemented"
 }
 
-// ---- session (Task 6) ----
-
-func classifySet(cs *effects.ClassifiedStatement, _ *pg_query.VariableSetStmt)     { stub(cs, "set") }
-func classifyShow(cs *effects.ClassifiedStatement)                                 { stub(cs, "show") }
-func classifyDiscard(cs *effects.ClassifiedStatement, _ *pg_query.DiscardStmt)     { stub(cs, "discard") }
-func classifyTransaction(cs *effects.ClassifiedStatement, _ *pg_query.TransactionStmt) {
-	stub(cs, "transaction")
-}
-
 // ---- DDL (Task 7) ----
 
 func classifyCreateTable(cs *effects.ClassifiedStatement, _ *pg_query.CreateStmt, _ SessionState) {

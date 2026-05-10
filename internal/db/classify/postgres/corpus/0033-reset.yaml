@@ -1,0 +1,13 @@
+name: reset-search-path
+spec_ref: §7.4 RESET
+description: RESET search_path — restores DefaultSearchPath in applySession.
+sql: "RESET search_path"
+expected_classification:
+  - raw_verb: RESET=search_path
+    primary_group: session
+    primary_subtype: reset
+    effects:
+      - group: session
+        subtype: reset
+        objects:
+          - { kind: guc, name: search_path }

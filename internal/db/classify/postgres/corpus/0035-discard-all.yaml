@@ -1,0 +1,11 @@
+name: discard-all
+spec_ref: §7.4 DISCARD
+description: DISCARD ALL — broadest reset; clears search_path, role, and temp tables.
+sql: "DISCARD ALL"
+expected_classification:
+  - raw_verb: DISCARD_ALL
+    primary_group: session
+    primary_subtype: discard_all
+    effects:
+      - group: session
+        subtype: discard_all

@@ -1,0 +1,11 @@
+name: discard-plans
+spec_ref: §7.4 DISCARD
+description: DISCARD PLANS — invalidates cached plans; opaque to the classifier (no SessionState mutation).
+sql: "DISCARD PLANS"
+expected_classification:
+  - raw_verb: DISCARD_PLANS
+    primary_group: session
+    primary_subtype: discard_plans
+    effects:
+      - group: session
+        subtype: discard_plans

@@ -1,0 +1,9 @@
+name: begin
+spec_ref: §7.4 BEGIN / COMMIT / ROLLBACK
+description: BEGIN — primary transaction effect; applySession sets InTransaction=true.
+sql: "BEGIN"
+expected_classification:
+  - raw_verb: BEGIN
+    primary_group: transaction
+    effects:
+      - group: transaction

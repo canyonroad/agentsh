@@ -1,0 +1,13 @@
+name: reset-all
+spec_ref: §7.4 RESET ALL
+description: RESET ALL — clears search_path, role, and temp tables (via applySessionEffect).
+sql: "RESET ALL"
+expected_classification:
+  - raw_verb: RESET_ALL
+    primary_group: session
+    primary_subtype: reset_all
+    effects:
+      - group: session
+        subtype: reset_all
+        objects:
+          - { kind: guc }

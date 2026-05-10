@@ -123,11 +123,6 @@ func ApplyStatement(s SessionState, c effects.ClassifiedStatement) SessionState 
 	return applySession(s, c)
 }
 
-// Temporary stub until Task 6 ships. Removed/replaced when its owning task lands.
-func applySession(s SessionState, c effects.ClassifiedStatement) SessionState {
-	return s
-}
-
 // classifyWithBackend is shared between libpgquery.go and wasm.go.
 // It owns the dialect-aware error path (Redshift fallback) and the
 // per-RawStmt dispatch loop.
