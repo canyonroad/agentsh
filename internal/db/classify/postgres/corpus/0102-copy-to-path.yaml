@@ -1,0 +1,26 @@
+name: copy-to-path
+spec_ref: §7.3 COPY ... TO 'path', Appendix B unsafe_io
+description: |
+  COPY t TO '/tmp/x.csv' — primary unsafe_io(copy_to_path) carrying the table
+  plus a filesystem_path object; secondary bulk_export and a read of the
+  source. Sample policy denies via the EXPORT alias on app-deny-mutations.
+sql: "COPY users TO '/tmp/x.csv'"
+expected_classification:
+  - raw_verb: COPY_TO_PATH
+    primary_group: unsafe_io
+    primary_subtype: copy_to_path
+    effects:
+      - group: unsafe_io
+        subtype: copy_to_path
+        objects:
+          - { kind: table, name: users }
+          - { kind: filesystem_path, path: /tmp/x.csv }
+      - group: bulk_export
+        objects:
+          - { kind: table, name: users }
+      - group: read
+        objects:
+          - { kind: table, name: users }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

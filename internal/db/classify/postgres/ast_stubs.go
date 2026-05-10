@@ -16,12 +16,6 @@ func stub(cs *effects.ClassifiedStatement, family string) {
 	cs.Error = "unmapped form: " + family + " not yet implemented"
 }
 
-// ---- COPY (Task 9) ----
-
-func classifyCopy(cs *effects.ClassifiedStatement, _ *pg_query.CopyStmt, _ SessionState, _ Options) {
-	stub(cs, "copy")
-}
-
 // ---- external-IO DDL (Task 10) ----
 
 func classifyCreateSubscription(cs *effects.ClassifiedStatement, _ *pg_query.CreateSubscriptionStmt) {

@@ -1,0 +1,21 @@
+name: copy-to-stdout
+spec_ref: §7.3 COPY ... TO STDOUT, Appendix B bulk_export
+description: |
+  COPY t TO STDOUT — primary bulk_export(copy_to_stdout) plus a secondary
+  read effect on the table. Sample policy denies on EXPORT alias.
+sql: "COPY users TO STDOUT"
+expected_classification:
+  - raw_verb: COPY_TO_STDOUT
+    primary_group: bulk_export
+    primary_subtype: copy_to_stdout
+    effects:
+      - group: bulk_export
+        subtype: copy_to_stdout
+        objects:
+          - { kind: table, name: users }
+      - group: read
+        objects:
+          - { kind: table, name: users }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations

@@ -1,0 +1,19 @@
+name: copy-query-to-stdout
+spec_ref: §7.3 COPY (SELECT) TO STDOUT, §20 inner-query composition
+description: |
+  COPY (SELECT * FROM customers) TO STDOUT — primary bulk_export(copy_to_stdout)
+  composes with the inner SELECT's read effect on the source relation.
+sql: "COPY (SELECT * FROM customers) TO STDOUT"
+expected_classification:
+  - raw_verb: COPY_QUERY_TO_STDOUT
+    primary_group: bulk_export
+    primary_subtype: copy_to_stdout
+    effects:
+      - group: bulk_export
+        subtype: copy_to_stdout
+      - group: read
+        objects:
+          - { kind: table, name: customers }
+expected_decision_under_sample_policy:
+  verb: deny
+  reason_contains: no rule covers

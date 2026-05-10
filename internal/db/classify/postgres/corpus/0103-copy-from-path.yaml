@@ -1,0 +1,22 @@
+name: copy-from-path
+spec_ref: §7.3 COPY ... FROM 'path', Appendix B unsafe_io
+description: |
+  COPY t FROM '/tmp/x.csv' — primary unsafe_io(copy_from_path) with the table
+  and filesystem_path; secondary bulk_load on the table.
+sql: "COPY users FROM '/tmp/x.csv'"
+expected_classification:
+  - raw_verb: COPY_FROM_PATH
+    primary_group: unsafe_io
+    primary_subtype: copy_from_path
+    effects:
+      - group: unsafe_io
+        subtype: copy_from_path
+        objects:
+          - { kind: table, name: users }
+          - { kind: filesystem_path, path: /tmp/x.csv }
+      - group: bulk_load
+        objects:
+          - { kind: table, name: users }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-mutations
