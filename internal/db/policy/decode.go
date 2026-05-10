@@ -6,6 +6,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/agentsh/agentsh/internal/db/service"
 	rootpolicy "github.com/agentsh/agentsh/internal/policy"
 )
 
@@ -41,6 +42,10 @@ func Decode(p *rootpolicy.Policy) (*RuleSet, []Warning, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	unavoid, err := decodeUnavoidability(p)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Phase B.
 	warns, err := validate(svcs, stmtRules, connRules)
@@ -49,7 +54,7 @@ func Decode(p *rootpolicy.Policy) (*RuleSet, []Warning, error) {
 	}
 
 	// Phase C.
-	rs := &RuleSet{services: svcs, redaction: red}
+	rs := &RuleSet{services: svcs, redaction: red, unavoidability: unavoid}
 	for _, r := range stmtRules {
 		c, err := compileStatementRule(r)
 		if err != nil {
@@ -106,12 +111,13 @@ func decodeConnectionRules(n yaml.Node) ([]*ConnectionRule, error) {
 }
 
 // redactionYAML is the on-disk shape of the policies.db block. Only the
-// statement-redaction-related fields are decoded here; the rest of the
+// redaction and unavoidability fields are decoded here; the rest of the
 // policies block is owned by other packages.
 type redactionYAML struct {
 	LogStatements                 string `yaml:"log_statements,omitempty"`
 	ApprovalStatementPreview      string `yaml:"approval_statement_preview,omitempty"`
 	ApprovalStatementPreviewChars int    `yaml:"approval_statement_preview_chars,omitempty"`
+	Unavoidability                string `yaml:"unavoidability,omitempty"`
 }
 
 // dbPoliciesWrapper is the on-disk shape of the policies block as far as
@@ -155,6 +161,26 @@ func decodeRedaction(p *rootpolicy.Policy) (RedactionConfig, error) {
 		out.ApprovalStatementChars = rb.ApprovalStatementPreviewChars
 	}
 	return out, nil
+}
+
+// decodeUnavoidability reads policies.db.unavoidability. Default: UnavoidabilityOff.
+// Unknown values are an error.
+func decodeUnavoidability(p *rootpolicy.Policy) (service.Unavoidability, error) {
+	if p.Policies.IsZero() {
+		return service.UnavoidabilityOff, nil
+	}
+	var w dbPoliciesWrapper
+	if err := strictDecode(p.Policies, &w); err != nil {
+		return service.UnavoidabilityOff, fmt.Errorf("decode policies.db: %w", err)
+	}
+	if w.DB.Unavoidability == "" {
+		return service.UnavoidabilityOff, nil
+	}
+	u, ok := service.ParseUnavoidability(w.DB.Unavoidability)
+	if !ok {
+		return service.UnavoidabilityOff, fmt.Errorf("unknown policies.db.unavoidability: %q", w.DB.Unavoidability)
+	}
+	return u, nil
 }
 
 // parseApprovalPreviewTier handles the §10.3 alias: in approval_statement_preview,

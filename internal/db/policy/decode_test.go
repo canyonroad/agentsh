@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/db/service"
 	"github.com/agentsh/agentsh/internal/policy"
 )
 
@@ -160,5 +161,82 @@ database_rules:
 	}
 	if !found {
 		t.Errorf("expected audit_on_dangerous warning, got %v", warns)
+	}
+}
+
+func TestDecode_PoliciesDB_Unavoidability(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want service.Unavoidability
+	}{
+		{
+			name: "missing block defaults to off",
+			yaml: `version: 1
+name: test
+`,
+			want: service.UnavoidabilityOff,
+		},
+		{
+			name: "explicit off",
+			yaml: `version: 1
+name: test
+policies:
+  db:
+    unavoidability: off
+`,
+			want: service.UnavoidabilityOff,
+		},
+		{
+			name: "observe",
+			yaml: `version: 1
+name: test
+policies:
+  db:
+    unavoidability: observe
+`,
+			want: service.UnavoidabilityObserve,
+		},
+		{
+			name: "enforce",
+			yaml: `version: 1
+name: test
+policies:
+  db:
+    unavoidability: enforce
+`,
+			want: service.UnavoidabilityEnforce,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rp, err := policy.LoadFromBytes([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("LoadFromBytes: %v", err)
+			}
+			rs, _, err := Decode(rp)
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if got := rs.Unavoidability(); got != tc.want {
+				t.Errorf("Unavoidability() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecode_PoliciesDB_Unavoidability_Unknown(t *testing.T) {
+	yaml := `version: 1
+name: test
+policies:
+  db:
+    unavoidability: bogus
+`
+	rp, err := policy.LoadFromBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	if _, _, err := Decode(rp); err == nil {
+		t.Fatal("Decode: expected error for unknown unavoidability value, got nil")
 	}
 }

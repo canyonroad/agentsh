@@ -10,15 +10,15 @@ This document is the *roadmap*, not the spec. It commits to plan decomposition, 
 
 ## 1. Decomposition
 
-Seven plans. Plans 01–03 are pure libraries; Plan 04 introduces the first socket; Plans 05–06 are siblings on top of Plan 04; Plan 07 closes the loop with unavoidability and integration tests.
+Seven plans, with Plan 04 split into three sub-plans during 2026-05-10 brainstorming. Plans 01–03 are pure libraries; Plan 04a introduces the first socket (no protocol semantics); Plan 04b adds handshake and TLS; Plan 04c adds the Simple Query path; Plans 05–06 are siblings on top of Plan 04c; Plan 07 closes the loop with unavoidability and integration tests.
 
 ```
 [01 taxonomy/effects]──┐
                        ├─→[03 pg classifier]─┐
 [02 policy evaluator]──┘                     │
-                                             ├─→[04 wire+simple+startup+TLS]─┬─→[05 extended+tx]─┐
-                                                                             ├─→[06 cancel mapping]─┤
-                                                                                                  └─→[07 unavoidability+listener+integration]
+                                             ├─→[04a listener]─→[04b handshake+TLS]─→[04c simple+events]─┬─→[05 extended+tx]─┐
+                                                                                                         ├─→[06 cancel mapping]─┤
+                                                                                                                              └─→[07 unavoidability+listener-hardening+integration]
 ```
 
 Dependency notes:
@@ -26,14 +26,16 @@ Dependency notes:
 - Plan 01 unblocks Plans 02 and 03.
 - Plan 02 depends only on Plan 01 — it operates on `ClassifiedStatement`, which Plan 01 defines.
 - Plan 03 depends on Plans 01 and 02. The §23.1 golden corpus rows include `expected_decision_under_sample_policy`, so Plan 02's evaluator and `corpus/sample-policy.yaml` must be merged before Plan 03's CI gate can be wired.
-- Plan 04 depends on Plans 01–03 — Simple Query path is meaningful only when classifier and evaluator exist.
-- Plans 05 and 06 are siblings on top of Plan 04. Extended Query / transaction state (Plan 05) and CancelRequest mapping (Plan 06) touch different parts of the proxy and may proceed in parallel after Plan 04 lands.
-- Plan 07 depends on Plans 04–06 — integration tests need a real proxy.
+- **Plan 04 was split during brainstorming on 2026-05-10** when the unified scope became too large for a single plan. The three sub-plans are sequential: 04a (listener skeleton, no protocol), 04b (handshake + TLS + upstream auth), 04c (Simple Query + DBEvent emission). The shared design doc `2026-05-10-db-plan-04-pg-proxy-skeleton-design.md` covers all three; each sub-plan has its own implementation plan.
+- Plan 04a depends on Plans 01–02 only (no classifier needed for an empty listener). Plan 04b depends on 04a. Plan 04c depends on 04b and on Plan 03 (Simple Query path needs the classifier).
+- Plans 05 and 06 are siblings on top of Plan 04c. Extended Query / transaction state (Plan 05) and CancelRequest mapping (Plan 06) touch different parts of the proxy and may proceed in parallel after Plan 04c lands.
+- Plan 07 depends on Plans 04c–06 — integration tests need a real proxy.
 
 Externally visible behavior:
 
 - Plans 01–03 ship on `main` with no behavior change (types, pure functions, CLI tool only).
-- Plan 04 introduces recognition of `db_services` config and the first proxy listener, gated behind `policies.db.unavoidability: off` (default).
+- Plans 04a–04c ship behind `policies.db.unavoidability: off` (default). With flag = `off`, no listener is bound and the package is a no-op. With flag = `observe`, listeners bind from Plan 04a, complete handshakes from Plan 04b, and emit `db_statement` events from Plan 04c.
+- Plan 04c introduces recognition of `db_services` config end-to-end (declared services intercept queries when flag is `observe`).
 - Plan 07 ships the unavoidability bundle and makes `enforce` the recommended high-assurance default.
 
 ## 2. Package layout
@@ -126,22 +128,63 @@ Tests: corpus-driven; backend cross-validation tests where libpg_query and fallb
 
 External behavior: new CLI binary; no runtime change.
 
-### Plan 04 — `db-plan-04-pg-proxy-skeleton.md`
+### Plan 04 — split into 04a / 04b / 04c during 2026-05-10 brainstorming
 
-Spec-§: 7.1, 8, 11.1, 11.2, 11.3, 13; §23.4 steps 5+7.
+The unified Plan 04 was split into three sub-plans during brainstorming when the combined scope (framing + handshake + TLS + simple-query + listener auth + events) became too large for a single plan. The shared design doc `2026-05-10-db-plan-04-pg-proxy-skeleton-design.md` covers all three sub-plans; each has its own implementation plan file. Spec-section coverage and roadmap §23.4 step coverage are unchanged in aggregate.
+
+#### Plan 04a — `db-plan-04a-listener-skeleton.md`
+
+Spec-§: 11.3 (listener part), 12.5 (UID-only listener auth subset); §23.4 step 5 (skeleton work).
 
 Deliverables:
 
-- `internal/db/proxy/postgres/` (`//go:build linux`): pgproto3 framing, StartupMessage / SSLRequest / GSSENCRequest / CancelRequest dispatch (§11.1 with R6 passthrough begins at StartupMessage acceptance).
-- TLS modes `terminate_reissue`, `passthrough` (connection-level rules only), `terminate_plaintext_upstream` per §13. R9 SNI footnote captured: SNI under passthrough is best-effort. Connection-level deny across modes per §13.3.
-- Simple Query path: invokes Plan 03's classifier and Plan 02's evaluator; emits `DBEvent` (§8). No transaction state yet — first deny in tx falls back to the simplest mode.
-- Replication and GSSENC: default-deny per §11.1.
-- `db_services` recognition: declared service produces a `dest` rule plus a Unix-socket listener via Plan 01's `service` package. Listener auth in this plan is UID-match only; Plan 07 hardens it.
-- Feature flag: `policies.db.unavoidability: enforce | observe | off`, default `off`.
+- `internal/db/service/flag.go`: `Unavoidability` enum (`off | observe | enforce`); `internal/policy/load.go` parses `policies.db.unavoidability`.
+- `internal/db/proxy/postgres/` package skeleton (`//go:build linux`); non-Linux stub returning `errors.ErrUnsupported`.
+- `Server` lifecycle: `New` / `Start` / `Shutdown`; binds Unix-socket listeners per declared `db_service`, accept loop, graceful drain, listener cleanup. Sentinel-server short-circuit when flag = `off`.
+- SO_PEERCRED + UID-equality listener auth on Linux; emits `db_listener_auth_fail` event on mismatch and silently closes.
+- `internal/db/events/sink.go`: `Sink` interface, `NopSink`, in-memory `SyncSink` test fake.
+- `internal/db/policy/validate.go` extension: reject connection rules under `tls_mode: passthrough` that match passthrough-invisible fields (`db_user`, `database`, `application_name`).
+- `internal/api` wiring: instantiate `Server` at startup when flag != `off` and `db_services` non-empty.
 
-Tests: in-process pgproto3 round-trip tests; redaction-level tests; deny pre-forward semantics (§14.4 R18 — pre-deny upstream responses still forward to client).
+Tests: bind/unbind, peercred mismatch, peercred match, shutdown drains in-flight, sentinel server is no-op, validate.go rejects passthrough-invisible field rules.
 
-External behavior: declared services are intercepted when flag is `observe`; `enforce` not yet recommended.
+External behavior under flag = `observe`: declared `db_service` listener exists; connections are accepted from the right uid and immediately closed (no protocol code yet).
+
+#### Plan 04b — `db-plan-04b-handshake-tls.md`
+
+Spec-§: 7.1 (framing), 11.1 (startup-packet dispatch), 11.3 (handshake parts), 13 (TLS modes); §23.4 step 5 (handshake/TLS work) + step 7 (degraded-visibility events).
+
+Deliverables:
+
+- pgproto3 dependency (`github.com/jackc/pgx/v5/pgproto3`) and per-connection framing wrappers.
+- `internal/db/tlsleaf/`: lazy self-signed CA (load-or-create under StateDir) + per-hostname leaf issuer with in-process LRU cache.
+- Startup-packet dispatch: `SSLRequest`, `GSSENCRequest`, `CancelRequest`, `StartupMessage`.
+- Three TLS modes: `terminate_reissue`, `terminate_plaintext_upstream` (with config-load loopback/RFC1918 check), `passthrough` (with best-effort SNI extraction and `degraded_visibility_warning` at first connect).
+- Replication detection → default-deny; opt-in path enters byte-passthrough and emits `degraded_visibility_warning`.
+- `connect`-kind connection-rule evaluation via Plan 02's existing `policy.EvaluateConnection`. `cancel`-kind eval too; CancelRequest forwards un-mapped (Plan 06 owns mapping).
+- Upstream TCP connect + auth-byte forwarding; SCRAM-SHA-256-PLUS detection at upstream auth → fail-closed with `db_handshake_fail` event.
+
+Tests: per-mode TLS round-trip with fake upstream, SCRAM fail-closed, replication default-deny, cancel un-mapped forward, degraded_visibility events.
+
+External behavior under flag = `observe`: clients can complete a handshake and reach `ReadyForQuery` through the proxy. The proxy then drops the connection because no statement path exists yet.
+
+#### Plan 04c — `db-plan-04c-simple-query-events.md`
+
+Spec-§: 8 (DBEvent), 11.2 (architecture diagram for simple-query parts), 14.1 / 14.4 (Simple Query semantics, pre-forward); §23.4 step 5 (statement path) + step 7 (DBEvent emission).
+
+Deliverables:
+
+- RFQ status-byte tracker per connection (one byte; updated on observed `ReadyForQuery` from upstream).
+- `'Q'` frame classify (Plan 03's `Parser`) + evaluate (Plan 02's `Evaluate`) per-statement; multi-statement parse-all-before-forward.
+- Deny synthesis: `ErrorResponse` + `ReadyForQuery('I')` locally when out-of-tx; in-tx terminate (close upstream + client) when `lastUpstreamRFQ ∈ {T, E}`.
+- `approve` → `deny + APPROVE_NOT_YET_SUPPORTED` runtime stub + config-load warning when any rule has `decision: approve`.
+- Frame budget cap (`MaxQueryBytes`, default 1 MiB) → synthetic `54000` + close.
+- Eventbuilder: `ClassifiedStatement` + `Decision` → `DBEvent` with redaction tiers (`full` / `parameters_redacted` / `none`); `statement_digest` = SHA-256 of the normalized form.
+- Spine integration test: real `jackc/pgx/v5` client → real `Server` (terminate_reissue) → fake upstream goroutine; assert query result reaches client + one `db_statement` event in `SyncSink`.
+
+Tests: classify+evaluate+forward (allow/audit), deny synth out-of-tx, in-tx terminate, multi-statement deny semantics, approve→deny stub, redaction tiers, statement_digest stability across tiers, spine round-trip.
+
+External behavior under flag = `observe`: declared services intercept `SELECT 1` (allow) and a denied `DELETE` (deny synth); operators see `db_statement` events; `enforce` not yet recommended (unavoidability bundle is Plan 07).
 
 ### Plan 05 — `db-plan-05-pg-extended-tx.md`
 
