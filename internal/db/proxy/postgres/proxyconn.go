@@ -74,10 +74,10 @@ func formatUID(uid uint32) string {
 	return "uid:" + strconv.FormatUint(uint64(uid), 10)
 }
 
-// run is the per-connection driver. Task 5 replaces this body with the
-// startup-packet dispatch. The current stub reads the first message and
-// returns; this satisfies the proxyconn_test.go "returns cleanly" expectation.
+// run is the per-connection driver. Delegates to dispatchStartup (handshake.go)
+// which handles SSLRequest, GSSENCRequest, CancelRequest, and StartupMessage.
+// Task 7 inserts connect-rule eval inside dispatchStartup ahead of the
+// not-yet-wired error.
 func (pc *proxyConn) run(ctx context.Context) error {
-	_, err := pc.backend.ReceiveStartupMessage()
-	return err
+	return pc.dispatchStartup(ctx)
 }
