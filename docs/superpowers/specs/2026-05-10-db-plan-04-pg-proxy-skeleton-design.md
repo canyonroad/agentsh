@@ -23,7 +23,7 @@ This document captures the package-shape, lifecycle, and interface decisions the
 - Feature flag `policies.db.unavoidability: enforce | observe | off`, default `off`. With `off`, listeners are **not** bound — package is a no-op. With `observe` or `enforce`, listeners bind and the full simple-query path runs. Plan 04 does **not** generate the unavoidability bundle (network/file rules); that is Plan 07.
 - DBEvent emission via a new `events.Sink` interface declared in the existing `internal/db/events` package, with a thin adapter to `internal/audit.SinkChain` and an in-memory test fake.
 - Self-signed AgentSH-DB CA: `internal/db/tlsleaf/`. Lazily generated and persisted under the AgentSH state dir (path injected, not hard-coded). Leaves issued at connect time per upstream hostname, cached per-process. SCRAM-SHA-256-PLUS detected at upstream auth → fail-closed with structured error.
-- Connection-level rule evaluation hook (a small extension to `internal/db/policy`'s `RuleSet` to evaluate `database_connection_rules` for `connect`-kind matches).
+- Wire `internal/db/policy.EvaluateConnection` (already shipped in Plan 02) into the proxy at handshake time, with per-TLS-mode field-visibility validation extending Plan 02's existing `validate.go`.
 
 ### Out of scope (deferred to later plans)
 
@@ -71,7 +71,8 @@ internal/db/events/                          (existing — extended)
 └── audit_adapter.go                         NEW: adapter that emits DBEvent through internal/audit.SinkChain
 
 internal/db/policy/                          (existing — extended)
-└── connect.go                               NEW: EvaluateConnect(ConnectionContext, RuleSet) → ConnectionDecision
+└── validate.go                              MODIFIED: reject connection rules under tls_mode: passthrough that match passthrough-invisible fields (db_user, database, application_name)
+                                                                        EvaluateConnection itself is already shipped in Plan 02 and used as-is.
 
 internal/db/service/                         (existing — extended; minor)
 └── flag.go                                  NEW: Unavoidability enum (off|observe|enforce) parsed from policies.db.unavoidability
@@ -82,7 +83,7 @@ internal/api/                                MODIFIED: at startup, if Unavoidabi
 
 ### Boundary calls
 
-- `internal/db/proxy/postgres` depends on `effects`, `policy` (incl. new `connect.go`), `classify/postgres`, `events` (incl. new `Sink`), `service`, `tlsleaf`. It does **not** import `internal/api`, `internal/audit`, or `internal/proxy`. The supervisor wiring lives in `internal/api`.
+- `internal/db/proxy/postgres` depends on `effects`, `policy` (consuming the existing `EvaluateConnection` and `Evaluate` plus a small `validate.go` extension), `classify/postgres`, `events` (incl. new `Sink`), `service`, `tlsleaf`. It does **not** import `internal/api`, `internal/audit`, or `internal/proxy`. The supervisor wiring lives in `internal/api`.
 - `internal/db/tlsleaf` is its own package because it is reusable by Plans 05/06 and trivially testable in isolation.
 - `events.Sink` lives in the existing `internal/db/events` package (not in `proxy/postgres`) so the audit adapter does not pull the proxy package into the audit graph.
 - `peercred_linux.go` uses Go's `_linux` filename suffix; no explicit build tag required.
