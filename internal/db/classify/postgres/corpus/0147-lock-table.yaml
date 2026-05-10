@@ -1,0 +1,17 @@
+name: lock-table
+spec_ref: §7.3 LOCK TABLE, Appendix B lock
+description: |
+  LOCK TABLE customers IN ACCESS EXCLUSIVE MODE — single lock effect carrying
+  the customers table as an ObjectTable ref. Sample policy denies via
+  app-deny-dangerous (LOCK is in DANGEROUS).
+sql: "LOCK TABLE customers IN ACCESS EXCLUSIVE MODE"
+expected_classification:
+  - raw_verb: LOCK
+    primary_group: lock
+    effects:
+      - group: lock
+        objects:
+          - { kind: table, name: customers }
+expected_decision_under_sample_policy:
+  verb: deny
+  rule_name: app-deny-dangerous

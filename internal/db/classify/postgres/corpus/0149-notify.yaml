@@ -1,0 +1,13 @@
+name: notify
+spec_ref: §7.3 NOTIFY, Appendix B notify
+description: |
+  NOTIFY ch1, 'payload' — channel name surfaces in RawVerb only. The payload
+  is intentionally not modeled in Phase 1. Sample policy: implicit deny.
+sql: "NOTIFY ch1, 'payload'"
+expected_classification:
+  - raw_verb: NOTIFY=ch1
+    primary_group: notify
+    effects:
+      - group: notify
+expected_decision_under_sample_policy:
+  verb: deny

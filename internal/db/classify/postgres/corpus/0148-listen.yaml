@@ -1,0 +1,13 @@
+name: listen
+spec_ref: §7.3 LISTEN, Appendix B notify
+description: |
+  LISTEN ch1 — channel name surfaces in RawVerb only; Phase 1 doesn't model
+  channels as a distinct ObjectKind. Sample policy: implicit deny.
+sql: "LISTEN ch1"
+expected_classification:
+  - raw_verb: LISTEN=ch1
+    primary_group: notify
+    effects:
+      - group: notify
+expected_decision_under_sample_policy:
+  verb: deny

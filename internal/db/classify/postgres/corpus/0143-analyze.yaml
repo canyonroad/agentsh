@@ -1,0 +1,14 @@
+name: analyze
+spec_ref: §7.3 ANALYZE, Appendix B maintenance
+description: |
+  ANALYZE — same VacuumStmt node with IsVacuumcmd=false. The handler
+  surfaces ANALYZE as the RawVerb but classifies as maintenance, identical
+  to VACUUM. Sample policy: implicit deny.
+sql: "ANALYZE"
+expected_classification:
+  - raw_verb: ANALYZE
+    primary_group: maintenance
+    effects:
+      - group: maintenance
+expected_decision_under_sample_policy:
+  verb: deny
