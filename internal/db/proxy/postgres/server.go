@@ -21,6 +21,8 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	_ "github.com/jackc/pgx/v5/pgproto3"
+
 	"github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/db/policy"
 	"github.com/agentsh/agentsh/internal/db/service"
