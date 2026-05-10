@@ -1,0 +1,15 @@
+name: select-allowed-fn
+spec_ref: §7.6 escalate_unknown_functions knob
+description: |
+  SELECT now() with EscalateUnknownFunctions=true and now in the
+  safe_function_allowlist. The escalation walker finds only allowlisted
+  calls, so no procedural effect is appended; primary stays read.
+sql: "SELECT now()"
+options:
+  escalate_unknown_functions: true
+  safe_function_allowlist: [now]
+expected_classification:
+  - raw_verb: SELECT
+    primary_group: read
+    effects:
+      - group: read

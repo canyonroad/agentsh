@@ -48,9 +48,9 @@ func classifySelect(cs *effects.ClassifiedStatement, s *pg_query.SelectStmt, ses
 	}
 
 	// §7.6 escalation: if any function call in the projection / WHERE is not
-	// in the safe-allowlist, add a procedural effect. Real walker lands in
-	// Task 13; the stub returns false so this is a no-op for now.
-	if opts.EscalateUnknownFunctions && containsUnknownFunctionCall(s, opts.SafeFunctionAllowlist) {
+	// in the safe-allowlist, add a procedural effect. Walker + allowlist
+	// matcher live in escalation.go.
+	if opts.EscalateUnknownFunctions && collectFuncCallsAny(s, opts.SafeFunctionAllowlist) {
 		cs.Effects = append(cs.Effects, effects.Effect{Group: effects.GroupProcedural})
 	}
 
@@ -368,15 +368,3 @@ func appendCTEEffects(cs *effects.ClassifiedStatement, with *pg_query.WithClause
 }
 
 func hasReturningList(list []*pg_query.Node) bool { return len(list) > 0 }
-
-// ---- Task-13 stub ----
-//
-// containsUnknownFunctionCall is owned by Task 13 (escalation knob); stub it
-// here so the DML handlers compile until that task lands.
-
-func containsUnknownFunctionCall(s *pg_query.SelectStmt, allow map[string]struct{}) bool {
-	return collectFuncCallsAny(s, allow)
-}
-
-// collectFuncCallsAny is the real escalation walker (Task 13). Stub returns false.
-func collectFuncCallsAny(_ *pg_query.SelectStmt, _ map[string]struct{}) bool { return false }
