@@ -1,102 +1,173 @@
 # Auto-wrapping the agent harness via `agentsh wrap` — design
 
 **Date:** 2026-05-11
-**Status:** Draft, awaiting review
+**Status:** Revised after real-agent-kit probe revealed PATH precedence design flaw
 **Owner:** Eran Sandler
 **Parent spec:** `2026-05-11-docker-sandboxes-mixin-kit-design.md`
+
+## 0. Revision history
+
+- **v1 (original):** PATH precedence — drop wrapper at `/usr/local/bin/<agent>`, rely on it preceding the real binary in PATH.
+- **v2 (this version, after probing `docker/sandbox-templates:{opencode,codex,gemini}`):** real agent kits install their binaries via npm at `/usr/local/share/npm-global/bin/<agent>`, which **precedes** `/usr/local/bin` in PATH. The v1 wrapper would never have fired against any real agent kit. Switched to **move-aside-and-replace** at the discovered binary location.
 
 ## 1. Goal
 
 After the AgentSH mixin kit installs, the sandbox's agent binary (`claude`, `opencode`, `gemini`, `codex`, `cursor`) is launched as a child of `agentsh wrap`. The harness — not just its tools — runs under AgentSH's full exec-pipeline interception (session, policy, audit, report).
 
-The kit's value proposition stops being "AgentSH is installed alongside the agent" and becomes "AgentSH owns the agent's lifecycle from `claude --help` outwards."
-
 ## 2. Constraint reminder
 
-A `kind: mixin` kit **cannot** override the agent kit's entrypoint — that field belongs to the `kind: agent` kit (claude, opencode, etc.). We can't tell sbx "launch the agent as `agentsh wrap -- claude`." The only tool a mixin has is PATH precedence: drop a wrapper at `/usr/local/bin/claude` (which precedes `/usr/bin/claude` in PATH) and rely on the agent kit's entrypoint using PATH lookup rather than an absolute path.
+A `kind: mixin` kit cannot override the agent kit's entrypoint. The mixin can only modify the filesystem post-install. To intercept the agent's exec without entrypoint cooperation, the wrapper must occupy *the exact path the agent kit's entrypoint already resolves to* — not a path that happens to come earlier in PATH.
 
-This is an unavoidable structural limitation. If a future agent kit launches its binary via absolute path, the wrapper is bypassed and this design's coverage drops to zero for that kit.
+The probe results (`docker run --rm docker/sandbox-templates:opencode bash -lc 'type -a opencode'`) show:
+
+```
+opencode is /usr/local/share/npm-global/bin/opencode
+PATH=/home/agent/.local/bin:/usr/local/share/npm-global/bin:/usr/local/sbin:/usr/local/bin:...
+```
+
+`/usr/local/bin` is 4th in PATH; npm-global is 2nd. A wrapper at `/usr/local/bin/opencode` would be shadowed. The move-aside design avoids this entirely by relocating the agent binary in place.
 
 ## 3. Non-goals
 
-- **No env-var opt-in.** Earlier drafts gated this on `AGENTSH_WRAP_AGENT=1`; the v1 design unconditionally engages wrap. The kit's purpose is enforcement; an opt-out flag implies the unenforced path is supported, which it is not.
-- **No manual `agentsh wrap` SKILL guidance.** The harness is already wrapped; instructing the LLM to manually invoke wrap on individual commands would be redundant.
-- **No fix for absolute-path entrypoints.** Documented as a known limitation. Per-agent-kit verification is the operator's responsibility.
+- **No env-var opt-in.** Auto-wrap is the kit's purpose.
+- **No SKILL.md manual-wrap guidance.** Harness is already wrapped; the LLM doesn't need to invoke wrap explicitly.
+- **No "do not touch the agent kit's installed files" guarantee.** The move-aside approach explicitly renames the binary the agent kit shipped. This is the trade-off for actually engaging the wrap.
 
-## 4. Failure posture: fail-CLOSED (explicit deviation from parent spec §7)
-
-The parent spec promises "fail-open with loud logging — never bricks a user's sandbox." This design **deviates** for runtime failures: if `agentsh wrap` cannot engage cleanly when the wrapper runs, the wrapper refuses to launch the agent.
+## 4. Failure posture: fail-CLOSED (unchanged from v1)
 
 | Failure | Disposition |
 |---|---|
-| `/usr/bin/<agent>` missing | exit 127 + stderr — there's nothing to wrap; sandbox is misconfigured. |
-| `agentsh` binary missing | exit 1 + stderr — kit installed wrappers but not AgentSH; broken install. |
-| `/run/agentsh/tier` ≠ `shim` | exit 1 + stderr — bootstrap didn't complete or daemon never came up. |
-| `agentsh wrap` itself fails after exec | agent launch fails (cannot fork-monitor around exec). |
+| `${0}.real` missing | exit 127 + stderr — installer didn't run or someone deleted the moved-aside binary |
+| `agentsh` binary missing | exit 1 + stderr |
+| `/run/agentsh/tier` ≠ `shim` | exit 1 + stderr |
+| `agentsh wrap` itself fails after exec | agent launch fails |
 
-**Justification for the deviation:** the kit's contract has shifted. Under the parent spec, the kit guaranteed "the agent runs; AgentSH may or may not enforce." Under this design, the kit guarantees "the agent runs *and* is enforced, or it doesn't run." Operators choosing this kit choose enforcement-mandatory semantics. Running unenforced when the operator asked for enforcement is the worse failure mode.
-
-**One layer the design cannot close:** if the kit's `install` command itself fails (curl 404, package install error), the wrappers are never created and `exec claude` resolves to the unwrapped `/usr/bin/claude`. That's pass-through despite the fail-closed intent — but at that point sbx run will have reported the install-phase error visibly, so the operator can react.
-
-## 5. Components
+## 5. Components (unchanged from v1)
 
 ```
 packaging/
-  agent-wrap.sh                       # the wrapper script (shipped in /usr/lib/agentsh/)
+  agent-wrap.sh                       # the wrapper script (real path now derived from ${0}.real)
   agent-wrap_test.sh                  # shell test of the wrapper
-  install-agent-wrappers.sh           # symlink-creating installer (shipped in /usr/lib/agentsh/)
+  install-agent-wrappers.sh           # discover-via-command-v + move-aside + symlink
   install-agent-wrappers_test.sh      # shell test of the installer
 
 docker/sbx-kit/
-  spec.yaml                           # +1 install command line
-  tests/run-e2e.sh                    # +1 verification check
+  spec.yaml                           # (unchanged) second install command
+  tests/run-e2e.sh                    # gains a real-agent-kit check using opencode
 
-.goreleaser.yml                       # +2 nfpms contents entries
+.goreleaser.yml                       # (unchanged) packages the two scripts
 ```
-
-The wrapper and installer ship in every `.deb`/`.rpm`/`.apk` so they're available wherever `install.sh` lands the kit. Symlink creation happens **per-sandbox**, in the kit's `install` step, because the set of agent binaries varies between sandbox templates.
 
 ## 6. The wrapper (`/usr/lib/agentsh/agent-wrap`)
 
 ```sh
 #!/bin/sh
-# Symlinked from /usr/local/bin/<agent>. Routes the agent through
-# `agentsh wrap`. Fail-closed.
+# Invoked via symlinks placed by install-agent-wrappers.sh at the original
+# location of each agent binary (e.g. /usr/local/share/npm-global/bin/opencode).
+# Real binary lives at the same path with a .real suffix.
+#
+# Fail-CLOSED: any health-check failure refuses launch.
 
 set -u
-name=$(basename "$0")
-real="/usr/bin/$name"
+
+# Gated test hook (parallel of v1 design).
+if [ "${AGENTSH_TEST:-}" = "1" ]; then
+    FAKE_ROOT="${FAKE_ROOT:-}"
+else
+    FAKE_ROOT=""
+fi
+
+real="${0}.real"
+tier_file="${FAKE_ROOT}/run/agentsh/tier"
 
 if [ ! -x "$real" ]; then
-    echo "agentsh-agent-wrap: real binary not found at $real" >&2
+    echo "agentsh-agent-wrap: real binary not found at $real; refusing to launch $(basename "$0")" >&2
     exit 127
 fi
 
+# command -v also reports shell functions; exec below dispatches to binaries
+# only, so a function-named agentsh fails non-zero — still fail-closed.
 if ! command -v agentsh >/dev/null 2>&1; then
-    echo "agentsh-agent-wrap: agentsh binary missing; refusing to launch $name without enforcement" >&2
+    echo "agentsh-agent-wrap: agentsh binary missing; refusing to launch $(basename "$0") without enforcement" >&2
     exit 1
 fi
 
-tier=$(cat /run/agentsh/tier 2>/dev/null || echo missing)
+tier=$(cat "$tier_file" 2>/dev/null || echo missing)
 if [ "$tier" != "shim" ]; then
-    echo "agentsh-agent-wrap: enforcement not active (tier='$tier'); refusing to launch $name" >&2
+    echo "agentsh-agent-wrap: enforcement not active (tier='$tier'); refusing to launch $(basename "$0")" >&2
     exit 1
 fi
 
-exec /usr/bin/agentsh wrap -- "$real" "$@"
+exec agentsh wrap -- "$real" "$@"
 ```
+
+Key change from v1: `real="${0}.real"` instead of `real="${FAKE_ROOT}/usr/bin/$name"`. The wrapper is now location-flexible — it works wherever the installer placed it.
 
 ## 7. The installer (`/usr/lib/agentsh/install-agent-wrappers.sh`)
 
-Idempotent. Probes `/usr/bin` for the known agent set, creates `/usr/local/bin/<agent>` symlinks to `/usr/lib/agentsh/agent-wrap`. Skips when:
-- The agent binary is absent (no agent to wrap).
-- An entry already exists at the destination (don't fight the agent kit).
+Discovers each known agent via `command -v`, renames it to `<path>.real`, drops a symlink to the wrap script at the original location.
 
-Known agent list (v1): `claude`, `opencode`, `gemini`, `codex`, `cursor`. Adding a new agent is a one-line list edit.
+```sh
+#!/bin/sh
+# Discover known agent binaries via `command -v`, move them aside to a
+# `.real` sibling, and put a symlink to /usr/lib/agentsh/agent-wrap in
+# the original location. The agent kit's entrypoint, which resolves the
+# agent via PATH lookup, then hits our symlink wherever the binary lived.
+#
+# Idempotent. Fail-open if the wrap script itself is missing.
 
-## 8. Kit integration (`docker/sbx-kit/spec.yaml`)
+set -eu
 
-The kit's `commands.install` gains one entry, run after `install.sh`:
+if [ "${AGENTSH_TEST:-}" = "1" ]; then
+    FAKE_ROOT="${FAKE_ROOT:-}"
+    PATH="${FAKE_TEST_PATH:-$PATH}"   # test can override the search path
+else
+    FAKE_ROOT=""
+fi
+
+WRAP="${FAKE_ROOT}/usr/lib/agentsh/agent-wrap"
+
+# Known agent binaries. Extend as Docker Sandboxes adds support.
+AGENTS="claude opencode gemini codex cursor"
+
+if [ ! -x "$WRAP" ]; then
+    echo "install-agent-wrappers: agent-wrap missing at $WRAP; skipping (kit still works without auto-wrap)" >&2
+    exit 0
+fi
+
+for agent in $AGENTS; do
+    # Discover via PATH lookup, matching how the agent kit's entrypoint
+    # would resolve the binary.
+    real=$(command -v "$agent" 2>/dev/null || true)
+    if [ -z "$real" ] || [ ! -x "$real" ]; then
+        continue  # agent not installed
+    fi
+
+    # Idempotency: if $real is already our symlink AND $real.real exists,
+    # the agent is already wrapped — silent skip.
+    if [ -L "$real" ] && [ "$(readlink "$real")" = "$WRAP" ] && [ -e "${real}.real" ]; then
+        continue
+    fi
+
+    # Conflict detection: if $real.real already exists but $real is NOT
+    # our symlink, something else owns the location — don't touch it.
+    if [ -e "${real}.real" ]; then
+        echo "install-agent-wrappers: ${real}.real already exists but $real is not our symlink; not overwriting" >&2
+        continue
+    fi
+
+    # Move-aside-and-replace.
+    mv "$real" "${real}.real"
+    ln -s "$WRAP" "$real"
+    echo "install-agent-wrappers: wrapped $agent at $real (real moved to ${real}.real)" >&2
+done
+```
+
+**Why `command -v` instead of probing `/usr/bin/<agent>` like v1?** Because real agent kits don't put their binaries in `/usr/bin`. `command -v` is the same PATH-search the agent kit's entrypoint uses, so we find the binary wherever it actually lives. This is the load-bearing fix.
+
+## 8. Kit integration (unchanged from v1)
+
+Same two install commands in `spec.yaml`:
 
 ```yaml
 commands:
@@ -104,58 +175,62 @@ commands:
     - command: "/bin/sh -c 'curl -fsSL https://github.com/erans/agentsh/releases/latest/download/install.sh | sh'"
       user: "0"
       description: Install agentsh from the latest GitHub release
-    - command: ["/usr/lib/agentsh/install-agent-wrappers.sh"]
+    - command: "/usr/lib/agentsh/install-agent-wrappers.sh"
       user: "0"
-      description: Wrap detected agent binaries via /usr/local/bin/ symlinks
+      description: Move-aside-and-replace detected agent binaries with /usr/lib/agentsh/agent-wrap
 ```
-
-No `environment.variables` block (the env-var design was dropped).
 
 ## 9. Testing
 
 **Wrapper script** (5 cases in `packaging/agent-wrap_test.sh`):
-1. Real binary missing → exit 127.
+1. `${0}.real` missing → exit 127.
 2. `agentsh` missing from PATH → exit 1.
 3. Tier file says `none` → exit 1.
 4. Tier file missing entirely → exit 1.
-5. All three green → exec'd `agentsh wrap -- /usr/bin/<agent> <args>` with args preserved.
+5. All three green → exec'd `agentsh wrap -- ${0}.real <args>` with args preserved.
 
-**Installer** (5 cases in `packaging/install-agent-wrappers_test.sh`):
-1. No agents in `/usr/bin` → no symlinks.
-2. One agent → one symlink.
-3. Multiple agents → all wrapped.
-4. Pre-existing entry at `/usr/local/bin/<agent>` (file or symlink) → skipped, stderr warning, no overwrite.
-5. Re-run on a populated tree → no-op (idempotent).
+Test setup: place a fake binary at `<symlink>.real`, place a symlink to the wrapper at `<symlink>`, invoke via the symlink. Tests no longer reference `/usr/bin`.
 
-**E2E** (`docker/sbx-kit/tests/run-e2e.sh`): one new check appended after the existing 7 (becomes 8 total). The check installs a fake `agentsh` binary that prints a recognizable marker, drops a fake `/usr/bin/claude` stub, runs the installer to create `/usr/local/bin/claude`, then invokes `claude --version` from a fresh login shell and asserts the wrap-marker appears in the output. This proves the PATH precedence + wrapper + wrap-exec chain works end-to-end in a real sandbox-template container.
+**Installer** (6 cases in `packaging/install-agent-wrappers_test.sh`):
+1. No agents on PATH → no actions taken.
+2. One agent on PATH → moved to `.real` + symlink created at original location.
+3. Multiple agents → all wrapped at their respective discovered locations.
+4. Pre-existing `<path>.real` but `$path` is NOT our symlink → skipped with warning (foreign conflict).
+5. Missing wrap script → exit 0 with warning, no moves.
+6. Idempotent: re-run on already-wrapped tree → silent, no double-rename.
+
+Test setup uses `AGENTSH_TEST=1 FAKE_TEST_PATH=<tempdir-bin>` to scope the `command -v` search to a controlled location.
+
+**E2E** (`docker/sbx-kit/tests/run-e2e.sh`): the existing check 8 (stub-based engagement check) is **replaced** with a real-agent-kit check:
+
+- Pull `docker/sandbox-templates:opencode` (publicly available; verified).
+- Build the real `agentsh` binary on the host (CGO + libseccomp, same as `go build` in this worktree).
+- Side-load the binaries, the wrap script, and the installer into the opencode container.
+- Run the installer; verify `/usr/local/share/npm-global/bin/opencode` is now a symlink to `/usr/lib/agentsh/agent-wrap` and `opencode.real` exists.
+- Bring up the daemon (or stub the wrap session-creation endpoint, per E2E-tractability).
+- Invoke `opencode --help` from a login shell as the agent user. Assert `agentsh wrap` engaged AND opencode's real `--help` output appears (proving the move-aside binary still executes correctly).
+
+This is the real-agent E2E the v1 design never produced — the bug that prompted this revision would have been caught at this step.
 
 ## 10. Documentation
 
-**`docker/sbx-kit/README.md`** — a new "Behavior" section after "v1 enforcement tier":
+**`docker/sbx-kit/README.md`** "Behavior" section needs revision:
+- Drop "PATH precedence" language.
+- Describe the move-aside-and-replace mechanism.
+- Update the "Known limitations" — remove the absolute-path-entrypoint caveat (move-aside doesn't depend on PATH order) but ADD: "the installer renames files the agent kit shipped; uninstalling cleanly requires restoring `<path>.real` → `<path>`."
 
-> This kit runs the agent harness under `agentsh wrap` whenever it can. After install, the kit creates symlinks at `/usr/local/bin/<agent>` (for known agents present in the sandbox) that route launches through `agentsh wrap`, giving you full exec-pipeline interception of every subprocess the agent spawns, a coherent session, and a session report on exit.
->
-> **Fail-closed deviation from the parent spec:** when `agentsh wrap` cannot engage cleanly (AgentSH missing, bootstrap incomplete, tier != shim), the wrapper exits non-zero and refuses to launch the agent. Choosing this kit means choosing enforcement-mandatory semantics; running unenforced is not a supported state.
->
-> **Limitations:** the wrappers rely on PATH precedence. An agent kit whose entrypoint launches its binary via absolute path bypasses them. Verify per agent kit.
+**`docs/policy-reference.md`** table additions are mostly fine but the `/usr/local/bin/<agent>` row needs to become `<original agent path>` since the location varies per agent kit.
 
-**`docs/policy-reference.md`** — append two rows to the "Where things live" table:
+## 11. Risk register (revised)
 
-| `/usr/lib/agentsh/agent-wrap` | OS package, read-only | Shared wrapper for agent binaries |
-| `/usr/local/bin/<agent>` | Kit install step | Symlink to agent-wrap (one per detected agent) |
+- **Move-aside collides with agent kit upgrades.** If the agent kit's image is rebuilt with a new agent binary at the same path, our move-aside would have already happened and the new binary would land *next to* our symlink, not under it. v1 mitigation: idempotency check detects "already wrapped" and skips. v2 mitigation: image rebuild is image-rebuild — a fresh sandbox triggers a fresh install which catches the new binary.
+- **Uninstall path is non-trivial.** Removing the kit no longer just removes a symlink — it needs to restore `<path>.real` → `<path>`. Out of scope for v1; document the manual recovery in the README.
+- **Real `agentsh wrap` compatibility with opencode/codex/gemini.** Still untested against real agents until E2E lands. The new E2E directly exercises this.
+- **CGO+libseccomp build complexity for the E2E.** The dev host has the deps; CI runners typically have `libseccomp-dev` available via apt. If the E2E build is too brittle, fall back to building agentsh in a Docker build stage.
 
-No SKILL.md changes — the existing skill stays as-is.
+## 12. Out of scope (unchanged)
 
-## 11. Risk register
-
-- **PATH-precedence assumption.** If `claude`/`opencode`/`gemini` agent kits launch via absolute path, this design has zero effect for those kits. Mitigation: e2e check exercises PATH-lookup behavior; per-agent-kit manual verification before tagging the kit's release.
-- **`agentsh wrap` compatibility with long-lived agents.** `wrap` was designed for typical agent runs but its session-lifecycle behavior with a multi-hour interactive agent is untested. Mitigation: e2e is a smoke; the actual matrix lives in `coding-agent-smoke.sh` and runs against a real `sbx run` once a release is tagged.
-- **Fail-closed brittleness.** A flaky bootstrap (e.g., daemon crash mid-startup) leaves tier=none, refusing the agent. Operators must rely on AgentSH's startup being reliable. Mitigation: the bootstrap's daemon-spawn already retries; ongoing reliability is owned by AgentSH's release quality.
-- **Agent-kit-installed `/usr/local/bin/<agent>` conflict.** If an agent kit ships its own wrapper at `/usr/local/bin/claude`, the installer skips and the agent runs unwrapped. Mitigation: skip-and-log is the deliberate choice; alternative would be aggressive overwriting, which breaks the agent kit. Operators in this case need to manually merge.
-
-## 12. Out of scope
-
-- LD_PRELOAD / ptrace tiers (parked per parent spec §13).
-- Wrapping commands that aren't agent binaries (subprocesses are already handled by the shim list under `/usr/lib/agentsh/shims/`).
-- Absolute-path-entrypoint workarounds.
-- A pre-flight check that warns if a specific agent kit is known to use absolute paths.
+- LD_PRELOAD / ptrace tiers.
+- Wrapping subprocess binaries (already handled by the shim list).
+- Clean uninstall logic.
+- Detecting agent-kit image upgrades that swap the wrapped binary.
