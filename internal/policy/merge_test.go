@@ -56,24 +56,32 @@ func TestMergeOverlay_NilBaseReturnsOverlay(t *testing.T) {
 
 func TestMergeOverlay_PreservesAllRuleKinds(t *testing.T) {
 	base := &Policy{
-		Version:      1,
-		Name:         "base",
-		FileRules:    []FileRule{{Name: "f1"}},
-		CommandRules: []CommandRule{{Name: "c1"}},
-		SignalRules:  []SignalRule{{Name: "s1"}},
-		NetworkRules: []NetworkRule{{Name: "n1"}},
+		Version:              1,
+		Name:                 "base",
+		FileRules:            []FileRule{{Name: "f1"}},
+		CommandRules:         []CommandRule{{Name: "c1"}},
+		SignalRules:          []SignalRule{{Name: "s1"}},
+		NetworkRules:         []NetworkRule{{Name: "n1"}},
+		UnixRules:            []UnixSocketRule{{Name: "u1"}},
+		DnsRedirectRules:     []DnsRedirectRule{{Name: "d1"}},
+		ConnectRedirectRules: []ConnectRedirectRule{{Name: "cr1"}},
 	}
 	overlay := &Policy{
-		Version:      1,
-		Name:         "overlay",
-		FileRules:    []FileRule{{Name: "f2"}},
-		CommandRules: []CommandRule{{Name: "c2"}},
-		SignalRules:  []SignalRule{{Name: "s2"}},
-		NetworkRules: []NetworkRule{{Name: "n2"}},
+		Version:              1,
+		Name:                 "overlay",
+		FileRules:            []FileRule{{Name: "f2"}},
+		CommandRules:         []CommandRule{{Name: "c2"}},
+		SignalRules:          []SignalRule{{Name: "s2"}},
+		NetworkRules:         []NetworkRule{{Name: "n2"}},
+		UnixRules:            []UnixSocketRule{{Name: "u2"}},
+		DnsRedirectRules:     []DnsRedirectRule{{Name: "d2"}},
+		ConnectRedirectRules: []ConnectRedirectRule{{Name: "cr2"}},
 	}
 	merged := MergeOverlay(base, overlay)
 	if len(merged.FileRules) != 2 || len(merged.CommandRules) != 2 ||
-		len(merged.SignalRules) != 2 || len(merged.NetworkRules) != 2 {
+		len(merged.SignalRules) != 2 || len(merged.NetworkRules) != 2 ||
+		len(merged.UnixRules) != 2 || len(merged.DnsRedirectRules) != 2 ||
+		len(merged.ConnectRedirectRules) != 2 {
 		t.Errorf("merged rule counts wrong: %+v", merged)
 	}
 }
@@ -87,5 +95,32 @@ func TestMergeOverlay_KeepsBaseMetadata(t *testing.T) {
 	}
 	if merged.Description != "from base" {
 		t.Errorf("merged.Description = %q, want %q", merged.Description, "from base")
+	}
+}
+
+func TestMergeOverlay_EmptyNameOverlayAppends(t *testing.T) {
+	base := &Policy{
+		Version: 1,
+		Name:    "base",
+		FileRules: []FileRule{
+			{Name: "rule-a", Decision: "allow"},
+		},
+	}
+	overlay := &Policy{
+		Version: 1,
+		Name:    "overlay",
+		FileRules: []FileRule{
+			{Name: "", Decision: "deny", Paths: []string{"/anon"}}, // anonymous: must append
+		},
+	}
+	merged := MergeOverlay(base, overlay)
+	if len(merged.FileRules) != 2 {
+		t.Fatalf("len(FileRules) = %d, want 2 (anonymous overlay rule should append)", len(merged.FileRules))
+	}
+	if merged.FileRules[0].Name != "rule-a" {
+		t.Errorf("FileRules[0] = %+v, want base's rule-a preserved", merged.FileRules[0])
+	}
+	if merged.FileRules[1].Name != "" || merged.FileRules[1].Decision != "deny" {
+		t.Errorf("FileRules[1] = %+v, want appended anonymous deny rule", merged.FileRules[1])
 	}
 }
