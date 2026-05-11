@@ -13,6 +13,9 @@ commands:
     - command: "/bin/sh -c 'curl -fsSL https://github.com/erans/agentsh/releases/latest/download/install.sh | sh'"
       user: "0"
       description: Install agentsh from the latest GitHub release
+    - command: "/usr/lib/agentsh/install-agent-wrappers.sh"
+      user: "0"
+      description: Wrap detected agent binaries via /usr/local/bin/ symlinks
 
   initFiles:
     - path: /etc/profile.d/agentsh.sh
