@@ -130,6 +130,19 @@ builds:
     ldflags:
       - -s -w
 
+  - id: sbx-bootstrap-linux
+    main: ./cmd/agentsh-sbx-bootstrap
+    binary: agentsh-sbx-bootstrap
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
   # unixwrap: seccomp wrapper for Linux amd64 (requires CGO + libseccomp)
   - id: unixwrap-linux-amd64
     main: ./cmd/agentsh-unixwrap
@@ -307,6 +320,7 @@ nfpms:
       - unixwrap-linux-amd64
       - unixwrap-linux-arm64
       - stub-linux
+      - sbx-bootstrap-linux    # NEW: bootstrap binary lands in /usr/bin
     formats:
       - deb
       - rpm
@@ -361,6 +375,63 @@ nfpms:
         dst: /usr/lib/agentsh/bash_startup.sh
         file_info:
           mode: 0755
+      # Coding-agent policy template for Docker Sandboxes mixin bootstrap.
+      # Installed read-only — the bootstrap writes the merged result to
+      # /etc/agentsh/policies/default.yaml on each sandbox start.
+      - src: configs/policies/coding-agent.yaml
+        dst: /usr/share/agentsh/coding-agent.template.yaml
+        file_info:
+          mode: 0644
+
+      # Shim directory + symlinks (Docker Sandboxes mixin support).
+      # /usr/lib/agentsh/shims is prepended to PATH inside sandboxes via
+      # /etc/profile.d/agentsh.sh (written by the mixin kit's initFiles).
+      - dst: /usr/lib/agentsh/shims
+        type: dir
+        file_info:
+          mode: 0755
+      - dst: /usr/lib/agentsh/shims/bash
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+      - dst: /usr/lib/agentsh/shims/sh
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+      - dst: /usr/lib/agentsh/shims/curl
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+      - dst: /usr/lib/agentsh/shims/wget
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+      - dst: /usr/lib/agentsh/shims/pip
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+      - dst: /usr/lib/agentsh/shims/pip3
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+      - dst: /usr/lib/agentsh/shims/npm
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+      - dst: /usr/lib/agentsh/shims/node
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+      - dst: /usr/lib/agentsh/shims/git
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+      - dst: /usr/lib/agentsh/shims/python
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+      - dst: /usr/lib/agentsh/shims/python3
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+      - dst: /usr/lib/agentsh/shims/rm
+        src: /usr/bin/agentsh-shell-shim
+        type: symlink
+
+      # Packaged policy reference (also lives in repo at docs/policy-reference.md).
+      - src: docs/policy-reference.md
+        dst: /usr/share/doc/agentsh/policy-reference.md
+        file_info:
+          mode: 0644
       # Policy files
       - src: configs/policies/*.yaml
         dst: /etc/agentsh/policies/
