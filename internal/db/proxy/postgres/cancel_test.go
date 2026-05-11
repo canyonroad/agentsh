@@ -12,26 +12,29 @@ import (
 )
 
 // captureCancelListener accepts one connection, reads up to 16 bytes,
-// stores them in got, then closes. Returns the listener address.
-func captureCancelListener(t *testing.T, got *[]byte) string {
+// and sends them on the returned channel. Returns the listener address and
+// a channel that receives the captured bytes.
+func captureCancelListener(t *testing.T) (string, <-chan []byte) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	ch := make(chan []byte, 1)
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
+			ch <- nil
 			return
 		}
 		defer c.Close()
 		buf := make([]byte, 16)
 		_ = c.SetReadDeadline(time.Now().Add(1 * time.Second))
 		n, _ := io.ReadFull(c, buf)
-		*got = buf[:n]
+		ch <- buf[:n]
 	}()
-	return ln.Addr().String()
+	return ln.Addr().String(), ch
 }
 
 func buildCancelPacket(pid, secret uint32) []byte {
@@ -44,8 +47,7 @@ func buildCancelPacket(pid, secret uint32) []byte {
 }
 
 func TestForwardCancel_WritesPayloadVerbatim(t *testing.T) {
-	var got []byte
-	addr := captureCancelListener(t, &got)
+	addr, ch := captureCancelListener(t)
 	svc := Service{Upstream: addr, TLSMode: "terminate_reissue"}
 
 	packet := buildCancelPacket(54321, 98765)
@@ -54,8 +56,14 @@ func TestForwardCancel_WritesPayloadVerbatim(t *testing.T) {
 	if err := forwardCancel(ctx, svc, packet); err != nil {
 		t.Fatalf("forwardCancel: %v", err)
 	}
-	for i := 0; i < 100 && len(got) < 16; i++ {
-		time.Sleep(10 * time.Millisecond)
+	var got []byte
+	select {
+	case got = <-ch:
+		if got == nil {
+			t.Fatal("upstream did not capture cancel packet")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not capture cancel packet")
 	}
 	if len(got) != 16 {
 		t.Fatalf("captured %d bytes, want 16", len(got))

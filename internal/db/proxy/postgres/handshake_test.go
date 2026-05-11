@@ -353,8 +353,7 @@ database_connection_rules:
 }
 
 func TestDispatch_CancelRequest_AllowedForwardsPacket(t *testing.T) {
-	var captured []byte
-	upAddr := captureCancelListener(t, &captured)
+	upAddr, ch := captureCancelListener(t)
 
 	a, b := net.Pipe()
 	defer a.Close()
@@ -405,9 +404,14 @@ database_connection_rules:
 	if _, err := b.Write(pkt); err != nil {
 		t.Fatalf("write CancelRequest: %v", err)
 	}
-	// Allow upstream to capture.
-	for i := 0; i < 100 && len(captured) < 16; i++ {
-		time.Sleep(10 * time.Millisecond)
+	var captured []byte
+	select {
+	case captured = <-ch:
+		if captured == nil {
+			t.Fatal("upstream did not capture cancel packet")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not capture cancel packet")
 	}
 	if len(captured) != 16 {
 		t.Fatalf("captured %d bytes upstream, want 16", len(captured))

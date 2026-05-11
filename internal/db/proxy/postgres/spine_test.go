@@ -545,8 +545,7 @@ func TestSpine_ReplicationOptIn_BytePump_EmitsDVW(t *testing.T) {
 }
 
 func TestSpine_Cancel_AllowedForwardsUnmapped(t *testing.T) {
-	var captured []byte
-	upAddr := captureCancelListener(t, &captured)
+	upAddr, ch := captureCancelListener(t)
 	rule := `  - name: allow-cancel
     db_service: appdb
     match_kind: cancel
@@ -565,8 +564,14 @@ func TestSpine_Cancel_AllowedForwardsUnmapped(t *testing.T) {
 	if _, err := c.Write(pkt); err != nil {
 		t.Fatalf("write cancel: %v", err)
 	}
-	for i := 0; i < 100 && len(captured) < 16; i++ {
-		time.Sleep(10 * time.Millisecond)
+	var captured []byte
+	select {
+	case captured = <-ch:
+		if captured == nil {
+			t.Fatal("upstream did not capture cancel packet")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not capture cancel packet")
 	}
 	if len(captured) != 16 {
 		t.Fatalf("captured %d bytes upstream, want 16", len(captured))
