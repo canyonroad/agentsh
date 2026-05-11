@@ -3,6 +3,7 @@ package events
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,5 +68,69 @@ func TestDBEvent_JSONRoundTrip(t *testing.T) {
 	}
 	if out.StatementRedaction != RedactionParametersRedacted {
 		t.Errorf("redaction lost: %v", out.StatementRedaction)
+	}
+}
+
+func TestDBEvent_Extended_RoundTrip(t *testing.T) {
+	rows := int64(7)
+	in := DBEvent{
+		EventID:   "01HJ...",
+		SessionID: "sess-1",
+		Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
+		DBService: "appdb",
+		DBFamily:  "postgres",
+		DBDialect: "postgres",
+		Effects:   []effects.Effect{{Group: effects.GroupRead, Resolution: effects.ResolutionQualified}},
+
+		TLS: EventTLS{Mode: "terminate_reissue", ClientSNI: "db.example"},
+		Decision: EventDecision{
+			Verb:                "allow",
+			RuleKind:            "statement",
+			RuleName:            "app-allow-read",
+			MatchingEffectIndex: 0,
+			MatchingEffectGroup: "read",
+		},
+		Result: EventResult{
+			RowsReturned: &rows,
+			BytesIn:      9,
+			BytesOut:     42,
+			LatencyMs:    3,
+		},
+		TxContext:  EventTxContext{InTransaction: false, DenyAction: "none"},
+		Predicates: EventPredicates{HasFilter: true},
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var out DBEvent
+	if err := json.Unmarshal(bs, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.Decision.Verb != "allow" || out.Result.LatencyMs != 3 {
+		t.Fatalf("round-trip mismatch: %+v", out)
+	}
+	if out.Result.RowsReturned == nil || *out.Result.RowsReturned != 7 {
+		t.Fatalf("rows_returned lost: %+v", out.Result.RowsReturned)
+	}
+	if out.Result.RowsAffected != nil {
+		t.Fatalf("rows_affected must be nil for null in wire form: %+v",
+			out.Result.RowsAffected)
+	}
+}
+
+func TestDBEvent_Extended_RowsNull(t *testing.T) {
+	in := DBEvent{
+		EventID:   "01HJ...",
+		Timestamp: time.Now().UTC().Truncate(time.Second),
+		Result:    EventResult{BytesIn: 9, BytesOut: 0, LatencyMs: 0},
+		TxContext: EventTxContext{DenyAction: "none"},
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(bs), `"rows_returned":null`) {
+		t.Fatalf("rows_returned must serialise as null when nil; got %s", bs)
 	}
 }
