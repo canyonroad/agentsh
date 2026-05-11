@@ -21,10 +21,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/agentsh/agentsh/internal/db/events"
+	classify_pg "github.com/agentsh/agentsh/internal/db/classify/postgres"
 	"github.com/agentsh/agentsh/internal/db/policy"
 	"github.com/agentsh/agentsh/internal/db/service"
 	"github.com/agentsh/agentsh/internal/db/tlsleaf"
@@ -65,11 +67,19 @@ type Config struct {
 	Logger         *slog.Logger
 	Policy         *policy.RuleSet // current rule set; nil means "no rules" (implicit deny). Hot-swappable in a later plan.
 
+	// MaxQueryBytes caps the 'Q' frame body. Default 1 MiB when zero.
+	// Statements above the cap get a synthetic ErrorResponse(54000) + close.
+	MaxQueryBytes int
+
 	// UpstreamTLSConfigForTest, when non-nil, overrides the production
 	// upstream-TLS config (system roots, verify-full, MinVersion=TLS12,
 	// ServerName from svc.Upstream). Test-only — production callsites must
 	// leave this nil. dialUpstream uses this verbatim when non-nil.
 	UpstreamTLSConfigForTest *tls.Config
+
+	// classifierForTest, when non-nil, overrides the per-dialect Parser map
+	// built by New(). Test-only — production callsites must leave this nil.
+	classifierForTest func(dialect string) classify_pg.Parser
 }
 
 // Server runs the AgentSH PostgreSQL proxy listeners.
@@ -99,6 +109,9 @@ type Server struct {
 
 	caMu  sync.Mutex
 	caRef *tlsleaf.CA
+
+	policyPtr   atomic.Pointer[policy.RuleSet]
+	classifiers map[string]classify_pg.Parser
 }
 
 // New validates cfg and returns a *Server. When cfg.Unavoidability ==
@@ -112,8 +125,12 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("postgres.New: StateDir is required")
 	}
 	if cfg.Unavoidability == service.UnavoidabilityOff {
+		if cfg.MaxQueryBytes == 0 {
+			cfg.MaxQueryBytes = 1 << 20
+		}
 		srv := &Server{cfg: cfg, logger: cfg.Logger, sentinel: true, done: make(chan struct{})}
 		srv.uidAllowed = func(uid uint32) bool { return uid == uint32(os.Getuid()) }
+		srv.policyPtr.Store(cfg.Policy)
 		return srv, nil
 	}
 	if cfg.Sink == nil {
@@ -133,12 +150,22 @@ func New(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("postgres.New: services[%d].Listen.Path is empty for unix listener", i)
 		}
 	}
-	return &Server{
-		cfg:        cfg,
-		logger:     cfg.Logger,
-		done:       make(chan struct{}),
-		uidAllowed: func(uid uint32) bool { return uid == uint32(os.Getuid()) },
-	}, nil
+	if cfg.MaxQueryBytes == 0 {
+		cfg.MaxQueryBytes = 1 << 20
+	}
+	classifiers, err := buildClassifierMap(cfg.Services)
+	if err != nil {
+		return nil, err
+	}
+	srv := &Server{
+		cfg:         cfg,
+		logger:      cfg.Logger,
+		done:        make(chan struct{}),
+		uidAllowed:  func(uid uint32) bool { return uid == uint32(os.Getuid()) },
+		classifiers: classifiers,
+	}
+	srv.policyPtr.Store(cfg.Policy)
+	return srv, nil
 }
 
 // Start binds listeners and runs accept loops until ctx is cancelled.
@@ -364,3 +391,9 @@ func (s *Server) ca() (*tlsleaf.CA, error) {
 		"cert", filepath.Join(s.cfg.StateDir, "db-ca.crt"))
 	return ca, nil
 }
+
+// SetPolicy atomically replaces the active rule set. A nil ruleset means
+// "implicit deny everywhere" (matches policy.Evaluate(stmt, nil, _)).
+func (s *Server) SetPolicy(rs *policy.RuleSet) { s.policyPtr.Store(rs) }
+
+func (s *Server) policy() *policy.RuleSet { return s.policyPtr.Load() }

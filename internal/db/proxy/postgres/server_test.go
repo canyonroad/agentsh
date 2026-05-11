@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,6 +165,7 @@ func TestServer_StartTwice_ReturnsError(t *testing.T) {
 		Sink:           &events.SyncSink{},
 		Services: []Service{{
 			Name:    "appdb",
+			Dialect: "postgres",
 			Listen:  ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "appdb.sock")},
 			Service: policy.DBService{Name: "appdb"},
 			TLSMode: "terminate_reissue",
@@ -238,5 +240,108 @@ func TestServer_LazyCALoad(t *testing.T) {
 	}
 	if again != ca {
 		t.Error("ca() did not return cached pointer on second call")
+	}
+}
+
+func TestServer_New_AppliesMaxQueryBytesDefault(t *testing.T) {
+	cfg := Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           &events.SyncSink{},
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: "127.0.0.1:5432",
+			TLSMode:  "terminate_reissue",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "appdb.sock")},
+			Service:  policy.DBService{Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "127.0.0.1:5432", TLSMode: "terminate_reissue"},
+		}},
+	}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := s.cfg.MaxQueryBytes; got != 1<<20 {
+		t.Fatalf("MaxQueryBytes default = %d want %d", got, 1<<20)
+	}
+}
+
+func TestServer_New_HonorsMaxQueryBytesOverride(t *testing.T) {
+	cfg := Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           &events.SyncSink{},
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		MaxQueryBytes:  4096,
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: "127.0.0.1:5432",
+			TLSMode:  "terminate_reissue",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "appdb.sock")},
+			Service:  policy.DBService{Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "127.0.0.1:5432", TLSMode: "terminate_reissue"},
+		}},
+	}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := s.cfg.MaxQueryBytes; got != 4096 {
+		t.Fatalf("MaxQueryBytes = %d want 4096", got)
+	}
+}
+
+func TestServer_SetPolicy_AtomicSwap(t *testing.T) {
+	cfg := Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           &events.SyncSink{},
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: "127.0.0.1:5432",
+			TLSMode:  "terminate_reissue",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "appdb.sock")},
+			Service:  policy.DBService{Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "127.0.0.1:5432", TLSMode: "terminate_reissue"},
+		}},
+	}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := s.policy(); got != nil {
+		t.Fatalf("initial policy = %p want nil", got)
+	}
+	rs := &policy.RuleSet{}
+	s.SetPolicy(rs)
+	if got := s.policy(); got != rs {
+		t.Fatalf("policy() after SetPolicy = %p want %p", got, rs)
+	}
+}
+
+func TestServer_New_RejectsUnknownDialect(t *testing.T) {
+	cfg := Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           &events.SyncSink{},
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "rabbitql", // unknown
+			Upstream: "127.0.0.1:5432",
+			TLSMode:  "terminate_reissue",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "appdb.sock")},
+			Service:  policy.DBService{Name: "appdb", Family: "postgres", Dialect: "rabbitql", Upstream: "127.0.0.1:5432", TLSMode: "terminate_reissue"},
+		}},
+	}
+	_, err := New(cfg)
+	if err == nil || !strings.Contains(err.Error(), "rabbitql") {
+		t.Fatalf("New on unknown dialect: err = %v", err)
 	}
 }
