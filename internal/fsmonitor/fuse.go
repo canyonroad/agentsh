@@ -85,12 +85,23 @@ func (n *node) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFl
 
 	n.emitFileEvent(ctx, "file_open", virt, "open", 0, dec, false, nil)
 	if flags&uint32(syscall.O_TRUNC) != 0 {
+		// O_TRUNC truncates the file as part of open. Same reasoning as
+		// the Setattr(FATTR_SIZE) branch: truncate is an in-place
+		// content edit, not a delete, so don't route it through
+		// applyAuditPolicy with a nil divert -- that path returns EIO
+		// under audit.mode=soft_delete (soft_delete_no_handler), the
+		// same bug. Policy-check as a write (O_TRUNC already implies
+		// write access) via checkTruncate and emit a file_truncate
+		// audit event.
+		tdec := n.checkTruncate(ctx, virt)
+		if tdec.EffectiveDecision == types.DecisionDeny {
+			n.emitFileEvent(ctx, "file_truncate", virt, "truncate", 0, tdec, true, nil)
+			return nil, 0, syscall.EACCES
+		}
 		var inner fs.FileHandle
 		var fFlags uint32
-		errno = applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "truncate_open", virt, "", "", nil, func() syscall.Errno {
-			inner, fFlags, errno = n.LoopbackNode.Open(ctx, flags)
-			return errno
-		})
+		inner, fFlags, errno = n.LoopbackNode.Open(ctx, flags)
+		n.emitFileEvent(ctx, "file_truncate", virt, "truncate", 0, tdec, errno != 0, nil)
 		if errno != 0 {
 			return nil, 0, errno
 		}
@@ -294,9 +305,23 @@ func (n *node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 	}
 
 	if in.Valid&fuse.FATTR_SIZE != 0 {
-		return applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "truncate", virt, "", "", nil, func() syscall.Errno {
-			return n.LoopbackNode.Setattr(ctx, f, in, out)
-		})
+		// Truncate is editing, not deleting -- the inode stays, only the
+		// content shrinks. Don't route it through applyAuditPolicy with a
+		// nil divert: under audit.mode=soft_delete that returns EIO
+		// because there is no handler to divert to, breaking ordinary
+		// writes that pass O_TRUNC (e.g. `python -m venv` over an
+		// existing venv truncates venv/.gitignore, surfacing as
+		// "[Errno 5] Input/output error"). Policy-check as a write
+		// (see checkTruncate) and run; the audit event type stays
+		// file_truncate for visibility.
+		dec := n.checkTruncate(ctx, virt)
+		if dec.EffectiveDecision == types.DecisionDeny {
+			n.emitFileEvent(ctx, "file_truncate", virt, "truncate", 0, dec, true, nil)
+			return syscall.EACCES
+		}
+		errno := n.LoopbackNode.Setattr(ctx, f, in, out)
+		n.emitFileEvent(ctx, "file_truncate", virt, "truncate", int64(in.Size), dec, errno != 0, nil)
+		return errno
 	}
 
 	return n.LoopbackNode.Setattr(ctx, f, in, out)
@@ -383,6 +408,23 @@ func (f *fileHandle) Release(ctx context.Context) syscall.Errno {
 func (n *node) check(ctx context.Context, virtPath string, op string) policy.Decision {
 	mustExist := op != "create" && op != "mkdir"
 	return n.checkWithExist(ctx, virtPath, op, mustExist)
+}
+
+// checkTruncate evaluates policy for an in-place truncate. Truncate is a
+// content mutation, not a delete, so the policy operation is "write": it
+// matches the same file_rules as an ordinary write and does not require
+// operators to grant a separate "truncate" operation (matchOp is exact,
+// so a rule with operations: [write] would not match "truncate"). This
+// mirrors the older platform FUSE implementation, which already treats
+// truncate as FileOpWrite.
+//
+// Both Setattr(FATTR_SIZE) and Open(O_TRUNC) route through here so the
+// soft_delete EIO bug -- a nil divert handed to applyAuditPolicy, which
+// returns EIO under audit.mode=soft_delete -- cannot recur on either
+// truncate path. Callers emit the file_truncate audit event themselves.
+func (n *node) checkTruncate(ctx context.Context, virtPath string) policy.Decision {
+	dec := n.check(ctx, virtPath, "write")
+	return n.maybeApprove(ctx, dec, "file", virtPath, "write")
 }
 
 func (n *node) checkWithExist(_ context.Context, virtPath string, op string, mustExist bool) policy.Decision {
