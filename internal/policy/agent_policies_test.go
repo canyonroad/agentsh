@@ -282,7 +282,25 @@ func TestAgentPolicies_ObserveRuleDetails(t *testing.T) {
 	assert.True(t, p.Audit.IncludeStderr)
 }
 
-// loadAgentDefaultEngine loads agent-default.yaml and creates an engine with
+func TestAgentPolicies_CodingAgent(t *testing.T) {
+	root := findProjectRoot(t)
+	path := filepath.Join(root, "configs", "policies", "coding-agent.yaml")
+	p, err := LoadFromFile(path)
+	require.NoError(t, err, "failed to load coding-agent policy")
+
+	assert.Equal(t, 1, p.Version)
+	assert.Equal(t, "coding-agent", p.Name)
+	assert.NoError(t, p.Validate())
+
+	assert.GreaterOrEqual(t, len(p.FileRules), 9,
+		"file_rules count dropped below floor of 9 (currently %d)", len(p.FileRules))
+	assert.GreaterOrEqual(t, len(p.CommandRules), 2,
+		"command_rules count dropped below floor of 2 (currently %d)", len(p.CommandRules))
+	assert.GreaterOrEqual(t, len(p.SignalRules), 3,
+		"signal_rules count dropped below floor of 3 (currently %d)", len(p.SignalRules))
+}
+
+
 // variable expansion and enforced approvals.
 func loadAgentDefaultEngine(t *testing.T) *Engine {
 	t.Helper()

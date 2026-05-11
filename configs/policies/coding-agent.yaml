@@ -78,12 +78,6 @@ file_rules:
     decision: soft_delete
     message: "File quarantined (recoverable): {{.Path}}"
 
-  # ---- Home: read/write everywhere except the credential paths denied above.
-  - name: allow-home
-    paths: ["/home/**", "/root/**"]
-    operations: ["*"]
-    decision: allow
-
   # ---- Package manager caches: full allow (routine for coding work).
   - name: allow-package-caches
     paths:
@@ -101,6 +95,12 @@ file_rules:
       - "/root/.rustup/**"
       - "/root/.gradle/caches/**"
       - "/root/.m2/**"
+    operations: ["*"]
+    decision: allow
+
+  # ---- Home: read/write everywhere except the credential paths denied above.
+  - name: allow-home
+    paths: ["/home/**", "/root/**"]
     operations: ["*"]
     decision: allow
 
@@ -142,6 +142,8 @@ file_rules:
 # =============================================================================
 # COMMAND RULES
 # =============================================================================
+# curl|sh patterns are caught by the shellc-opaque-script layer; a future
+# audit/redirect rule (to agentsh-fetch) will be added in v1.1.
 command_rules:
 
   - name: deny-privilege-escalation
@@ -149,14 +151,6 @@ command_rules:
     commands: [sudo, su, doas]
     decision: deny
     message: "Privilege escalation via {{.Command}} is denied inside a Docker Sandbox."
-
-  - name: audit-curl-pipe-to-shell
-    description: Audit curl/wget piped to sh/bash. v1.1 will replace this with redirect to agentsh-fetch.
-    commands: [curl, wget]
-    args_patterns:
-      - ".*\\|\\s*(sh|bash|zsh).*"
-    decision: audit
-    message: "curl|sh pattern detected: {{.Command}} {{.Args}}"
 
   - name: approve-recursive-chmod
     description: Require approval for chmod -R on / or /home, or chmod 777.
@@ -168,10 +162,10 @@ command_rules:
     decision: approve
     message: "Recursive or world-writable chmod requested: chmod {{.Args}}"
 
-  - name: allow-package-installers
+  - name: audit-package-installers
     description: Routine for coding agents; allow with audit.
     commands: [pip, pip3, npm, yarn, pnpm, cargo, apt, apt-get, gem, bundle]
-    decision: allow
+    decision: audit
 
 # =============================================================================
 # SIGNAL RULES
@@ -190,7 +184,7 @@ signal_rules:
 
   - name: deny-signal-agentsh
     description: The agent must not signal AgentSH processes.
-    signals: ["@fatal"]
+    signals: ["@fatal", "@job"]
     target:
       type: external
       pattern: "agentsh*"
