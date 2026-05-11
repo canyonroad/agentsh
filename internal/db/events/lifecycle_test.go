@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -13,10 +14,12 @@ func TestLifecycleEvent_JSONRoundTrip(t *testing.T) {
 		Timestamp:      time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
 		DBService:      "appdb",
 		ClientIdentity: "uid:1000",
-		Kind:           "db_listener_auth_fail",
-		Reason:         "uid_mismatch",
+		Kind:           "db_handshake_fail",
+		Reason:         "scram_plus_fail_closed",
 		PeerUID:        2000,
 		PeerPID:        12345,
+		ErrorCode:      "SCRAM_PLUS_FAIL_CLOSED",
+		SNIHostname:    "db.internal",
 	}
 	bs, err := json.Marshal(in)
 	if err != nil {
@@ -28,5 +31,16 @@ func TestLifecycleEvent_JSONRoundTrip(t *testing.T) {
 	}
 	if out != in {
 		t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", out, in)
+	}
+}
+
+func TestLifecycleEvent_OmitsEmptySNIHostname(t *testing.T) {
+	ev := LifecycleEvent{Kind: "db_listener_auth_fail", Timestamp: time.Now()}
+	bs, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if got := string(bs); strings.Contains(got, "sni_hostname") {
+		t.Errorf("sni_hostname must be omitted when empty; got %s", got)
 	}
 }

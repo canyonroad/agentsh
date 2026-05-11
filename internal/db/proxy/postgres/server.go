@@ -14,9 +14,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -24,6 +26,7 @@ import (
 	"github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/db/policy"
 	"github.com/agentsh/agentsh/internal/db/service"
+	"github.com/agentsh/agentsh/internal/db/tlsleaf"
 )
 
 // Service is the proxy-internal flattened view of one db_service. The proxy
@@ -59,6 +62,7 @@ type Config struct {
 	StateDir       string
 	Sink           events.Sink
 	Logger         *slog.Logger
+	Policy         *policy.RuleSet // current rule set; nil means "no rules" (implicit deny). Hot-swappable in a later plan.
 }
 
 // Server runs the AgentSH PostgreSQL proxy listeners.
@@ -85,6 +89,9 @@ type Server struct {
 	// uidAllowed reports whether a peer uid is permitted to connect.
 	// Default: equality with os.Getuid(). Overrideable in tests.
 	uidAllowed func(uint32) bool
+
+	caMu  sync.Mutex
+	caRef *tlsleaf.CA
 }
 
 // New validates cfg and returns a *Server. When cfg.Unavoidability ==
@@ -111,6 +118,9 @@ func New(cfg Config) (*Server, error) {
 	for i, svc := range cfg.Services {
 		if svc.Name == "" {
 			return nil, fmt.Errorf("postgres.New: services[%d].Name is empty", i)
+		}
+		if svc.TLSMode == "passthrough" {
+			return nil, fmt.Errorf("postgres.New: services[%d] (%s) tls_mode: passthrough requires upstream wiring (Plan 04b₂); declare a terminate_* mode or wait for 04b₂", i, svc.Name)
 		}
 		if svc.Listen.Kind != "unix" && svc.Listen.Kind != "tcp" {
 			return nil, fmt.Errorf("postgres.New: services[%d].Listen.Kind = %q; want unix or tcp", i, svc.Listen.Kind)
@@ -298,8 +308,14 @@ func (s *Server) handleConn(ctx context.Context, svc Service, conn net.Conn) {
 		s.emitListenerAuthFail(ctx, svc, uid, pid, "uid_mismatch")
 		return
 	}
-	// Plan 04a: peercred passed; close the conn (handshake lands in 04b).
-	// The deferred Close in acceptLoop handles the actual close.
+	pc := newProxyConn(s, svc, conn, uid)
+	if err := pc.run(ctx); err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, net.ErrClosed) &&
+		!errors.Is(err, io.EOF) &&
+		!errors.Is(err, io.ErrUnexpectedEOF) {
+		s.logger.Warn("postgres.Server: proxyConn exited with error", "service", svc.Name, "err", err)
+	}
 }
 
 // emitListenerAuthFail emits a db_listener_auth_fail lifecycle event via the
@@ -324,4 +340,23 @@ func (s *Server) emitListenerAuthFail(ctx context.Context, svc Service, uid uint
 	if err := s.cfg.Sink.EmitLifecycle(ctx, ev); err != nil {
 		s.logger.Warn("postgres.Server: sink emit failed", "kind", ev.Kind, "err", err)
 	}
+}
+
+// ca returns the CA, loading or generating it on first call. Concurrent
+// callers see the same instance.
+func (s *Server) ca() (*tlsleaf.CA, error) {
+	s.caMu.Lock()
+	defer s.caMu.Unlock()
+	if s.caRef != nil {
+		return s.caRef, nil
+	}
+	ca, err := tlsleaf.LoadOrCreate(s.cfg.StateDir, timeNow)
+	if err != nil {
+		return nil, fmt.Errorf("postgres.Server: load CA: %w", err)
+	}
+	s.caRef = ca
+	s.logger.Info("postgres.Server: CA loaded",
+		"key", filepath.Join(s.cfg.StateDir, "db-ca.key"),
+		"cert", filepath.Join(s.cfg.StateDir, "db-ca.crt"))
+	return ca, nil
 }

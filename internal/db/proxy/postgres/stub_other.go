@@ -38,6 +38,7 @@ type Config struct {
 	StateDir       string
 	Sink           events.Sink
 	Logger         *slog.Logger
+	Policy         *policy.RuleSet // current rule set; nil means "no rules" (implicit deny). Hot-swappable in a later plan.
 }
 
 type Server struct {

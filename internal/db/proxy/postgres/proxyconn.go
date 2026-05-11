@@ -1,0 +1,83 @@
+//go:build linux
+
+package postgres
+
+import (
+	"context"
+	"net"
+	"strconv"
+
+	"github.com/jackc/pgx/v5/pgproto3"
+)
+
+// connState is the per-connection state carried through the 04b handshake.
+// 04b₂ grows this with upstream-side fields (BackendKeyData, RFQ tracker).
+type connState struct {
+	dbService      string
+	dbUser         string
+	database       string
+	appName        string
+	clientIdentity string // "uid:<peer_uid>" placeholder until Plan 07
+	sniHostname    string // best-effort; set by tls.go and sni.go in later tasks
+	replication    bool
+	tlsTerminated  bool   // true once inbound TLS handshake completes (Task 6)
+	peerUID        uint32 // captured at SO_PEERCRED time
+}
+
+// logger narrows *slog.Logger to just the methods we use, so tests can
+// substitute a no-op when verbose output would clutter t.Log.
+type logger interface {
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Debug(msg string, args ...any)
+}
+
+// proxyConn drives one client connection through the 04b handshake. It
+// owns the *pgproto3.Backend used for client-facing framing and the
+// connState. Branches plugged in by Tasks 5–7:
+//
+//   - handshake.go (Task 5): startup-packet dispatch.
+//   - tls.go      (Task 6): inbound TLS termination.
+//   - connect_rule.go (Task 7): connect-kind connection-rule eval + §13.3.
+//
+// On exit the conn is closed by the caller (acceptLoop's deferred Close).
+type proxyConn struct {
+	srv     *Server
+	svc     Service
+	logger  logger
+	conn    net.Conn // current client-facing conn (becomes *tls.Conn after Task 6)
+	backend *pgproto3.Backend
+	state   *connState
+}
+
+func newProxyConn(srv *Server, svc Service, conn net.Conn, peerUID uint32) *proxyConn {
+	return &proxyConn{
+		srv:     srv,
+		svc:     svc,
+		logger:  srv.logger,
+		conn:    conn,
+		backend: pgproto3.NewBackend(conn, conn),
+		state: &connState{
+			dbService:      svc.Name,
+			peerUID:        peerUID,
+			clientIdentity: clientIdentityFromUID(peerUID),
+		},
+	}
+}
+
+func clientIdentityFromUID(uid uint32) string {
+	return formatUID(uid)
+}
+
+// formatUID returns "uid:N". Delegates to strconv.FormatUint for conversion.
+func formatUID(uid uint32) string {
+	return "uid:" + strconv.FormatUint(uint64(uid), 10)
+}
+
+// run is the per-connection driver. Delegates to dispatchStartup (handshake.go)
+// which handles SSLRequest, GSSENCRequest, CancelRequest, and StartupMessage.
+// Task 7 inserts connect-rule eval inside dispatchStartup ahead of the
+// not-yet-wired error.
+func (pc *proxyConn) run(ctx context.Context) error {
+	return pc.dispatchStartup(ctx)
+}

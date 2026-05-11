@@ -31,6 +31,7 @@ type dbProxyDeps struct {
 	Services       []dbProxyService
 	StateDir       string
 	Sink           events.Sink
+	Policy         *dbpolicy.RuleSet // live rule set for connect-rule eval
 }
 
 // buildDBProxyConfig assembles a postgres.Config from deps and ensures
@@ -40,6 +41,7 @@ func buildDBProxyConfig(deps dbProxyDeps) (postgres.Config, error) {
 		Unavoidability: deps.Unavoidability,
 		StateDir:       deps.StateDir,
 		Sink:           deps.Sink,
+		Policy:         deps.Policy,
 	}
 	for _, s := range deps.Services {
 		if s.ListenKind == "unix" && s.ListenPath != "" {
@@ -144,6 +146,7 @@ func NewDBProxy(p *rootpolicy.Policy, stateDir string, sink events.Sink) (*postg
 		StateDir:       stateDir,
 		Sink:           sink,
 		Services:       collectDBProxyServices(rs, stateDir),
+		Policy:         rs,
 	}
 	cfg, err := buildDBProxyConfig(deps)
 	if err != nil {

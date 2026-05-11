@@ -38,6 +38,7 @@ require (
 	github.com/hashicorp/vault/api v1.22.0
 	github.com/hashicorp/vault/api/auth/approle v0.12.0
 	github.com/hashicorp/vault/api/auth/kubernetes v0.10.0
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/klauspost/compress v1.18.0
 	github.com/miekg/dns v1.1.62
 	github.com/pganalyze/pg_query_go/v6 v6.2.2
@@ -59,6 +60,7 @@ require (
 	go.opentelemetry.io/otel/sdk/log v0.16.0
 	go.opentelemetry.io/otel/trace v1.42.0
 	golang.org/x/net v0.52.0
+	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.42.0
 	golang.org/x/term v0.41.0
 	golang.org/x/time v0.15.0
@@ -181,7 +183,6 @@ require (
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/mod v0.33.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/tools v0.42.0 // indirect
 	google.golang.org/api v0.274.0 // indirect
