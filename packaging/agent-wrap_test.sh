@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Smoke test for packaging/agent-wrap.sh. Sets up an isolated tempdir with a
-# fake agent binary, fake agentsh, and fake tier file, then drives the wrapper
-# through all 5 scenarios.
+# fake agent binary at <symlink>.real, fake agentsh, and fake tier file, then
+# drives the wrapper through all 5 scenarios.
+#
+# Layout matches the move-aside-and-replace design: the wrapper symlink lives
+# at $tmp/local-bin/claude and the real binary lives at
+# $tmp/local-bin/claude.real (a sibling with .real suffix).
 
 set -euo pipefail
 
@@ -17,14 +21,14 @@ fi
 tmp=$(mktemp -d -t agent-wrap-test.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
 
-mkdir -p "$tmp/usr/bin" "$tmp/usr/local/bin" "$tmp/agentsh-bin" "$tmp/run/agentsh" "$tmp/empty-bin"
+mkdir -p "$tmp/local-bin" "$tmp/agentsh-bin" "$tmp/run/agentsh" "$tmp/empty-bin"
 
-# Fake real agent binary that announces itself.
-cat >"$tmp/usr/bin/claude" <<'EOF'
+# Fake real agent binary placed at <symlink>.real (sibling of the symlink).
+cat >"$tmp/local-bin/claude.real" <<'EOF'
 #!/bin/sh
 echo "REAL-CLAUDE: $*"
 EOF
-chmod +x "$tmp/usr/bin/claude"
+chmod +x "$tmp/local-bin/claude.real"
 
 # Fake agentsh that announces itself when called as `agentsh wrap`.
 cat >"$tmp/agentsh-bin/agentsh" <<'EOF'
@@ -33,35 +37,33 @@ echo "AGENTSH-WRAP: $*"
 EOF
 chmod +x "$tmp/agentsh-bin/agentsh"
 
-# Symlink the wrapper as if installed.
-ln -s "$wrap" "$tmp/usr/local/bin/claude"
+# Symlink the wrapper at the original agent location.
+ln -s "$wrap" "$tmp/local-bin/claude"
 
-# Helper: run the symlinked wrapper with an overridden FAKE_ROOT (the wrapper
-# reads FAKE_ROOT to relocate /usr/bin, /run/agentsh, etc. — see Task 1 Step 3
-# for how this hook is wired).
+# Helper: run the symlinked wrapper with FAKE_ROOT for tier-file relocation.
 run_wrap() {
-    AGENTSH_TEST=1 FAKE_ROOT="$tmp" PATH="$tmp/agentsh-bin:$PATH" "$tmp/usr/local/bin/claude" "$@"
+    AGENTSH_TEST=1 FAKE_ROOT="$tmp" PATH="$tmp/agentsh-bin:$PATH" "$tmp/local-bin/claude" "$@"
 }
 
 run_wrap_no_agentsh() {
-    # Restrict PATH to an empty tempdir so `command -v agentsh` fails
+    # Restrict PATH to an empty dir so `command -v agentsh` fails
     # regardless of what is installed on the host system.
-    AGENTSH_TEST=1 FAKE_ROOT="$tmp" PATH="$tmp/empty-bin" "$tmp/usr/local/bin/claude" "$@"
+    AGENTSH_TEST=1 FAKE_ROOT="$tmp" PATH="$tmp/empty-bin" "$tmp/local-bin/claude" "$@"
 }
 
-# Test 1: real binary missing → exit 127
-rm "$tmp/usr/bin/claude"
+# Test 1: ${0}.real missing → exit 127
+rm "$tmp/local-bin/claude.real"
 out=$(run_wrap --version 2>&1) && rc=0 || rc=$?
 if [ "$rc" -ne 127 ]; then
     echo "FAIL: missing-real-binary should exit 127; got rc=$rc out=$out"
     exit 1
 fi
 # Restore for subsequent tests.
-cat >"$tmp/usr/bin/claude" <<'EOF'
+cat >"$tmp/local-bin/claude.real" <<'EOF'
 #!/bin/sh
 echo "REAL-CLAUDE: $*"
 EOF
-chmod +x "$tmp/usr/bin/claude"
+chmod +x "$tmp/local-bin/claude.real"
 echo "PASS: missing-real-binary exits 127"
 
 # Test 2: agentsh missing → exit 1
@@ -91,10 +93,10 @@ if [ "$rc" -ne 1 ]; then
 fi
 echo "PASS: tier-missing exits 1"
 
-# Test 5: everything green → engages wrap with args preserved
+# Test 5: everything green → exec'd agentsh wrap -- <symlink>.real <args>
 echo "shim" >"$tmp/run/agentsh/tier"
 out=$(run_wrap --version --foo bar 2>&1)
-expected="AGENTSH-WRAP: wrap -- $tmp/usr/bin/claude --version --foo bar"
+expected="AGENTSH-WRAP: wrap -- $tmp/local-bin/claude.real --version --foo bar"
 if [ "$out" != "$expected" ]; then
     echo "FAIL: engage path wrong"
     echo "  want: $expected"
