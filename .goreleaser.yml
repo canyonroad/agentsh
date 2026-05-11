@@ -460,6 +460,9 @@ nfpms:
 release:
   draft: false
   prerelease: auto
+  extra_files:
+    - glob: scripts/install-agentsh.sh
+      name_template: install.sh
 
 # Homebrew cask is published by the publish-homebrew-cask job in release.yml
 # (not managed by GoReleaser — the cask installs the signed DMG, not raw binaries)
