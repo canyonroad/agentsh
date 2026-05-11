@@ -28,8 +28,9 @@ func buildClassifierMap(svcs []Service) (map[string]classify_pg.Parser, error) {
 }
 
 // classifierFor returns the parser registered for the given dialect. Falls
-// back to the "postgres" parser if a lookup fails — buildClassifierMap
-// validated dialects at New(), so this should not happen in practice.
+// back to any parser from the map if a lookup fails — buildClassifierMap
+// validated dialects at New() and guaranteed the map is non-empty, so all
+// Parser instances are interchangeable for an unknown dialect.
 // classifierForTest, when set on Config, overrides the map entirely.
 func (s *Server) classifierFor(dialect string) classify_pg.Parser {
 	if s.cfg.classifierForTest != nil {
@@ -38,5 +39,12 @@ func (s *Server) classifierFor(dialect string) classify_pg.Parser {
 	if p, ok := s.classifiers[dialect]; ok {
 		return p
 	}
-	return s.classifiers["postgres"]
+	// Fallback: pick any parser from the map. New() guaranteed the map is
+	// non-empty in non-sentinel mode; in sentinel mode classifierFor is never
+	// called. All Parser instances are interchangeable for an unknown dialect —
+	// they all classify against the same libpg_query AST grammar.
+	for _, p := range s.classifiers {
+		return p
+	}
+	return nil
 }

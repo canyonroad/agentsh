@@ -51,3 +51,22 @@ func TestServer_ClassifierFor_TestHookOverride(t *testing.T) {
 		t.Fatalf("hook called %d times, want 2", calls)
 	}
 }
+
+func TestServer_ClassifierFor_FallsBackWhenNoPostgresDialect(t *testing.T) {
+	// Only register a cockroachdb parser. classifierFor("unknown") must not
+	// panic and must return a non-nil parser.
+	s := &Server{
+		classifiers: map[string]classify_pg.Parser{
+			"cockroachdb": classify_pg.New(classify_pg.DialectCockroachDB),
+		},
+	}
+	got := s.classifierFor("postgres")
+	if got == nil {
+		t.Fatalf("classifierFor on missing dialect: want non-nil fallback parser")
+	}
+	// Sanity: the fallback parser must actually work.
+	_, err := got.Classify("SELECT 1", classify_pg.SessionState{}, classify_pg.Options{})
+	if err != nil {
+		t.Fatalf("fallback parser cannot classify: %v", err)
+	}
+}
