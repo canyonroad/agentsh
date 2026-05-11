@@ -115,4 +115,15 @@ const (
 	upstreamNotYetWiredErrorCode = "0A000"
 	upstreamNotYetWiredMessage   = "AgentSH DB proxy: upstream wiring not yet shipped (Plan 04b is inbound-only; Plan 04b₂ adds upstream)"
 	connectionDenyErrorCode      = "28000"
+
+	// SCRAM-SHA-256-PLUS fail-closed under terminate_* modes. Spec §13.1.
+	scramPlusErrorCode = "28000"
+	scramPlusMessage   = "AgentSH DB proxy cannot terminate channel-bound SCRAM (SCRAM-SHA-256-PLUS). Disable channel binding upstream or use TLS passthrough; see docs/agentsh-db-access-spec.md §13."
+	scramPlusEventCode = "SCRAM_PLUS_FAIL_CLOSED"
+
+	// Upstream dial / TLS failures. SQLSTATE 08006 (connection_failure).
+	upstreamDialFailErrorCode = "08006"
+	upstreamDialFailEventCode = "UPSTREAM_DIAL_FAIL"
+	upstreamTLSFailErrorCode  = "08006"
+	upstreamTLSFailEventCode  = "UPSTREAM_TLS_FAIL"
 )
