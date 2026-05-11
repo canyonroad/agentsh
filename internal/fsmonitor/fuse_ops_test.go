@@ -111,3 +111,65 @@ func TestFUSE_InterceptsExtraOps(t *testing.T) {
 		}
 	}
 }
+
+// TestFUSE_FsyncFlushLseekPassthrough verifies that fsync(2), implicit flush
+// on close, and lseek(2) on a file opened through the agentsh FUSE mount
+// succeed instead of returning ENOTSUP. Without explicit Fsync/Flush/Lseek
+// pass-throughs on fileHandle, go-fuse falls back to ENOTSUP, which libuv-
+// based runtimes surface as "operation not supported on socket, fsync".
+func TestFUSE_FsyncFlushLseekPassthrough(t *testing.T) {
+	if _, err := os.Stat("/dev/fuse"); err != nil {
+		t.Skipf("fuse not available: %v", err)
+	}
+
+	backing := t.TempDir()
+	mountPoint := filepath.Join(t.TempDir(), "mnt")
+
+	pol := &policy.Policy{
+		Version: 1,
+		Name:    "allow-all",
+		FileRules: []policy.FileRule{
+			{Name: "allow-workspace", Paths: []string{"/workspace", "/workspace/**"}, Operations: []string{"*"}, Decision: "allow"},
+		},
+	}
+	engine, err := policy.NewEngine(pol, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hooks := &Hooks{
+		SessionID: "session-fsync",
+		Policy:    engine,
+		Emit:      &typeCaptureEmitter{},
+	}
+
+	m, err := MountWorkspace(context.Background(), backing, mountPoint, hooks)
+	if err != nil {
+		t.Skipf("mount failed (skipping): %v", err)
+	}
+	defer func() { _ = m.Unmount() }()
+
+	path := filepath.Join(mountPoint, "data.bin")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := f.Write([]byte("hello")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// fsync should succeed (was ENOTSUP without pass-through).
+	if err := f.Sync(); err != nil {
+		t.Fatalf("fsync returned %v; expected nil (ENOTSUP regression)", err)
+	}
+
+	// lseek(SEEK_SET, 0) should succeed.
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Fatalf("lseek returned %v; expected nil", err)
+	}
+
+	// Close exercises the flush path; must not surface ENOTSUP either.
+	if err := f.Close(); err != nil {
+		t.Fatalf("close (flush) returned %v; expected nil", err)
+	}
+}

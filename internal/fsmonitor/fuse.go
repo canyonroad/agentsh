@@ -379,6 +379,32 @@ func (f *fileHandle) Release(ctx context.Context) syscall.Errno {
 	return 0
 }
 
+// Fsync, Flush, and Lseek pass through to the underlying loopback handle.
+// Without explicit pass-throughs go-fuse responds ENOTSUP, which libuv-
+// based runtimes (notably Node's fs.writeFileSync via the libuv fsync
+// path) surface as the misleading default ENOTSUP message string
+// "operation not supported on socket, fsync".
+func (f *fileHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
+	if s, ok := f.inner.(fs.FileFsyncer); ok {
+		return s.Fsync(ctx, flags)
+	}
+	return 0
+}
+
+func (f *fileHandle) Flush(ctx context.Context) syscall.Errno {
+	if s, ok := f.inner.(fs.FileFlusher); ok {
+		return s.Flush(ctx)
+	}
+	return 0
+}
+
+func (f *fileHandle) Lseek(ctx context.Context, off uint64, whence uint32) (uint64, syscall.Errno) {
+	if s, ok := f.inner.(fs.FileLseeker); ok {
+		return s.Lseek(ctx, off, whence)
+	}
+	return 0, syscall.ENOSYS
+}
+
 func (n *node) check(ctx context.Context, virtPath string, op string) policy.Decision {
 	mustExist := op != "create" && op != "mkdir"
 	return n.checkWithExist(ctx, virtPath, op, mustExist)
