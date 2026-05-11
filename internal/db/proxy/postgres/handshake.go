@@ -164,14 +164,42 @@ func contains(s, sub string) bool {
 }
 
 // forwardReplicationStartupAndPump is the replication-allowed allow path.
-// Task 8 implements; Task 6 lands a stub that synthesizes the deny so the
-// build is green and Task 6's tests pass. (Task 6's tests do not exercise
-// the replication-allowed branch — Policy is either nil or has no
-// match_kind=replication rule, so the evaluator returns VerbDeny before
-// we ever reach this function.) Task 8's implementer will replace this
-// stub with the real implementation.
-func (pc *proxyConn) forwardReplicationStartupAndPump(_ context.Context, _ *pgproto3.StartupMessage) error {
-	return pc.synthesizeError(replicationDenyErrorCode, "AgentSH DB proxy: replication opt-in not yet wired (Plan 04b₂ Task 8)")
+// Dials upstream per service.TLSMode, forwards the StartupMessage, emits
+// degraded_visibility_warning{reason: replication_passthrough}, then runs
+// bytePump until either side closes.
+func (pc *proxyConn) forwardReplicationStartupAndPump(ctx context.Context, m *pgproto3.StartupMessage) error {
+	conn, fe, err := dialUpstream(ctx, pc.svc, pc.srv.cfg)
+	if err != nil {
+		code := upstreamDialFailEventCode
+		errCode := upstreamDialFailErrorCode
+		msg := fmt.Sprintf("AgentSH DB proxy: upstream unreachable: %v", err)
+		if isTLSError(err) {
+			code = upstreamTLSFailEventCode
+			errCode = upstreamTLSFailErrorCode
+			msg = fmt.Sprintf("AgentSH DB proxy: upstream TLS handshake failed: %v", err)
+		}
+		pc.emitHandshakeFail(ctx, code)
+		return pc.synthesizeError(errCode, msg)
+	}
+	pc.state.upstream = conn
+	pc.state.upstreamFE = fe
+	pc.state.degradedReason = "replication_passthrough"
+
+	pc.state.upstreamFE.Send(m)
+	if err := pc.state.upstreamFE.Flush(); err != nil {
+		pc.emitHandshakeFail(ctx, upstreamDialFailEventCode)
+		return pc.synthesizeError(upstreamDialFailErrorCode, fmt.Sprintf("AgentSH DB proxy: upstream send StartupMessage (replication): %v", err))
+	}
+
+	pc.emitDegradedVisibility(ctx, "replication_passthrough", "replication_opt_in")
+
+	if err := bytePump(ctx, pc.conn, pc.state.upstream); err != nil {
+		// io.EOF / pipe-closed are normal; surface anything else.
+		if !isNormalCloseErr(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // synthesizeError writes one ErrorResponse with the given SQLSTATE+message

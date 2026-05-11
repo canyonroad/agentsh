@@ -136,3 +136,25 @@ func (pc *proxyConn) emitHandshakeFail(ctx context.Context, errorCode string) {
 	}
 	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, ev)
 }
+
+// emitDegradedVisibility emits a degraded_visibility_warning LifecycleEvent
+// with the supplied reason classifications. degradedReason is the typed
+// enum value ("replication_passthrough" / "gssenc_passthrough"); reason is
+// the free-form spec-level reason string.
+func (pc *proxyConn) emitDegradedVisibility(ctx context.Context, degradedReason, reason string) {
+	if pc.srv.cfg.Sink == nil {
+		return
+	}
+	ev := events.LifecycleEvent{
+		EventID:        newEventID(),
+		Timestamp:      timeNow(),
+		DBService:      pc.svc.Name,
+		ClientIdentity: pc.state.clientIdentity,
+		Kind:           "degraded_visibility_warning",
+		Reason:         reason,
+		PeerUID:        pc.state.peerUID,
+		DegradedReason: degradedReason,
+		SNIHostname:    pc.state.sniHostname,
+	}
+	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, ev)
+}
