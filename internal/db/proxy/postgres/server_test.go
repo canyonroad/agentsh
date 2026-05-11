@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -183,7 +182,7 @@ func TestServer_StartTwice_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestServer_New_RejectsPassthroughService(t *testing.T) {
+func TestServer_New_AllowsPassthroughService(t *testing.T) {
 	cfg := Config{
 		Unavoidability: service.UnavoidabilityObserve,
 		StateDir:       t.TempDir(),
@@ -198,12 +197,8 @@ func TestServer_New_RejectsPassthroughService(t *testing.T) {
 			Service:  policy.DBService{Name: "appdb", TLSMode: "passthrough"},
 		}},
 	}
-	_, err := New(cfg)
-	if err == nil {
-		t.Fatal("New (passthrough): want error referencing Plan 04b₂, got nil")
-	}
-	if !strings.Contains(err.Error(), "passthrough") {
-		t.Errorf("New error = %q; want it to mention passthrough", err)
+	if _, err := New(cfg); err != nil {
+		t.Fatalf("New (passthrough): want nil error, got %v", err)
 	}
 }
 

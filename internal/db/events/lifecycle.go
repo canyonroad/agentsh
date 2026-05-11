@@ -30,4 +30,11 @@ type LifecycleEvent struct {
 	// omitted SNI or the connection is not TLS. Spec §13.2 footnote: SNI
 	// is advisory; do not gate access decisions on it.
 	SNIHostname string `json:"sni_hostname,omitempty"`
+
+	// DegradedReason classifies a degraded_visibility_warning event. Values:
+	// "replication_passthrough" (Plan 04b₂), "gssenc_passthrough" (Plan 05).
+	// "tls_passthrough" is reserved but never set in 04b₂ — spec §11.1 says
+	// no per-connection DVW under tls_mode: passthrough; the value is kept
+	// for symmetry with the future GSSENC enum.
+	DegradedReason string `json:"degraded_reason,omitempty"`
 }

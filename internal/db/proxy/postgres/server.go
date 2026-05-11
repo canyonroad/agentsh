@@ -12,6 +12,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -63,6 +64,12 @@ type Config struct {
 	Sink           events.Sink
 	Logger         *slog.Logger
 	Policy         *policy.RuleSet // current rule set; nil means "no rules" (implicit deny). Hot-swappable in a later plan.
+
+	// UpstreamTLSConfigForTest, when non-nil, overrides the production
+	// upstream-TLS config (system roots, verify-full, MinVersion=TLS12,
+	// ServerName from svc.Upstream). Test-only — production callsites must
+	// leave this nil. dialUpstream uses this verbatim when non-nil.
+	UpstreamTLSConfigForTest *tls.Config
 }
 
 // Server runs the AgentSH PostgreSQL proxy listeners.
@@ -118,9 +125,6 @@ func New(cfg Config) (*Server, error) {
 	for i, svc := range cfg.Services {
 		if svc.Name == "" {
 			return nil, fmt.Errorf("postgres.New: services[%d].Name is empty", i)
-		}
-		if svc.TLSMode == "passthrough" {
-			return nil, fmt.Errorf("postgres.New: services[%d] (%s) tls_mode: passthrough requires upstream wiring (Plan 04b₂); declare a terminate_* mode or wait for 04b₂", i, svc.Name)
 		}
 		if svc.Listen.Kind != "unix" && svc.Listen.Kind != "tcp" {
 			return nil, fmt.Errorf("postgres.New: services[%d].Listen.Kind = %q; want unix or tcp", i, svc.Listen.Kind)
