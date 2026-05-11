@@ -52,11 +52,11 @@ func (pc *proxyConn) handleUnsupportedFrame(ctx context.Context, msg pgproto3.Fr
 	frameType := fmt.Sprintf("%T", msg)
 	if _, isFunc := msg.(*pgproto3.FunctionCall); isFunc {
 		pc.emitUnsupportedFrame(ctx, "FUNCTION_CALL_PROTOCOL_DENIED", "FunctionCall")
-		_ = pc.synthesizeError("42501", "FunctionCall sub-protocol denied by AgentSH policy")
+		_ = pc.synthesizeError(sqlstateInsufficientPrivilege, "FunctionCall sub-protocol denied by AgentSH policy")
 		return errUnsupportedFrame
 	}
 	pc.emitUnsupportedFrame(ctx, "EXTENDED_QUERY_NOT_SUPPORTED", frameType)
-	_ = pc.synthesizeError("0A000", "Extended Query / COPY / FunctionCall not supported in AgentSH proxy phase 1")
+	_ = pc.synthesizeError(sqlstateFeatureNotSupported, "Extended Query / COPY / FunctionCall not supported in AgentSH proxy phase 1")
 	return errUnsupportedFrame
 }
 
@@ -65,19 +65,11 @@ func (pc *proxyConn) handleUnsupportedFrame(ctx context.Context, msg pgproto3.Fr
 func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 	if len(q.String) > pc.srv.cfg.MaxQueryBytes {
 		pc.emitFrameTooLarge(ctx, len(q.String))
-		_ = pc.synthErrorAndRFQTmp("54000",
+		_ = pc.synthErrorAndRFQ(sqlstateProgramLimitExceeded,
 			fmt.Sprintf("statement too large for AgentSH proxy: %d bytes > %d cap",
 				len(q.String), pc.srv.cfg.MaxQueryBytes))
 		return errFrameTooLargeClose
 	}
 	// Allow/deny paths filled in by later tasks.
 	return pc.synthesizeError("58030", "handleQuery not yet implemented in scaffold")
-}
-
-// synthErrorAndRFQTmp is a placeholder used by Task 8's frame-budget path.
-// Task 10 introduces the real synthErrorAndRFQ in deny.go and removes this.
-func (pc *proxyConn) synthErrorAndRFQTmp(sqlstate, msg string) error {
-	pc.backend.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: sqlstate, Message: msg})
-	pc.backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-	return pc.backend.Flush()
 }
