@@ -17,7 +17,7 @@ fi
 tmp=$(mktemp -d -t agent-wrap-test.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
 
-mkdir -p "$tmp/usr/bin" "$tmp/usr/local/bin" "$tmp/agentsh-bin" "$tmp/run/agentsh"
+mkdir -p "$tmp/usr/bin" "$tmp/usr/local/bin" "$tmp/agentsh-bin" "$tmp/run/agentsh" "$tmp/empty-bin"
 
 # Fake real agent binary that announces itself.
 cat >"$tmp/usr/bin/claude" <<'EOF'
@@ -40,12 +40,13 @@ ln -s "$wrap" "$tmp/usr/local/bin/claude"
 # reads FAKE_ROOT to relocate /usr/bin, /run/agentsh, etc. — see Task 1 Step 3
 # for how this hook is wired).
 run_wrap() {
-    FAKE_ROOT="$tmp" PATH="$tmp/agentsh-bin:$PATH" "$tmp/usr/local/bin/claude" "$@"
+    AGENTSH_TEST=1 FAKE_ROOT="$tmp" PATH="$tmp/agentsh-bin:$PATH" "$tmp/usr/local/bin/claude" "$@"
 }
 
 run_wrap_no_agentsh() {
-    # Restrict PATH so `command -v agentsh` fails.
-    FAKE_ROOT="$tmp" PATH="/usr/bin:/bin" "$tmp/usr/local/bin/claude" "$@"
+    # Restrict PATH to an empty tempdir so `command -v agentsh` fails
+    # regardless of what is installed on the host system.
+    AGENTSH_TEST=1 FAKE_ROOT="$tmp" PATH="$tmp/empty-bin" "$tmp/usr/local/bin/claude" "$@"
 }
 
 # Test 1: real binary missing → exit 127
