@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -147,17 +148,7 @@ func isTLSError(err error) bool {
 		return false
 	}
 	s := err.Error()
-	return contains(s, "tls:") || contains(s, "x509:") || contains(s, "TLS handshake")
-}
-
-// contains is io-free; the events package uses a similar helper.
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(s, "tls:") || strings.Contains(s, "x509:") || strings.Contains(s, "TLS handshake")
 }
 
 // forwardReplicationStartupAndPump is the replication-allowed allow path.
@@ -259,19 +250,13 @@ func (pc *proxyConn) synthesizeError(sqlstate, message string) error {
 // Error codes Plan 04b synthesizes. Documented here so Plan 04b₂ can
 // reuse where relevant.
 const (
-	// 0A000 (feature_not_supported) — replication is denied because Plan 04b
-	// does not yet route the replication protocol; not an authentication
-	// failure (28000), which would mislead operators debugging policy.
-	replicationDenyErrorCode     = "0A000"
-	replicationDenyMessage       = "AgentSH DB proxy: replication mode is not yet supported; opt-in path lands in Plan 04b₂"
-	upstreamNotYetWiredErrorCode = "0A000"
-	upstreamNotYetWiredMessage   = "AgentSH DB proxy: upstream wiring not yet shipped (Plan 04b is inbound-only; Plan 04b₂ adds upstream)"
-	connectionDenyErrorCode      = "28000"
-
 	// SCRAM-SHA-256-PLUS fail-closed under terminate_* modes. Spec §13.1.
 	scramPlusErrorCode = "28000"
 	scramPlusMessage   = "AgentSH DB proxy cannot terminate channel-bound SCRAM (SCRAM-SHA-256-PLUS). Disable channel binding upstream or use TLS passthrough; see docs/agentsh-db-access-spec.md §13."
 	scramPlusEventCode = "SCRAM_PLUS_FAIL_CLOSED"
+
+	// Connection denied by policy; also used for replication denied in Plan 04b₂.
+	connectionDenyErrorCode = "28000"
 
 	// Upstream dial / TLS failures. SQLSTATE 08006 (connection_failure).
 	upstreamDialFailErrorCode = "08006"

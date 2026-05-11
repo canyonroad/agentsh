@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -310,7 +311,7 @@ database_connection_rules:
 		if body == nil {
 			t.Fatal("upstream did not receive StartupMessage")
 		}
-		if !contains(string(body), "replication") {
+		if !strings.Contains(string(body), "replication") {
 			t.Errorf("upstream startup body missing replication param: %q", body)
 		}
 	case <-time.After(1 * time.Second):
