@@ -69,7 +69,7 @@ Each rule has `name`, `description`, the kind-specific selectors, `decision`, an
 | `/var/log/agentsh/daemon.log` | daemon | Daemon stdout+stderr |
 | `/var/log/agentsh/bootstrap.log` | bootstrap | Startup banner + tier probe result |
 | `/usr/lib/agentsh/agent-wrap` | OS package, read-only | Shared wrapper script for agent binaries |
-| `/usr/local/bin/<agent>` | Kit install step | Symlink to agent-wrap (created per detected agent) |
+| `<original agent path>` | Kit install step | Symlink to agent-wrap at the agent's original PATH location; the real binary is moved aside to `<path>.real` (e.g. `/usr/local/share/npm-global/bin/opencode` → symlink, `…/opencode.real` → moved-aside binary) |
 
 ## Decision semantics quick reference
 
