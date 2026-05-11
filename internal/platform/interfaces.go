@@ -106,6 +106,11 @@ type FSConfig struct {
 	// NotifySoftDelete is called when a file is soft-deleted (optional)
 	NotifySoftDelete func(path, token string)
 
+	// MaxBackground sets the kernel-side per-mount FUSE async request queue
+	// depth (FUSE_INIT max_background). 0 means "use the underlying library
+	// default" (go-fuse uses 12, matching the kernel default).
+	MaxBackground int
+
 	// Options contains platform-specific mount options
 	Options map[string]string
 }

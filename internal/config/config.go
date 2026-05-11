@@ -400,6 +400,13 @@ type SandboxFUSEConfig struct {
 	// DeferredEnableCommand is run when FUSE is unavailable in deferred mode
 	// to make /dev/fuse accessible (e.g., ["sudo", "/bin/chmod", "666", "/dev/fuse"]).
 	DeferredEnableCommand []string `yaml:"deferred_enable_command"`
+	// MaxBackground is the kernel-side per-mount FUSE async request queue
+	// depth (the FUSE_INIT max_background value go-fuse passes to the
+	// kernel). When unset or 0, agentsh leaves go-fuse's default in place
+	// (12). Raising it gives the kernel more headroom for multi-mount
+	// daemons under heavy ptrace+seccomp syscall traffic; common tuned
+	// values are 32-128.
+	MaxBackground int `yaml:"max_background"`
 }
 
 type FUSEAuditConfig struct {

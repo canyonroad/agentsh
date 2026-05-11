@@ -36,6 +36,7 @@ type Hooks struct {
 	FUSEAudit        *FUSEAuditHooks
 	TraceContextFunc func() (traceID, spanID, traceFlags string)
 	VirtualRoot      string // "/workspace" or real path
+	MaxBackground int
 }
 
 func NewMonitoredLoopbackRoot(realRoot string, hooks *Hooks) (fs.InodeEmbedder, error) {

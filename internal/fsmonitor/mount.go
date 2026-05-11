@@ -55,6 +55,15 @@ func MountWorkspace(ctx context.Context, backingDir string, mountPoint string, h
 		},
 	}
 
+	// Optional kernel-side async request queue tuning
+	// (sandbox.fuse.max_background). When 0, leave go-fuse's default in
+	// place -- go-fuse uses 12, matching the kernel default.
+	// Running one daemon with many mounts under heavy ptrace+seccomp
+	// syscall traffic can raise this knob to give the kernel more headroom
+	if hooks != nil && hooks.MaxBackground > 0 {
+		opts.MountOptions.MaxBackground = hooks.MaxBackground
+	}
+
 	type mountResult struct {
 		server *fuse.Server
 		err    error

@@ -63,6 +63,10 @@ sandbox:
       trash_path: ".agentsh_trash"
       ttl: "24h"
       quota: "1GB"
+    # Kernel-side per-mount FUSE async request queue depth
+    # When unset or 0, agentsh defaults to go-fuse's 12
+    # Raise this when one agentsh daemon serves many concurrent FUSE mounts
+    # max_background: 64
 
   # Network interception
   network:

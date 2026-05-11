@@ -2302,6 +2302,7 @@ Key fields:
     - `strict_on_audit_failure` (bool, fail operation when audit sink errors)
     - `max_event_queue` (bounded async logger depth; drop-oldest unless strict)
     - `hash_small_files_under` (size threshold to hash diverted files for integrity on restore)
+  - `sandbox.fuse.max_background` (int, default 0): kernel-side per-mount FUSE async request queue depth (`FUSE_INIT max_background`). When 0, go-fuse's default of 12 is used (matching the kernel default). Raise on multi-mount daemons under heavy ptrace+seccomp syscall traffic to reduce request_wait_answer parking. Common tuned values: 32–128. Values below 12 typically degrade throughput.
   - `sandbox.unixSockets.*` (audit-only unix domain socket monitoring):
     - `enabled` (bool, default false)
     - `wrapper_bin` (path override, default `agentsh-unixwrap` in `$PATH`)

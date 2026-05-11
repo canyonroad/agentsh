@@ -268,6 +268,7 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 			commandIDFunc: cfg.CommandIDFunc,
 		},
 		TraceContextFunc: cfg.TraceContextFunc,
+		MaxBackground:    cfg.MaxBackground,
 	}
 
 	// Set up trash/soft-delete if configured
