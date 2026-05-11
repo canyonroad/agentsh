@@ -7,6 +7,7 @@ package postgres
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 
@@ -160,6 +161,22 @@ func classifyWithBackend(
 	out := make([]effects.ClassifiedStatement, 0, len(res.Stmts))
 	for _, raw := range res.Stmts {
 		cs := classifyRawStmt(dialect, raw, sess, opts, backend)
+		// pg_query gives StmtLen=0 for a trailing single statement; in that
+		// case the statement runs from StmtLocation to end-of-input.
+		start := raw.StmtLocation
+		length := raw.StmtLen
+		var end int32
+		if length == 0 {
+			end = int32(len(sql))
+		} else {
+			end = start + length
+		}
+		// Skip leading whitespace to get the actual statement boundaries
+		for start < end && unicode.IsSpace(rune(sql[start])) {
+			start++
+		}
+		cs.SourceStart = start
+		cs.SourceEnd = end
 		out = append(out, cs)
 	}
 	return out, nil
