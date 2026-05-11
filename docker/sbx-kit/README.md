@@ -50,6 +50,34 @@ are routed through AgentSH's shim binary. LD_PRELOAD and ptrace tiers are
 planned (see the spec under
 `docs/superpowers/specs/2026-05-11-docker-sandboxes-mixin-kit-design.md`).
 
+## E2E test (no `sbx` required)
+
+`tests/run-e2e.sh` (or `make sbx-e2e` from the repo root) exercises the kit's
+mechanics against the public `docker/sandbox-templates:shell-docker` image —
+no Docker Sandboxes install needed. It:
+
+1. Builds `agentsh-shell-shim` and `agentsh-sbx-bootstrap` on the host (CGO off).
+2. Starts a container from the sandbox template.
+3. Lays down the same payload `sbx run --kit` would (binaries, policy template,
+   `/usr/lib/agentsh/shims/*` symlinks, `/etc/profile.d/agentsh.sh`,
+   `/etc/environment.d/10-agentsh.conf`, the kit's `files/` tree, plus a user
+   override fragment crafted to exercise both replace-by-name and append).
+4. Runs `/usr/bin/agentsh-sbx-bootstrap`.
+5. Verifies: `/run/agentsh/tier == shim`; `command -v curl` resolves under
+   `/usr/lib/agentsh/shims/`; `/etc/agentsh/policies/default.yaml` is the
+   merged policy (baked rule present; appended override rule present;
+   replace-by-name overlay paths win); SKILL.md and override stub landed.
+
+What it does **not** verify (still gated on a real `sbx run` against a
+tagged release):
+
+- The `install` step actually downloading `install.sh` and the matching
+  `.deb`/`.rpm`/`.apk` from the GitHub release.
+- In-sandbox enforcement (deny / audit / soft_delete) — that needs the
+  `agentsh server` running, which depends on libseccomp; out of scope for
+  v1 E2E. Run `tests/coding-agent-smoke.sh` inside a real sandbox for that.
+- That the agent kit's actual entrypoint inherits the shim PATH.
+
 ## Override the policy
 
 Write a partial YAML policy to `/home/agent/.agentsh/policy.yaml` inside the

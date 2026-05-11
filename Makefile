@@ -58,6 +58,9 @@ dns-test:
 	docker build -f Dockerfile.dns-test -t agentsh-dns-test .
 	docker run --rm --cap-add SYS_PTRACE agentsh-dns-test
 
+sbx-e2e:
+	bash docker/sbx-kit/tests/run-e2e.sh
+
 seccomp-probe:
 	mkdir -p build
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o build/seccomp-probe ./cmd/seccomp-probe/

@@ -9,13 +9,26 @@ import (
 	"strings"
 )
 
-// probeShimTier runs `/bin/sh -c 'command -v curl'` and reports whether the
-// resolved curl path lives under shimDir. Returns (ok, resolvedPath, err).
+// probeShimTier runs a tiny shell that first sources the kit's PATH-injection
+// hook at /etc/profile.d/agentsh.sh (if present) and then resolves curl.
+// Returns (ok, resolvedPath, err). `ok=true` when the resolved curl lives
+// under shimDir; `ok=false` means either curl is absent or the system curl
+// is winning over the shim (i.e. the kit's PATH wiring isn't effective).
 // A non-nil error means the probe couldn't be run at all (e.g. /bin/sh
-// missing); a successful run with `ok=false` means curl is either absent or
-// the system curl is winning over the shim.
+// missing).
+//
+// Sourcing profile.d explicitly matters because the bootstrap typically runs
+// in a non-login shell (the Docker Sandboxes `startup` phase), so PATH
+// modifications written to /etc/profile.d/ are not picked up by `/bin/sh`
+// out of the box. The probe must verify the agent's eventual PATH, not the
+// bootstrap's own PATH at invocation time.
 func probeShimTier(shimDir string) (bool, string, error) {
-	cmd := exec.Command("/bin/sh", "-c", "command -v curl")
+	// Guard the `dot` source with `[ -r ... ]` rather than `2>/dev/null || true`:
+	// in POSIX mode (which bash-as-/bin/sh enters), a missing-file failure from
+	// the special builtin `.` aborts the shell before `|| true` can rescue it,
+	// turning a no-op into a probe failure. The bracket test sidesteps that.
+	const script = "[ -r /etc/profile.d/agentsh.sh ] && . /etc/profile.d/agentsh.sh; command -v curl"
+	cmd := exec.Command("/bin/sh", "-c", script)
 	out, err := cmd.Output()
 	if err != nil {
 		// `command -v curl` exits 1 when curl isn't found; that's not an error
