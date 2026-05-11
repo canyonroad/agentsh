@@ -68,6 +68,8 @@ Each rule has `name`, `description`, the kind-specific selectors, `decision`, an
 | `/run/agentsh/agentsh.sock` | daemon | Daemon control socket |
 | `/var/log/agentsh/daemon.log` | daemon | Daemon stdout+stderr |
 | `/var/log/agentsh/bootstrap.log` | bootstrap | Startup banner + tier probe result |
+| `/usr/lib/agentsh/agent-wrap` | OS package, read-only | Shared wrapper script for agent binaries |
+| `/usr/local/bin/<agent>` | Kit install step | Symlink to agent-wrap (created per detected agent) |
 
 ## Decision semantics quick reference
 

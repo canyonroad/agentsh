@@ -50,6 +50,42 @@ are routed through AgentSH's shim binary. LD_PRELOAD and ptrace tiers are
 planned (see the spec under
 `docs/superpowers/specs/2026-05-11-docker-sandboxes-mixin-kit-design.md`).
 
+## Behavior: agent harness runs under `agentsh wrap`
+
+This kit runs the agent harness under `agentsh wrap` whenever it can. After
+install, the kit creates symlinks at `/usr/local/bin/<agent>` (for known
+agents present in the sandbox) that route launches through `agentsh wrap`,
+giving you full exec-pipeline interception of every subprocess the agent
+spawns, a coherent session, and a session report on exit.
+
+Wrapped agents (v1): `claude`, `opencode`, `gemini`, `codex`, `cursor`. The
+installer skips agents whose binary isn't present in `/usr/bin/` and skips
+any entry that already exists in `/usr/local/bin/` (never overwrites
+something the agent kit shipped).
+
+### Fail-CLOSED deviation from the parent spec
+
+When the wrapper at `/usr/local/bin/<agent>` runs, it exits non-zero and
+refuses to launch the agent if AgentSH cannot engage cleanly: the `agentsh`
+binary is missing, `/run/agentsh/tier` does not read `shim`, or the tier
+file is missing. Choosing this kit means choosing enforcement-mandatory
+semantics; running unenforced is not a supported state.
+
+This deviates from the parent spec's §7 "never bricks the sandbox" stance.
+The parent spec governs the kit's *bootstrap*; this section governs the
+wrapper's behavior at *agent launch time*.
+
+### Known limitations
+
+- **Absolute-path entrypoints bypass the wrapper.** The mechanism relies on
+  `/usr/local/bin` preceding `/usr/bin` in PATH. An agent kit whose
+  entrypoint invokes `/usr/bin/claude` directly is unaffected by the
+  wrapper. Verify per agent kit before relying on auto-wrap.
+- **Install-time failures pass through.** If the kit's `install` command
+  itself fails (curl 404, package install error), the wrappers are never
+  created and the agent runs unwrapped. sbx run should report this
+  failure visibly.
+
 ## E2E test (no `sbx` required)
 
 `tests/run-e2e.sh` (or `make sbx-e2e` from the repo root) exercises the kit's
