@@ -9,9 +9,7 @@
 # Package manager support:
 #   dpkg  — downloads the .deb artifact
 #   rpm   — downloads the .rpm artifact
-#   apk   — Alpine Linux; GoReleaser produces no .apk, so the tar.gz
-#             archive is downloaded and the binaries extracted manually
-#             into /usr/bin.
+#   apk   — downloads the .apk artifact (Alpine Linux)
 #
 # Env knobs (all optional):
 #   AGENTSH_VERSION    Pinned release tag, e.g. v0.1.2 (default: latest)
@@ -129,16 +127,13 @@ main() {
       ;;
 
     apk)
-      # GoReleaser does not produce .apk; use the tar.gz archive and
-      # extract binaries manually into /usr/bin.
-      fname="agentsh_${ver}_linux_${arch}.tar.gz"
+      # GoReleaser nfpms apk default: agentsh_<version>_linux_<arch>.apk
+      fname="agentsh_${ver}_linux_${arch}.apk"
       url="${base}/${fname}"
-      tmp="/tmp/agentsh.tar.gz"
+      tmp="/tmp/agentsh.apk"
       echo "install-agentsh: using apk (${url})"
-      run curl -fsSL "$url" -o "$tmp"                                    || exit 2
-      run tar -xzf "$tmp" -C /usr/bin --strip-components=0               \
-          agentsh agentsh-shell-shim agentsh-unixwrap agentsh-stub       \
-          agentsh-sbx-bootstrap 2>/dev/null || run tar -xzf "$tmp" -C /usr/bin --strip-components=0 agentsh || exit 3
+      run curl -fsSL "$url" -o "$tmp"               || exit 2
+      run apk add --allow-untrusted "$tmp"          || exit 3
       ;;
 
     none)

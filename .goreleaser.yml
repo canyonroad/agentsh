@@ -325,6 +325,7 @@ nfpms:
       - deb
       - rpm
       - archlinux
+      - apk
     bindir: /usr/bin
     vendor: AgentSH
     homepage: https://github.com/agentsh/agentsh

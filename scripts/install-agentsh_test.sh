@@ -26,9 +26,9 @@ echo "$out" | grep -q "rpm.*agentsh-.*\.x86_64\.rpm" || {
   exit 1
 }
 
-# Test 3: detects apk (Alpine — uses tar.gz since GoReleaser produces no .apk)
+# Test 3: detects apk
 out=$(AGENTSH_DRY_RUN=1 AGENTSH_FORCE_DETECT=apk AGENTSH_ARCH=amd64 "$script" 2>&1 || true)
-echo "$out" | grep -q "apk.*agentsh_.*_linux_amd64\.tar\.gz" || {
+echo "$out" | grep -q "apk.*agentsh_.*_linux_amd64.apk" || {
   echo "FAIL: apk branch missing or wrong URL"
   echo "----- output -----"
   echo "$out"
