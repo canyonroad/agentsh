@@ -68,10 +68,7 @@ type Config struct {
 	// UpstreamTLSConfigForTest, when non-nil, overrides the production
 	// upstream-TLS config (system roots, verify-full, MinVersion=TLS12,
 	// ServerName from svc.Upstream). Test-only — production callsites must
-	// leave this nil. Gated by a runtime panic when non-nil under
-	// Unavoidability != off and the running process's executable is not a
-	// _test binary, to make accidental production misuse loud rather than
-	// silent. See upstream.go.
+	// leave this nil. dialUpstream uses this verbatim when non-nil.
 	UpstreamTLSConfigForTest *tls.Config
 }
 
