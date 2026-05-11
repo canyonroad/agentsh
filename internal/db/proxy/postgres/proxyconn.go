@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strconv"
 
@@ -163,4 +164,42 @@ func (pc *proxyConn) emitDegradedVisibility(ctx context.Context, degradedReason,
 		SNIHostname:    pc.state.sniHostname,
 	}
 	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, ev)
+}
+
+// emitFrameTooLarge emits a db_handshake_fail event with error_code
+// FRAME_TOO_LARGE. Used when the client sends a 'Q' body above MaxQueryBytes.
+func (pc *proxyConn) emitFrameTooLarge(ctx context.Context, size int) {
+	if pc.srv.cfg.Sink == nil {
+		return
+	}
+	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, events.LifecycleEvent{
+		EventID:        newEventID(),
+		Timestamp:      timeNow(),
+		DBService:      pc.svc.Name,
+		ClientIdentity: pc.state.clientIdentity,
+		Kind:           "db_handshake_fail",
+		ErrorCode:      "FRAME_TOO_LARGE",
+		Reason:         fmt.Sprintf("statement too large for AgentSH proxy: %d bytes > %d cap", size, pc.srv.cfg.MaxQueryBytes),
+		PeerUID:        pc.state.peerUID,
+	})
+}
+
+// emitUnsupportedFrame emits a db_handshake_fail event when the client sends
+// a Plan-05 frame (Parse/Bind/Describe/Execute/Sync/Flush/Close/FunctionCall)
+// post-handshake. errorCode distinguishes FUNCTION_CALL_PROTOCOL_DENIED from
+// the generic EXTENDED_QUERY_NOT_SUPPORTED.
+func (pc *proxyConn) emitUnsupportedFrame(ctx context.Context, errorCode, frameType string) {
+	if pc.srv.cfg.Sink == nil {
+		return
+	}
+	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, events.LifecycleEvent{
+		EventID:        newEventID(),
+		Timestamp:      timeNow(),
+		DBService:      pc.svc.Name,
+		ClientIdentity: pc.state.clientIdentity,
+		Kind:           "db_handshake_fail",
+		ErrorCode:      errorCode,
+		Reason:         "frame " + frameType + " not supported in AgentSH proxy phase 1",
+		PeerUID:        pc.state.peerUID,
+	})
 }
