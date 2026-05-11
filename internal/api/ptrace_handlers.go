@@ -69,7 +69,35 @@ func (r *ptraceHandlerRouter) emitDBBypassAttempt(ctx context.Context, engine *p
 func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecContext) ptrace.ExecResult {
 	s, ok := r.sessions.Get(ec.SessionID)
 	if !ok {
-		slog.Warn("ptrace: unknown session for execve", "session_id", ec.SessionID, "pid", ec.PID)
+		// Two cases that look the same (no session for this tracee)
+		// but mean very different things:
+		//
+		//   (a) Sessionless pid-attach. initPtraceTracer calls
+		//       tr.AttachPID(pid) without WithSessionID for the
+		//       attach_mode=pid path, so the attached root and its
+		//       descendants are sessionless by design -- the wrapper
+		//       / session layer governs enforcement above the tracer.
+		//       Pass through (no policy engine to consult here).
+		//
+		//   (b) Non-empty SessionID that the session manager does not
+		//       know about. This is a real session-accounting bug:
+		//       something registered a session id with the tracer but
+		//       the session is gone (or never existed) by the time
+		//       execve fires. Fail closed, loud log.
+		//
+		// The earlier version of this branch flipped deny->allow
+		// unconditionally to avoid crashing tracees on a session race;
+		// per maintainer review (PR #312), the race itself is now
+		// closed by seedChildStateFromParent in the tracer minimal-
+		// state fallbacks, and the conflated case (b) must remain
+		// fail-closed rather than silently allowed.
+		if ec.SessionlessPIDAttach {
+			slog.Debug("ptrace: sessionless pid-attach execve, allowing pass-through",
+				"pid", ec.PID, "filename", ec.Filename)
+			return ptrace.ExecResult{Allow: true, Action: "allow", Rule: "sessionless_pid_attach"}
+		}
+		slog.Warn("ptrace: unknown session for execve, denying",
+			"session_id", ec.SessionID, "pid", ec.PID, "filename", ec.Filename)
 		return ptrace.ExecResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES), Rule: "unknown_session"}
 	}
 

@@ -197,6 +197,63 @@ func TestHandleExecve_DBUnavoidabilityDenyEmitsBypassAttempt(t *testing.T) {
 	}
 }
 
+// TestHandleExecve_SessionlessPIDAttachAllows verifies the legitimate
+// attach_mode=pid sessionless path (PR #312 review concern B):
+// initPtraceTracer calls tr.AttachPID(pid) without WithSessionID, so
+// the attached root and its descendants are sessionless by design --
+// the wrapper / session layer governs enforcement above the tracer.
+// HandleExecve must let those execve's pass through with rule
+// "sessionless_pid_attach".
+func TestHandleExecve_SessionlessPIDAttachAllows(t *testing.T) {
+	router, _ := newTestRouter(t, "")
+	res := router.HandleExecve(context.Background(), ptrace.ExecContext{
+		PID:                  4242,
+		Filename:             "/bin/true",
+		SessionID:            "",
+		SessionlessPIDAttach: true,
+	})
+	if !res.Allow {
+		t.Fatalf("SessionlessPIDAttach execve must allow; got Allow=false")
+	}
+	if res.Action != "allow" {
+		t.Fatalf("Action=%q; want %q", res.Action, "allow")
+	}
+	if res.Rule != "sessionless_pid_attach" {
+		t.Fatalf("Rule=%q; want %q", res.Rule, "sessionless_pid_attach")
+	}
+	if res.Errno != 0 {
+		t.Fatalf("Errno=%d; want 0 (no errno on allow)", res.Errno)
+	}
+}
+
+// TestHandleExecve_NonEmptyUnknownSessionDenies covers the other half
+// of the PR #312 review split: a non-empty SessionID that the session
+// manager does not know about is a real session-accounting bug, not
+// the legitimate sessionless-pid-attach case. Must fail closed with
+// rule "unknown_session" so the bug is visible rather than silently
+// allowed.
+func TestHandleExecve_NonEmptyUnknownSessionDenies(t *testing.T) {
+	router, _ := newTestRouter(t, "")
+	res := router.HandleExecve(context.Background(), ptrace.ExecContext{
+		PID:                  4242,
+		Filename:             "/bin/true",
+		SessionID:            "session-that-does-not-exist",
+		SessionlessPIDAttach: false,
+	})
+	if res.Allow {
+		t.Fatalf("non-empty unknown SessionID must deny; got Allow=true")
+	}
+	if res.Action != "deny" {
+		t.Fatalf("Action=%q; want %q", res.Action, "deny")
+	}
+	if res.Rule != "unknown_session" {
+		t.Fatalf("Rule=%q; want %q", res.Rule, "unknown_session")
+	}
+	if res.Errno != int32(syscall.EACCES) {
+		t.Fatalf("Errno=%d; want EACCES (%d)", res.Errno, syscall.EACCES)
+	}
+}
+
 func TestHandleFile_SoftDelete(t *testing.T) {
 	workspace := t.TempDir()
 

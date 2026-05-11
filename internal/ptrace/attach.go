@@ -129,6 +129,13 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 		MemFD:              memFD,
 		PendingExecStubFD:  -1,
 		PendingExecSavedFD: -1,
+		// Mark the legitimate "attach_mode=pid without a SessionID"
+		// case (initPtraceTracer's tr.AttachPID(pid) path). Children
+		// inherit this flag via seedChildStateFromParent so
+		// HandleExecve can distinguish an intentionally sessionless
+		// pid-attach descendant from a real "non-empty unknown
+		// SessionID" session-accounting bug.
+		SessionlessPIDAttach: opts.sessionID == "",
 	}
 	if opts.keepStopped {
 		t.parkedTracees[tid] = struct{}{}
