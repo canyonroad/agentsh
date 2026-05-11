@@ -6,6 +6,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -159,5 +160,41 @@ func TestSimpleQueryLoop_TerminateForwarded(t *testing.T) {
 
 	if err := <-loopErr; err != nil {
 		t.Fatalf("simpleQueryLoop on Terminate: %v", err)
+	}
+}
+
+func TestHandleQuery_FrameTooLarge(t *testing.T) {
+	pc, clientFE, sink := newSimpleQueryFixture(t)
+	pc.state.lastUpstreamRFQ = 'I'
+	pc.srv.cfg.MaxQueryBytes = 32
+
+	big := &pgproto3.Query{String: strings.Repeat("SELECT 1; ", 10)} // > 32 bytes
+
+	loopErr := make(chan error, 1)
+	go func() { loopErr <- pc.simpleQueryLoop(context.Background()) }()
+
+	mustSendFromClient(t, clientFE, big)
+
+	msg := mustReceiveClientFrame(t, clientFE)
+	er, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("first frame = %T want ErrorResponse", msg)
+	}
+	if er.Code != "54000" {
+		t.Fatalf("Code = %q want 54000", er.Code)
+	}
+
+	rfq := mustReceiveClientFrame(t, clientFE)
+	if _, ok := rfq.(*pgproto3.ReadyForQuery); !ok {
+		t.Fatalf("expected ReadyForQuery after FRAME_TOO_LARGE, got %T", rfq)
+	}
+
+	if err := <-loopErr; err == nil {
+		t.Fatalf("simpleQueryLoop on oversized Q: want err, got nil")
+	}
+
+	ev := sink.DrainLifecycle()
+	if len(ev) != 1 || ev[0].ErrorCode != "FRAME_TOO_LARGE" {
+		t.Fatalf("lifecycle = %+v", ev)
 	}
 }

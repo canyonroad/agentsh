@@ -61,9 +61,23 @@ func (pc *proxyConn) handleUnsupportedFrame(ctx context.Context, msg pgproto3.Fr
 }
 
 // handleQuery is filled in by Tasks 8 (frame budget), 12 (allow) and 13 (deny).
-// For now it returns a synthetic error to keep the loop progressing in tests.
+// Task 8 enforces the frame budget cap; subsequent tasks fill in allow/deny paths.
 func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
-	_ = ctx
-	_ = q
+	if len(q.String) > pc.srv.cfg.MaxQueryBytes {
+		pc.emitFrameTooLarge(ctx, len(q.String))
+		_ = pc.synthErrorAndRFQTmp("54000",
+			fmt.Sprintf("statement too large for AgentSH proxy: %d bytes > %d cap",
+				len(q.String), pc.srv.cfg.MaxQueryBytes))
+		return errFrameTooLargeClose
+	}
+	// Allow/deny paths filled in by later tasks.
 	return pc.synthesizeError("58030", "handleQuery not yet implemented in scaffold")
+}
+
+// synthErrorAndRFQTmp is a placeholder used by Task 8's frame-budget path.
+// Task 10 introduces the real synthErrorAndRFQ in deny.go and removes this.
+func (pc *proxyConn) synthErrorAndRFQTmp(sqlstate, msg string) error {
+	pc.backend.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: sqlstate, Message: msg})
+	pc.backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	return pc.backend.Flush()
 }
