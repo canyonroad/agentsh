@@ -26,6 +26,7 @@ const (
 	defaultServerConfig  = "/etc/agentsh/config.yaml"
 	defaultDaemonSocket  = "/run/agentsh/agentsh.sock"
 	defaultSocketTimeout = 2 * time.Second
+	defaultShimDir       = "/usr/lib/agentsh/shims"
 )
 
 func main() {
@@ -55,7 +56,6 @@ func main() {
 		// Don't exit — tier probe will record tier=none.
 	}
 
-	const defaultShimDir = "/usr/lib/agentsh/shims"
 	shimDir := defaultShimDir
 	if env := os.Getenv("AGENTSH_SHIM_DIR"); env != "" {
 		shimDir = env

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,7 +20,8 @@ func probeShimTier(shimDir string) (bool, string, error) {
 	if err != nil {
 		// `command -v curl` exits 1 when curl isn't found; that's not an error
 		// for our purposes — it just means the shim tier didn't apply.
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 			return false, "", nil
 		}
 		return false, "", fmt.Errorf("probe: %w", err)

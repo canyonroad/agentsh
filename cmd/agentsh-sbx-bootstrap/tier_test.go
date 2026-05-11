@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -47,9 +49,11 @@ func TestProbeShimTier_RejectsRealCurl(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 	ok, _, err := probeShimTier("/nonexistent/shims")
 	if err != nil {
-		// "command -v" failing because curl isn't installed is fine; it
-		// surfaces as ok=false, err=nil. If it does error, we want to know.
-		t.Logf("probe returned err (acceptable): %v", err)
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+			t.Fatalf("unexpected probe error: %v", err)
+		}
+		// exit 1 = "curl not found"; acceptable on hosts without curl
 	}
 	if ok {
 		t.Errorf("expected probe to NOT detect shim when only /usr/bin/curl is reachable")
