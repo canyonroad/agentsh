@@ -29,6 +29,12 @@ type ClassifiedStatement struct {
 	RawVerb       string        `json:"raw_verb,omitempty"`
 	ParserBackend ParserBackend `json:"parser_backend,omitempty"`
 	Error         string        `json:"error,omitempty"`
+
+	// SourceStart / SourceEnd are byte offsets into the original SQL input
+	// (Plan 04c needs these to slice per-stmt text under RedactionFull). Both
+	// zero when the parser cannot supply them (e.g. unknown-statement path).
+	SourceStart int32 `json:"source_start,omitempty"`
+	SourceEnd   int32 `json:"source_end,omitempty"`
 }
 
 // Primary returns the first (canonical) effect. ok=false on empty effects list.

@@ -4,6 +4,7 @@ package effects
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -89,4 +90,39 @@ func TestClassifiedStatement_ErrorField(t *testing.T) {
 			t.Fatalf("Error round-trip: got %q want %q", out.Error, in.Error)
 		}
 	})
+}
+
+func TestClassifiedStatement_SourceSpan_RoundTrip(t *testing.T) {
+	in := ClassifiedStatement{
+		Effects:     []Effect{{Group: GroupRead, Resolution: ResolutionQualified}},
+		RawVerb:     "SELECT",
+		SourceStart: 7,
+		SourceEnd:   23,
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var out ClassifiedStatement
+	if err := json.Unmarshal(bs, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.SourceStart != in.SourceStart || out.SourceEnd != in.SourceEnd {
+		t.Fatalf("span lost: got (%d,%d) want (%d,%d)",
+			out.SourceStart, out.SourceEnd, in.SourceStart, in.SourceEnd)
+	}
+}
+
+func TestClassifiedStatement_SourceSpan_ZeroOmitted(t *testing.T) {
+	in := ClassifiedStatement{
+		Effects: []Effect{{Group: GroupRead, Resolution: ResolutionQualified}},
+		RawVerb: "SELECT",
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(bs), "source_start") || strings.Contains(string(bs), "source_end") {
+		t.Fatalf("zero span fields must be omitted: %s", bs)
+	}
 }
