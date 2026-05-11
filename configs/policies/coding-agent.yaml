@@ -38,6 +38,10 @@ file_rules:
       - "/root/.gnupg/**"
       - "/root/.kube/**"
       - "/root/.netrc"
+      - "/root/.docker/config.json"
+      - "/root/.config/gcloud/**"
+      - "/root/.config/gh/**"
+      - "/root/.config/git-credentials"
     operations: ["*"]
     decision: deny
     message: "Access to credential path {{.Path}} is denied by the coding-agent policy."
@@ -93,6 +97,10 @@ file_rules:
       - "/root/.npm/**"
       - "/root/.cache/pip/**"
       - "/root/.cargo/**"
+      - "/root/.cache/go-build/**"
+      - "/root/.rustup/**"
+      - "/root/.gradle/caches/**"
+      - "/root/.m2/**"
     operations: ["*"]
     decision: allow
 
