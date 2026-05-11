@@ -12,18 +12,18 @@ import (
 )
 
 type kitSpec struct {
-	SchemaVersion string   `yaml:"schemaVersion"`
-	Kind          string   `yaml:"kind"`
-	Name          string   `yaml:"name"`
-	DisplayName   string   `yaml:"displayName"`
-	Description   string   `yaml:"description"`
-	Commands      kitCmds  `yaml:"commands"`
+	SchemaVersion string  `yaml:"schemaVersion"`
+	Kind          string  `yaml:"kind"`
+	Name          string  `yaml:"name"`
+	DisplayName   string  `yaml:"displayName"`
+	Description   string  `yaml:"description"`
+	Commands      kitCmds `yaml:"commands"`
 }
 
 type kitCmds struct {
-	Install   []kitInstall   `yaml:"install"`
-	InitFiles []kitInitFile  `yaml:"initFiles"`
-	Startup   []kitStartup   `yaml:"startup"`
+	Install   []kitInstall  `yaml:"install"`
+	InitFiles []kitInitFile `yaml:"initFiles"`
+	Startup   []kitStartup  `yaml:"startup"`
 }
 
 type kitInstall struct {
@@ -74,15 +74,26 @@ func TestSpecYAML_TopLevel(t *testing.T) {
 
 func TestSpecYAML_InstallReferencesInstallScript(t *testing.T) {
 	s := loadSpec(t)
-	if len(s.Commands.Install) != 1 {
-		t.Fatalf("expected exactly one install command, got %d", len(s.Commands.Install))
+	if len(s.Commands.Install) != 2 {
+		t.Fatalf("expected exactly two install commands, got %d", len(s.Commands.Install))
 	}
-	cmd := s.Commands.Install[0].Command
-	if !strings.Contains(cmd, "install.sh") {
-		t.Errorf("install command does not curl install.sh: %q", cmd)
+
+	// First entry: curl install.sh | sh
+	first := s.Commands.Install[0].Command
+	if !strings.Contains(first, "install.sh") {
+		t.Errorf("first install command does not curl install.sh: %q", first)
 	}
 	if s.Commands.Install[0].User != "0" {
-		t.Errorf("install user = %q, want %q (root)", s.Commands.Install[0].User, "0")
+		t.Errorf("first install user = %q, want %q (root)", s.Commands.Install[0].User, "0")
+	}
+
+	// Second entry: install-agent-wrappers.sh
+	second := s.Commands.Install[1].Command
+	if !strings.Contains(second, "install-agent-wrappers.sh") {
+		t.Errorf("second install command does not invoke install-agent-wrappers.sh: %q", second)
+	}
+	if s.Commands.Install[1].User != "0" {
+		t.Errorf("second install user = %q, want %q (root)", s.Commands.Install[1].User, "0")
 	}
 }
 
