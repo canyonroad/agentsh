@@ -1,0 +1,161 @@
+//go:build linux
+
+package postgres
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strings"
+
+	classify_pg "github.com/agentsh/agentsh/internal/db/classify/postgres"
+	"github.com/agentsh/agentsh/internal/db/effects"
+	"github.com/agentsh/agentsh/internal/db/events"
+	"github.com/agentsh/agentsh/internal/db/policy"
+)
+
+// buildArgs collects the inputs to buildStatementEvent. Keeping them in a
+// struct avoids a 14-argument function and makes test cases readable.
+type buildArgs struct {
+	Stmt              effects.ClassifiedStatement
+	StmtIndex         int
+	BatchTotal        int
+	Decision          policy.Decision
+	SQL               string
+	Tier              policy.RedactionTier
+	Conn              connState
+	BytesIn           int64
+	BytesOut          int64
+	LatencyMs         int64
+	RowsReturned      *int64
+	RowsAffected      *int64
+	UpstreamErrCode   string
+	DenyAction        string
+	IsDeniedBySibling bool
+	BatchSHA          string // sha256 hex of the full Q.String; used for command_id
+	Parser            classify_pg.Parser
+}
+
+// buildStatementEvent returns a fully-populated events.DBEvent. Pure function
+// — no I/O, no clock, no globals beyond timeNow / newEventID.
+func buildStatementEvent(a buildArgs) events.DBEvent {
+	slice := perStmtSlice(a.SQL, a.Stmt)
+
+	normalized, err := a.Parser.Normalize(slice)
+	if err != nil || normalized == "" {
+		normalized = strings.TrimSpace(slice)
+	}
+	digestBytes := sha256.Sum256([]byte(normalized))
+	digest := "sha256:" + hex.EncodeToString(digestBytes[:])
+
+	var stmtText string
+	var redaction events.Redaction
+	switch a.Tier {
+	case policy.RedactFull:
+		stmtText = slice
+		redaction = events.RedactionFull
+	case policy.RedactParametersRedacted:
+		stmtText = normalized
+		redaction = events.RedactionParametersRedacted
+	case policy.RedactNone:
+		stmtText = ""
+		redaction = events.RedactionNone
+	default:
+		stmtText = normalized
+		redaction = events.RedactionParametersRedacted
+	}
+
+	dec := buildDecision(a.Decision, a.IsDeniedBySibling)
+
+	result := events.EventResult{
+		RowsReturned: a.RowsReturned,
+		RowsAffected: a.RowsAffected,
+		BytesIn:      a.BytesIn,
+		BytesOut:     a.BytesOut,
+		LatencyMs:    a.LatencyMs,
+		ErrorCode:    a.UpstreamErrCode,
+	}
+	if a.IsDeniedBySibling {
+		result = events.EventResult{
+			BytesIn:   a.BytesIn,
+			ErrorCode: "DENIED_BY_SIBLING",
+		}
+	}
+
+	tx := events.EventTxContext{
+		InTransaction: a.Conn.lastUpstreamRFQ == 'T' || a.Conn.lastUpstreamRFQ == 'E',
+		DenyAction:    a.DenyAction,
+	}
+
+	predicates := events.EventPredicates{HasFilter: hasFilter(a.Stmt)}
+
+	return events.DBEvent{
+		EventID:            newEventID(),
+		SessionID:          a.Conn.clientIdentity,
+		CommandID:          fmt.Sprintf("%s:%d", a.BatchSHA, a.StmtIndex),
+		Timestamp:          timeNow(),
+		DBService:          a.Conn.dbService,
+		DBFamily:           "postgres",
+		DBDialect:          "postgres",
+		DBUser:             a.Conn.dbUser,
+		ApplicationName:    a.Conn.appName,
+		ClientIdentity:     a.Conn.clientIdentity,
+		Effects:            a.Stmt.Effects,
+		RawVerb:            a.Stmt.RawVerb,
+		ParserBackend:      a.Stmt.ParserBackend,
+		StatementText:      stmtText,
+		StatementDigest:    digest,
+		StatementRedaction: redaction,
+		TLS:        events.EventTLS{Mode: a.Conn.tlsMode, ClientSNI: a.Conn.sniHostname},
+		Decision:   dec,
+		Result:     result,
+		TxContext:  tx,
+		Predicates: predicates,
+	}
+}
+
+func buildDecision(d policy.Decision, deniedBySibling bool) events.EventDecision {
+	if deniedBySibling {
+		return events.EventDecision{
+			Verb:     "deny",
+			RuleKind: "statement",
+			Reason:   "denied by sibling statement",
+		}
+	}
+	verb := d.Verb.String()
+	if verb == "" {
+		verb = "deny"
+	}
+	out := events.EventDecision{
+		Verb:                verb,
+		RuleKind:            d.RuleKind.String(),
+		RuleName:            d.RuleName,
+		MatchingEffectIndex: d.MatchingEffectIndex,
+		Reason:              d.Reason,
+	}
+	if d.MatchingEffectGroup != effects.GroupUnknown {
+		out.MatchingEffectGroup = d.MatchingEffectGroup.String()
+	}
+	if len(d.ContributingAuditRules) > 0 {
+		out.ContributingAuditRules = append([]string(nil), d.ContributingAuditRules...)
+	}
+	return out
+}
+
+func perStmtSlice(sql string, stmt effects.ClassifiedStatement) string {
+	if stmt.SourceStart == 0 && stmt.SourceEnd == 0 {
+		return strings.TrimSpace(sql)
+	}
+	if int(stmt.SourceEnd) > len(sql) || stmt.SourceStart < 0 || stmt.SourceStart > stmt.SourceEnd {
+		return strings.TrimSpace(sql)
+	}
+	return sql[stmt.SourceStart:stmt.SourceEnd]
+}
+
+// hasFilter returns true when the classifier indicated a WHERE clause was
+// present. Plan 04c does not surface this from the classifier yet — Plan 05
+// is expected to thread a WHERE-clause flag through effects.Effect. Until
+// then we conservatively return false.
+func hasFilter(_ effects.ClassifiedStatement) bool {
+	return false
+}
