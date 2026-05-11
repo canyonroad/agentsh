@@ -27,8 +27,16 @@ func (pc *proxyConn) synthErrorAndRFQ(sqlstate, message string) error {
 
 // synthErrorOnly writes ErrorResponse with no trailing RFQ. Used for the
 // in-tx deny case ({'T', 'E'}) — caller closes both conns immediately after.
+// Severity is FATAL so libpq-family clients (pgx, jdbc) treat the following
+// EOF as the expected fail-closed signal and surface the ErrorResponse with
+// SQLSTATE intact, instead of reporting "unexpected EOF".
 func (pc *proxyConn) synthErrorOnly(sqlstate, message string) error {
-	pc.backend.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: sqlstate, Message: message})
+	pc.backend.Send(&pgproto3.ErrorResponse{
+		Severity:            "FATAL",
+		SeverityUnlocalized: "FATAL",
+		Code:                sqlstate,
+		Message:             message,
+	})
 	return pc.backend.Flush()
 }
 

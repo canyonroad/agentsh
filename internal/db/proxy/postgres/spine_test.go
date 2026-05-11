@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,9 +16,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/agentsh/agentsh/internal/db/events"
@@ -619,5 +623,405 @@ func TestSpine_Cancel_DeniedSilentClose(t *testing.T) {
 		t.Error("upstream was dialed despite deny rule")
 	case <-time.After(300 * time.Millisecond):
 		// Expected: no dial.
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Plan 04c Task 15 — spine integration tests with real jackc/pgx/v5 client.
+//
+// These tests connect a real pgx client through the AgentSH proxy to a fake
+// upstream and exercise the three Plan 04c outcomes: allow, deny pre-tx, and
+// deny in-tx (which terminates the connection).
+//
+// We use Unix sockets and "terminate_plaintext_upstream" mode. pgx ignores TLS
+// settings on Unix sockets (matching libpq behaviour), so the client sends a
+// plaintext StartupMessage directly — dispatchStartup accepts that path. The
+// upstream leg stays plaintext, letting us reuse the existing fake upstream.
+// ----------------------------------------------------------------------------
+
+// pgxSpinePolicyYAML returns a policy YAML with an allow-everyone connection
+// rule and an allow-all statement rule on db_service "appdb". If extraDeny is
+// true, a deny-DELETE statement rule is appended *after* the allow-all so
+// later-listed deny rules override earlier allows on matching ops.
+//
+// The transaction / session group has no objects per the classifier, so the
+// generic ["*"] allow rule cannot cover it (the policy evaluator marks
+// object-less effects as implicit deny). We add explicit allow rules for
+// those groups so BEGIN/COMMIT/SET flow through.
+func pgxSpinePolicyYAML(upstream string, extraDeny bool) string {
+	y := `version: 1
+name: pgx-spine
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: ` + upstream + `
+    tls_mode: terminate_plaintext_upstream
+    trusted_network: true
+database_connection_rules:
+  - name: allow-everyone
+    db_service: appdb
+    decision: allow
+database_rules:
+  - name: allow-all
+    db_service: appdb
+    operations: ["*"]
+    decision: allow
+  - name: allow-transaction
+    db_service: appdb
+    operations: [transaction]
+    decision: allow
+  - name: allow-session
+    db_service: appdb
+    operations: [session]
+    decision: allow
+`
+	if extraDeny {
+		y += `  - name: deny-deletes
+    db_service: appdb
+    operations: [DELETE]
+    decision: deny
+`
+	}
+	return y
+}
+
+// renameSocketForPgx renames the harness's "appdb.sock" path to
+// ".s.PGSQL.<port>" so pgx's Unix-socket discovery (host=<dir>, port=<port>)
+// finds it. Returns the directory portion of the resulting path.
+func renameSocketForPgx(t *testing.T, oldPath string, port int) string {
+	t.Helper()
+	dir := filepath.Dir(oldPath)
+	newPath := filepath.Join(dir, fmt.Sprintf(".s.PGSQL.%d", port))
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatalf("rename socket for pgx: %v", err)
+	}
+	return dir
+}
+
+// pgxConnString builds a libpq-style DSN that pgx parses. host is the socket
+// directory (pgx auto-appends ".s.PGSQL.<port>"). sslmode=disable because pgx
+// would ignore TLS over Unix anyway, and we don't want SSLRequest sent.
+// default_query_exec_mode=simple_protocol forces pgx to use the Simple Query
+// sub-protocol (single 'Q' frames) — the Plan 04c proxy only supports Simple
+// Query in phase 1; Extended Query (Parse/Bind/Execute) is denied.
+func pgxConnString(sockDir string, port int) string {
+	return fmt.Sprintf("host=%s port=%d user=alice dbname=app sslmode=disable default_query_exec_mode=simple_protocol",
+		sockDir, port)
+}
+
+// pgxErrorCode extracts the SQLSTATE from a pg error, returning "" otherwise.
+func pgxErrorCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}
+
+// pgxAuthOKThenQueryScript handles the StartupMessage with AuthOK + BKD + RFQ,
+// then receives one Query and replies with RowDescription/DataRow/CmdComplete/
+// RFQ('I'). It then drains until the client closes.
+//
+// We emit standard_conforming_strings=on as a ParameterStatus because pgx
+// (when default_query_exec_mode=simple_protocol) refuses to send simple-
+// protocol queries unless that GUC has been advertised by the server.
+func pgxAuthOKThenQueryScript(t *testing.T, be *pgproto3.Backend, conn net.Conn) error {
+	t.Helper()
+	if _, err := be.ReceiveStartupMessage(); err != nil {
+		return fmt.Errorf("receive startup: %w", err)
+	}
+	be.Send(&pgproto3.AuthenticationOk{})
+	be.Send(&pgproto3.ParameterStatus{Name: "standard_conforming_strings", Value: "on"})
+	be.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
+	be.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "16.0"})
+	be.Send(&pgproto3.BackendKeyData{ProcessID: 42, SecretKey: append([]byte(nil), wantSecret...)})
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := be.Flush(); err != nil {
+		return fmt.Errorf("flush handshake: %w", err)
+	}
+	// Receive the Q.
+	msg, err := be.Receive()
+	if err != nil {
+		return fmt.Errorf("receive Q: %w", err)
+	}
+	if _, ok := msg.(*pgproto3.Query); !ok {
+		return fmt.Errorf("expected Query, got %T", msg)
+	}
+	be.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{
+		Name:                 []byte("a"),
+		TableOID:             0,
+		TableAttributeNumber: 0,
+		DataTypeOID:          23, // int4
+		DataTypeSize:         4,
+		TypeModifier:         -1,
+		Format:               0,
+	}}})
+	be.Send(&pgproto3.DataRow{Values: [][]byte{[]byte("1")}})
+	be.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := be.Flush(); err != nil {
+		return fmt.Errorf("flush reply: %w", err)
+	}
+	// Drain until client closes.
+	buf := make([]byte, 256)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		if _, err := conn.Read(buf); err != nil {
+			return nil
+		}
+	}
+}
+
+func TestSpine_Plan04c_SimpleQuery_AllowFlow(t *testing.T) {
+	up := newFakeUpstream(t, withFakeUpstreamScript(pgxAuthOKThenQueryScript))
+	upAddr := up.Address()
+
+	h := startSpineHarness(t, upAddr, "terminate_plaintext_upstream", nil, "")
+	// Replace the harness's permissive default policy with one that has a real
+	// allow-all statement rule on service "appdb" — statement evaluation is
+	// what the simpleQueryLoop consults.
+	h.srv.SetPolicy(loadRuleSet(t, pgxSpinePolicyYAML(upAddr, false)))
+
+	stop := runServer(t, h.srv)
+	defer stop()
+
+	sockDir := renameSocketForPgx(t, h.sock, 5432)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, pgxConnString(sockDir, 5432))
+	if err != nil {
+		t.Fatalf("pgx.Connect: %v", err)
+	}
+	defer conn.Close(context.Background())
+
+	var n int
+	if err := conn.QueryRow(ctx, "SELECT a FROM t").Scan(&n); err != nil {
+		t.Fatalf("QueryRow.Scan: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("row value = %d want 1", n)
+	}
+
+	// Wait for the event to drain.
+	var evs []events.DBEvent
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		evs = h.sink.DrainStatements()
+		if len(evs) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("statement events = %d want 1: %+v", len(evs), evs)
+	}
+	if evs[0].Decision.Verb != "allow" {
+		t.Fatalf("Decision.Verb = %q want allow", evs[0].Decision.Verb)
+	}
+	if evs[0].Result.RowsReturned == nil || *evs[0].Result.RowsReturned != 1 {
+		t.Fatalf("RowsReturned = %v want 1", evs[0].Result.RowsReturned)
+	}
+}
+
+func TestSpine_Plan04c_SimpleQuery_DenyPreTx(t *testing.T) {
+	// Script: handshake to RFQ('I'); after that, try to read another frame.
+	// With deny pre-forward, the proxy must NOT forward the DELETE Q upstream,
+	// so the read should time out. We expose the observed state via closure.
+	var (
+		mu              sync.Mutex
+		upstreamSawQuery bool
+	)
+	script := func(t *testing.T, be *pgproto3.Backend, conn net.Conn) error {
+		t.Helper()
+		if _, err := be.ReceiveStartupMessage(); err != nil {
+			return fmt.Errorf("receive startup: %w", err)
+		}
+		be.Send(&pgproto3.AuthenticationOk{})
+		be.Send(&pgproto3.ParameterStatus{Name: "standard_conforming_strings", Value: "on"})
+		be.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
+		be.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "16.0"})
+		be.Send(&pgproto3.BackendKeyData{ProcessID: 42, SecretKey: append([]byte(nil), wantSecret...)})
+		be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		if err := be.Flush(); err != nil {
+			return fmt.Errorf("flush handshake: %w", err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		msg, err := be.Receive()
+		if err == nil {
+			if _, ok := msg.(*pgproto3.Query); ok {
+				mu.Lock()
+				upstreamSawQuery = true
+				mu.Unlock()
+			}
+		}
+		// Drain until client closes.
+		buf := make([]byte, 256)
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			if _, err := conn.Read(buf); err != nil {
+				return nil
+			}
+		}
+	}
+
+	up := newFakeUpstream(t, withFakeUpstreamScript(script))
+	upAddr := up.Address()
+
+	h := startSpineHarness(t, upAddr, "terminate_plaintext_upstream", nil, "")
+	h.srv.SetPolicy(loadRuleSet(t, pgxSpinePolicyYAML(upAddr, true)))
+
+	stop := runServer(t, h.srv)
+	defer stop()
+
+	sockDir := renameSocketForPgx(t, h.sock, 5433)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, pgxConnString(sockDir, 5433))
+	if err != nil {
+		t.Fatalf("pgx.Connect: %v", err)
+	}
+	defer conn.Close(context.Background())
+
+	_, err = conn.Exec(ctx, "DELETE FROM t")
+	if err == nil {
+		t.Fatalf("Exec DELETE: expected deny error, got nil")
+	}
+	if code := pgxErrorCode(err); code != "42501" {
+		t.Fatalf("error code = %q want 42501 (err=%v)", code, err)
+	}
+
+	// Wait a beat to confirm the upstream did not see the Query.
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	saw := upstreamSawQuery
+	mu.Unlock()
+	if saw {
+		t.Fatalf("upstream saw a Query frame; expected deny pre-forward")
+	}
+
+	var evs []events.DBEvent
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		evs = h.sink.DrainStatements()
+		if len(evs) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(evs) != 1 || evs[0].Decision.Verb != "deny" {
+		t.Fatalf("statement events = %+v", evs)
+	}
+	if evs[0].TxContext.DenyAction != "none" {
+		t.Fatalf("DenyAction = %q want none", evs[0].TxContext.DenyAction)
+	}
+}
+
+func TestSpine_Plan04c_SimpleQuery_DenyInTx_Terminates(t *testing.T) {
+	// Script: handshake → RFQ('I'); accept BEGIN and reply with
+	// CommandComplete + RFQ('T'). The proxy then denies the DELETE in-tx
+	// without forwarding it (Plan 04c terminate-on-in-tx-deny).
+	script := func(t *testing.T, be *pgproto3.Backend, conn net.Conn) error {
+		t.Helper()
+		if _, err := be.ReceiveStartupMessage(); err != nil {
+			return fmt.Errorf("receive startup: %w", err)
+		}
+		be.Send(&pgproto3.AuthenticationOk{})
+		be.Send(&pgproto3.ParameterStatus{Name: "standard_conforming_strings", Value: "on"})
+		be.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
+		be.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "16.0"})
+		be.Send(&pgproto3.BackendKeyData{ProcessID: 42, SecretKey: append([]byte(nil), wantSecret...)})
+		be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		if err := be.Flush(); err != nil {
+			return fmt.Errorf("flush handshake: %w", err)
+		}
+		// Receive BEGIN.
+		msg, err := be.Receive()
+		if err != nil {
+			return fmt.Errorf("receive BEGIN: %w", err)
+		}
+		q, ok := msg.(*pgproto3.Query)
+		if !ok || !strings.Contains(strings.ToUpper(q.String), "BEGIN") {
+			return fmt.Errorf("expected BEGIN, got %T %v", msg, msg)
+		}
+		be.Send(&pgproto3.CommandComplete{CommandTag: []byte("BEGIN")})
+		be.Send(&pgproto3.ReadyForQuery{TxStatus: 'T'})
+		if err := be.Flush(); err != nil {
+			return fmt.Errorf("flush BEGIN reply: %w", err)
+		}
+		// No further Q should arrive (proxy denies in-tx + terminates). Drain.
+		buf := make([]byte, 256)
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			if _, err := conn.Read(buf); err != nil {
+				return nil
+			}
+		}
+	}
+
+	up := newFakeUpstream(t, withFakeUpstreamScript(script))
+	upAddr := up.Address()
+
+	h := startSpineHarness(t, upAddr, "terminate_plaintext_upstream", nil, "")
+	h.srv.SetPolicy(loadRuleSet(t, pgxSpinePolicyYAML(upAddr, true)))
+
+	stop := runServer(t, h.srv)
+	defer stop()
+
+	sockDir := renameSocketForPgx(t, h.sock, 5434)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, pgxConnString(sockDir, 5434))
+	if err != nil {
+		t.Fatalf("pgx.Connect: %v", err)
+	}
+	defer conn.Close(context.Background())
+
+	if _, err := conn.Exec(ctx, "BEGIN"); err != nil {
+		t.Fatalf("BEGIN: %v", err)
+	}
+	// DELETE in-tx must error with 42501 and the proxy must close the conn.
+	_, err = conn.Exec(ctx, "DELETE FROM t")
+	if err == nil {
+		t.Fatalf("DELETE in-tx: expected deny error")
+	}
+	if code := pgxErrorCode(err); code != "42501" {
+		t.Fatalf("DELETE error code = %q want 42501 (err=%v)", code, err)
+	}
+
+	// A subsequent op must fail because the proxy terminated the connection.
+	if _, err := conn.Exec(context.Background(), "SELECT 1"); err == nil {
+		t.Fatalf("expected closed-conn error after in-tx deny terminate")
+	}
+
+	// Events: at minimum a BEGIN allow + DELETE deny w/ DenyAction=connection_terminated.
+	var evs []events.DBEvent
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		evs = h.sink.DrainStatements()
+		if len(evs) >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var deny events.DBEvent
+	found := false
+	for _, e := range evs {
+		if e.Decision.Verb == "deny" {
+			deny = e
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no deny event among %+v", evs)
+	}
+	if deny.TxContext.DenyAction != "connection_terminated" {
+		t.Fatalf("DenyAction = %q want connection_terminated (event=%+v)", deny.TxContext.DenyAction, deny)
 	}
 }
