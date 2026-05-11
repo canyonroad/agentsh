@@ -111,6 +111,13 @@ type FSConfig struct {
 	// default" (go-fuse uses 12, matching the kernel default).
 	MaxBackground int
 
+	// SymlinkEscapeDeny, when true, restores the historical blanket
+	// "workspace-escape" deny for workspace symlinks pointing outside
+	// the workspace root. When false (default), the resolved outside
+	// path is evaluated against the normal file_rules instead.
+	// Plumbed from policies.symlink_escape: "deny" | "evaluate".
+	SymlinkEscapeDeny bool
+
 	// Options contains platform-specific mount options
 	Options map[string]string
 }

@@ -62,3 +62,51 @@ func resolveRealPathUnderRoot(realRoot string, virtPath string, mustExist bool, 
 	}
 	return out, nil
 }
+
+// evalEscapedSymlink resolves virtPath fully through symlinks when the
+// in-workspace candidate path resolves, via a symlink, to a target
+// outside realRoot. Returns the cleaned real target, or the empty
+// string if this is not a legitimate symlink-target escape (broken
+// link, missing parent, or a "..":-style path escape).
+//
+// Used by checkWithExist to fall back from a blanket "workspace-escape"
+// deny to a regular policy evaluation when the only "escape" is via a
+// symlink whose target is outside the workspace. Lets a policy
+// explicitly govern common system symlink targets (e.g. /usr/bin/python3
+// for Python venvs, /usr/lib for venv/lib64) via the usual file_rules
+// instead of agentsh's hardcoded blanket deny.
+//
+// Important: only *symlink-target* escapes fall through. A "..":-style
+// path escape (e.g. /workspace/../outside/secret) must NOT, even when
+// the sibling exists on disk -- otherwise a broad rule like /** would
+// allow reading arbitrary sibling paths. filepath.Join cleans the
+// candidate, so such a path lands outside rootClean before any symlink
+// resolution; we check containment of the pre-resolution candidate and
+// bail (returning "" -> caller keeps the workspace-escape deny) when it
+// is not under rootClean. This mirrors the fast ".." escape check in
+// resolveRealPathUnderRoot.
+func evalEscapedSymlink(realRoot, virtPath, virtualRoot string) string {
+	if !pathutil.IsUnderRoot(virtPath, virtualRoot) {
+		return ""
+	}
+	rel := pathutil.TrimRootPrefix(virtPath, virtualRoot)
+	rel = strings.TrimPrefix(rel, "/")
+	rootClean, err := filepath.EvalSymlinks(filepath.Clean(realRoot))
+	if err != nil {
+		rootClean = filepath.Clean(realRoot)
+	}
+	candidate := filepath.Join(rootClean, filepath.FromSlash(rel))
+	// Reject ".."-style escapes before touching the filesystem: the
+	// candidate itself must stay under the workspace root. Only the
+	// final symlink *target* is allowed to point outside (handled by
+	// the resolve below). filepath.Join has already cleaned candidate,
+	// so an escaping rel has consumed the root prefix here.
+	if !pathutil.IsRealPathUnder(candidate, rootClean) {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(resolved)
+}

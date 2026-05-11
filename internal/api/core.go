@@ -338,9 +338,10 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					TraceContextFunc: func() (string, string, string) {
 						return s.CurrentTraceContext()
 					},
-					PolicyEngine:  platform.NewPolicyAdapter(policyEngine),
-					EventChannel:  eventChan,
-					MaxBackground: a.cfg.Sandbox.FUSE.MaxBackground,
+					PolicyEngine:      platform.NewPolicyAdapter(policyEngine),
+					EventChannel:      eventChan,
+					MaxBackground:     a.cfg.Sandbox.FUSE.MaxBackground,
+					SymlinkEscapeDeny: a.cfg.Policies.SymlinkEscapeDeny(),
 					// For the primary workspace mount, use the session's effective virtual
 					// root so FUSE events report paths consistent with the session (e.g.
 					// /workspace in default mode). Non-workspace mounts use their real
@@ -1149,9 +1150,10 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 		TraceContextFunc: func() (string, string, string) {
 			return s.CurrentTraceContext()
 		},
-		PolicyEngine:  platform.NewPolicyAdapter(p.engine),
-		EventChannel:  eventChan,
-		MaxBackground: a.cfg.Sandbox.FUSE.MaxBackground,
+		PolicyEngine:      platform.NewPolicyAdapter(p.engine),
+		EventChannel:      eventChan,
+		MaxBackground:     a.cfg.Sandbox.FUSE.MaxBackground,
+		SymlinkEscapeDeny: a.cfg.Policies.SymlinkEscapeDeny(),
 	}
 
 	// Configure soft-delete/trash if enabled
