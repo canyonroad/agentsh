@@ -13,10 +13,13 @@ import (
 )
 
 const (
-	defaultTemplatePath  = "/usr/share/agentsh/coding-agent.template.yaml"
-	defaultOverlayPath   = "/home/agent/.agentsh/policy.yaml"
-	defaultPolicyPath    = "/etc/agentsh/policies/default.yaml"
-	defaultTierPath      = "/run/agentsh/tier"
+	defaultTemplatePath = "/usr/share/agentsh/coding-agent.template.yaml"
+	defaultOverlayPath  = "/home/agent/.agentsh/policy.yaml"
+	defaultPolicyPath   = "/etc/agentsh/policies/default.yaml"
+	defaultTierPath     = "/run/agentsh/tier"
+	// defaultBootstrapLog: target for the future bootstrap banner / tier probe
+	// log. v1 writes those to stderr; the constant reserves the path so
+	// installers, doc tooling, and Task 5 can reference a single source of truth.
 	defaultBootstrapLog  = "/var/log/agentsh/bootstrap.log"
 	defaultDaemonLog     = "/var/log/agentsh/daemon.log"
 	defaultAgentshBin    = "/usr/bin/agentsh"
@@ -33,6 +36,7 @@ func main() {
 		agentshBin = flag.String("agentsh", defaultAgentshBin, "Path to the agentsh binary")
 		srvConfig  = flag.String("server-config", defaultServerConfig, "Path to the agentsh server config")
 		sock       = flag.String("socket", defaultDaemonSocket, "Daemon socket path to poll for readiness")
+		daemonLog  = flag.String("daemon-log", defaultDaemonLog, "Path to daemon log file")
 	)
 	flag.Parse()
 
@@ -41,7 +45,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if _, err := spawnDaemon(*agentshBin, []string{"server", "--config", *srvConfig}, defaultDaemonLog); err != nil {
+	if _, err := spawnDaemon(*agentshBin, []string{"server", "--config", *srvConfig}, *daemonLog); err != nil {
 		fmt.Fprintf(os.Stderr, "agentsh-sbx-bootstrap: spawn daemon: %v\n", err)
 		os.Exit(1)
 	}

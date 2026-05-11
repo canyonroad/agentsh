@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,9 +29,9 @@ func spawnDaemon(bin string, args []string, logPath string) (*exec.Cmd, error) {
 		logF.Close()
 		return nil, fmt.Errorf("start %s: %w", bin, err)
 	}
-	// Release the parent's reference to the log file FD once exec(2) has dup'd
-	// stdio. The child keeps its own dup'd FD.
-	go func() { _ = logF.Close() }()
+	// Release the parent's reference to the log file FD now that exec(2) has
+	// dup'd stdio into the child. The child keeps its own dup'd FD.
+	_ = logF.Close()
 	return cmd, nil
 }
 
@@ -46,6 +47,8 @@ func waitForSocket(sockPath string, deadline time.Duration) error {
 	for time.Now().Before(end) {
 		if _, err := os.Stat(sockPath); err == nil {
 			return nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("stat socket %q: %w", sockPath, err)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
