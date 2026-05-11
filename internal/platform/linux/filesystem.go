@@ -358,9 +358,12 @@ func (fs *Filesystem) Unmount(mount platform.FSMount) error {
 		if err == nil && m.fsMount != nil && m.fsMount.Server != nil {
 			m.fsMount.Server.Wait()
 		}
+		m.closeEmitter()
 		return err
 	}
-	return m.fsMount.Unmount()
+	err := m.fsMount.Unmount()
+	m.closeEmitter()
+	return err
 }
 
 // Mount wraps fsmonitor.Mount to implement platform.FSMount.
@@ -409,28 +412,86 @@ func (m *Mount) Stats() platform.FSStats {
 	}
 }
 
-// Close unmounts the filesystem.
+// Close unmounts the filesystem and then quiesces the event emitter.
+//
+// Ordering matters: the FUSE server is shut down first so its
+// handlers stop producing, then closeEmitter() sets the emitter's done
+// flag and closes the event channel. Even if the unmount above returns
+// an error and a handler is briefly still alive, the done flag plus the
+// recover guard in AppendEvent keep the close safe.
 func (m *Mount) Close() error {
+	var err error
 	if m.mountedViaNewAPI {
 		// go-fuse owns the FUSE fd — do NOT close it here.
 		// Unmount the VFS, then wait for go-fuse server to shut down.
 		// After unix.Unmount, go-fuse's Serve() loop will get an error
 		// reading from the FUSE fd and exit, closing the fd and calling
 		// fileSystem.OnUnmount().
-		err := unix.Unmount(m.mountPoint, 0)
+		err = unix.Unmount(m.mountPoint, 0)
 		if err == nil && m.fsMount != nil && m.fsMount.Server != nil {
 			m.fsMount.Server.Wait()
 		}
-		return err
+	} else {
+		err = m.fsMount.Unmount()
 	}
-	return m.fsMount.Unmount()
+	m.closeEmitter()
+	return err
+}
+
+// closeEmitter quiesces and closes this mount's event emitter, if it has
+// one. The emitter sets its done flag before closing the channel, so
+// FUSE handlers stop sending before the close. Idempotent — safe to call
+// from both Close() and Filesystem.Unmount().
+func (m *Mount) closeEmitter() {
+	if m.hooks == nil {
+		return
+	}
+	if e, ok := m.hooks.Emit.(*eventEmitter); ok {
+		e.Close()
+	}
 }
 
 // eventEmitter bridges platform.EventChannel to fsmonitor.Emitter.
+//
+// Lifecycle ownership: the emitter owns the closed state via an RWMutex.
+// Producers (FUSE handlers) take RLock around the non-blocking send.
+// RLock is non-serializing among producers, so concurrent AppendEvent
+// calls all proceed in parallel.
+// Close() takes the write Lock, which only proceeds once every
+// in-flight RLock has been released; after that it sets closed=true
+// and closes the channel. The happens-before edge means no producer
+// can be mid-send when close() runs, which is the actual race-free
+// "producers stop before close" guarantee the maintainer asked for
+// (the earlier atomic-flag attempt only shrank the race window, not
+// eliminated it, and -race flagged it). The recover in AppendEvent
+// stays as never-fires defense-in-depth.
 type eventEmitter struct {
 	eventChan     chan<- platform.IOEvent
 	sessionID     string
 	commandIDFunc func() string
+
+	mu     sync.RWMutex
+	closed bool
+}
+
+// Close quiesces the emitter and closes the underlying event channel.
+// The write Lock blocks until every in-flight AppendEvent (which holds
+// RLock around its send) has released its RLock, so the close cannot
+// race a concurrent send. Idempotent -- subsequent calls are no-ops.
+// This replaces the bare close(eventChan) the session-teardown
+// closures used to do, which could panic if a late FUSE event arrived
+// after the close.
+func (e *eventEmitter) Close() {
+	if e.eventChan == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return // a prior Close() already quiesced + closed the channel
+	}
+	e.closed = true
+	close(e.eventChan)
 }
 
 // AppendEvent implements fsmonitor.Emitter.
@@ -469,12 +530,37 @@ func (e *eventEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
 		ioEvent.PolicyRule = ev.Policy.Rule
 	}
 
-	// Non-blocking send
-	select {
-	case e.eventChan <- ioEvent:
-	default:
-		// Channel full, drop event
+	// Hold RLock around the send. RLock is non-serializing among
+	// producers (any number of concurrent AppendEvent calls proceed in
+	// parallel). Close() takes the write Lock, which waits for every
+	// in-flight RLock to release before flipping closed=true and
+	// calling close(eventChan) -- so the send cannot race the close.
+	// After Close, closed==true and we bail before the send.
+	//
+	// The recover below is never-fires defense-in-depth (if upstream
+	// teardown ordering or some future refactor were to close the raw
+	// channel out-of-band, this would still keep the daemon alive
+	// rather than crash the whole process).
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.closed {
+		return nil
 	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Warn("eventEmitter: recovered from send on closed event channel; "+
+					"this should be unreachable under the RWMutex ownership -- "+
+					"defense-in-depth guard fired, event dropped",
+					"session_id", e.sessionID, "panic", r)
+			}
+		}()
+		select {
+		case e.eventChan <- ioEvent:
+		default:
+			// Channel full, drop event
+		}
+	}()
 
 	return nil
 }

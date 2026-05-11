@@ -377,7 +377,10 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					PolicyEngine: policyEngine,
 					Unmount: func() error {
 						deregisterFUSEMount(sessionID, capturedMountPoint)
-						close(eventChan)
+						// m.Close() unmounts the FUSE server, then quiesces
+						// and closes the event channel via the emitter's
+						// done flag. Closing eventChan here would race
+						// late FUSE events and panic.
 						return m.Close()
 					},
 				})
@@ -1268,6 +1271,11 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 
 	m, err := fs.Mount(fsCfg)
 	if err != nil {
+		// Mount failed: no FUSE server, so no producer ever attaches to
+		// eventChan. Close it here so the processIOEvents goroutine
+		// started above exits instead of blocking on it forever
+		// (otherwise the channel + goroutine leak on every failed mount).
+		close(eventChan)
 		fields := map[string]any{
 			"mount_point":    mountPoint,
 			"error":          err.Error(),
@@ -1292,13 +1300,14 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 	// Register the FUSE mount point (not source path) in MountRegistry
 	// so seccomp FileHandler defers only for paths accessed through FUSE.
 	registerFUSEMount(s.ID, mountPoint)
-	// Wrap unmount to also close the event channel and
-	// deregister from MountRegistry.
+	// Wrap unmount to deregister from MountRegistry. m.Close() unmounts
+	// the FUSE server, then quiesces and closes the event channel via
+	// the emitter's done flag -- closing eventChan here would
+	// race late FUSE events and panic.
 	sessionID := s.ID
 	capturedMountPoint := mountPoint
 	s.SetWorkspaceUnmount(func() error {
 		deregisterFUSEMount(sessionID, capturedMountPoint)
-		close(eventChan)
 		return m.Close()
 	})
 
