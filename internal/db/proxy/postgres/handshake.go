@@ -101,11 +101,11 @@ func (pc *proxyConn) handleStartupMessage(ctx context.Context, m *pgproto3.Start
 }
 
 // dialUpstreamAndForward dials upstream, forwards the StartupMessage, runs
-// forwardAuth until upstream RFQ, then returns nil (caller closes both
-// conns). On dial / TLS failure synthesizes UPSTREAM_DIAL_FAIL or
-// UPSTREAM_TLS_FAIL to the client. On SCRAM-PLUS detection emits a
-// db_handshake_fail event and synthesizes the SCRAM_PLUS_FAIL_CLOSED error
-// (the error itself is written by forwardAuth).
+// forwardAuth until upstream RFQ, seeds per-conn state (redactionTier,
+// tlsMode), and hands off to simpleQueryLoop. On dial / TLS failure
+// synthesizes UPSTREAM_DIAL_FAIL or UPSTREAM_TLS_FAIL to the client. On
+// SCRAM-PLUS detection emits a db_handshake_fail event and synthesizes the
+// SCRAM_PLUS_FAIL_CLOSED error (the error itself is written by forwardAuth).
 func (pc *proxyConn) dialUpstreamAndForward(ctx context.Context, m *pgproto3.StartupMessage) error {
 	conn, fe, err := dialUpstream(ctx, pc.svc, pc.srv.cfg)
 	if err != nil {
@@ -138,7 +138,15 @@ func (pc *proxyConn) dialUpstreamAndForward(ctx context.Context, m *pgproto3.Sta
 		// nil so the deferred Close happens but no event is emitted.
 		return nil
 	}
-	return nil
+	// forwardAuth returned successfully on the first upstream RFQ. Seed
+	// the per-conn state for the Simple Query loop and hand off.
+	if rs := pc.srv.policy(); rs != nil {
+		pc.state.redactionTier = rs.Redaction().LogStatements
+	} else {
+		pc.state.redactionTier = policy.RedactParametersRedacted
+	}
+	pc.state.tlsMode = pc.svc.TLSMode
+	return pc.simpleQueryLoop(ctx)
 }
 
 // isTLSError is a loose heuristic — "tls:" or "x509:" in the message.

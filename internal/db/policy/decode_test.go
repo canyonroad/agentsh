@@ -240,3 +240,33 @@ policies:
 		t.Fatal("Decode: expected error for unknown unavoidability value, got nil")
 	}
 }
+
+func TestDecode_WarnsOnApproveDecision(t *testing.T) {
+	src := `version: 1
+name: t
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+database_rules:
+  - name: review-deletes
+    db_service: appdb
+    operations: [DELETE]
+    decision: approve
+`
+	_, warns, err := loadDB(t, src)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	found := false
+	for _, w := range warns {
+		if w.Code == "APPROVE_NOT_YET_SUPPORTED" && w.Rule == "review-deletes" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected APPROVE_NOT_YET_SUPPORTED warning, got %v", warns)
+	}
+}

@@ -140,6 +140,18 @@ func validateStatementRule(r *StatementRule, svcs map[ServiceID]*DBService) ([]e
 		}
 	}
 
+	// approve verb is parsed but treated as deny+APPROVE_NOT_YET_SUPPORTED
+	// at runtime until Plan 05 ships the approval workflow. Surface a
+	// loud warning at config load so operators are not surprised.
+	if r.Decision == "approve" {
+		warns = append(warns, Warning{
+			Rule:    r.Name,
+			Field:   "decision",
+			Code:    "APPROVE_NOT_YET_SUPPORTED",
+			Message: fmt.Sprintf("rule %q has decision: approve — Plan 04c treats approve as deny+APPROVE_NOT_YET_SUPPORTED at runtime; the real approval workflow lands in Plan 05", r.Name),
+		})
+	}
+
 	return errs, warns
 }
 
