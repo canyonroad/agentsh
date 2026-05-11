@@ -300,7 +300,7 @@ func TestAgentPolicies_CodingAgent(t *testing.T) {
 		"signal_rules count dropped below floor of 3 (currently %d)", len(p.SignalRules))
 }
 
-
+// loadAgentDefaultEngine loads agent-default.yaml and creates an engine with
 // variable expansion and enforced approvals.
 func loadAgentDefaultEngine(t *testing.T) *Engine {
 	t.Helper()

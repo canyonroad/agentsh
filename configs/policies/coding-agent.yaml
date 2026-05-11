@@ -163,7 +163,7 @@ command_rules:
     message: "Recursive or world-writable chmod requested: chmod {{.Args}}"
 
   - name: audit-package-installers
-    description: Routine for coding agents; allow with audit.
+    description: "Routine for coding agents; audit-log all package manager invocations."
     commands: [pip, pip3, npm, yarn, pnpm, cargo, apt, apt-get, gem, bundle]
     decision: audit
 
