@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -57,9 +58,15 @@ func (pc *proxyConn) dispatchStartup(ctx context.Context) error {
 	}
 }
 
-// handleStartupMessage parses the parameters and either denies replication,
-// proceeds to connection-rule eval (Task 7), or surfaces the not-yet-wired
-// error.
+// handleStartupMessage parses the parameters, evaluates the appropriate
+// connection rule (match_kind=replication when the replication parameter is
+// truthy; match_kind=connect otherwise), and either synthesizes a deny or
+// dials upstream + forwards.
+//
+// Plan 04b₂: terminate_* allow path dials upstream → Send(StartupMessage)
+// → forwardAuth → close at first upstream RFQ. Replication-allowed branches
+// to forwardReplicationStartupAndPump (Task 8). Passthrough is handled by
+// handleSSLRequest in tls.go (Task 7).
 func (pc *proxyConn) handleStartupMessage(ctx context.Context, m *pgproto3.StartupMessage) error {
 	pc.state.dbUser = m.Parameters["user"]
 	pc.state.database = m.Parameters["database"]
@@ -67,22 +74,101 @@ func (pc *proxyConn) handleStartupMessage(ctx context.Context, m *pgproto3.Start
 	if v, ok := m.Parameters["replication"]; ok && v != "" && v != "false" && v != "off" && v != "0" {
 		pc.state.replication = true
 	}
+
+	var d policy.Decision
 	if pc.state.replication {
-		return pc.synthesizeError(replicationDenyErrorCode, replicationDenyMessage)
+		d = pc.evaluateReplication(ctx)
+	} else {
+		d = pc.evaluateConnect(ctx)
 	}
-	d := pc.evaluateConnect(ctx)
 	if d.Verb == policy.VerbDeny {
-		// §13.3 deny under terminate_* modes: synthesize ErrorResponse(28000).
-		// Passthrough is rejected at Server.New so we always have a TLS-terminated
-		// connection here.
 		msg := d.Reason
 		if msg == "" {
-			msg = "AgentSH DB proxy: connection denied by policy"
+			if pc.state.replication {
+				msg = "AgentSH DB proxy: replication denied by policy"
+			} else {
+				msg = "AgentSH DB proxy: connection denied by policy"
+			}
 		}
 		return pc.synthesizeError(connectionDenyErrorCode, msg)
 	}
-	// Allow / audit / approve: Plan 04b ends here; Plan 04b₂ dials upstream.
-	return pc.synthesizeError(upstreamNotYetWiredErrorCode, upstreamNotYetWiredMessage)
+
+	if pc.state.replication {
+		return pc.forwardReplicationStartupAndPump(ctx, m) // Task 8
+	}
+	return pc.dialUpstreamAndForward(ctx, m)
+}
+
+// dialUpstreamAndForward dials upstream, forwards the StartupMessage, runs
+// forwardAuth until upstream RFQ, then returns nil (caller closes both
+// conns). On dial / TLS failure synthesizes UPSTREAM_DIAL_FAIL or
+// UPSTREAM_TLS_FAIL to the client. On SCRAM-PLUS detection emits a
+// db_handshake_fail event and synthesizes the SCRAM_PLUS_FAIL_CLOSED error
+// (the error itself is written by forwardAuth).
+func (pc *proxyConn) dialUpstreamAndForward(ctx context.Context, m *pgproto3.StartupMessage) error {
+	conn, fe, err := dialUpstream(ctx, pc.svc, pc.srv.cfg)
+	if err != nil {
+		code := upstreamDialFailEventCode
+		errCode := upstreamDialFailErrorCode
+		msg := fmt.Sprintf("AgentSH DB proxy: upstream unreachable: %v", err)
+		if isTLSError(err) {
+			code = upstreamTLSFailEventCode
+			errCode = upstreamTLSFailErrorCode
+			msg = fmt.Sprintf("AgentSH DB proxy: upstream TLS handshake failed: %v", err)
+		}
+		pc.emitHandshakeFail(ctx, code)
+		return pc.synthesizeError(errCode, msg)
+	}
+	pc.state.upstream = conn
+	pc.state.upstreamFE = fe
+
+	pc.state.upstreamFE.Send(m)
+	if err := pc.state.upstreamFE.Flush(); err != nil {
+		pc.emitHandshakeFail(ctx, upstreamDialFailEventCode)
+		return pc.synthesizeError(upstreamDialFailErrorCode, fmt.Sprintf("AgentSH DB proxy: upstream send StartupMessage: %v", err))
+	}
+
+	if err := forwardAuth(ctx, pc); err != nil {
+		if errors.Is(err, errScramPlusFailClosed) {
+			pc.emitHandshakeFail(ctx, scramPlusEventCode)
+			return nil // ErrorResponse already written by forwardAuth
+		}
+		// Other forwardAuth errors are typically EOF / pipe-closed; return
+		// nil so the deferred Close happens but no event is emitted.
+		return nil
+	}
+	return nil
+}
+
+// isTLSError is a loose heuristic — "tls:" or "x509:" in the message.
+// Used to distinguish TLS-handshake failures from raw TCP dial failures.
+func isTLSError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return contains(s, "tls:") || contains(s, "x509:") || contains(s, "TLS handshake")
+}
+
+// contains is io-free; the events package uses a similar helper.
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+// forwardReplicationStartupAndPump is the replication-allowed allow path.
+// Task 8 implements; Task 6 lands a stub that synthesizes the deny so the
+// build is green and Task 6's tests pass. (Task 6's tests do not exercise
+// the replication-allowed branch — Policy is either nil or has no
+// match_kind=replication rule, so the evaluator returns VerbDeny before
+// we ever reach this function.) Task 8's implementer will replace this
+// stub with the real implementation.
+func (pc *proxyConn) forwardReplicationStartupAndPump(_ context.Context, _ *pgproto3.StartupMessage) error {
+	return pc.synthesizeError(replicationDenyErrorCode, "AgentSH DB proxy: replication opt-in not yet wired (Plan 04b₂ Task 8)")
 }
 
 // synthesizeError writes one ErrorResponse with the given SQLSTATE+message

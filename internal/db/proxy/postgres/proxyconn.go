@@ -8,6 +8,8 @@ import (
 	"strconv"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+
+	"github.com/agentsh/agentsh/internal/db/events"
 )
 
 // connState is the per-connection state carried through the 04b handshake.
@@ -113,4 +115,24 @@ func (pc *proxyConn) closeUpstream() {
 		_ = pc.state.upstream.Close()
 		pc.state.upstream = nil
 	}
+}
+
+// emitHandshakeFail emits a db_handshake_fail LifecycleEvent into the
+// configured sink. errorCode populates the event's ErrorCode field; the
+// matching SQLSTATE is on the wire ErrorResponse.
+func (pc *proxyConn) emitHandshakeFail(ctx context.Context, errorCode string) {
+	if pc.srv.cfg.Sink == nil {
+		return
+	}
+	ev := events.LifecycleEvent{
+		EventID:        newEventID(),
+		Timestamp:      timeNow(),
+		DBService:      pc.svc.Name,
+		ClientIdentity: pc.state.clientIdentity,
+		Kind:           "db_handshake_fail",
+		PeerUID:        pc.state.peerUID,
+		ErrorCode:      errorCode,
+		SNIHostname:    pc.state.sniHostname,
+	}
+	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, ev)
 }
