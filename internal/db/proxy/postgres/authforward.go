@@ -19,72 +19,44 @@ var errScramPlusFailClosed = errors.New("postgres.forwardAuth: SCRAM-SHA-256-PLU
 // forwardAuth pumps frames between the client *Backend and the upstream
 // *Frontend until the upstream sends ReadyForQuery (or the loop dies).
 //
+// Auth in Postgres is strictly challenge-response: the upstream emits one
+// Authentication* frame (or directly AuthenticationOk → BKD → RFQ for
+// trust/peer modes), and the client replies with a PasswordMessage / SASL
+// Initial Response / SASL Response. We drive this as a single-goroutine
+// state machine so that on success we return WITHOUT tearing down either
+// conn — the caller (dialUpstreamAndForward) then hands off to
+// simpleQueryLoop, which reuses both backend and upstreamFE.
+//
 // The upstream→client direction inspects each frame:
 //   - *AuthenticationSASL: scan AuthMechanisms for SCRAM-SHA-256-PLUS. If
 //     present, write ErrorResponse(28000, SCRAM_PLUS_FAIL_CLOSED) to client,
 //     close upstream, and return errScramPlusFailClosed. The caller emits
 //     db_handshake_fail.
+//   - *Authentication{CleartextPassword,MD5Password,GSS,SSPI,SASL,
+//     SASLContinue}: forward to client, then block-read one client frame and
+//     forward it to upstream. AuthenticationOk/SASLFinal are non-challenge
+//     and just pass through.
 //   - *BackendKeyData: record PID/SecretKey into connState.upstreamBKD for
 //     Plan 06 mapping; forward verbatim to client.
 //   - *ReadyForQuery: forward to client, return nil (end-of-auth-loop).
 //   - everything else: forward to client.
-//
-// The client→upstream direction forwards any frame verbatim.
-//
-// Both directions run as goroutines coordinated via a shared error channel.
-// The first error (or RFQ) wins; the loser is cancelled by closing one side.
 func forwardAuth(ctx context.Context, pc *proxyConn) error {
 	if pc.state.upstreamFE == nil {
 		return fmt.Errorf("postgres.forwardAuth: upstreamFE is nil")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-	errCh := make(chan error, 2)
-
-	// Upstream → client.
-	go func() {
-		errCh <- pc.forwardUpstreamToClientUntilRFQ()
-	}()
-
-	// Client → upstream.
-	go func() {
-		errCh <- pc.forwardClientToUpstream()
-	}()
-
-	// Wait for the first goroutine to finish. The upstream-side goroutine
-	// returning nil means we saw RFQ — clean end. Anything else is fatal.
-	select {
-	case err := <-errCh:
-		// Tear down so the other goroutine can exit.
-		pc.closeUpstream()
-		_ = pc.conn.Close()
-		// Drain the second goroutine's result so it does not leak.
-		<-errCh
-		if errors.Is(err, errScramPlusFailClosed) {
+	for {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err == nil {
-			return nil
-		}
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
-			return nil
-		}
-		return err
-	case <-ctx.Done():
-		pc.closeUpstream()
-		_ = pc.conn.Close()
-		<-errCh
-		<-errCh
-		return ctx.Err()
-	}
-}
-
-// forwardUpstreamToClientUntilRFQ runs the upstream→client loop. Returns nil
-// when it sees ReadyForQuery; returns errScramPlusFailClosed on SCRAM-PLUS;
-// returns the underlying error on any I/O failure.
-func (pc *proxyConn) forwardUpstreamToClientUntilRFQ() error {
-	for {
 		msg, err := pc.state.upstreamFE.Receive()
 		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+				return nil
+			}
 			return fmt.Errorf("upstream recv: %w", err)
 		}
 		switch m := msg.(type) {
@@ -105,6 +77,21 @@ func (pc *proxyConn) forwardUpstreamToClientUntilRFQ() error {
 			pc.backend.Send(m)
 			if err := pc.backend.Flush(); err != nil {
 				return fmt.Errorf("flush after SASL: %w", err)
+			}
+			if err := pc.relayClientFrameToUpstream(); err != nil {
+				return err
+			}
+		case *pgproto3.AuthenticationCleartextPassword,
+			*pgproto3.AuthenticationMD5Password,
+			*pgproto3.AuthenticationGSS,
+			*pgproto3.AuthenticationGSSContinue,
+			*pgproto3.AuthenticationSASLContinue:
+			pc.backend.Send(m)
+			if err := pc.backend.Flush(); err != nil {
+				return fmt.Errorf("flush after %T: %w", m, err)
+			}
+			if err := pc.relayClientFrameToUpstream(); err != nil {
+				return err
 			}
 		case *pgproto3.BackendKeyData:
 			pc.state.upstreamBKD.PID = m.ProcessID
@@ -132,17 +119,17 @@ func (pc *proxyConn) forwardUpstreamToClientUntilRFQ() error {
 	}
 }
 
-// forwardClientToUpstream runs the client→upstream loop. Forwards every
-// frame verbatim. Returns when either side closes.
-func (pc *proxyConn) forwardClientToUpstream() error {
-	for {
-		msg, err := pc.backend.Receive()
-		if err != nil {
-			return fmt.Errorf("client recv: %w", err)
-		}
-		pc.state.upstreamFE.Send(msg)
-		if err := pc.state.upstreamFE.Flush(); err != nil {
-			return fmt.Errorf("upstream flush: %w", err)
-		}
+// relayClientFrameToUpstream reads one frame from the client and forwards
+// it verbatim to upstream. Used after the proxy forwards an authentication
+// challenge that the client must answer (PasswordMessage / SASL Response).
+func (pc *proxyConn) relayClientFrameToUpstream() error {
+	msg, err := pc.backend.Receive()
+	if err != nil {
+		return fmt.Errorf("client recv: %w", err)
 	}
+	pc.state.upstreamFE.Send(msg)
+	if err := pc.state.upstreamFE.Flush(); err != nil {
+		return fmt.Errorf("upstream flush: %w", err)
+	}
+	return nil
 }

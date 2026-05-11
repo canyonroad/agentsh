@@ -68,9 +68,19 @@ const (
 
 // evaluateEffect runs the three-pass §10.2 algorithm for a single effect.
 func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effectDecision {
-	// An effect with no objects cannot be covered by any rule (coverage is per-object,
-	// per §10.2). Treat as implicit deny — fail-closed posture.
+	// An effect with no objects is normally implicit-deny (coverage is per
+	// object), preserving the fail-closed posture for object-bearing effects
+	// like Read/Write that arrive without resolved objects (parser gap or
+	// intentional nil).
+	//
+	// Exception: groups that *inherently* have no objects — Transaction,
+	// Session, Notify — would otherwise be unreachable through the §10.2
+	// coverage rules. Treat those as covered by any non-objects-constrained
+	// rule whose effect-meta matches.
 	if len(e.Objects) == 0 {
+		if isObjectlessGroup(e.Group) {
+			return evaluateEffectObjectless(e, applicable)
+		}
 		return effectDecision{verb: verbImplicitDeny}
 	}
 
@@ -173,6 +183,113 @@ func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effec
 		primary = coverage[0][0]
 	}
 
+	return effectDecision{
+		verb:                best,
+		rule:                primary,
+		contributingApprove: approveRules,
+		contributingAudit:   auditRules,
+	}
+}
+
+// isObjectlessGroup reports whether the group inherently has no objects
+// in its classified effects (BEGIN/COMMIT/SAVEPOINT, SET/RESET, NOTIFY).
+// Object-less effects in these groups must still be reachable through the
+// policy — they would otherwise be unreachable under §10.2's per-object
+// coverage rule.
+func isObjectlessGroup(g effects.Group) bool {
+	switch g {
+	case effects.GroupTransaction, effects.GroupSession, effects.GroupNotify:
+		return true
+	}
+	return false
+}
+
+// evaluateEffectObjectless handles effects with no Objects (e.g. transaction
+// or session effects from BEGIN/COMMIT/SET). The §10.2 three-pass algorithm
+// is per-object; for object-less effects we apply a degenerate version:
+//
+//   - A deny rule whose effect-meta matches and whose `objects:` filter is
+//     empty (coversAllObjects) short-circuits to deny.
+//   - Otherwise, the effect is covered by any non-deny rule whose effect-meta
+//     matches and whose `objects:` filter is empty. The most-restrictive verb
+//     across covering rules wins.
+//   - If no rule covers the effect, fall back to implicit deny.
+//
+// A rule that constrains `objects:` (non-empty) cannot match an object-less
+// effect — there is no object to match against.
+func evaluateEffectObjectless(e effects.Effect, applicable []*compiledStatementRule) effectDecision {
+	// Pass 1 — deny.
+	for _, r := range applicable {
+		if r.verb != VerbDeny {
+			continue
+		}
+		if !ruleMatchesEffectMeta(r, e) {
+			continue
+		}
+		if !r.coversAllObjects() {
+			continue
+		}
+		return effectDecision{verb: verbDeny, rule: r}
+	}
+
+	// Pass 2 — coverage: any non-deny rule whose effect-meta matches and
+	// whose objects filter is empty.
+	var (
+		coverage []*compiledStatementRule
+	)
+	for _, r := range applicable {
+		if r.verb == VerbDeny {
+			continue
+		}
+		if !ruleMatchesEffectMeta(r, e) {
+			continue
+		}
+		if !r.coversAllObjects() {
+			continue
+		}
+		coverage = append(coverage, r)
+	}
+	if len(coverage) == 0 {
+		return effectDecision{verb: verbImplicitDeny}
+	}
+
+	// Pass 3 — most-restrictive verb across covering rules.
+	var (
+		best         internalVerb = verbAllow
+		primary      *compiledStatementRule
+		approveRules []*compiledStatementRule
+		auditRules   []*compiledStatementRule
+		approveSeen  = map[string]bool{}
+		auditSeen    = map[string]bool{}
+	)
+	for _, r := range coverage {
+		switch r.verb {
+		case VerbApprove:
+			if verbApprove > best {
+				best = verbApprove
+			}
+			if !approveSeen[r.src.Name] {
+				approveSeen[r.src.Name] = true
+				approveRules = append(approveRules, r)
+			}
+		case VerbAudit:
+			if verbAudit > best {
+				best = verbAudit
+			}
+			if !auditSeen[r.src.Name] {
+				auditSeen[r.src.Name] = true
+				auditRules = append(auditRules, r)
+			}
+		}
+	}
+	switch best {
+	case verbApprove:
+		primary = approveRules[0]
+	case verbAudit:
+		primary = auditRules[0]
+	default:
+		primary = coverage[0]
+	}
 	return effectDecision{
 		verb:                best,
 		rule:                primary,
