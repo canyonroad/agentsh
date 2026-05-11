@@ -350,3 +350,142 @@ database_connection_rules:
 		t.Errorf("DegradedReason = %q, want replication_passthrough", found.DegradedReason)
 	}
 }
+
+func TestDispatch_CancelRequest_AllowedForwardsPacket(t *testing.T) {
+	var captured []byte
+	upAddr := captureCancelListener(t, &captured)
+
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	rs := loadRuleSet(t, `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: `+upAddr+`
+    tls_mode: terminate_plaintext_upstream
+    trusted_network: true
+database_connection_rules:
+  - name: allow-cancel
+    db_service: appdb
+    match_kind: cancel
+    decision: allow
+`)
+
+	srv, err := New(Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           &events.SyncSink{},
+		Policy:         rs,
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: upAddr,
+			TLSMode:  "terminate_plaintext_upstream",
+			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pc := newProxyConn(srv, srv.cfg.Services[0], a, 1000)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = pc.run(ctx) }()
+
+	pkt := buildCancelPacket(11111, 22222)
+	if _, err := b.Write(pkt); err != nil {
+		t.Fatalf("write CancelRequest: %v", err)
+	}
+	// Allow upstream to capture.
+	for i := 0; i < 100 && len(captured) < 16; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(captured) != 16 {
+		t.Fatalf("captured %d bytes upstream, want 16", len(captured))
+	}
+	for i := range pkt {
+		if captured[i] != pkt[i] {
+			t.Errorf("byte %d: got %#x, want %#x", i, captured[i], pkt[i])
+		}
+	}
+}
+
+func TestDispatch_CancelRequest_DeniedSilentClose(t *testing.T) {
+	upLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer upLn.Close()
+	dialed := make(chan struct{}, 1)
+	go func() {
+		if c, err := upLn.Accept(); err == nil {
+			dialed <- struct{}{}
+			c.Close()
+		}
+	}()
+
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	rs := loadRuleSet(t, `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: `+upLn.Addr().String()+`
+    tls_mode: terminate_plaintext_upstream
+    trusted_network: true
+database_connection_rules:
+  - name: deny-cancel
+    db_service: appdb
+    match_kind: cancel
+    decision: deny
+`)
+
+	srv, err := New(Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           &events.SyncSink{},
+		Policy:         rs,
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: upLn.Addr().String(),
+			TLSMode:  "terminate_plaintext_upstream",
+			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pc := newProxyConn(srv, srv.cfg.Services[0], a, 1000)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	go func() { _ = pc.run(ctx) }()
+
+	pkt := buildCancelPacket(11111, 22222)
+	if _, err := b.Write(pkt); err != nil {
+		t.Fatalf("write CancelRequest: %v", err)
+	}
+
+	select {
+	case <-dialed:
+		t.Error("upstream was dialed despite deny rule")
+	case <-time.After(300 * time.Millisecond):
+		// Expected: no dial.
+	}
+}

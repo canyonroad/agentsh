@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -48,11 +49,7 @@ func (pc *proxyConn) dispatchStartup(ctx context.Context) error {
 			}
 			continue
 		case *pgproto3.CancelRequest:
-			// Plan 04b: silently close. Plan 04b₂ evaluates a cancel rule
-			// and may forward to upstream un-mapped.
-			pc.logger.Debug("CancelRequest received; close silently (Plan 04b)",
-				"service", pc.svc.Name, "syn_pid", m.ProcessID, "syn_secret", m.SecretKey)
-			return nil
+			return pc.handleCancelRequest(ctx, m)
 		case *pgproto3.StartupMessage:
 			return pc.handleStartupMessage(ctx, m)
 		default:
@@ -200,6 +197,44 @@ func (pc *proxyConn) forwardReplicationStartupAndPump(ctx context.Context, m *pg
 		}
 	}
 	return nil
+}
+
+// handleCancelRequest evaluates match_kind=cancel and either forwards the
+// raw 16-byte packet via forwardCancel or silently closes. Plan 04b₂ runs
+// un-mapped — Plan 06 will add the mapping table.
+func (pc *proxyConn) handleCancelRequest(ctx context.Context, m *pgproto3.CancelRequest) error {
+	d := pc.evaluateCancel(ctx)
+	pc.logger.Debug("CancelRequest received",
+		"service", pc.svc.Name,
+		"syn_pid", m.ProcessID,
+		"syn_secret", m.SecretKey,
+		"verb", d.Verb,
+		"rule", d.RuleName)
+	if d.Verb == policy.VerbDeny {
+		// Silent close per spec §15: cancel has no error response.
+		return nil
+	}
+	// Rebuild the on-wire packet from the parsed CancelRequest because
+	// pgproto3's ReceiveStartupMessage consumes the bytes.
+	pkt := buildCancelPacketBytes(m.ProcessID, m.SecretKey)
+	if err := forwardCancel(ctx, pc.svc, pkt); err != nil {
+		pc.logger.Warn("forwardCancel failed", "service", pc.svc.Name, "err", err)
+	}
+	return nil
+}
+
+// buildCancelPacketBytes serializes a CancelRequest payload for un-mapped
+// forwarding. Wire layout: 4-byte length + 4-byte magic + 4-byte process ID +
+// N-byte secret key (typically 4 bytes for vanilla Postgres; longer for
+// CockroachDB extended-secret format).
+func buildCancelPacketBytes(pid uint32, secret []byte) []byte {
+	total := 4 + 4 + 4 + len(secret) // length, magic, pid, secret
+	pkt := make([]byte, total)
+	binary.BigEndian.PutUint32(pkt[0:4], uint32(total))
+	binary.BigEndian.PutUint32(pkt[4:8], cancelRequestMagic)
+	binary.BigEndian.PutUint32(pkt[8:12], pid)
+	copy(pkt[12:], secret)
+	return pkt
 }
 
 // synthesizeError writes one ErrorResponse with the given SQLSTATE+message
