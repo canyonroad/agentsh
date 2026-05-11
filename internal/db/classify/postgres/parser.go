@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 
@@ -171,9 +172,16 @@ func classifyWithBackend(
 		} else {
 			end = start + length
 		}
-		// Skip leading whitespace to get the actual statement boundaries
-		for start < end && unicode.IsSpace(rune(sql[start])) {
-			start++
+		// Skip leading whitespace to get the actual statement boundaries.
+		// libpg_query's StmtLocation can point at a separator's trailing
+		// whitespace in multi-statement input. Use utf8.DecodeRuneInString
+		// so multi-byte whitespace (e.g. U+00A0) is handled correctly.
+		for start < end {
+			r, width := utf8.DecodeRuneInString(sql[int(start):])
+			if !unicode.IsSpace(r) {
+				break
+			}
+			start += int32(width)
 		}
 		cs.SourceStart = start
 		cs.SourceEnd = end
