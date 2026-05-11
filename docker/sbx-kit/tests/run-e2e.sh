@@ -124,6 +124,8 @@ docker run -d --rm --name "$CONTAINER" --user 0 \
   -v "$REPO/packaging/config.yaml:/sbx-e2e/server-config.yaml:ro" \
   -v "$REPO/docker/sbx-kit/files:/sbx-e2e/kit-files:ro" \
   -v "$STAGE/home-overrides/policy.yaml:/sbx-e2e/user-override.yaml:ro" \
+  -v "$REPO/packaging/agent-wrap.sh:/sbx-e2e/agent-wrap:ro" \
+  -v "$REPO/packaging/install-agent-wrappers.sh:/sbx-e2e/install-agent-wrappers:ro" \
   "$IMAGE" \
   sleep 600 >/dev/null
 
@@ -266,7 +268,58 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Summary
+# 8. Wrapper engagement check.
+#    Install a fake /usr/bin/claude stub, a fake `agentsh` that emits a
+#    recognizable marker, run the installer to create /usr/local/bin/claude,
+#    then invoke claude via a login shell and verify the wrap chain fired.
+# ---------------------------------------------------------------------------
+
+log
+log "Verifying agent wrap engagement:"
+
+in_container '
+set -e
+
+# Fake agentsh that announces itself when called as `agentsh wrap`.
+cat >/usr/bin/agentsh <<EOF
+#!/bin/sh
+echo "FAKE-AGENTSH-WRAP-MARKER: \$*"
+EOF
+chmod +x /usr/bin/agentsh
+
+# Fake claude binary.
+cat >/usr/bin/claude <<EOF
+#!/bin/sh
+echo "REAL-CLAUDE-MARKER: \$*"
+EOF
+chmod +x /usr/bin/claude
+
+# Copy the installer and wrap script into the container at the production
+# layout. (In real `sbx run`, install.sh would do this via the OS package;
+# here we side-load from the host so the E2E does not depend on a tagged
+# release.)
+install -m 0755 /sbx-e2e/agent-wrap /usr/lib/agentsh/agent-wrap
+install -m 0755 /sbx-e2e/install-agent-wrappers /usr/lib/agentsh/install-agent-wrappers.sh
+
+# Run the installer.
+/usr/lib/agentsh/install-agent-wrappers.sh
+'
+
+# Now invoke `claude` from a login shell — bash -lc sources profile.d, which
+# puts /usr/local/bin on PATH ahead of /usr/bin (the default on most distros).
+out=$(in_container "bash -lc 'claude --version'" 2>&1 || true)
+
+if printf '%s' "$out" | grep -q 'FAKE-AGENTSH-WRAP-MARKER: wrap -- /usr/bin/claude --version'; then
+    pass "wrapper engages \`agentsh wrap\` with args preserved"
+else
+    fail "wrapper did not engage wrap (or args dropped)"
+    log  "----- claude invocation output -----"
+    printf '%s\n' "$out"
+    log  "------------------------------------"
+fi
+
+# ---------------------------------------------------------------------------
+# 9. Summary
 # ---------------------------------------------------------------------------
 
 log
