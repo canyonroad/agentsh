@@ -1,0 +1,206 @@
+# Coding-agent policy for AgentSH inside Docker Sandboxes.
+# This is the baked-in template the agentsh-sbx-bootstrap binary merges with
+# any user override at /home/agent/.agentsh/policy.yaml on every sandbox start.
+#
+# Reference: /usr/share/doc/agentsh/policy-reference.md
+# To extend: write rules to /home/agent/.agentsh/policy.yaml; the bootstrap
+# merges them on top of this file (user wins on name collision; otherwise
+# rules concatenate in declared order).
+
+version: 1
+name: coding-agent
+description: |
+  Default policy for AI coding agents (Claude Code, OpenCode, Gemini CLI)
+  running inside Docker Sandboxes. Tuned for path/command granularity inside
+  the sandbox; outbound network controls are handled by the Docker Sandbox
+  proxy and intentionally not duplicated here.
+
+# =============================================================================
+# FILE RULES — evaluated in order, first match wins.
+# =============================================================================
+file_rules:
+
+  # ---- Sensitive credential paths: deny before any allow-home rule matches.
+  - name: deny-credential-paths
+    description: Block reads/writes of host credentials that may have leaked into the sandbox.
+    paths:
+      - "/home/**/.ssh/**"
+      - "/home/**/.aws/**"
+      - "/home/**/.gnupg/**"
+      - "/home/**/.kube/**"
+      - "/home/**/.docker/config.json"
+      - "/home/**/.netrc"
+      - "/home/**/.config/gcloud/**"
+      - "/home/**/.config/gh/**"
+      - "/home/**/.config/git-credentials"
+      - "/root/.ssh/**"
+      - "/root/.aws/**"
+      - "/root/.gnupg/**"
+      - "/root/.kube/**"
+      - "/root/.netrc"
+    operations: ["*"]
+    decision: deny
+    message: "Access to credential path {{.Path}} is denied by the coding-agent policy."
+
+  # ---- AgentSH self-protection: agent cannot edit its own policy/logs/binaries.
+  - name: deny-self-write
+    description: Prevent the agent from tampering with AgentSH state.
+    paths:
+      - "/etc/agentsh/**"
+      - "/usr/lib/agentsh/**"
+      - "/usr/share/agentsh/**"
+      - "/run/agentsh/**"
+      - "/var/lib/agentsh/**"
+      - "/var/log/agentsh/**"
+    operations: [write, create, mkdir, chmod, rename, delete, rmdir]
+    decision: deny
+    message: "Write to AgentSH-controlled path {{.Path}} is denied."
+
+  # ---- Workspace: full read/write; deletes are soft so rm -rf is recoverable.
+  - name: allow-workspace-read
+    paths: ["/workspace", "/workspace/**"]
+    operations: [read, open, stat, list, readlink]
+    decision: allow
+
+  - name: allow-workspace-write
+    paths: ["/workspace", "/workspace/**"]
+    operations: [write, create, mkdir, chmod, rename]
+    decision: allow
+
+  - name: soft-delete-workspace
+    description: Soft-delete workspace files (recoverable via /var/lib/agentsh/trash).
+    paths: ["/workspace", "/workspace/**"]
+    operations: [delete, rmdir]
+    decision: soft_delete
+    message: "File quarantined (recoverable): {{.Path}}"
+
+  # ---- Home: read/write everywhere except the credential paths denied above.
+  - name: allow-home
+    paths: ["/home/**", "/root/**"]
+    operations: ["*"]
+    decision: allow
+
+  # ---- Package manager caches: full allow (routine for coding work).
+  - name: allow-package-caches
+    paths:
+      - "/home/**/.npm/**"
+      - "/home/**/.cache/pip/**"
+      - "/home/**/.cargo/**"
+      - "/home/**/.cache/go-build/**"
+      - "/home/**/.rustup/**"
+      - "/home/**/.gradle/caches/**"
+      - "/home/**/.m2/**"
+      - "/root/.npm/**"
+      - "/root/.cache/pip/**"
+      - "/root/.cargo/**"
+    operations: ["*"]
+    decision: allow
+
+  # ---- Tmp: full access.
+  - name: allow-tmp
+    paths: ["/tmp/**", "/var/tmp/**"]
+    operations: ["*"]
+    decision: allow
+
+  # ---- System paths: read-only allow.
+  - name: allow-system-read
+    paths:
+      - "/usr/**"
+      - "/lib/**"
+      - "/lib64/**"
+      - "/bin/**"
+      - "/sbin/**"
+      - "/opt/**"
+    operations: [read, open, stat, list, readlink]
+    decision: allow
+
+  - name: allow-etc-read-safe
+    paths:
+      - "/etc/hosts"
+      - "/etc/resolv.conf"
+      - "/etc/ssl/**"
+      - "/etc/ca-certificates/**"
+      - "/etc/localtime"
+      - "/etc/timezone"
+      - "/etc/mime.types"
+      - "/etc/protocols"
+      - "/etc/services"
+      - "/etc/environment"
+      - "/etc/environment.d/**"
+      - "/etc/profile.d/**"
+    operations: [read, open, stat]
+    decision: allow
+
+# =============================================================================
+# COMMAND RULES
+# =============================================================================
+command_rules:
+
+  - name: deny-privilege-escalation
+    description: The Docker Sandbox already pins the agent to a fixed user; escalation is suspicious.
+    commands: [sudo, su, doas]
+    decision: deny
+    message: "Privilege escalation via {{.Command}} is denied inside a Docker Sandbox."
+
+  - name: audit-curl-pipe-to-shell
+    description: Audit curl/wget piped to sh/bash. v1.1 will replace this with redirect to agentsh-fetch.
+    commands: [curl, wget]
+    args_patterns:
+      - ".*\\|\\s*(sh|bash|zsh).*"
+    decision: audit
+    message: "curl|sh pattern detected: {{.Command}} {{.Args}}"
+
+  - name: approve-recursive-chmod
+    description: Require approval for chmod -R on / or /home, or chmod 777.
+    commands: [chmod]
+    args_patterns:
+      - "^-R\\s+/$"
+      - "^-R\\s+/home.*"
+      - ".*777.*"
+    decision: approve
+    message: "Recursive or world-writable chmod requested: chmod {{.Args}}"
+
+  - name: allow-package-installers
+    description: Routine for coding agents; allow with audit.
+    commands: [pip, pip3, npm, yarn, pnpm, cargo, apt, apt-get, gem, bundle]
+    decision: allow
+
+# =============================================================================
+# SIGNAL RULES
+# =============================================================================
+signal_rules:
+
+  - name: deny-signal-pid1
+    description: The agent must not signal PID 1.
+    signals: ["@fatal", "@job"]
+    target:
+      type: pid_range
+      min: 1
+      max: 1
+    decision: deny
+    message: "Signaling PID 1 is denied."
+
+  - name: deny-signal-agentsh
+    description: The agent must not signal AgentSH processes.
+    signals: ["@fatal"]
+    target:
+      type: external
+      pattern: "agentsh*"
+    decision: deny
+    message: "Signaling AgentSH is denied."
+
+  - name: allow-signal-own-tree
+    description: Allow signals within the agent's own subprocess tree.
+    signals: ["@fatal", "@job"]
+    target:
+      type: children
+    decision: allow
+
+# =============================================================================
+# AUDIT
+# =============================================================================
+audit:
+  log_allowed: false
+  log_denied: true
+  log_approved: true
+  retention_days: 7
