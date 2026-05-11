@@ -221,3 +221,35 @@ func TestForwardAuth_UpstreamErrorResponse_ForwardedVerbatim(t *testing.T) {
 		t.Errorf("ErrorResponse.Code = %q, want 28P01", resp.Code)
 	}
 }
+
+func TestForwardAuth_CapturesUpstreamRFQByte(t *testing.T) {
+	clientFE, proxyClientBE, proxyUpstreamFE, upstreamBE := pairedConns(t)
+	pc := newTestProxyConnForAuth(t, proxyClientBE, proxyUpstreamFE)
+	upstreamScript := pgproto3.NewBackend(upstreamBE, upstreamBE)
+	clientReader := pgproto3.NewFrontend(clientFE, clientFE)
+
+	go func() {
+		upstreamScript.Send(&pgproto3.AuthenticationOk{})
+		upstreamScript.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		_ = upstreamScript.Flush()
+	}()
+
+	// Drain client side in the background.
+	go func() {
+		for {
+			if _, err := clientReader.Receive(); err != nil {
+				return
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := forwardAuth(ctx, pc); err != nil {
+		t.Fatalf("forwardAuth: %v", err)
+	}
+
+	if pc.state.lastUpstreamRFQ != 'I' {
+		t.Fatalf("lastUpstreamRFQ = %q want 'I'", pc.state.lastUpstreamRFQ)
+	}
+}

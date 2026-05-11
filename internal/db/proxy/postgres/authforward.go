@@ -117,6 +117,7 @@ func (pc *proxyConn) forwardUpstreamToClientUntilRFQ() error {
 				return fmt.Errorf("flush after BKD: %w", err)
 			}
 		case *pgproto3.ReadyForQuery:
+			pc.state.lastUpstreamRFQ = m.TxStatus
 			pc.backend.Send(m)
 			if err := pc.backend.Flush(); err != nil {
 				return fmt.Errorf("flush after RFQ: %w", err)

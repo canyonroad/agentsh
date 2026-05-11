@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/agentsh/agentsh/internal/db/events"
+	"github.com/agentsh/agentsh/internal/db/policy"
 )
 
 // connState is the per-connection state carried through the 04b handshake.
@@ -47,6 +48,11 @@ type connState struct {
 	// state via an explicit opt-in (replication_passthrough in 04b₂;
 	// gssenc_passthrough lands in Plan 05). Used by the DVW emitter.
 	degradedReason string
+
+	// Task 6 captures from forwardAuth.
+	lastUpstreamRFQ byte                 // 'I' | 'T' | 'E' | 0 (pre-auth)
+	redactionTier   policy.RedactionTier // resolved at handshake end
+	tlsMode         string               // svc.TLSMode at handshake end, for EventTLS.Mode
 }
 
 // logger narrows *slog.Logger to just the methods we use, so tests can
