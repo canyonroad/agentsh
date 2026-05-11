@@ -103,6 +103,10 @@ func (s SessionState) Clone() SessionState {
 // Parser is the single public surface. Implementations are returned by New.
 type Parser interface {
 	Classify(sql string, sess SessionState, opts Options) ([]effects.ClassifiedStatement, error)
+	// Normalize returns SQL with all literal values replaced by $N placeholders.
+	// On parse failure returns the parser error verbatim; callers degrade to
+	// the verbatim trimmed SQL for digest computation.
+	Normalize(sql string) (string, error)
 }
 
 // New returns the parser for the given dialect, using whichever libpg_query
