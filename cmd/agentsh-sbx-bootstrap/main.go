@@ -9,20 +9,30 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 )
 
 const (
-	defaultTemplatePath = "/usr/share/agentsh/coding-agent.template.yaml"
-	defaultOverlayPath  = "/home/agent/.agentsh/policy.yaml"
-	defaultPolicyPath   = "/etc/agentsh/policies/default.yaml"
-	defaultTierPath     = "/run/agentsh/tier"
+	defaultTemplatePath  = "/usr/share/agentsh/coding-agent.template.yaml"
+	defaultOverlayPath   = "/home/agent/.agentsh/policy.yaml"
+	defaultPolicyPath    = "/etc/agentsh/policies/default.yaml"
+	defaultTierPath      = "/run/agentsh/tier"
+	defaultBootstrapLog  = "/var/log/agentsh/bootstrap.log"
+	defaultDaemonLog     = "/var/log/agentsh/daemon.log"
+	defaultAgentshBin    = "/usr/bin/agentsh"
+	defaultServerConfig  = "/etc/agentsh/config.yaml"
+	defaultDaemonSocket  = "/run/agentsh/agentsh.sock"
+	defaultSocketTimeout = 2 * time.Second
 )
 
 func main() {
 	var (
-		tmpl    = flag.String("template", defaultTemplatePath, "Baked-in policy template path")
-		overlay = flag.String("overlay", defaultOverlayPath, "User override fragment path (optional)")
-		policy  = flag.String("policy", defaultPolicyPath, "Output merged policy path")
+		tmpl       = flag.String("template", defaultTemplatePath, "Baked policy template path")
+		overlay    = flag.String("overlay", defaultOverlayPath, "User override fragment path")
+		policy     = flag.String("policy", defaultPolicyPath, "Output merged policy path")
+		agentshBin = flag.String("agentsh", defaultAgentshBin, "Path to the agentsh binary")
+		srvConfig  = flag.String("server-config", defaultServerConfig, "Path to the agentsh server config")
+		sock       = flag.String("socket", defaultDaemonSocket, "Daemon socket path to poll for readiness")
 	)
 	flag.Parse()
 
@@ -30,5 +40,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "agentsh-sbx-bootstrap: policy merge failed: %v\n", err)
 		os.Exit(1)
 	}
-	// Daemon spawn + tier probe land in Task 4 and Task 5.
+
+	if _, err := spawnDaemon(*agentshBin, []string{"server", "--config", *srvConfig}, defaultDaemonLog); err != nil {
+		fmt.Fprintf(os.Stderr, "agentsh-sbx-bootstrap: spawn daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := waitForSocket(*sock, defaultSocketTimeout); err != nil {
+		fmt.Fprintf(os.Stderr, "agentsh-sbx-bootstrap: %v (continuing with degraded tier)\n", err)
+		// Don't exit — tier probe will record tier=none.
+	}
+
+	// Tier probe lands in Task 5.
 }
