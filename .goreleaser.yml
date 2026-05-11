@@ -376,6 +376,15 @@ nfpms:
         dst: /usr/lib/agentsh/bash_startup.sh
         file_info:
           mode: 0755
+      # Auto-wrap agent harness (paired with the Docker Sandboxes mixin kit).
+      - src: packaging/agent-wrap.sh
+        dst: /usr/lib/agentsh/agent-wrap
+        file_info:
+          mode: 0755
+      - src: packaging/install-agent-wrappers.sh
+        dst: /usr/lib/agentsh/install-agent-wrappers.sh
+        file_info:
+          mode: 0755
       # Coding-agent policy template for Docker Sandboxes mixin bootstrap.
       # Installed read-only — the bootstrap writes the merged result to
       # /etc/agentsh/policies/default.yaml on each sandbox start.
