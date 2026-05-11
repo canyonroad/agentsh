@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 )
@@ -52,5 +53,5 @@ func bytePump(ctx context.Context, a, b net.Conn) error {
 }
 
 func isNormalCloseErr(err error) bool {
-	return err == io.EOF || err == io.ErrClosedPipe || err == net.ErrClosed
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
 }

@@ -133,3 +133,81 @@ func TestDispatch_Replication_DefaultDeny(t *testing.T) {
 	}
 	<-clientDone
 }
+
+func TestDispatch_Passthrough_BytePumpAfterS(t *testing.T) {
+	// Fake upstream that echoes any bytes received.
+	upLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen upstream: %v", err)
+	}
+	defer upLn.Close()
+	go func() {
+		c, err := upLn.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = io.Copy(c, c) // echo
+	}()
+
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	srv, err := New(Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           &events.SyncSink{},
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: upLn.Addr().String(),
+			TLSMode:  "passthrough",
+			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Service:  policy.DBService{Name: "appdb", TLSMode: "passthrough"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pc := newProxyConn(srv, srv.cfg.Services[0], a, 1000)
+
+	// Drive proxy.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = pc.run(ctx) }()
+
+	// Client sends SSLRequest (8 bytes: 0x00000008, 0x04D2162F).
+	sslReq := make([]byte, 8)
+	binary.BigEndian.PutUint32(sslReq[0:4], 8)
+	binary.BigEndian.PutUint32(sslReq[4:8], sslRequestMagic)
+	if _, err := b.Write(sslReq); err != nil {
+		t.Fatalf("write SSLRequest: %v", err)
+	}
+
+	// Expect 'S' response.
+	resp := make([]byte, 1)
+	if _, err := io.ReadFull(b, resp); err != nil {
+		t.Fatalf("read SSL resp: %v", err)
+	}
+	if resp[0] != 'S' {
+		t.Fatalf("SSL resp = %q, want 'S'", resp[0])
+	}
+
+	// Now bytes pump through to the echo upstream. Write a payload, read
+	// it back.
+	payload := []byte("hello-from-client")
+	if _, err := b.Write(payload); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	buf := make([]byte, len(payload))
+	_ = b.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(b, buf); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if string(buf) != string(payload) {
+		t.Errorf("echo = %q, want %q", buf, payload)
+	}
+}

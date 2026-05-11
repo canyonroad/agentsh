@@ -34,6 +34,9 @@ func (pc *proxyConn) dispatchStartup(ctx context.Context) error {
 		switch m := msg.(type) {
 		case *pgproto3.SSLRequest:
 			if err := pc.handleSSLRequest(ctx); err != nil {
+				if errors.Is(err, errPassthroughDone) {
+					return nil // passthrough byte-pump finished cleanly
+				}
 				return err
 			}
 			continue

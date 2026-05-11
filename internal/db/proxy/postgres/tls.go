@@ -5,27 +5,71 @@ package postgres
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// handleSSLRequest negotiates inbound TLS per the service's tls_mode.
-// Plan 04b supports terminate_reissue and terminate_plaintext_upstream
-// (passthrough is rejected at Server.New). Both terminate-mode paths
-// reissue a leaf for the upstream hostname (extracted from svc.Upstream).
+// handleSSLRequest negotiates the SSL response and runs the appropriate
+// post-S flow per service.TLSMode.
+//
+// terminate_reissue / terminate_plaintext_upstream: respond 'S', run
+// tls.Server with a leaf for the upstream hostname, swap pc.conn /
+// pc.backend to the encrypted stream, return to dispatchStartup so it
+// reads the post-TLS StartupMessage.
+//
+// passthrough: respond 'S', dial upstream plaintext, hand off to bytePump.
+// The client's encrypted bytes are forwarded verbatim; upstream's own 'S'
+// response (if any) is pumped back to client. No TLS termination occurs
+// on either side.
 func (pc *proxyConn) handleSSLRequest(ctx context.Context) error {
 	switch pc.svc.TLSMode {
 	case "terminate_reissue", "terminate_plaintext_upstream":
 		return pc.terminateInbound(ctx)
+	case "passthrough":
+		return pc.passthroughAfterSSL(ctx)
 	default:
-		// Should not happen: passthrough is rejected at Server.New.
-		// Defensive: refuse SSL so the client falls back or errors out.
+		// Defensive — unknown mode. Refuse SSL so the client falls back or
+		// errors out.
 		_, err := pc.conn.Write([]byte{'N'})
 		return err
 	}
 }
+
+// passthroughAfterSSL responds 'S' to the inbound SSLRequest, dials upstream
+// plaintext, and runs bytePump until either side closes. Returns
+// errPassthroughDone (a sentinel) so dispatchStartup's caller breaks out
+// of the for-loop cleanly.
+func (pc *proxyConn) passthroughAfterSSL(ctx context.Context) error {
+	if _, err := pc.conn.Write([]byte{'S'}); err != nil {
+		return fmt.Errorf("write passthrough 'S': %w", err)
+	}
+	upstream, _, err := dialUpstream(ctx, pc.svc, pc.srv.cfg)
+	if err != nil {
+		// Synthesize ErrorResponse on the inbound (still-plaintext) stream.
+		// This will appear inside the TLS bytes the client wraps; clients
+		// typically present this as "server closed connection during
+		// startup". Best-effort.
+		_ = pc.conn.Close()
+		return fmt.Errorf("passthrough upstream dial: %w", err)
+	}
+	pc.state.upstream = upstream
+	// No SNI peek here — Plan 04b's extractSNI helper is plumbed into the
+	// proxy's tls.Server GetCertificate path, not used in passthrough. A
+	// future task may peek client bytes pre-pump to capture SNI; out of
+	// scope for 04b₂.
+	if err := bytePump(ctx, pc.conn, pc.state.upstream); err != nil {
+		return fmt.Errorf("passthrough bytePump: %w", err)
+	}
+	return errPassthroughDone
+}
+
+// errPassthroughDone is the sentinel returned by passthroughAfterSSL so
+// dispatchStartup knows to break out of its for-loop without trying to read
+// another startup message.
+var errPassthroughDone = errors.New("postgres: passthrough complete")
 
 // terminateInbound responds 'S' to SSLRequest and runs tls.Server using
 // a leaf issued for the upstream hostname. After the handshake the proxy
