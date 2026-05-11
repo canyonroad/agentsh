@@ -78,6 +78,22 @@ if ! echo "$out" | grep -q "exists; not overwriting"; then
 fi
 echo "PASS: pre-existing file skipped with warning"
 
+# Test 4b: pre-existing symlink pointing elsewhere → skipped with warning
+setup_root "$tmp"
+touch "$tmp/usr/bin/claude"; chmod +x "$tmp/usr/bin/claude"
+ln -s /opt/vendor/bin/claude "$tmp/usr/local/bin/claude"
+out=$(FAKE_ROOT="$tmp" "$installer" 2>&1)
+link=$(readlink "$tmp/usr/local/bin/claude")
+if [ "$link" != "/opt/vendor/bin/claude" ]; then
+    echo "FAIL: pre-existing foreign symlink was overwritten; now points to $link"
+    exit 1
+fi
+if ! echo "$out" | grep -q "exists; not overwriting"; then
+    echo "FAIL: expected 'exists; not overwriting' message; got: $out"
+    exit 1
+fi
+echo "PASS: pre-existing foreign symlink skipped with warning"
+
 # Test 5: missing wrap script → exit 0, warning, no symlinks
 setup_root "$tmp"
 rm "$tmp/usr/lib/agentsh/agent-wrap"
@@ -102,16 +118,38 @@ setup_root "$tmp"
 for a in claude opencode; do
     touch "$tmp/usr/bin/$a"; chmod +x "$tmp/usr/bin/$a"
 done
+
+# Capture state as (filename, readlink-target) pairs for each entry.
+capture_state() {
+    local dir="$1"
+    for f in "$dir"/*; do
+        [ -e "$f" ] || continue   # skip if dir empty (glob unmatched)
+        if [ -L "$f" ]; then
+            printf '%s\t%s\n' "$(basename "$f")" "$(readlink "$f")"
+        else
+            printf '%s\tREGULAR\n' "$(basename "$f")"
+        fi
+    done | sort
+}
+
 FAKE_ROOT="$tmp" "$installer" >/dev/null 2>&1
-state1=$(find "$tmp/usr/local/bin" -maxdepth 1 | sort)
-FAKE_ROOT="$tmp" "$installer" >/dev/null 2>&1
-state2=$(find "$tmp/usr/local/bin" -maxdepth 1 | sort)
+state1=$(capture_state "$tmp/usr/local/bin")
+# Second run: also capture stderr to verify no spurious warnings.
+out2=$(FAKE_ROOT="$tmp" "$installer" 2>&1)
+state2=$(capture_state "$tmp/usr/local/bin")
 if [ "$state1" != "$state2" ]; then
-    echo "FAIL: not idempotent"
+    echo "FAIL: not idempotent (state diverged)"
     diff <(echo "$state1") <(echo "$state2") || true
     exit 1
 fi
-echo "PASS: idempotent"
+if [ -n "$out2" ]; then
+    # Second run on an already-wrapped tree should be SILENT.
+    # If stdout shows new "wrapped X" lines, the script re-wrapped.
+    # If stderr shows "exists; not overwriting", Fix 1 didn't land.
+    echo "FAIL: idempotent re-run was not silent; output was: $out2"
+    exit 1
+fi
+echo "PASS: idempotent (silent on re-run)"
 
 echo
-echo "OK install-agent-wrappers.sh (6/6)"
+echo "OK install-agent-wrappers.sh (7/7)"
