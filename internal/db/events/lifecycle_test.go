@@ -44,3 +44,38 @@ func TestLifecycleEvent_OmitsEmptySNIHostname(t *testing.T) {
 		t.Errorf("sni_hostname must be omitted when empty; got %s", got)
 	}
 }
+
+func TestLifecycleEvent_DegradedReason_RoundTrip(t *testing.T) {
+	in := LifecycleEvent{
+		EventID:        "01HJ...",
+		SessionID:      "sess-1",
+		Timestamp:      time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
+		DBService:      "appdb",
+		ClientIdentity: "uid:1000",
+		Kind:           "degraded_visibility_warning",
+		Reason:         "replication_opt_in",
+		DegradedReason: "replication_passthrough",
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var out LifecycleEvent
+	if err := json.Unmarshal(bs, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out != in {
+		t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", out, in)
+	}
+}
+
+func TestLifecycleEvent_OmitsEmptyDegradedReason(t *testing.T) {
+	ev := LifecycleEvent{Kind: "db_handshake_fail", Timestamp: time.Now()}
+	bs, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if got := string(bs); strings.Contains(got, "degraded_reason") {
+		t.Errorf("degraded_reason must be omitted when empty; got %s", got)
+	}
+}

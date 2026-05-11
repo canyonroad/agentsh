@@ -12,6 +12,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -63,6 +64,15 @@ type Config struct {
 	Sink           events.Sink
 	Logger         *slog.Logger
 	Policy         *policy.RuleSet // current rule set; nil means "no rules" (implicit deny). Hot-swappable in a later plan.
+
+	// UpstreamTLSConfigForTest, when non-nil, overrides the production
+	// upstream-TLS config (system roots, verify-full, MinVersion=TLS12,
+	// ServerName from svc.Upstream). Test-only — production callsites must
+	// leave this nil. Gated by a runtime panic when non-nil under
+	// Unavoidability != off and the running process's executable is not a
+	// _test binary, to make accidental production misuse loud rather than
+	// silent. See upstream.go.
+	UpstreamTLSConfigForTest *tls.Config
 }
 
 // Server runs the AgentSH PostgreSQL proxy listeners.
