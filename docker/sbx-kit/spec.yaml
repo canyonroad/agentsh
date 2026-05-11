@@ -1,0 +1,30 @@
+# AgentSH mixin kit for Docker Sandboxes.
+# See docs/superpowers/specs/2026-05-11-docker-sandboxes-mixin-kit-design.md
+# Invoke: sbx run <agent> --kit git+https://github.com/erans/agentsh.git#dir=docker/sbx-kit
+
+schemaVersion: "1"
+kind: mixin
+name: agentsh
+displayName: AgentSH
+description: Policy-enforced execution gateway for AI coding agents
+
+commands:
+  install:
+    - command: "/bin/sh -c 'curl -fsSL https://github.com/erans/agentsh/releases/latest/download/install.sh | sh'"
+      user: "0"
+      description: Install agentsh from the latest GitHub release
+
+  initFiles:
+    - path: /etc/profile.d/agentsh.sh
+      content: 'export PATH=/usr/lib/agentsh/shims:$PATH'
+      mode: "0644"
+
+    - path: /etc/environment.d/10-agentsh.conf
+      content: 'PATH=/usr/lib/agentsh/shims:/usr/local/bin:/usr/bin:/bin'
+      mode: "0644"
+
+  startup:
+    - command: ["/usr/bin/agentsh-sbx-bootstrap"]
+      user: "0"
+      background: true
+      description: Merge policy, start agentsh server, probe enforcement tier

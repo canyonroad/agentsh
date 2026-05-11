@@ -1,0 +1,18 @@
+# AgentSH user-override fragment.
+#
+# Anything you write here merges on top of the baked coding-agent policy at
+# /usr/share/agentsh/coding-agent.template.yaml on the next sandbox start.
+# Rules that share a `name` with a baked rule replace it; rules with new
+# names append after the baked set.
+#
+# Reference: /usr/share/doc/agentsh/policy-reference.md
+#
+# Example (uncomment to use):
+#
+# version: 1
+# name: my-overrides
+# file_rules:
+#   - name: allow-extra-write-area
+#     paths: ["/data/**"]
+#     operations: [write, create, mkdir, rename]
+#     decision: allow
