@@ -55,5 +55,24 @@ func main() {
 		// Don't exit — tier probe will record tier=none.
 	}
 
-	// Tier probe lands in Task 5.
+	const defaultShimDir = "/usr/lib/agentsh/shims"
+	shimDir := defaultShimDir
+	if env := os.Getenv("AGENTSH_SHIM_DIR"); env != "" {
+		shimDir = env
+	}
+
+	tier := "none"
+	if ok, resolved, probeErr := probeShimTier(shimDir); probeErr != nil {
+		fmt.Fprintf(os.Stderr, "agentsh-sbx-bootstrap: shim probe failed: %v\n", probeErr)
+	} else if ok {
+		tier = "shim"
+		fmt.Fprintf(os.Stdout, "agentsh-sbx-bootstrap: shim tier active (curl -> %s)\n", resolved)
+	} else {
+		fmt.Fprintf(os.Stderr, "agentsh-sbx-bootstrap: shim tier NOT active (PATH did not yield %s)\n", shimDir)
+	}
+
+	if err := writeTierFile(defaultTierPath, tier); err != nil {
+		fmt.Fprintf(os.Stderr, "agentsh-sbx-bootstrap: write tier file: %v\n", err)
+		os.Exit(1)
+	}
 }
