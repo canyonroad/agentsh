@@ -346,3 +346,132 @@ func TestHandleQuery_AllowPath_MultiStmt(t *testing.T) {
 	}
 	_ = loopErr
 }
+
+// denyDeletesRuleSet allows all read/session/ddl operations on service "test"
+// but denies writes/deletes. Tuned so BEGIN/COMMIT are allowed (covered by
+// `["*"]` allow rule) while DELETE triggers a deny.
+func denyDeletesRuleSet(t *testing.T) *policy.RuleSet {
+	return loadRuleSet(t, `version: 1
+name: test
+db_services:
+  test:
+    family: postgres
+    dialect: postgres
+    upstream: 127.0.0.1:5432
+    tls_mode: terminate_reissue
+database_rules:
+  - name: allow-all
+    db_service: test
+    operations: ["*"]
+    decision: allow
+  - name: deny-writes
+    db_service: test
+    operations: [DELETE]
+    decision: deny
+`)
+}
+
+func TestHandleQuery_DenyPath_PreTx(t *testing.T) {
+	pc, clientFE, sink, _ := allowPathFixture(t)
+	pc.state.lastUpstreamRFQ = 'I'
+	pc.srv.SetPolicy(denyDeletesRuleSet(t))
+
+	loopErr := make(chan error, 1)
+	go func() { loopErr <- pc.simpleQueryLoop(context.Background()) }()
+
+	mustSendFromClient(t, clientFE, &pgproto3.Query{String: "DELETE FROM t"})
+
+	er := mustReceiveClientFrame(t, clientFE).(*pgproto3.ErrorResponse)
+	if er.Code != "42501" {
+		t.Fatalf("Code = %q want 42501", er.Code)
+	}
+	rfq := mustReceiveClientFrame(t, clientFE).(*pgproto3.ReadyForQuery)
+	if rfq.TxStatus != 'I' {
+		t.Fatalf("RFQ TxStatus = %q want 'I'", rfq.TxStatus)
+	}
+
+	// Drain sink with small retry.
+	var evs []events.DBEvent
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		evs = sink.DrainStatements()
+		if len(evs) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(evs) != 1 || evs[0].Decision.Verb != "deny" {
+		t.Fatalf("statement events = %+v", evs)
+	}
+	if evs[0].TxContext.DenyAction != "none" {
+		t.Fatalf("DenyAction = %q want none", evs[0].TxContext.DenyAction)
+	}
+}
+
+func TestHandleQuery_DenyPath_InTx_Terminates(t *testing.T) {
+	pc, clientFE, sink, _ := allowPathFixture(t)
+	pc.state.lastUpstreamRFQ = 'T' // simulate prior BEGIN forwarded + upstream RFQ=T
+	pc.srv.SetPolicy(denyDeletesRuleSet(t))
+
+	loopErr := make(chan error, 1)
+	go func() { loopErr <- pc.simpleQueryLoop(context.Background()) }()
+
+	mustSendFromClient(t, clientFE, &pgproto3.Query{String: "DELETE FROM t"})
+
+	// Read ErrorResponse only — no RFQ should follow, conn closes.
+	er := mustReceiveClientFrame(t, clientFE).(*pgproto3.ErrorResponse)
+	if er.Code != "42501" {
+		t.Fatalf("Code = %q want 42501", er.Code)
+	}
+
+	// Loop must return with an error indicating in-tx terminate.
+	select {
+	case err := <-loopErr:
+		if err == nil {
+			t.Fatalf("simpleQueryLoop must return non-nil on in-tx deny terminate")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("simpleQueryLoop did not return within 1s")
+	}
+
+	// Verify sink has one event with DenyAction=connection_terminated.
+	evs := sink.DrainStatements()
+	if len(evs) != 1 || evs[0].TxContext.DenyAction != "connection_terminated" {
+		t.Fatalf("events = %+v", evs)
+	}
+}
+
+func TestHandleQuery_DenyPath_MultiStmt_TagsSiblings(t *testing.T) {
+	pc, clientFE, sink, _ := allowPathFixture(t)
+	pc.state.lastUpstreamRFQ = 'I'
+	pc.srv.SetPolicy(denyDeletesRuleSet(t))
+
+	loopErr := make(chan error, 1)
+	go func() { loopErr <- pc.simpleQueryLoop(context.Background()) }()
+
+	mustSendFromClient(t, clientFE, &pgproto3.Query{String: "SELECT a FROM t; DELETE FROM t"})
+
+	_ = mustReceiveClientFrame(t, clientFE) // ErrorResponse
+	_ = mustReceiveClientFrame(t, clientFE) // ReadyForQuery
+
+	var evs []events.DBEvent
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		evs = sink.DrainStatements()
+		if len(evs) == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(evs) != 2 {
+		t.Fatalf("statement events = %d want 2", len(evs))
+	}
+	// First (SELECT) should be denied_by_sibling.
+	if evs[0].Result.ErrorCode != "DENIED_BY_SIBLING" || evs[0].Decision.Verb != "deny" {
+		t.Fatalf("evs[0] = %+v", evs[0])
+	}
+	// Second (DELETE) is the actual denying stmt.
+	if evs[1].Decision.Verb != "deny" || evs[1].Decision.RuleName == "" {
+		t.Fatalf("evs[1] = %+v", evs[1])
+	}
+}

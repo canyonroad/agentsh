@@ -105,8 +105,48 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 		return ferr
 	}
 
-	// Deny path filled in by Task 13.
-	return pc.synthesizeError(sqlstateInsufficientPrivilege, "deny path not yet implemented")
+	// Deny path.
+	denyAction := "none"
+	if pc.state.lastUpstreamRFQ == 'T' || pc.state.lastUpstreamRFQ == 'E' {
+		denyAction = "connection_terminated"
+	}
+	pc.emitDenyEvents(ctx, stmts, decisions, q.String, batchSHA, denyAction)
+	rendered, sqlstate := pickDenySynth(decisions)
+	switch pc.state.lastUpstreamRFQ {
+	case 0, 'I':
+		return pc.synthErrorAndRFQ(sqlstate, rendered)
+	case 'T', 'E':
+		_ = pc.synthErrorOnly(sqlstate, rendered)
+		return errInTxTerminate
+	default:
+		return fmt.Errorf("postgres.handleQuery: unexpected RFQ byte %q", pc.state.lastUpstreamRFQ)
+	}
+}
+
+func (pc *proxyConn) emitDenyEvents(
+	ctx context.Context,
+	stmts []effects.ClassifiedStatement,
+	decisions []policy.Decision,
+	sql, batchSHA, denyAction string,
+) {
+	parser := pc.srv.classifierFor(pc.svc.Dialect)
+	for i, s := range stmts {
+		deniedBySibling := decisions[i].Verb != policy.VerbDeny
+		ev := buildStatementEvent(buildArgs{
+			Stmt: s, StmtIndex: i, BatchTotal: len(stmts),
+			Decision:          decisions[i],
+			SQL:               sql, Tier: pc.state.redactionTier,
+			Conn:              *pc.state,
+			BytesIn:           int64(len(sql)),
+			DenyAction:        denyAction,
+			IsDeniedBySibling: deniedBySibling,
+			BatchSHA:          batchSHA,
+			Parser:            parser,
+		})
+		if err := pc.srv.cfg.Sink.EmitStatement(ctx, ev); err != nil {
+			pc.logger.Warn("emit statement event failed", "err", err)
+		}
+	}
 }
 
 // synthApproveAsDeny rewrites a Decision with Verb=approve into Verb=deny
