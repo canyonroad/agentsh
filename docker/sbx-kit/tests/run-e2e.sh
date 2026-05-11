@@ -47,10 +47,12 @@ STAGE="$(mktemp -d -t agentsh-sbx-e2e.XXXXXX)"
 
 PASS=0
 FAIL=0
+SKIP=0
 
 log()    { printf '%s\n' "$*"; }
 pass()   { printf 'PASS: %s\n' "$*"; PASS=$((PASS + 1)); }
 fail()   { printf 'FAIL: %s\n' "$*" >&2; FAIL=$((FAIL + 1)); }
+skip()   { printf 'SKIP: %s\n' "$*"; SKIP=$((SKIP + 1)); }
 
 cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -268,62 +270,166 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Wrapper engagement check.
-#    Install a fake /usr/bin/claude stub, a fake `agentsh` that emits a
-#    recognizable marker, run the installer to create /usr/local/bin/claude,
-#    then invoke claude via a login shell and verify the wrap chain fired.
+# 8. Real-agent wrapper engagement check against docker/sandbox-templates:opencode.
+#
+#    This replaces the stub-based check that faked both agentsh and claude.
+#    The v1 design bug: the installer used `command -v opencode` from a login
+#    shell, which resolves to /usr/local/share/npm-global/bin/opencode (that
+#    directory appears before /usr/local/bin in the opencode image's PATH).
+#    This test pins that path and asserts the move-aside-and-replace layout
+#    matches the real image.
+#
+#    We use a stub agentsh (not a real CGO+libseccomp build) because the
+#    wrap-engagement assertion is purely structural: we only need to confirm
+#    the wrapper invokes `agentsh wrap -- <real-path> <args>` and that the
+#    real opencode binary still runs (stub execs through). No enforcement
+#    kernel machinery is exercised here, so libseccomp-dev is not required,
+#    keeping this check CI-friendly.
 # ---------------------------------------------------------------------------
 
 log
-log "Verifying agent wrap engagement:"
+log "Section 8: real-agent wrapper engagement (docker/sandbox-templates:opencode):"
 
-in_container '
-set -e
+OC_IMAGE="docker/sandbox-templates:opencode"
+OC_CONTAINER="agentsh-sbx-e2e-oc-$$"
 
-# Fake agentsh that announces itself when called as `agentsh wrap`.
-cat >/usr/bin/agentsh <<EOF
-#!/bin/sh
-echo "FAKE-AGENTSH-WRAP-MARKER: \$*"
-EOF
-chmod +x /usr/bin/agentsh
-
-# Fake claude binary.
-cat >/usr/bin/claude <<EOF
-#!/bin/sh
-echo "REAL-CLAUDE-MARKER: \$*"
-EOF
-chmod +x /usr/bin/claude
-
-# Copy the installer and wrap script into the container at the production
-# layout. (In real `sbx run`, install.sh would do this via the OS package;
-# here we side-load from the host so the E2E does not depend on a tagged
-# release.)
-install -m 0755 /sbx-e2e/agent-wrap /usr/lib/agentsh/agent-wrap
-install -m 0755 /sbx-e2e/install-agent-wrappers /usr/lib/agentsh/install-agent-wrappers.sh
-
-# Run the installer.
-/usr/lib/agentsh/install-agent-wrappers.sh
-'
-
-# Now invoke `claude` from a login shell — bash -lc sources profile.d, which
-# puts /usr/local/bin on PATH ahead of /usr/bin (the default on most distros).
-out=$(in_container "bash -lc 'claude --version'" 2>&1 || true)
-
-if printf '%s' "$out" | grep -q 'FAKE-AGENTSH-WRAP-MARKER: wrap -- /usr/bin/claude --version'; then
-    pass "wrapper engages \`agentsh wrap\` with args preserved"
+# Attempt to pull the opencode image; SKIP the whole section if unavailable.
+if ! docker pull "$OC_IMAGE" >/dev/null 2>&1; then
+  skip "opencode image pull failed — skipping real-agent engagement check (no network/hub access)"
 else
-    fail "wrapper did not engage wrap (or args dropped)"
-    log  "----- claude invocation output -----"
-    printf '%s\n' "$out"
-    log  "------------------------------------"
-fi
+
+  # Ensure the opencode container is cleaned up even if we exit early.
+  cleanup_oc() {
+    docker rm -f "$OC_CONTAINER" >/dev/null 2>&1 || true
+  }
+  trap 'cleanup_oc; cleanup' EXIT
+
+  # Start a fresh container from the opencode image.
+  docker run -d --name "$OC_CONTAINER" --user 0 "$OC_IMAGE" sleep 600 >/dev/null
+
+  # Helper: run a command in the opencode container as root.
+  in_oc() { docker exec --user 0 "$OC_CONTAINER" /bin/bash -c "$1"; }
+
+  # -------------------------------------------------------------------------
+  # 8a. Side-load: stub agentsh, real agent-wrap, real installer.
+  #
+  #     The stub agentsh records the invocation on stderr and then execs
+  #     through to the real binary (second positional arg after "wrap --"),
+  #     proving both that the wrapper called agentsh AND that real opencode
+  #     still runs.
+  # -------------------------------------------------------------------------
+
+  # Build stub agentsh in the stage dir.
+  cat >"$STAGE/bin/agentsh-stub" <<'STUB'
+#!/bin/sh
+# E2E stub: record invocation and exec through to the real binary.
+echo "AGENTSH-MARKER: $*" >&2
+# Strip "wrap --" prefix: the real binary is the third positional arg.
+shift  # past "wrap"
+shift  # past "--"
+exec "$@"
+STUB
+  chmod +x "$STAGE/bin/agentsh-stub"
+
+  docker cp "$STAGE/bin/agentsh-stub" "$OC_CONTAINER:/usr/bin/agentsh"
+  in_oc 'mkdir -p /usr/lib/agentsh'
+  docker cp "$REPO/packaging/agent-wrap.sh" "$OC_CONTAINER:/usr/lib/agentsh/agent-wrap"
+  docker cp "$REPO/packaging/install-agent-wrappers.sh" "$OC_CONTAINER:/usr/lib/agentsh/install-agent-wrappers.sh"
+
+  in_oc 'chmod +x /usr/bin/agentsh /usr/lib/agentsh/agent-wrap /usr/lib/agentsh/install-agent-wrappers.sh'
+
+  # -------------------------------------------------------------------------
+  # 8b. Create the tier file (the wrapper checks /run/agentsh/tier = "shim").
+  # -------------------------------------------------------------------------
+
+  in_oc 'mkdir -p /run/agentsh && echo shim > /run/agentsh/tier'
+
+  # -------------------------------------------------------------------------
+  # 8c. Run the installer from root login shell so it sees the same PATH that
+  #     would be set in production.
+  # -------------------------------------------------------------------------
+
+  in_oc 'bash -lc /usr/lib/agentsh/install-agent-wrappers.sh' 2>"$STAGE/oc-install.log" || true
+
+  # -------------------------------------------------------------------------
+  # 8d. Discover opencode's path (the load-bearing assertion: must be
+  #     /usr/local/share/npm-global/bin/opencode, not /usr/local/bin/opencode).
+  # -------------------------------------------------------------------------
+
+  # The installer ran from root login shell; query the same way.
+  oc_path=$(in_oc "bash -lc 'command -v opencode 2>/dev/null || echo MISSING'" || echo MISSING)
+  # After wrapping, `command -v opencode` returns the symlink path (same location).
+  # The .real sibling is what we need for assertions.
+  oc_real="${oc_path}.real"
+
+  # Check 8.1: discovered path is the expected npm-global location.
+  EXPECTED_OC_PATH="/usr/local/share/npm-global/bin/opencode"
+  if [ "$oc_path" = "$EXPECTED_OC_PATH" ]; then
+    pass "opencode discovered at expected npm-global path ($oc_path)"
+  else
+    fail "opencode path is '$oc_path' (want $EXPECTED_OC_PATH) — layout may have changed"
+  fi
+
+  # Check 8.2: discovered path is now a symlink to agent-wrap.
+  link_target=$(in_oc "readlink '$oc_path' 2>/dev/null || echo NOTLINK" || echo NOTLINK)
+  if [ "$link_target" = "/usr/lib/agentsh/agent-wrap" ]; then
+    pass "opencode symlink points to /usr/lib/agentsh/agent-wrap"
+  else
+    fail "opencode is not a symlink to agent-wrap (readlink='$link_target')"
+    log  "----- installer log -----"
+    cat "$STAGE/oc-install.log"
+    log  "-------------------------"
+  fi
+
+  # Check 8.3: .real sibling exists and is executable.
+  if in_oc "test -x '$oc_real'" 2>/dev/null; then
+    pass "opencode.real sibling exists and is executable ($oc_real)"
+  else
+    fail "opencode.real sibling missing or not executable ($oc_real)"
+  fi
+
+  # -------------------------------------------------------------------------
+  # 8e. Invoke opencode through the wrapper as the agent user.
+  #     Capture stderr (AGENTSH-MARKER) and stdout (real opencode output).
+  #     We use --version as the probe; if it produces no output, --help is
+  #     the fallback.  Either way, non-empty stdout proves real opencode ran.
+  # -------------------------------------------------------------------------
+
+  oc_out=$(docker exec --user agent "$OC_CONTAINER" bash -lc 'opencode --version 2>/tmp/oc-stderr; cat /tmp/oc-stderr' 2>/dev/null || true)
+  oc_stdout=$(docker exec --user agent "$OC_CONTAINER" bash -lc 'opencode --version 2>/dev/null' 2>/dev/null || true)
+  oc_stderr=$(docker exec --user agent "$OC_CONTAINER" bash -lc 'opencode --version 2>&1 >/dev/null' 2>/dev/null || true)
+
+  # Check 8.4: stderr from the wrap contains the AGENTSH-MARKER with correct argv.
+  expected_marker="AGENTSH-MARKER: wrap -- ${oc_real} --version"
+  if printf '%s' "$oc_stderr" | grep -qF "$expected_marker"; then
+    pass "AGENTSH-MARKER present in stderr (wrap chain fired with correct argv)"
+  else
+    fail "AGENTSH-MARKER not found in stderr (want: '$expected_marker')"
+    log  "----- opencode stderr -----"
+    printf '%s\n' "$oc_stderr"
+    log  "---------------------------"
+  fi
+
+  # Check 8.5: stdout is non-empty and does not contain the marker (real opencode ran).
+  if [ -n "$oc_stdout" ] && ! printf '%s' "$oc_stdout" | grep -q 'AGENTSH-MARKER'; then
+    pass "opencode --version produced real output (real binary executed through stub)"
+  else
+    fail "opencode --version stdout empty or contains marker (real binary may not have run)"
+    log  "----- opencode stdout -----"
+    printf '%s\n' "$oc_stdout"
+    log  "---------------------------"
+  fi
+
+  cleanup_oc
+
+fi  # end opencode image available
 
 # ---------------------------------------------------------------------------
 # 9. Summary
 # ---------------------------------------------------------------------------
 
 log
-log "summary: $PASS pass, $FAIL fail"
+log "summary: $PASS pass, $FAIL fail, $SKIP skip"
 if [ "$FAIL" -gt 0 ]; then
   log
   log "---- bootstrap log ----"
