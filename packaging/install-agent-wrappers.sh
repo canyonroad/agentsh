@@ -1,28 +1,22 @@
 #!/bin/sh
-# /usr/lib/agentsh/install-agent-wrappers.sh
-# Probe /usr/bin for known agent binaries and create /usr/local/bin/<name>
-# symlinks pointing at /usr/lib/agentsh/agent-wrap. Skips when:
-#   - the agent binary isn't present (nothing to wrap)
-#   - /usr/local/bin/<name> already exists (don't fight the agent kit)
+# Discover known agent binaries via `command -v`, move them aside to a
+# `.real` sibling, and put a symlink to /usr/lib/agentsh/agent-wrap in
+# the original location.
 #
-# Idempotent. Fail-open if the wrap script itself is missing (warns, exits 0,
-# leaves /usr/local/bin untouched).
-#
-# FAKE_ROOT is a TEST-ONLY hook: when set, all paths are relocated under it.
-# Production must NOT set FAKE_ROOT.
-# FAKE_ROOT must be an absolute path when set. A relative FAKE_ROOT produces
-# symlinks whose targets are relative to the symlink's directory (not CWD)
-# and will resolve incorrectly. The test harness uses mktemp, which always
-# produces an absolute path.
+# Idempotent. Fail-open if the wrap script itself is missing.
 
 set -eu
 
-FAKE_ROOT="${FAKE_ROOT:-}"
-WRAP="${FAKE_ROOT}/usr/lib/agentsh/agent-wrap"
-DEST="${FAKE_ROOT}/usr/local/bin"
-BIN="${FAKE_ROOT}/usr/bin"
+if [ "${AGENTSH_TEST:-}" = "1" ]; then
+    FAKE_ROOT="${FAKE_ROOT:-}"
+    _AGENT_PATH="${FAKE_TEST_PATH:-$PATH}"
+else
+    FAKE_ROOT=""
+    _AGENT_PATH="$PATH"
+fi
 
-# Known agent binaries. Extend this list as Docker Sandboxes adds support.
+WRAP="${FAKE_ROOT}/usr/lib/agentsh/agent-wrap"
+
 AGENTS="claude opencode gemini codex cursor"
 
 if [ ! -x "$WRAP" ]; then
@@ -30,21 +24,24 @@ if [ ! -x "$WRAP" ]; then
     exit 0
 fi
 
-mkdir -p "$DEST"
-
 for agent in $AGENTS; do
-    if [ ! -x "$BIN/$agent" ]; then
+    real=$(PATH="$_AGENT_PATH" command -v "$agent" 2>/dev/null || true)
+    if [ -z "$real" ] || [ ! -x "$real" ]; then
         continue
     fi
-    target="$DEST/$agent"
-    if [ -L "$target" ] && [ "$(readlink "$target")" = "$WRAP" ]; then
-        # Already correctly wrapped; silent skip (idempotent re-run).
+
+    # Idempotency: already-wrapped silent skip.
+    if [ -L "$real" ] && [ "$(readlink "$real")" = "$WRAP" ] && [ -e "${real}.real" ]; then
         continue
     fi
-    if [ -e "$target" ] || [ -L "$target" ]; then
-        echo "install-agent-wrappers: $target exists; not overwriting" >&2
+
+    # Conflict: .real exists but $real is not our symlink.
+    if [ -e "${real}.real" ]; then
+        echo "install-agent-wrappers: ${real}.real already exists but $real is not our symlink; not overwriting" >&2
         continue
     fi
-    ln -s "$WRAP" "$target"
-    echo "install-agent-wrappers: wrapped $agent" >&2
+
+    mv "$real" "${real}.real"
+    ln -s "$WRAP" "$real"
+    echo "install-agent-wrappers: wrapped $agent at $real (real moved to ${real}.real)" >&2
 done
