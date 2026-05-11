@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -28,15 +29,19 @@ func TestLoadOrCreate_FirstCallGenerates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat key: %v", err)
 	}
-	if keyFI.Mode()&0o777 != 0o600 {
-		t.Errorf("key perms = %#o, want 0600", keyFI.Mode()&0o777)
+	if runtime.GOOS != "windows" {
+		if keyFI.Mode()&0o777 != 0o600 {
+			t.Errorf("key perms = %#o, want 0600", keyFI.Mode()&0o777)
+		}
 	}
 	crtFI, err := os.Stat(crtPath)
 	if err != nil {
 		t.Fatalf("stat crt: %v", err)
 	}
-	if crtFI.Mode()&0o777 != 0o644 {
-		t.Errorf("crt perms = %#o, want 0644", crtFI.Mode()&0o777)
+	if runtime.GOOS != "windows" {
+		if crtFI.Mode()&0o777 != 0o644 {
+			t.Errorf("crt perms = %#o, want 0644", crtFI.Mode()&0o777)
+		}
 	}
 	if ca.Cert().Subject.CommonName != "AgentSH DB Proxy CA" {
 		t.Errorf("CN = %q, want \"AgentSH DB Proxy CA\"", ca.Cert().Subject.CommonName)
