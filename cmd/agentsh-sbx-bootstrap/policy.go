@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,7 +32,7 @@ func mergeAndWritePolicy(tmpl, overlay, out string) error {
 	if overlay != "" {
 		ovBytes, ovErr := os.ReadFile(overlay)
 		switch {
-		case os.IsNotExist(ovErr):
+		case errors.Is(ovErr, os.ErrNotExist):
 			// No override file: fine. Bare template wins.
 		case ovErr != nil:
 			fmt.Fprintf(os.Stderr, "agentsh-sbx-bootstrap: read overlay %q: %v (falling back to template only)\n", overlay, ovErr)
