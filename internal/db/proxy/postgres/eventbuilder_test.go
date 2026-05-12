@@ -195,3 +195,33 @@ func TestBuildEvent_DenyActionRollbackInjected(t *testing.T) {
 		t.Errorf("DenyAction=%q want rollback_injected", ev.TxContext.DenyAction)
 	}
 }
+
+func TestBuildEvent_PropagatesFunctionOID(t *testing.T) {
+	oid := int32(99)
+	sql := "-- function call"
+	stmt := effects.ClassifiedStatement{
+		RawVerb: "FUNCTION_CALL",
+		Effects: []effects.Effect{{
+			Group:       effects.GroupProcedural,
+			Subtype:     effects.SubtypeFunctionCallProtocol,
+			FunctionOID: &oid,
+		}},
+	}
+	parser := classify_pg.New(classify_pg.DialectPostgres)
+	ev := buildStatementEvent(buildArgs{
+		Stmt:     stmt,
+		SQL:      sql,
+		Tier:     policy.RedactParametersRedacted,
+		Conn:     connStateForTest("appdb", "postgres", "terminate_reissue"),
+		Decision: policy.Decision{Verb: policy.VerbAllow},
+		DenyAction: "none",
+		BatchSHA: sha256Hex(sql),
+		Parser:   parser,
+	})
+	if len(ev.Effects) != 1 {
+		t.Fatalf("len(Effects)=%d want 1", len(ev.Effects))
+	}
+	if ev.Effects[0].FunctionOID == nil || *ev.Effects[0].FunctionOID != 99 {
+		t.Errorf("FunctionOID=%v want 99", ev.Effects[0].FunctionOID)
+	}
+}
