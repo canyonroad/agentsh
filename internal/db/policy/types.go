@@ -85,7 +85,6 @@ type DBService struct {
 	Dialect                   string `yaml:"dialect"`
 	Upstream                  string `yaml:"upstream"`
 	TLSMode                   string `yaml:"tls_mode"`
-	DenyModeInTx              string `yaml:"deny_mode_in_tx,omitempty"`
 	AllowFunctionCallProtocol bool   `yaml:"allow_function_call_protocol,omitempty"`
 	AllowGSSEncryption        bool   `yaml:"allow_gss_encryption,omitempty"`
 	TrustedNetwork            bool   `yaml:"trusted_network,omitempty"`
@@ -106,6 +105,7 @@ type StatementRule struct {
 	Message                     string        `yaml:"message,omitempty"`
 	Timeout                     time.Duration `yaml:"timeout,omitempty"`
 	AcknowledgeAuditOnDangerous bool          `yaml:"acknowledge_audit_on_dangerous,omitempty"`
+	DenyModeInTx                string        `yaml:"deny_mode_in_tx,omitempty"`
 }
 
 // ConnectionRule is the on-disk shape of a database_connection_rules entry per §9.3.

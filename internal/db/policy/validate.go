@@ -152,6 +152,20 @@ func validateStatementRule(r *StatementRule, svcs map[ServiceID]*DBService) ([]e
 		})
 	}
 
+	// deny_mode_in_tx is only valid on deny rules. §14.3/§14.4.
+	if r.DenyModeInTx != "" {
+		if r.Decision != "deny" {
+			errs = append(errs, fmt.Errorf("rule_deny_mode_in_tx_not_deny: database_rules[%q]: deny_mode_in_tx is only valid on deny rules", r.Name))
+		} else {
+			switch r.DenyModeInTx {
+			case "terminate", "rollback_then_continue":
+				// ok
+			default:
+				errs = append(errs, fmt.Errorf("rule_deny_mode_in_tx_unknown: database_rules[%q]: deny_mode_in_tx %q: must be one of \"terminate\" or \"rollback_then_continue\"", r.Name, r.DenyModeInTx))
+			}
+		}
+	}
+
 	return errs, warns
 }
 

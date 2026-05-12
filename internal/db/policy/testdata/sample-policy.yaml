@@ -6,7 +6,6 @@ db_services:
     dialect: postgres
     upstream: db.internal:5432
     tls_mode: terminate_reissue
-    deny_mode_in_tx: terminate
     allow_function_call_protocol: false
   warehouse:
     family: postgres
@@ -52,6 +51,7 @@ database_rules:
     db_service: appdb
     operations: [DELETE, CREATE, DROP, ALTER, EXPORT]
     decision: deny
+    deny_mode_in_tx: terminate
     message: "Agent is read+update only on appdb. Requested: {{.Operation}}"
 
   - name: app-deny-dangerous

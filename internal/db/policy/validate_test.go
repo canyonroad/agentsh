@@ -418,3 +418,99 @@ database_rules:
 		t.Fatalf("want message_template_parse error, got %v", err)
 	}
 }
+
+func TestValidate_DenyModeInTx_AcceptedOnDenyRule(t *testing.T) {
+	src := `version: 1
+name: test
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: "127.0.0.1:5432", tls_mode: terminate_reissue}
+database_rules:
+  - name: block-delete
+    db_service: appdb
+    operations: [delete]
+    decision: deny
+    deny_mode_in_tx: rollback_then_continue
+`
+	p, err := rootpolicy.LoadFromBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	rs, _, err := Decode(p)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if rs == nil {
+		t.Fatal("rs nil")
+	}
+}
+
+func TestValidate_DenyModeInTx_AcceptedTerminate(t *testing.T) {
+	src := `version: 1
+name: test
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: "127.0.0.1:5432", tls_mode: terminate_reissue}
+database_rules:
+  - name: block-delete
+    db_service: appdb
+    operations: [delete]
+    decision: deny
+    deny_mode_in_tx: terminate
+`
+	p, err := rootpolicy.LoadFromBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	if _, _, err := Decode(p); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+}
+
+func TestValidate_DenyModeInTx_RejectedOnAllowRule(t *testing.T) {
+	src := `version: 1
+name: test
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: "127.0.0.1:5432", tls_mode: terminate_reissue}
+database_rules:
+  - name: allow-read
+    db_service: appdb
+    operations: [read]
+    decision: allow
+    deny_mode_in_tx: rollback_then_continue
+`
+	p, err := rootpolicy.LoadFromBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	_, _, err = Decode(p)
+	if err == nil {
+		t.Fatal("expected error; got nil")
+	}
+	if !strings.Contains(err.Error(), "deny_mode_in_tx") {
+		t.Fatalf("unexpected err: %v", err)
+	}
+}
+
+func TestValidate_DenyModeInTx_RejectedUnknownValue(t *testing.T) {
+	src := `version: 1
+name: test
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: "127.0.0.1:5432", tls_mode: terminate_reissue}
+database_rules:
+  - name: block-delete
+    db_service: appdb
+    operations: [delete]
+    decision: deny
+    deny_mode_in_tx: banana
+`
+	p, err := rootpolicy.LoadFromBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	_, _, err = Decode(p)
+	if err == nil {
+		t.Fatal("expected error; got nil")
+	}
+	if !strings.Contains(err.Error(), "deny_mode_in_tx") {
+		t.Fatalf("unexpected err: %v", err)
+	}
+}
