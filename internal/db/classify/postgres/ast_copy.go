@@ -52,10 +52,12 @@ func classifyCopy(cs *effects.ClassifiedStatement, s *pg_query.CopyStmt, sess Se
 	case s.Relation != nil && !isFrom:
 		// COPY t TO STDOUT
 		appendCopyStdoutEffects(cs, s, sess)
+		cs.BulkOp = effects.BulkOpOut
 	case s.Relation != nil && isFrom:
 		// COPY t FROM STDIN
 		obj, res := extractRelation(s.Relation, sess, effects.ObjectTable)
 		cs.RawVerb = "COPY_FROM_STDIN"
+		cs.BulkOp = effects.BulkOpIn
 		cs.Effects = []effects.Effect{{
 			Group:      effects.GroupBulkLoad,
 			Subtype:    effects.SubtypeCopyFromStdin,
@@ -65,6 +67,7 @@ func classifyCopy(cs *effects.ClassifiedStatement, s *pg_query.CopyStmt, sess Se
 	case s.Query != nil:
 		// COPY (<query>) TO STDOUT
 		appendCopyQueryEffects(cs, s, sess, opts)
+		cs.BulkOp = effects.BulkOpOut
 	default:
 		cs.Effects = []effects.Effect{{Group: effects.GroupUnknown, Resolution: effects.ResolutionUnresolved}}
 		cs.Error = "unmapped form: COPY shape not recognized"

@@ -14,6 +14,9 @@ func TestClassifyCopy_ToStdout(t *testing.T) {
 	if cs.RawVerb != "COPY_TO_STDOUT" {
 		t.Fatalf("RawVerb: got %q want COPY_TO_STDOUT", cs.RawVerb)
 	}
+	if cs.BulkOp != effects.BulkOpOut {
+		t.Fatalf("BulkOp: got %v want BulkOpOut", cs.BulkOp)
+	}
 	if len(cs.Effects) != 2 {
 		t.Fatalf("effect count: got %d want 2: %+v", len(cs.Effects), cs.Effects)
 	}
@@ -35,6 +38,9 @@ func TestClassifyCopy_FromStdin(t *testing.T) {
 	if cs.RawVerb != "COPY_FROM_STDIN" {
 		t.Fatalf("RawVerb: got %q want COPY_FROM_STDIN", cs.RawVerb)
 	}
+	if cs.BulkOp != effects.BulkOpIn {
+		t.Fatalf("BulkOp: got %v want BulkOpIn", cs.BulkOp)
+	}
 	if len(cs.Effects) != 1 {
 		t.Fatalf("effect count: got %d want 1", len(cs.Effects))
 	}
@@ -52,6 +58,9 @@ func TestClassifyCopy_ToPath(t *testing.T) {
 	cs := classifyOne(t, "COPY users TO '/tmp/x.csv'", SessionState{})
 	if cs.RawVerb != "COPY_TO_PATH" {
 		t.Fatalf("RawVerb: got %q want COPY_TO_PATH", cs.RawVerb)
+	}
+	if cs.BulkOp != effects.BulkOpNone {
+		t.Fatalf("BulkOp: got %v want BulkOpNone", cs.BulkOp)
 	}
 	if len(cs.Effects) != 3 {
 		t.Fatalf("effect count: got %d want 3: %+v", len(cs.Effects), cs.Effects)
@@ -133,6 +142,9 @@ func TestClassifyCopy_FromProgram(t *testing.T) {
 	if cs.RawVerb != "COPY_FROM_PROGRAM" {
 		t.Fatalf("RawVerb: got %q want COPY_FROM_PROGRAM", cs.RawVerb)
 	}
+	if cs.BulkOp != effects.BulkOpNone {
+		t.Fatalf("BulkOp: got %v want BulkOpNone", cs.BulkOp)
+	}
 	if cs.Effects[0].Group != effects.GroupUnsafeIO ||
 		cs.Effects[0].Subtype != effects.SubtypeCopyFromProgram {
 		t.Fatalf("primary: got %v/%v", cs.Effects[0].Group, cs.Effects[0].Subtype)
@@ -154,6 +166,9 @@ func TestClassifyCopy_QueryToStdout_Select(t *testing.T) {
 	cs := classifyOne(t, "COPY (SELECT * FROM customers) TO STDOUT", SessionState{})
 	if cs.RawVerb != "COPY_QUERY_TO_STDOUT" {
 		t.Fatalf("RawVerb: got %q want COPY_QUERY_TO_STDOUT", cs.RawVerb)
+	}
+	if cs.BulkOp != effects.BulkOpOut {
+		t.Fatalf("BulkOp: got %v want BulkOpOut", cs.BulkOp)
 	}
 	// Expect a bulk_export primary plus the inner SELECT's read effect.
 	if cs.Effects[0].Group != effects.GroupBulkExport ||
