@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+
+	"github.com/agentsh/agentsh/internal/db/proxy/postgres/statemachine"
 )
 
 // upstreamResult collects counters and final state from one Q...Z round-trip.
@@ -74,7 +76,24 @@ func (pc *proxyConn) forwardUpstreamUntilRFQ(ctx context.Context, sentAt time.Ti
 			pc.backend.Send(m)
 
 		case *pgproto3.ReadyForQuery:
-			pc.state.smState.LastUpstreamRFQ = m.TxStatus
+			if pc.state.smState != nil {
+				prev := pc.state.smState.LastUpstreamRFQ
+				pc.state.smState.LastUpstreamRFQ = m.TxStatus
+				switch m.TxStatus {
+				case 'I':
+					pc.state.smState.Phase = statemachine.PhaseIdle
+					pc.state.smState.TxStartedAt = time.Time{}
+				case 'T':
+					pc.state.smState.Phase = statemachine.PhaseInTx
+					if prev != 'T' {
+						pc.state.smState.TxStartedAt = time.Now()
+					}
+				case 'E':
+					pc.state.smState.Phase = statemachine.PhaseInTxError
+				}
+				// reset the per-Sync dirty flag on every observed RFQ
+				pc.state.smState.UpstreamDirtySinceSync = false
+			}
 			r.BytesOut += int64(estimatedFrameSize(m))
 			pc.backend.Send(m)
 			if err := pc.backend.Flush(); err != nil {
