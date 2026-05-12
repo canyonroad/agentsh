@@ -11,9 +11,9 @@ import (
 )
 
 // TestExportBPFViaPipe builds a minimal filter and asserts the exporter
-// returns a non-empty BPF program whose first instruction matches
-// libseccomp's standard prologue: BPF_LD | BPF_W | BPF_ABS loading
-// from offset 0 (the seccomp_data.nr field).
+// returns a non-empty BPF program whose first instruction is a valid
+// libseccomp prologue: BPF_LD | BPF_W | BPF_ABS loading a seccomp_data
+// field (arch at offset 4 on >=2.2, nr at offset 0 on older versions).
 func TestExportBPFViaPipe(t *testing.T) {
 	filt, err := seccomp.NewFilter(seccomp.ActAllow)
 	if err != nil {
