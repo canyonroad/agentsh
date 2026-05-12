@@ -10,7 +10,12 @@
 #   gcc-aarch64-linux-gnu make pkg-config
 #
 # Requires (for both):
-#   curl gpg tar make gcc gperf
+#   gpg tar make gcc gperf
+#
+# The libseccomp source tarball + signature are vendored under this
+# script's directory; no network fetch is performed at build time. See
+# scripts/libseccomp-vendor.md for the refresh procedure when bumping
+# the version.
 
 set -euo pipefail
 
@@ -25,8 +30,12 @@ case "${TARGET}" in
 esac
 
 PREFIX="/opt/libseccomp/${TARGET}"
-SRC_URL="https://github.com/seccomp/libseccomp/releases/download/v${VERSION}/libseccomp-${VERSION}.tar.gz"
-SIG_URL="${SRC_URL}.asc"
+# Upstream provenance of the vendored tarball + signature, for documentation
+# only -- the build no longer fetches these. See scripts/libseccomp-vendor.md
+# for the refresh procedure that re-downloads from these URLs and updates the
+# vendored copies + pinned SHA256 below.
+#   SRC_URL="https://github.com/seccomp/libseccomp/releases/download/v${VERSION}/libseccomp-${VERSION}.tar.gz"
+#   SIG_URL="${SRC_URL}.asc"
 # Paul Moore <paul@paul-moore.com> — libseccomp release signing key
 # Fingerprint pinned to block key-substitution attacks. Verify upstream at
 # https://github.com/seccomp/libseccomp — README lists the signing key.
@@ -37,6 +46,16 @@ GPG_FPR="7100AADFAE6E6E940D2E0AD655E45A5AE8CA7C8A"
 # bundled key without updating the fingerprint will fail the build.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_FILE="${SCRIPT_DIR}/libseccomp-signing-key.asc"
+# Vendored source + signature. Committed under scripts/ alongside this
+# build script so the build does not need network access at run time.
+SRC_FILE="${SCRIPT_DIR}/libseccomp-${VERSION}.tar.gz"
+SIG_FILE="${SCRIPT_DIR}/libseccomp-${VERSION}.tar.gz.asc"
+# SHA256 of the vendored tarball, pinned in-tree as defense beyond the
+# GPG signature. Catches the case where the .tar.gz and .asc are both
+# swapped in-tree (the GPG check still has to pass, but the hash check
+# fails cheaper and earlier). Update this when bumping VERSION; see
+# scripts/libseccomp-vendor.md.
+SRC_SHA256="83b6085232d1588c379dc9b9cae47bb37407cf262e6e74993c61ba72d2a784dc"
 
 # detect_object_fmt <path-to-elf-object>
 # Echoes a BFD file-format string ("elf64-x86-64",
@@ -377,9 +396,29 @@ fi
 
 cd "$WORKDIR"
 
-# Download tarball + signature.
-curl -fsSL "$SRC_URL" -o "libseccomp-${VERSION}.tar.gz"
-curl -fsSL "$SIG_URL" -o "libseccomp-${VERSION}.tar.gz.asc"
+# Copy vendored tarball + signature into the work dir. The
+# bundled-tarball approach avoids a network fetch at build time --
+# important for offline / air-gapped / restricted-network sites (e.g.
+# RHEL build farms where EPEL ships only libseccomp 2.5.x and reaching
+# github.com/seccomp/libseccomp/releases is not an option). See
+# scripts/libseccomp-vendor.md for the refresh procedure when bumping
+# VERSION.
+test -f "$SRC_FILE" || { echo "ERROR: vendored tarball not found at ${SRC_FILE}; see scripts/libseccomp-vendor.md to refresh." >&2; exit 1; }
+test -f "$SIG_FILE" || { echo "ERROR: vendored signature not found at ${SIG_FILE}" >&2; exit 1; }
+cp "$SRC_FILE" "libseccomp-${VERSION}.tar.gz"
+cp "$SIG_FILE" "libseccomp-${VERSION}.tar.gz.asc"
+
+# SHA256 pin check (defense beyond the GPG verify below). Cheap, no
+# external dependency. A mismatch means the in-tree tarball was
+# swapped without updating the pin -- fail closed.
+GOT_SHA256="$(sha256sum "libseccomp-${VERSION}.tar.gz" | awk '{print $1}')"
+if [ "$GOT_SHA256" != "$SRC_SHA256" ]; then
+    echo "ERROR: vendored libseccomp-${VERSION}.tar.gz SHA256 mismatch:" >&2
+    echo "  expected: ${SRC_SHA256}" >&2
+    echo "  got:      ${GOT_SHA256}" >&2
+    echo "Update SRC_SHA256 in scripts/build-libseccomp.sh when bumping VERSION." >&2
+    exit 1
+fi
 
 # Verify signature — fail the build rather than risk a supply-chain compromise.
 # We use --status-fd to parse gpg's machine-readable output and assert the
