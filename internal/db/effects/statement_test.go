@@ -162,3 +162,55 @@ func TestClassifiedStatement_PreparedName_OmitEmpty(t *testing.T) {
 		t.Fatalf("prepared_name should be omitted; got: %s", bs)
 	}
 }
+
+func TestBulkOpKind_String(t *testing.T) {
+	cases := []struct {
+		in   BulkOpKind
+		want string
+	}{
+		{BulkOpNone, ""},
+		{BulkOpIn, "copy_in"},
+		{BulkOpOut, "copy_out"},
+	}
+	for _, c := range cases {
+		if got := c.in.String(); got != c.want {
+			t.Errorf("BulkOpKind(%d).String()=%q want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestClassifiedStatement_BulkOp_JSON_RoundTrip(t *testing.T) {
+	in := ClassifiedStatement{
+		Effects: []Effect{{Group: GroupBulkLoad, Subtype: SubtypeCopyFromStdin}},
+		RawVerb: "COPY",
+		BulkOp:  BulkOpIn,
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(bs), `"bulk_op":"copy_in"`) {
+		t.Fatalf("bulk_op missing: %s", bs)
+	}
+	var out ClassifiedStatement
+	if err := json.Unmarshal(bs, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.BulkOp != BulkOpIn {
+		t.Fatalf("BulkOp=%v want BulkOpIn", out.BulkOp)
+	}
+}
+
+func TestClassifiedStatement_BulkOp_OmitNone(t *testing.T) {
+	in := ClassifiedStatement{
+		Effects: []Effect{{Group: GroupRead}},
+		RawVerb: "SELECT",
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(bs), "bulk_op") {
+		t.Fatalf("bulk_op should be omitted for BulkOpNone: %s", bs)
+	}
+}
