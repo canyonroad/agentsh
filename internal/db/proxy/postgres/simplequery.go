@@ -168,6 +168,22 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 			return err
 		}
 		result, ferr := pc.forwardUpstreamUntilRFQ(ctx, sentAt, len(q.String))
+		if ferr == nil && (result.YieldedToCopyIn || result.YieldedToCopyOut) {
+			direction := effects.BulkOpIn
+			if result.YieldedToCopyOut {
+				direction = effects.BulkOpOut
+			}
+			copyResult, cerr := pc.runCopyLoop(ctx, direction)
+			result.BytesIn += copyResult.BytesIn
+			result.BytesOut += copyResult.BytesOut
+			result.RowsByStmt = append(result.RowsByStmt, copyResult.RowsByStmt...)
+			result.AffectedByStmt = append(result.AffectedByStmt, copyResult.AffectedByStmt...)
+			result.LatencyMs = copyResult.LatencyMs
+			if copyResult.ErrorCode != "" {
+				result.ErrorCode = copyResult.ErrorCode
+			}
+			ferr = cerr
+		}
 		pc.emitAllowEvents(ctx, stmts, decisions, q.String, batchSHA, result)
 		return ferr
 	}
