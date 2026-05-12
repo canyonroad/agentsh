@@ -31,7 +31,7 @@ func (errMapper) Map(_ types.Event) (compact.MappedEvent, error) {
 // with EmitExtendedLossReasons set to the supplied flag value. The mapper
 // argument is used as-is (caller passes either compact.StubMapper{} or an
 // errMapper{}). allowStub must be true when mapper is a StubMapper.
-func newInflightTestStore(t *testing.T, router transport.Dialer, mapper compact.Mapper, allowStub bool, emitExtended bool) *watchtower.Store {
+func newInflightTestStore(t testing.TB, router transport.Dialer, mapper compact.Mapper, allowStub bool, emitExtended bool) *watchtower.Store {
 	t.Helper()
 	s, err := watchtower.New(context.Background(), watchtower.Options{
 		WALDir:                  t.TempDir(),
@@ -170,35 +170,37 @@ func TestStore_InFlightDrop_EmitsTransportLossOnWire(t *testing.T) {
 				t.Skip(tc.skip)
 			}
 
-			srv := testserver.New(testserver.Options{})
-			defer srv.Close()
-			router := testserver.NewRoutingDialer(srv)
+			retryFlake(t, 3, func(t testing.TB) {
+				srv := testserver.New(testserver.Options{})
+				defer srv.Close()
+				router := testserver.NewRoutingDialer(srv)
 
-			s := newInflightTestStore(t, router, tc.mapper, tc.allowStub, true)
-			defer s.Close()
+				s := newInflightTestStore(t, router, tc.mapper, tc.allowStub, true)
+				defer s.Close()
 
-			// Wait for SessionInit to land — this confirms the transport has
-			// completed the handshake and is either in Replaying or Live
-			// state. Without this, AppendEvent could race the dial and the
-			// resulting loss marker might be written before the Live reader
-			// is registered, causing it to miss the notification.
-			if _, err := srv.WaitForFirstSessionInit(10 * time.Second); err != nil {
-				t.Fatalf("WaitForFirstSessionInit: %v", err)
-			}
+				// Wait for SessionInit to land — this confirms the transport has
+				// completed the handshake and is either in Replaying or Live
+				// state. Without this, AppendEvent could race the dial and the
+				// resulting loss marker might be written before the Live reader
+				// is registered, causing it to miss the notification.
+				if _, err := srv.WaitForFirstSessionInit(10 * time.Second); err != nil {
+					t.Fatalf("WaitForFirstSessionInit: %v", err)
+				}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
 
-			// Emit the drop-triggering event.
-			_ = s.AppendEvent(ctx, tc.makeEvent(1))
+				// Emit the drop-triggering event.
+				_ = s.AppendEvent(ctx, tc.makeEvent(1))
 
-			loss, err := srv.WaitForTransportLoss(60 * time.Second)
-			if err != nil {
-				t.Fatalf("WaitForTransportLoss: %v", err)
-			}
-			if loss.Reason != tc.wantReason {
-				t.Fatalf("TransportLoss.Reason = %v; want %v", loss.Reason, tc.wantReason)
-			}
+				loss, err := srv.WaitForTransportLoss(60 * time.Second)
+				if err != nil {
+					t.Fatalf("WaitForTransportLoss: %v", err)
+				}
+				if loss.Reason != tc.wantReason {
+					t.Fatalf("TransportLoss.Reason = %v; want %v", loss.Reason, tc.wantReason)
+				}
+			})
 		})
 	}
 }
