@@ -160,7 +160,7 @@ func TestLoadFilterWithRetry_RetriesOnEINVALAndDropsFlag(t *testing.T) {
 		}
 		return 99, nil
 	})
-	fd, err := loadFilterWithRetry(minimalBPF(), true, nil)
+	fd, gotWaitKill, err := loadFilterWithRetry(minimalBPF(), true, nil)
 	if err != nil {
 		t.Fatalf("loadFilterWithRetry: %v", err)
 	}
@@ -176,6 +176,9 @@ func TestLoadFilterWithRetry_RetriesOnEINVALAndDropsFlag(t *testing.T) {
 	if seenFlags[1]&uintptr(unix.SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV) != 0 {
 		t.Fatalf("retry attempt still has WAIT_KILLABLE flag: 0x%x", seenFlags[1])
 	}
+	if gotWaitKill {
+		t.Fatalf("expected gotWaitKill=false after retry, got true")
+	}
 }
 
 func TestLoadFilterWithRetry_NoRetryWhenFlagNotSet(t *testing.T) {
@@ -184,12 +187,15 @@ func TestLoadFilterWithRetry_NoRetryWhenFlagNotSet(t *testing.T) {
 		calls++
 		return -1, unix.EINVAL
 	})
-	_, err := loadFilterWithRetry(minimalBPF(), false, nil)
+	_, gotWaitKill, err := loadFilterWithRetry(minimalBPF(), false, nil)
 	if !errors.Is(err, unix.EINVAL) {
 		t.Fatalf("expected EINVAL, got %v", err)
 	}
 	if calls != 1 {
 		t.Fatalf("expected 1 attempt, got %d", calls)
+	}
+	if gotWaitKill {
+		t.Fatalf("expected gotWaitKill=false on failure path, got true")
 	}
 }
 
@@ -199,12 +205,15 @@ func TestLoadFilterWithRetry_NoRetryOnNonEINVAL(t *testing.T) {
 		calls++
 		return -1, unix.EFAULT
 	})
-	_, err := loadFilterWithRetry(minimalBPF(), true, nil)
+	_, gotWaitKill, err := loadFilterWithRetry(minimalBPF(), true, nil)
 	if !errors.Is(err, unix.EFAULT) {
 		t.Fatalf("expected EFAULT, got %v", err)
 	}
 	if calls != 1 {
 		t.Fatalf("expected 1 attempt, got %d", calls)
+	}
+	if gotWaitKill {
+		t.Fatalf("expected gotWaitKill=false on failure path, got true")
 	}
 }
 
@@ -214,11 +223,30 @@ func TestLoadFilterWithRetry_BothAttemptsFail(t *testing.T) {
 		calls++
 		return -1, unix.EINVAL
 	})
-	_, err := loadFilterWithRetry(minimalBPF(), true, nil)
+	_, gotWaitKill, err := loadFilterWithRetry(minimalBPF(), true, nil)
 	if !errors.Is(err, unix.EINVAL) {
 		t.Fatalf("expected EINVAL after retry failure, got %v", err)
 	}
 	if calls != 2 {
 		t.Fatalf("expected 2 attempts (initial + retry), got %d", calls)
+	}
+	if gotWaitKill {
+		t.Fatalf("expected gotWaitKill=false on failure path, got true")
+	}
+}
+
+func TestLoadFilterWithRetry_ReportsWaitKillOnFirstAttemptSuccess(t *testing.T) {
+	withStubbedSeams(t, func(uintptr, *unix.SockFprog) (int, error) {
+		return 55, nil
+	})
+	fd, gotWaitKill, err := loadFilterWithRetry(minimalBPF(), true, nil)
+	if err != nil {
+		t.Fatalf("loadFilterWithRetry: %v", err)
+	}
+	if fd != 55 {
+		t.Fatalf("fd = %d, want 55", fd)
+	}
+	if !gotWaitKill {
+		t.Fatalf("expected gotWaitKill=true on first-attempt success, got false")
 	}
 }

@@ -294,25 +294,13 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	// these flags."
 	ruleCounts := map[string]int{}
 
-	// Enable SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (kernel 6.0+).
-	// When active, non-fatal signals (including Go's ~10ms SIGURG preemption)
-	// cannot interrupt seccomp_do_user_notification, preventing ERESTARTSYS loops.
-	// The compile-time #error in seccomp_version_check.go guarantees the
-	// libseccomp headers are >=2.6 and SetWaitKill is not a silent no-op.
-	// If ProbeWaitKillable reports the kernel supports it but SetWaitKill
-	// still fails, something is unexpected — warn loudly so operators can
-	// investigate. Load() retry at the end of this function handles the
-	// case where SetWaitKill succeeds but the kernel rejects the flag at
-	// load time (custom/vendor kernels).
-	waitKillSet := false
-	if ProbeWaitKillable() {
-		if err := filt.SetWaitKill(true); err != nil {
-			slog.Warn("seccomp: WaitKillable unexpectedly unavailable despite kernel 6.0+; falling back to SIGURG signal mask only",
-				"error", err)
-		} else {
-			waitKillSet = true
-		}
-	}
+	// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (kernel >=5.19) is applied
+	// at filter load time via the raw seccomp(2) syscall in
+	// loadFilterWithRetry below — NOT through libseccomp's SetWaitKill,
+	// whose silent-no-op behavior on pre-2.6 headers motivated this
+	// design. The flag value is a kernel ABI constant in x/sys/unix.
+	// See docs/superpowers/specs/2026-05-11-libseccomp25-system-link-design.md.
+	wantWaitKill := ProbeWaitKillable()
 
 	// Unix socket monitoring via user-notify
 	if cfg.UnixSocketEnabled {
@@ -510,28 +498,45 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	}
 
 	// Pre-load diagnostic snapshot. Logged at DEBUG so it stays out of
-	// stderr captured by integration tests on the success path. The same
-	// fields are embedded inline in the WARN entry on Load failure (via
-	// loadWithRetryOnWaitKillFailure), so a hostile-kernel rejection
-	// (issue #282 EFAULT on Runloop+Freestyle) still lands in stderr
-	// with full context — without polluting the success path that the
-	// docker integration tests on Ubuntu rely on for `tail -n 1`
-	// assertions of the wrapped command's output.
-	snapshot := filterDiagnosticFields(filt, cfg, waitKillSet, ruleCounts)
+	// stderr captured by integration tests on the success path.
+	snapshot := filterDiagnosticFields(filt, cfg, wantWaitKill, ruleCounts)
 	slog.Debug("seccomp: filter snapshot before Load", snapshot...)
 
-	if err := loadWithRetryOnWaitKillFailure(filt, waitKillSet, snapshot, filt.Load); err != nil {
-		return nil, err
-	}
-	fd, err := filt.GetNotifFd()
+	// Export the filter to BPF bytes, then load it ourselves via
+	// seccomp(2). This bypasses libseccomp's seccomp_load() so the
+	// WAIT_KILLABLE_RECV flag can be set as a kernel ABI bit
+	// regardless of the linked libseccomp version (see design doc).
+	// We must export BEFORE Release; afterwards filt's C context is
+	// gone but we still own the BPF bytes.
+	prog, err := exportFilterBPF(filt)
 	if err != nil {
-		// If no notify rules, fd will be -1, which is fine
-		if !filterConfigNeedsNotifyFD(cfg, blockListMap, blockedFamilyMap, socketRules) {
-			return &Filter{fd: -1, blockList: blockListMap, blockedFamilyMap: blockedFamilyMap, socketRules: socketRules}, nil
-		}
+		return nil, fmt.Errorf("export seccomp filter: %w", err)
+	}
+	filt.Release()
+
+	rawFd, gotWaitKill, err := loadFilterWithRetry(prog, wantWaitKill, snapshot)
+	if err != nil {
 		return nil, err
 	}
-	return &Filter{fd: fd, blockList: blockListMap, blockedFamilyMap: blockedFamilyMap, socketRules: socketRules}, nil
+	// rawFd is the listener fd from SECCOMP_FILTER_FLAG_NEW_LISTENER.
+	// loadFilterWithRetry returns >=0 on success; the legacy
+	// "no notify rules, fd=-1" path is unreachable because we always
+	// pass NEW_LISTENER (kernel returns the fd even for filters
+	// without ActNotify rules — it's just never readable).
+	libVer := libseccompRuntimeVersion()
+	slog.Info("seccomp: filter loaded",
+		"fd", rawFd,
+		"wait_killable", gotWaitKill,
+		"kernel_supports", wantWaitKill,
+		"libseccomp_runtime", libVer)
+
+	if !filterConfigNeedsNotifyFD(cfg, blockListMap, blockedFamilyMap, socketRules) {
+		// Close the now-unused listener fd. The filter is still
+		// installed; only the userspace dispatch handle is dropped.
+		_ = unix.Close(rawFd)
+		return &Filter{fd: -1, blockList: blockListMap, blockedFamilyMap: blockedFamilyMap, socketRules: socketRules}, nil
+	}
+	return &Filter{fd: seccomp.ScmpFd(rawFd), blockList: blockListMap, blockedFamilyMap: blockedFamilyMap, socketRules: socketRules}, nil
 }
 
 // familyToScmpAction maps an OnBlockAction to the libseccomp action used
@@ -876,4 +881,13 @@ func filterDiagnosticFields(filt *seccomp.ScmpFilter, cfg FilterConfig, waitKill
 		"cfg_intercept_metadata", cfg.InterceptMetadata,
 		"cfg_block_io_uring", cfg.BlockIOUring,
 	}
+}
+
+// libseccompRuntimeVersion returns the version of libseccomp that is
+// actually linked at runtime (not the build-time headers). Used in the
+// post-load startup log so docker matrix tests can confirm what
+// userspace they are exercising.
+func libseccompRuntimeVersion() string {
+	major, minor, micro := seccomp.GetLibraryVersion()
+	return fmt.Sprintf("%d.%d.%d", major, minor, micro)
 }

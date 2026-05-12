@@ -152,24 +152,24 @@ func runtimeKeepAlive(_ interface{}) {}
 // Log strings match the existing loadWithRetryOnWaitKillFailure
 // helper byte-for-byte so log scrapers and the sigurg_probe_test
 // regression check continue to function.
-func loadFilterWithRetry(prog []byte, withWaitKill bool, snapshot []any) (int, error) {
+func loadFilterWithRetry(prog []byte, withWaitKill bool, snapshot []any) (int, bool, error) {
 	start := time.Now()
 	fd, err := loadRawFilter(prog, withWaitKill)
 	dur := time.Since(start)
 	if err == nil {
 		slog.Debug("seccomp: filter Load succeeded",
 			"attempt", 1, "wait_kill", withWaitKill, "duration_ms", dur.Milliseconds())
-		return fd, nil
+		return fd, withWaitKill, nil
 	}
 	slog.Warn("seccomp: filter Load failed",
 		appendSnapshot(snapshot,
 			"attempt", 1, "wait_kill", withWaitKill, "duration_ms", dur.Milliseconds(),
 			"errno", errnoString(err), "error", err)...)
 	if !withWaitKill {
-		return -1, err
+		return -1, false, err
 	}
 	if !errors.Is(err, unix.EINVAL) {
-		return -1, err
+		return -1, false, err
 	}
 	slog.Warn("seccomp: WaitKillable rejected at filter load time; falling back to SIGURG signal mask only",
 		"error", err)
@@ -180,11 +180,11 @@ func loadFilterWithRetry(prog []byte, withWaitKill bool, snapshot []any) (int, e
 	if err == nil {
 		slog.Debug("seccomp: filter Load succeeded on retry without WaitKill",
 			"attempt", 2, "duration_ms", dur.Milliseconds())
-		return fd, nil
+		return fd, false, nil
 	}
 	slog.Warn("seccomp: filter Load failed on retry without WaitKill",
 		appendSnapshot(snapshot,
 			"attempt", 2, "duration_ms", dur.Milliseconds(),
 			"errno", errnoString(err), "error", err)...)
-	return -1, err
+	return -1, false, err
 }
