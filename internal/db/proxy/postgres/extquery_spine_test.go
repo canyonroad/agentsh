@@ -12,6 +12,11 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
+type clientBackendObservation struct {
+	errorCode string
+	rfqStatus byte
+}
+
 // extqueryFixture wires a *proxyConn with both client and upstream net.Pipes.
 // Returns:
 //   - pc: the proxyConn under test
@@ -37,15 +42,6 @@ func extqueryFixture(t *testing.T, policyYAML string) (
 	upBackend = pgproto3.NewBackend(up1, up1)
 	upRaw = up1
 
-	// Drain client side in background so backend writes don't block.
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			if _, err := pc.conn.Read(buf); err != nil {
-				return
-			}
-		}
-	}()
 	return pc, clientFE, upBackend, upRaw
 }
 
@@ -74,10 +70,8 @@ database_rules:
 // Setup notes:
 //   newSimpleQueryFixture's clientFE is wired to the proxy-facing side of
 //   the net.Pipe, so any Frontend.Send from the test side writes bytes into
-//   the proxy's backend.Receive. Conversely we drain pc.conn in a goroutine
-//   so the proxy's ErrorResponse / RFQ writes don't deadlock; reading those
-//   back here is asynchronous and not strictly required for these tests
-//   because we assert on side effects (upstream frames, smState, cache).
+//   the proxy's backend.Receive. Tests that expect proxy responses must read
+//   them from clientFE; there must be no competing reader on pc.conn.
 
 func TestExtquery_Spine_Parse_AllowForwardsAndCaches(t *testing.T) {
 	pc, clientFE, upBackend, _ := extqueryFixture(t, extqueryDenyPolicyYAML())
@@ -136,7 +130,7 @@ func TestExtquery_Spine_Parse_DenyOutOfTx_SynthsError(t *testing.T) {
 	pc, clientFE, upBackend, _ := extqueryFixture(t, extqueryDenyPolicyYAML())
 
 	// Drain client side specifically with a Frontend so we can inspect frames.
-	cliRead := make(chan pgproto3.BackendMessage, 4)
+	cliRead := make(chan clientBackendObservation, 4)
 	clientRead := pgproto3.NewFrontend(pc.conn, pc.conn)
 	_ = clientRead
 
@@ -149,7 +143,14 @@ func TestExtquery_Spine_Parse_DenyOutOfTx_SynthsError(t *testing.T) {
 			if err != nil {
 				return
 			}
-			cliRead <- m
+			var obs clientBackendObservation
+			if er, ok := m.(*pgproto3.ErrorResponse); ok {
+				obs.errorCode = er.Code
+			}
+			if rfq, ok := m.(*pgproto3.ReadyForQuery); ok {
+				obs.rfqStatus = rfq.TxStatus
+			}
+			cliRead <- obs
 		}
 	}()
 
@@ -166,14 +167,14 @@ func TestExtquery_Spine_Parse_DenyOutOfTx_SynthsError(t *testing.T) {
 	var sawErr, sawRFQ bool
 	for time.Now().Before(deadline) {
 		select {
-		case m := <-cliRead:
-			if er, ok := m.(*pgproto3.ErrorResponse); ok {
-				if er.Code != "42501" {
-					t.Errorf("Code = %q want 42501", er.Code)
+		case obs := <-cliRead:
+			if obs.errorCode != "" {
+				if obs.errorCode != "42501" {
+					t.Errorf("Code = %q want 42501", obs.errorCode)
 				}
 				sawErr = true
 			}
-			if _, ok := m.(*pgproto3.ReadyForQuery); ok {
+			if obs.rfqStatus != 0 {
 				sawRFQ = true
 			}
 		case <-time.After(100 * time.Millisecond):
@@ -224,14 +225,21 @@ func TestExtquery_Spine_Query_InTx_RollbackThenContinue(t *testing.T) {
 	pc, clientFE, upBackend, upRaw := extqueryFixture(t, extqueryDenyPolicyYAML())
 	pc.state.smState.LastUpstreamRFQ = 'T' // simulate prior BEGIN
 
-	cliRead := make(chan pgproto3.BackendMessage, 8)
+	cliRead := make(chan clientBackendObservation, 8)
 	go func() {
 		for {
 			m, err := clientFE.Receive()
 			if err != nil {
 				return
 			}
-			cliRead <- m
+			var obs clientBackendObservation
+			if er, ok := m.(*pgproto3.ErrorResponse); ok {
+				obs.errorCode = er.Code
+			}
+			if rfq, ok := m.(*pgproto3.ReadyForQuery); ok {
+				obs.rfqStatus = rfq.TxStatus
+			}
+			cliRead <- obs
 		}
 	}()
 
@@ -265,16 +273,12 @@ func TestExtquery_Spine_Query_InTx_RollbackThenContinue(t *testing.T) {
 	var sawErr, sawRFQ bool
 	for time.Now().Before(deadline) && (!sawErr || !sawRFQ) {
 		select {
-		case m := <-cliRead:
-			switch v := m.(type) {
-			case *pgproto3.ErrorResponse:
-				if v.Code == "42501" {
-					sawErr = true
-				}
-			case *pgproto3.ReadyForQuery:
-				if v.TxStatus == 'I' {
-					sawRFQ = true
-				}
+		case obs := <-cliRead:
+			if obs.errorCode == "42501" {
+				sawErr = true
+			}
+			if obs.rfqStatus == 'I' {
+				sawRFQ = true
 			}
 		case <-time.After(100 * time.Millisecond):
 		}
