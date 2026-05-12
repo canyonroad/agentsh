@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
@@ -110,6 +111,16 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 	parser := pc.srv.classifierFor(pc.svc.Dialect)
 	opts := classifierOptionsFromPolicy(rs)
 	stmts, _ := parser.Classify(q.String, classify_pg.SessionState{}, opts)
+
+	// Pre-pass: handles every Intercept-eligible verb except PREPARE.
+	// PREPARE needs decisions, so it's deferred to the post-pass.
+	if len(stmts) == 0 || !strings.HasPrefix(stmts[0].RawVerb, "PREPARE") {
+		preHandled, preActions := Intercept(stmts, nil, pc.sqlCache, *pc.state.smState, rs)
+		if preHandled {
+			return pc.executeActions(ctx, q, preActions)
+		}
+	}
+
 	decisions := make([]policy.Decision, len(stmts))
 	anyDeny := false
 	for i, s := range stmts {
@@ -119,6 +130,26 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 		}
 		if decisions[i].Verb == policy.VerbDeny {
 			anyDeny = true
+		}
+	}
+
+	// Post-pass: PREPARE-deny needs decisions to know the denying rule;
+	// PREPARE-allow populates the cache from the inner classification.
+	// Only invoked for PREPARE verbs; all other verbs were handled (or
+	// passed through) in the pre-pass.
+	if len(stmts) > 0 && strings.HasPrefix(stmts[0].RawVerb, "PREPARE") {
+		postHandled, postActions := Intercept(stmts, decisions, pc.sqlCache, *pc.state.smState, rs)
+		if postHandled {
+			batchSHA := sha256HexBatch(q.String)
+			var postDenyRule policy.StatementRule
+			for _, d := range decisions {
+				if d.Verb == policy.VerbDeny {
+					postDenyRule = lookupStatementRuleByName(rs, d.RuleName)
+					break
+				}
+			}
+			pc.emitDenyEvents(ctx, stmts, decisions, q.String, batchSHA, denyActionForState(pc.state.smState, postDenyRule))
+			return pc.executeActions(ctx, q, postActions)
 		}
 	}
 
@@ -158,6 +189,25 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 	rendered, sqlstate := pickDenySynth(decisions)
 	actions := statemachine.DenyRoute(*pc.state.smState, denyRule, rendered, sqlstate)
 	return pc.executeActions(ctx, q, actions)
+}
+
+// denyActionForState returns the deny action string based on the current
+// connection state and the matched rule. When the last upstream RFQ indicates
+// an active transaction ('T' or 'E'), the action depends on DenyModeInTx:
+// "rollback_then_continue" -> "rollback_injected"; anything else ->
+// "connection_terminated". Out-of-tx ('I') always returns "none".
+func denyActionForState(s *statemachine.ConnState, rule policy.StatementRule) string {
+	if s == nil {
+		return "none"
+	}
+	switch s.LastUpstreamRFQ {
+	case 'T', 'E':
+		if rule.DenyModeInTx == "rollback_then_continue" {
+			return "rollback_injected"
+		}
+		return "connection_terminated"
+	}
+	return "none"
 }
 
 // lookupStatementRuleByName is a 04c-friendly wrapper around
