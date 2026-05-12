@@ -191,6 +191,37 @@ func TestForwardUpstreamUntilRFQ_MidBatchError(t *testing.T) {
 	}
 }
 
+func TestForwardUpstreamUntilRFQ_YieldsOnCopyOutResponse(t *testing.T) {
+	pc, scriptUpstream, clientFE := upstreamReadFixture(t)
+	pc.state.smState.LastUpstreamRFQ = 'I'
+
+	clientGot := make(chan pgproto3.BackendMessage, 1)
+	go func() {
+		msg, err := clientFE.Receive()
+		if err != nil {
+			return
+		}
+		clientGot <- msg
+	}()
+
+	scriptUpstream([]pgproto3.BackendMessage{
+		&pgproto3.CopyOutResponse{},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	r, err := pc.forwardUpstreamUntilRFQ(ctx, time.Now(), 16)
+	if err != nil {
+		t.Fatalf("forwardUpstreamUntilRFQ: %v", err)
+	}
+	if !r.YieldedToCopyOut {
+		t.Fatal("YieldedToCopyOut = false, want true")
+	}
+	if _, ok := (<-clientGot).(*pgproto3.CopyOutResponse); !ok {
+		t.Fatal("client did not receive CopyOutResponse")
+	}
+}
+
 func TestForwardUpstream_TracksTxStartedAt(t *testing.T) {
 	pc, scriptUpstream, clientFE := upstreamReadFixture(t)
 	pc.state.smState = &statemachine.ConnState{LastUpstreamRFQ: 'I'}

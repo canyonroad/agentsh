@@ -831,7 +831,7 @@ func TestSpine_Plan04c_SimpleQuery_DenyPreTx(t *testing.T) {
 	// With deny pre-forward, the proxy must NOT forward the DELETE Q upstream,
 	// so the read should time out. We expose the observed state via closure.
 	var (
-		mu              sync.Mutex
+		mu               sync.Mutex
 		upstreamSawQuery bool
 	)
 	script := func(t *testing.T, be *pgproto3.Backend, conn net.Conn) error {
@@ -1143,6 +1143,172 @@ func TestSpine_SQLPrepare_DenyOverPGX(t *testing.T) {
 	}
 	if !gotDeny {
 		t.Errorf("expected deny event for PREPARE DELETE; got %+v", evs)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Plan 05c — COPY bulk_export + approval timeout spine tests
+// ----------------------------------------------------------------------------
+
+func copyToStdoutScript(t *testing.T, be *pgproto3.Backend, conn net.Conn) error {
+	t.Helper()
+	if _, err := be.ReceiveStartupMessage(); err != nil {
+		return fmt.Errorf("receive startup: %w", err)
+	}
+	be.Send(&pgproto3.AuthenticationOk{})
+	be.Send(&pgproto3.ParameterStatus{Name: "standard_conforming_strings", Value: "on"})
+	be.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
+	be.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "16.0"})
+	be.Send(&pgproto3.BackendKeyData{ProcessID: 42, SecretKey: append([]byte(nil), wantSecret...)})
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := be.Flush(); err != nil {
+		return fmt.Errorf("flush handshake: %w", err)
+	}
+	msg, err := be.Receive()
+	if err != nil {
+		return fmt.Errorf("receive COPY query: %w", err)
+	}
+	q, ok := msg.(*pgproto3.Query)
+	if !ok || !strings.Contains(strings.ToUpper(q.String), "COPY USERS TO STDOUT") {
+		return fmt.Errorf("expected COPY query, got %T %v", msg, msg)
+	}
+	be.Send(&pgproto3.CopyOutResponse{})
+	be.Send(&pgproto3.CopyData{Data: []byte("alice\n")})
+	be.Send(&pgproto3.CopyData{Data: []byte("bob\n")})
+	be.Send(&pgproto3.CopyDone{})
+	be.Send(&pgproto3.CommandComplete{CommandTag: []byte("COPY 2")})
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := be.Flush(); err != nil {
+		return fmt.Errorf("flush COPY response: %w", err)
+	}
+	buf := make([]byte, 256)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		if _, err := conn.Read(buf); err != nil {
+			return nil
+		}
+	}
+}
+
+func TestSpine_CopyToStdout_BytesOutCount(t *testing.T) {
+	up := newFakeUpstream(t, withFakeUpstreamScript(copyToStdoutScript))
+	upAddr := up.Address()
+
+	h := startSpineHarness(t, upstreamWithLocalhostHost(upAddr), "terminate_plaintext_upstream", nil, "")
+	h.srv.SetPolicy(loadRuleSet(t, pgxSpinePolicyYAML(upAddr, false)))
+
+	stop := runServer(t, h.srv)
+	defer stop()
+
+	sockDir := renameSocketForPgx(t, h.sock, 5444)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, pgxConnString(sockDir, 5444))
+	if err != nil {
+		t.Fatalf("pgx.Connect: %v", err)
+	}
+	defer conn.Close(context.Background())
+
+	var out bytes.Buffer
+	tag, err := conn.PgConn().CopyTo(ctx, &out, "COPY users TO STDOUT")
+	if err != nil {
+		t.Fatalf("CopyTo: %v", err)
+	}
+	if tag.String() != "COPY 2" {
+		t.Fatalf("CommandTag = %q want COPY 2", tag.String())
+	}
+	if out.String() != "alice\nbob\n" {
+		t.Fatalf("copy output = %q", out.String())
+	}
+
+	evs := drainStatements(h.sink, 1, 2*time.Second)
+	if len(evs) == 0 || evs[0].Result.BytesOut < int64(len("alice\nbob\n")) {
+		t.Fatalf("expected COPY event with BytesOut; got %+v", evs)
+	}
+}
+
+func approvalTimeoutPolicyYAML(upstream string) string {
+	return `version: 1
+name: approval-timeout-spine
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: ` + upstream + `
+    tls_mode: terminate_plaintext_upstream
+    trusted_network: true
+database_connection_rules:
+  - name: allow-everyone
+    db_service: appdb
+    decision: allow
+database_rules:
+  - name: review-delete
+    db_service: appdb
+    operations: [DELETE]
+    decision: approve
+    timeout: 20ms
+`
+}
+
+func approvalTimeoutScript(t *testing.T, be *pgproto3.Backend, conn net.Conn) error {
+	t.Helper()
+	if _, err := be.ReceiveStartupMessage(); err != nil {
+		return fmt.Errorf("receive startup: %w", err)
+	}
+	be.Send(&pgproto3.AuthenticationOk{})
+	be.Send(&pgproto3.ParameterStatus{Name: "standard_conforming_strings", Value: "on"})
+	be.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
+	be.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "16.0"})
+	be.Send(&pgproto3.BackendKeyData{ProcessID: 42, SecretKey: append([]byte(nil), wantSecret...)})
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := be.Flush(); err != nil {
+		return fmt.Errorf("flush handshake: %w", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if msg, err := be.Receive(); err == nil {
+		if _, ok := msg.(*pgproto3.Query); ok {
+			return fmt.Errorf("approval timeout should not forward query upstream; got %T", msg)
+		}
+	}
+	return nil
+}
+
+func TestSpine_ApprovalTimeout_DenyAfterTimeout(t *testing.T) {
+	up := newFakeUpstream(t, withFakeUpstreamScript(approvalTimeoutScript))
+	upAddr := up.Address()
+
+	h := startSpineHarness(t, upstreamWithLocalhostHost(upAddr), "terminate_plaintext_upstream", nil, "")
+	h.srv.SetPolicy(loadRuleSet(t, approvalTimeoutPolicyYAML(upAddr)))
+
+	stop := runServer(t, h.srv)
+	defer stop()
+
+	sockDir := renameSocketForPgx(t, h.sock, 5445)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, pgxConnString(sockDir, 5445))
+	if err != nil {
+		t.Fatalf("pgx.Connect: %v", err)
+	}
+	defer conn.Close(context.Background())
+
+	start := time.Now()
+	_, err = conn.Exec(ctx, "DELETE FROM users")
+	if err == nil {
+		t.Fatal("expected approval timeout deny, got nil")
+	}
+	if code := pgxErrorCode(err); code != "42501" {
+		t.Fatalf("SQLSTATE = %q want 42501 (err=%v)", code, err)
+	}
+	if elapsed := time.Since(start); elapsed < 15*time.Millisecond {
+		t.Fatalf("approval returned too quickly: %v", elapsed)
+	}
+
+	evs := drainStatements(h.sink, 1, 2*time.Second)
+	if len(evs) == 0 || evs[0].TxContext.DenyAction != "approval_timeout" {
+		t.Fatalf("expected approval_timeout event; got %+v", evs)
 	}
 }
 

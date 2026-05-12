@@ -313,6 +313,39 @@ func TestHandleQuery_AllowPath_MultiStmt(t *testing.T) {
 	_ = loopErr
 }
 
+func TestHandleQuery_CopyToStdout_EmitsBytesOut(t *testing.T) {
+	pc, clientFE, sink, script := allowPathFixture(t)
+	pc.state.smState.LastUpstreamRFQ = 'I'
+	pc.srv.SetPolicy(allowAllRuleSet(t))
+
+	script([]pgproto3.BackendMessage{
+		&pgproto3.CopyOutResponse{},
+		&pgproto3.CopyData{Data: []byte("alice\n")},
+		&pgproto3.CopyData{Data: []byte("bob\n")},
+		&pgproto3.CopyDone{},
+		&pgproto3.CommandComplete{CommandTag: []byte("COPY 2")},
+		&pgproto3.ReadyForQuery{TxStatus: 'I'},
+	})
+
+	loopErr := make(chan error, 1)
+	go func() { loopErr <- pc.simpleQueryLoop(context.Background()) }()
+
+	mustSendFromClient(t, clientFE, &pgproto3.Query{String: "COPY users TO STDOUT"})
+	frames := drainNFrames(t, clientFE, 6)
+	if _, ok := frames[0].(*pgproto3.CopyOutResponse); !ok {
+		t.Fatalf("frames[0] = %T want CopyOutResponse", frames[0])
+	}
+	if _, ok := frames[5].(*pgproto3.ReadyForQuery); !ok {
+		t.Fatalf("frames[5] = %T want ReadyForQuery", frames[5])
+	}
+
+	evs := waitStatementEvents(t, sink, 1)
+	if evs[0].Result.BytesOut < int64(len("alice\nbob\n")) {
+		t.Fatalf("BytesOut=%d want at least copied data bytes", evs[0].Result.BytesOut)
+	}
+	_ = loopErr
+}
+
 // denyDeletesRuleSet allows all read/session/ddl operations on service "test"
 // but denies writes/deletes. Tuned so BEGIN/COMMIT are allowed (covered by
 // `["*"]` allow rule) while DELETE triggers a deny.

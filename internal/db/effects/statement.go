@@ -1,6 +1,8 @@
 // internal/db/effects/statement.go
 package effects
 
+import "fmt"
+
 // ParserBackend identifies which parser produced a classification, per §7.8.
 type ParserBackend uint8
 
@@ -19,6 +21,46 @@ func (b ParserBackend) String() string {
 	default:
 		return ""
 	}
+}
+
+// BulkOpKind classifies whether a statement initiates a wire-protocol COPY
+// stream the proxy must follow. COPY to/from server paths or PROGRAM forms do
+// not set this because no client-side CopyData stream follows the Q frame.
+type BulkOpKind uint8
+
+const (
+	BulkOpNone BulkOpKind = iota
+	BulkOpIn
+	BulkOpOut
+)
+
+func (b BulkOpKind) String() string {
+	switch b {
+	case BulkOpIn:
+		return "copy_in"
+	case BulkOpOut:
+		return "copy_out"
+	default:
+		return ""
+	}
+}
+
+func (b BulkOpKind) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + b.String() + `"`), nil
+}
+
+func (b *BulkOpKind) UnmarshalJSON(bs []byte) error {
+	switch string(bs) {
+	case `""`, `null`:
+		*b = BulkOpNone
+	case `"copy_in"`:
+		*b = BulkOpIn
+	case `"copy_out"`:
+		*b = BulkOpOut
+	default:
+		return fmt.Errorf("unknown bulk_op %s", bs)
+	}
+	return nil
 }
 
 // ClassifiedStatement is the output of the Postgres classifier (Plan 03) and
@@ -40,6 +82,10 @@ type ClassifiedStatement struct {
 	// Empty for any other verb. For DEALLOCATE ALL, PreparedName is "" (the
 	// proxy's sqlprepared.Intercept distinguishes by RawVerb).
 	PreparedName string `json:"prepared_name,omitempty"`
+
+	// BulkOp is non-None for COPY statements that open a CopyData stream the
+	// proxy must follow.
+	BulkOp BulkOpKind `json:"bulk_op,omitempty"`
 }
 
 // Primary returns the first (canonical) effect. ok=false on empty effects list.

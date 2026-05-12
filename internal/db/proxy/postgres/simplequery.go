@@ -122,10 +122,13 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 
 	decisions := make([]policy.Decision, len(stmts))
 	anyDeny := false
+	approveIndex := -1
 	for i, s := range stmts {
 		decisions[i] = policy.Evaluate(s, rs, policy.ServiceID(pc.svc.Name))
 		if decisions[i].Verb == policy.VerbApprove {
-			decisions[i] = synthApproveAsDeny(decisions[i])
+			if approveIndex == -1 {
+				approveIndex = i
+			}
 		}
 		if decisions[i].Verb == policy.VerbDeny {
 			anyDeny = true
@@ -154,6 +157,10 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 
 	batchSHA := sha256HexBatch(q.String)
 
+	if !anyDeny && approveIndex >= 0 {
+		return pc.runSimpleQueryApproval(ctx, q, stmts, decisions, approveIndex, batchSHA)
+	}
+
 	if !anyDeny {
 		sentAt := timeNow()
 		pc.state.upstreamFE.Send(q)
@@ -161,6 +168,22 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 			return err
 		}
 		result, ferr := pc.forwardUpstreamUntilRFQ(ctx, sentAt, len(q.String))
+		if ferr == nil && (result.YieldedToCopyIn || result.YieldedToCopyOut) {
+			direction := effects.BulkOpIn
+			if result.YieldedToCopyOut {
+				direction = effects.BulkOpOut
+			}
+			copyResult, cerr := pc.runCopyLoop(ctx, direction)
+			result.BytesIn += copyResult.BytesIn
+			result.BytesOut += copyResult.BytesOut
+			result.RowsByStmt = append(result.RowsByStmt, copyResult.RowsByStmt...)
+			result.AffectedByStmt = append(result.AffectedByStmt, copyResult.AffectedByStmt...)
+			result.LatencyMs = copyResult.LatencyMs
+			if copyResult.ErrorCode != "" {
+				result.ErrorCode = copyResult.ErrorCode
+			}
+			ferr = cerr
+		}
 		pc.emitAllowEvents(ctx, stmts, decisions, q.String, batchSHA, result)
 		return ferr
 	}
@@ -236,8 +259,8 @@ func (pc *proxyConn) emitDenyEvents(
 		deniedBySibling := decisions[i].Verb != policy.VerbDeny
 		ev := buildStatementEvent(buildArgs{
 			Stmt: s, StmtIndex: i, BatchTotal: len(stmts),
-			Decision:          decisions[i],
-			SQL:               sql, Tier: pc.state.redactionTier,
+			Decision: decisions[i],
+			SQL:      sql, Tier: pc.state.redactionTier,
 			Conn:              *pc.state,
 			BytesIn:           int64(len(sql)),
 			DenyAction:        denyAction,
@@ -249,17 +272,6 @@ func (pc *proxyConn) emitDenyEvents(
 			pc.logger.Warn("emit statement event failed", "err", err)
 		}
 	}
-}
-
-// synthApproveAsDeny rewrites a Decision with Verb=approve into Verb=deny
-// with the APPROVE_NOT_YET_SUPPORTED stub marker. Per spec §14.5, approve
-// runtime lands in Plan 05; until then we surface a loud failure mode.
-func synthApproveAsDeny(d policy.Decision) policy.Decision {
-	d.Verb = policy.VerbDeny
-	if d.Reason == "" {
-		d.Reason = "APPROVE_NOT_YET_SUPPORTED"
-	}
-	return d
 }
 
 func sha256HexBatch(sql string) string {
@@ -300,17 +312,17 @@ func (pc *proxyConn) emitAllowEvents(
 		ev := buildStatementEvent(buildArgs{
 			Stmt: s, StmtIndex: i, BatchTotal: len(stmts),
 			Decision: decisions[i],
-			SQL: sql, Tier: pc.state.redactionTier,
-			Conn: *pc.state,
-			BytesIn: int64(len(sql)),
-			BytesOut: r.BytesOut,
-			LatencyMs: r.LatencyMs,
-			RowsReturned: rows,
-			RowsAffected: aff,
+			SQL:      sql, Tier: pc.state.redactionTier,
+			Conn:            *pc.state,
+			BytesIn:         int64(len(sql)),
+			BytesOut:        r.BytesOut,
+			LatencyMs:       r.LatencyMs,
+			RowsReturned:    rows,
+			RowsAffected:    aff,
 			UpstreamErrCode: errCode,
-			DenyAction: "none",
-			BatchSHA: batchSHA,
-			Parser: parser,
+			DenyAction:      "none",
+			BatchSHA:        batchSHA,
+			Parser:          parser,
 		})
 		if err := pc.srv.cfg.Sink.EmitStatement(ctx, ev); err != nil {
 			pc.logger.Warn("emit statement event failed", "err", err)

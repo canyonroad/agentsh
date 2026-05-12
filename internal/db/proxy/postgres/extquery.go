@@ -96,6 +96,10 @@ func (pc *proxyConn) executeActions(ctx context.Context, origFrame pgproto3.Fron
 			return errInTxTerminate
 		case *statemachine.ActionTrackUpstreamRFQ:
 			pc.state.smState.LastUpstreamRFQ = a.Status
+		case *statemachine.ActionApproverWait:
+			if err := pc.runApprovalWait(ctx, origFrame, *a); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("postgres: unknown statemachine action %T", a)
 		}

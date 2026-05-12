@@ -5,6 +5,7 @@ package statemachine
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 
@@ -143,6 +144,48 @@ func TestTransition_Parse_Deny_OutOfTx(t *testing.T) {
 	}
 	if _, ok := cache.Get("del"); ok {
 		t.Error("denied Parse must not populate cache")
+	}
+}
+
+func TestTransition_Parse_Approve_EmitsApproverWait(t *testing.T) {
+	yaml := `version: 1
+name: t
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: "127.0.0.1:5432", tls_mode: terminate_reissue}
+database_rules:
+  - name: allow-read
+    db_service: appdb
+    operations: [read]
+    decision: allow
+  - name: review-deletes
+    db_service: appdb
+    operations: [delete]
+    decision: approve
+    timeout: 60s
+`
+	cache := NewFakeCacheView()
+	next, acts := Transition(ConnState{LastUpstreamRFQ: 'I'}, &ParseFrame{Name: "s1", SQL: "DELETE FROM users"}, cache, mustDecode(t, yaml), "appdb")
+	if len(acts) != 1 {
+		t.Fatalf("len(acts)=%d want 1", len(acts))
+	}
+	aw, ok := acts[0].(*ActionApproverWait)
+	if !ok {
+		t.Fatalf("acts[0]=%T want *ActionApproverWait", acts[0])
+	}
+	if aw.Rule.Name != "review-deletes" {
+		t.Errorf("Rule.Name=%q", aw.Rule.Name)
+	}
+	if aw.Timeout != 60*time.Second {
+		t.Errorf("Timeout=%v want 60s", aw.Timeout)
+	}
+	if aw.Stmt.RawVerb != "DELETE" {
+		t.Errorf("Stmt.RawVerb=%q want DELETE", aw.Stmt.RawVerb)
+	}
+	if next.Absorbing {
+		t.Error("approve wait must not enter absorbing state before a decision")
+	}
+	if _, ok := cache.Get("s1"); ok {
+		t.Error("approve wait should not populate cache before approval")
 	}
 }
 

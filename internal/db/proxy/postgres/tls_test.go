@@ -162,6 +162,7 @@ database_connection_rules:
 		t.Errorf("first post-startup byte = %q, want 'R' (Authentication)", first[0])
 	}
 
+	_ = tlsConn.Close()
 	cancel()
 	select {
 	case err := <-srvDone:

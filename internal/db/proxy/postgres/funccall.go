@@ -42,7 +42,33 @@ func (pc *proxyConn) handleFunctionCall(ctx context.Context, msg *pgproto3.Funct
 	}
 	d := policy.Evaluate(cs, rs, policy.ServiceID(pc.svc.Name))
 	if d.Verb == policy.VerbApprove {
-		d = synthApproveAsDeny(d)
+		rule := lookupStatementRuleByName(rs, d.RuleName)
+		out := pc.waitForApproval(ctx, statemachine.ActionApproverWait{
+			Timeout: approvalTimeout(d, rule),
+			Stmt:    cs,
+			Rule:    rule,
+		})
+		if out.err != nil {
+			denyDecision := d
+			denyDecision.Verb = policy.VerbDeny
+			denyDecision.Reason = approvalReason(out.denyAction)
+			pc.emitFunctionCallEvent(ctx, cs, denyDecision, out.denyAction, upstreamResult{})
+			return out.err
+		}
+		if out.approved {
+			pc.state.upstreamFE.Send(msg)
+			if err := pc.state.upstreamFE.Flush(); err != nil {
+				return err
+			}
+			result, ferr := pc.forwardUpstreamUntilRFQ(ctx, timeNow(), 0)
+			pc.emitFunctionCallEvent(ctx, cs, d, "none", result)
+			return ferr
+		}
+		d.Verb = policy.VerbDeny
+		d.Reason = approvalReason(out.denyAction)
+		pc.emitFunctionCallEvent(ctx, cs, d, out.denyAction, upstreamResult{})
+		actions := statemachine.DenyRoute(*pc.state.smState, rule, renderDenyMessage(d), sqlstateInsufficientPrivilege)
+		return pc.executeActions(ctx, msg, actions)
 	}
 
 	if d.Verb == policy.VerbDeny {
@@ -89,7 +115,7 @@ func (pc *proxyConn) emitFunctionCallEvent(
 		SQL:        "",
 		Tier:       pc.state.redactionTier,
 		Conn:       *pc.state,
-		BytesIn:    0,  // FunctionCall frames carry no SQL body to measure
+		BytesIn:    0, // FunctionCall frames carry no SQL body to measure
 		BytesOut:   r.BytesOut,
 		LatencyMs:  r.LatencyMs,
 		DenyAction: denyAction,

@@ -2,6 +2,13 @@
 
 package statemachine
 
+import (
+	"time"
+
+	"github.com/agentsh/agentsh/internal/db/effects"
+	"github.com/agentsh/agentsh/internal/db/policy"
+)
+
 // Action is a single thing the dispatcher must execute after a Transition.
 // Concrete types are sealed via the private isAction() method so the dispatcher
 // can rely on a closed sum type. Cache mutations are NOT Actions — Transition
@@ -66,6 +73,14 @@ type ActionTrackUpstreamRFQ struct {
 	Status byte
 }
 
+// ActionApproverWait instructs the dispatcher to invoke the configured
+// Approver and wait up to Timeout before either forwarding or routing a deny.
+type ActionApproverWait struct {
+	Timeout time.Duration
+	Stmt    effects.ClassifiedStatement
+	Rule    policy.StatementRule
+}
+
 func (*ActionForward) isAction()            {}
 func (*ActionSynthError) isAction()         {}
 func (*ActionSynthReadyForQuery) isAction() {}
@@ -76,3 +91,4 @@ func (*ActionInjectRollback) isAction()     {}
 func (*ActionDrainUntilRFQ) isAction()      {}
 func (*ActionClose) isAction()              {}
 func (*ActionTrackUpstreamRFQ) isAction()   {}
+func (*ActionApproverWait) isAction()       {}

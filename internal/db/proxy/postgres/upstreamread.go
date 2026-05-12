@@ -19,11 +19,14 @@ import (
 // frames arrived in. Statements that did not produce a CommandComplete frame
 // (mid-batch ErrorResponse aborted them) get null counters at event-build time.
 type upstreamResult struct {
-	BytesOut       int64
-	RowsByStmt     []*int64
-	AffectedByStmt []*int64
-	LatencyMs      int64
-	ErrorCode      string
+	BytesIn          int64
+	BytesOut         int64
+	RowsByStmt       []*int64
+	AffectedByStmt   []*int64
+	LatencyMs        int64
+	ErrorCode        string
+	YieldedToCopyIn  bool
+	YieldedToCopyOut bool
 }
 
 // forwardUpstreamUntilRFQ reads upstream frames one at a time and forwards
@@ -74,6 +77,32 @@ func (pc *proxyConn) forwardUpstreamUntilRFQ(ctx context.Context, sentAt time.Ti
 			}
 			r.BytesOut += int64(estimatedFrameSize(m))
 			pc.backend.Send(m)
+
+		case *pgproto3.CopyInResponse:
+			r.BytesOut += int64(estimatedFrameSize(m))
+			r.YieldedToCopyIn = true
+			pc.backend.Send(m)
+			if err := pc.backend.Flush(); err != nil {
+				return r, fmt.Errorf("flush copy-in response: %w", err)
+			}
+			r.LatencyMs = time.Since(sentAt).Milliseconds()
+			if pc.state.smState != nil {
+				pc.state.smState.Phase = statemachine.PhaseInCopyIn
+			}
+			return r, nil
+
+		case *pgproto3.CopyOutResponse:
+			r.BytesOut += int64(estimatedFrameSize(m))
+			r.YieldedToCopyOut = true
+			pc.backend.Send(m)
+			if err := pc.backend.Flush(); err != nil {
+				return r, fmt.Errorf("flush copy-out response: %w", err)
+			}
+			r.LatencyMs = time.Since(sentAt).Milliseconds()
+			if pc.state.smState != nil {
+				pc.state.smState.Phase = statemachine.PhaseInCopyOut
+			}
+			return r, nil
 
 		case *pgproto3.ReadyForQuery:
 			if pc.state.smState != nil {

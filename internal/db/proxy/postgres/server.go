@@ -25,8 +25,8 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/agentsh/agentsh/internal/db/events"
 	classify_pg "github.com/agentsh/agentsh/internal/db/classify/postgres"
+	"github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/db/policy"
 	"github.com/agentsh/agentsh/internal/db/service"
 	"github.com/agentsh/agentsh/internal/db/tlsleaf"
@@ -66,6 +66,7 @@ type Config struct {
 	Sink           events.Sink
 	Logger         *slog.Logger
 	Policy         *policy.RuleSet // current rule set; nil means "no rules" (implicit deny). Hot-swappable in a later plan.
+	Approver       policy.Approver // defaults to policy.NopApprover{} when nil.
 
 	// MaxQueryBytes caps the 'Q' frame body. Default 1 MiB when zero.
 	// Statements above the cap get a synthetic ErrorResponse(54000) + close.
@@ -120,6 +121,9 @@ type Server struct {
 func New(cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.Approver == nil {
+		cfg.Approver = policy.NopApprover{}
 	}
 	if cfg.StateDir == "" {
 		return nil, errors.New("postgres.New: StateDir is required")
