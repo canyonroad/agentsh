@@ -39,17 +39,15 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          # Namespace bumped to v2 and salted with the libseccomp build
-          # script hash. Same reasoning as ci.yml: caches from before the
-          # libseccomp 2.6 static build carry libseccomp-golang cgo artifacts
-          # compiled against 2.5 headers (stub bodies for 2.6-only functions
-          # plus bare `-lseccomp` from system pkg-config). Relinking those
-          # against the 2.6 static .a produces duplicate-definition errors.
-          # Including hashFiles('scripts/build-libseccomp.sh') ensures any
-          # future libseccomp version bump invalidates stale artifacts.
-          key: release-v2-${{ runner.os }}-go-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-${{ hashFiles('**/go.sum') }}
+          # Namespace bumped to v3 after dropping the libseccomp 2.6
+          # source-build step. The key now salts only on go.sum so any
+          # dependency change (including libseccomp-golang) invalidates
+          # the cache. The old v2 key carried build artifacts compiled
+          # against a custom-built static libseccomp.a; those are
+          # incompatible with the new dynamic-link design.
+          key: release-v3-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            release-v2-${{ runner.os }}-go-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-
+            release-v3-${{ runner.os }}-go-
 
       - name: Free disk space
         run: |
@@ -64,18 +62,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libfuse-dev \
+            libseccomp-dev \
             pkg-config \
             gcc-aarch64-linux-gnu \
             make \
             gpg \
             gperf
-
-      - name: Build static libseccomp 2.6 (amd64 + arm64)
-        run: |
-          TARGET=amd64 ./scripts/build-libseccomp.sh
-          TARGET=arm64 ./scripts/build-libseccomp.sh
-          echo "=== libseccomp artifacts ==="
-          ls -la /opt/libseccomp/amd64/lib/libseccomp.a /opt/libseccomp/arm64/lib/libseccomp.a
 
       - name: Test
         run: |
@@ -83,12 +75,9 @@ jobs:
           go test -p=1 ./...
         env:
           GOTMPDIR: ${{ runner.temp }}/go-tmp
-          PKG_CONFIG_LIBDIR: /opt/libseccomp/amd64/lib/pkgconfig
 
       - name: Smoke
         run: make smoke
-        env:
-          PKG_CONFIG_LIBDIR: /opt/libseccomp/amd64/lib/pkgconfig
 
       - name: Pin GoReleaser tag selection to release ref
         run: |
@@ -586,10 +575,27 @@ jobs:
           - name: ubuntu2204
             dockerfile: Dockerfile.test.ubuntu2204
             docker_run_flags: "--device /dev/fuse --cap-add SYS_ADMIN"
+          - name: debian-trixie
+            dockerfile: Dockerfile.test.debian-trixie
+            docker_run_flags: ""
+          - name: rockylinux10
+            dockerfile: Dockerfile.test.rockylinux10
+            docker_run_flags: ""
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_SOURCE_REF }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build sigurg_probe for docker matrix
+        run: |
+          go build -o /tmp/sigurg_probe scripts/docker-test/sigurg_probe.go
+          chmod +x /tmp/sigurg_probe
+          ls -la /tmp/sigurg_probe
 
       - name: Build and run ${{ matrix.name }} integration test
         env:
@@ -604,4 +610,6 @@ jobs:
             echo "::warning::Skipping FUSE flags: /dev/fuse not available on this runner"
             RUN_FLAGS=""
           fi
-          docker run --rm $RUN_FLAGS agentsh-test-${{ matrix.name }}:latest
+          docker run --rm $RUN_FLAGS \
+            -v /tmp/sigurg_probe:/probe/sigurg_probe:ro \
+            agentsh-test-${{ matrix.name }}:latest

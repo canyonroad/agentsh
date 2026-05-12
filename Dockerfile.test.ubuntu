@@ -246,6 +246,24 @@ else
 fi
 
 # -------------------------------------------------------------------
+# Layer 1 (WAIT_KILLABLE_RECV) engagement check
+#
+# The new raw-seccomp(2) load path emits a structured Info log
+# "seccomp: filter loaded ... wait_killable=true" when the kernel
+# accepts SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV. On the GitHub
+# runner's host kernel (>=6.0) the flag is always supported, so
+# the log MUST contain wait_killable=true. False would mean Layer 1
+# silently degraded — exactly what this entire design exists to prevent.
+# -------------------------------------------------------------------
+if grep -q 'wait_killable=true' "$tmp/server.log" || grep -q '"wait_killable":true' "$tmp/server.log"; then
+  pass "server log shows wait_killable=true (Layer 1 engaged)"
+else
+  fail "server log shows wait_killable=true" "Layer 1 silently disabled — check seccomp_load_linux.go"
+  echo "--- relevant server log lines ---" >&2
+  grep -i wait_killable "$tmp/server.log" >&2 || echo "(no wait_killable lines in log)" >&2
+fi
+
+# -------------------------------------------------------------------
 # Create a session
 # -------------------------------------------------------------------
 echo ""
@@ -598,6 +616,25 @@ case "$shim_block_stderr" in
     fail "blocked command through shim fails" "rc=$shim_block_rc, no policy denial on stderr; got: ${shim_block_stderr}"
     ;;
 esac
+
+# -------------------------------------------------------------------
+# SIGURG sanity probe
+#
+# Best-effort check that the WAIT_KILLABLE_RECV flag is functionally
+# engaged end-to-end. The probe is bind-mounted from /probe/sigurg_probe
+# by docker run. See scripts/docker-test/README.md.
+# -------------------------------------------------------------------
+echo ""
+echo "=== SIGURG sanity probe ==="
+if [ -x /probe/sigurg_probe ]; then
+  if /probe/sigurg_probe 2>&1; then
+    pass "sigurg_probe completed without hang"
+  else
+    fail "sigurg_probe completed without hang" "probe exited non-zero (possible WAIT_KILLABLE_RECV regression)"
+  fi
+else
+  echo "  INFO: /probe/sigurg_probe not bind-mounted; skipping (allowed if docker run lacks -v flag)"
+fi
 
 # -------------------------------------------------------------------
 # Summary
