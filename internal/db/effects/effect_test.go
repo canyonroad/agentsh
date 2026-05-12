@@ -2,7 +2,9 @@
 package effects
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -77,4 +79,35 @@ func TestEffect_OrderStableForEqualPriority(t *testing.T) {
 func TestEffect_OrderEmpty(t *testing.T) {
 	Order(nil) // must not panic
 	Order([]Effect{})
+}
+
+func TestEffect_FunctionOID_RoundTrip(t *testing.T) {
+	oid := int32(12345)
+	in := Effect{
+		Group:       GroupProcedural,
+		Subtype:     SubtypeFunctionCallProtocol,
+		FunctionOID: &oid,
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(bs), `"function_oid":12345`) {
+		t.Fatalf("missing function_oid: %s", bs)
+	}
+	var out Effect
+	if err := json.Unmarshal(bs, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.FunctionOID == nil || *out.FunctionOID != 12345 {
+		t.Fatalf("FunctionOID round-trip lost value: %v", out.FunctionOID)
+	}
+}
+
+func TestEffect_FunctionOID_OmitEmpty(t *testing.T) {
+	in := Effect{Group: GroupRead}
+	bs, _ := json.Marshal(in)
+	if strings.Contains(string(bs), "function_oid") {
+		t.Fatalf("function_oid should be omitted; got %s", bs)
+	}
 }

@@ -9,6 +9,12 @@ type Effect struct {
 	Subtype    Subtype
 	Objects    []ObjectRef
 	Resolution Resolution
+
+	// FunctionOID is populated for procedural effects with Subtype
+	// SubtypeFunctionCallProtocol (the Postgres 'F' FunctionCall frame) or
+	// SubtypeEscalatedFunctionCall (when classifier escalation produced
+	// the effect). Pointer so JSON omits zero.
+	FunctionOID *int32 `json:"function_oid,omitempty"`
 }
 
 // canonicalGroupRank returns the within-tier ordering position per §5.2 R5.

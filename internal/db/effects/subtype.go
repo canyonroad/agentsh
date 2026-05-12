@@ -66,6 +66,7 @@ const (
 
 	// procedural
 	SubtypeFunctionCallProtocol
+	SubtypeEscalatedFunctionCall
 	SubtypeCall
 	SubtypeDo
 	SubtypeAnonymousBlock
@@ -152,6 +153,7 @@ var subtypeTable = map[Subtype]subtypeInfo{
 	SubtypeUnloadToS3:   {"unload_to_s3", GroupBulkExport},
 
 	SubtypeFunctionCallProtocol: {"function_call_protocol", GroupProcedural},
+	SubtypeEscalatedFunctionCall: {"escalated_function_call", GroupProcedural},
 	SubtypeCall:                 {"call", GroupProcedural},
 	SubtypeDo:                   {"do", GroupProcedural},
 	SubtypeAnonymousBlock:       {"anonymous_block", GroupProcedural},
