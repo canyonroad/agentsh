@@ -23,6 +23,27 @@ var (
 	errUnsupportedFrame   = errors.New("postgres.simpleQueryLoop: unsupported frame type; conn closed")
 )
 
+// classifierOptionsFromPolicy materializes a classify_pg.Options from the
+// active policy snapshot. Captures the escalation knobs (§7.6) and converts
+// the allowlist slice to a map for the walker.
+func classifierOptionsFromPolicy(rs *policy.RuleSet) classify_pg.Options {
+	if rs == nil {
+		return classify_pg.Options{}
+	}
+	r := rs.Redaction()
+	if !r.EscalateUnknownFunctions {
+		return classify_pg.Options{}
+	}
+	allow := make(map[string]struct{}, len(r.SafeFunctionAllowlist))
+	for _, n := range r.SafeFunctionAllowlist {
+		allow[n] = struct{}{}
+	}
+	return classify_pg.Options{
+		EscalateUnknownFunctions: true,
+		SafeFunctionAllowlist:    allow,
+	}
+}
+
 // simpleQueryLoop is the post-handshake driver. It reads client frames one at
 // a time, dispatches to handleQuery for 'Q', forwards 'X' (Terminate) directly,
 // routes Plan-05a Extended Query frames (Parse/Bind/Describe/Execute/Sync/
@@ -85,9 +106,10 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 		return errFrameTooLargeClose
 	}
 
-	parser := pc.srv.classifierFor(pc.svc.Dialect)
-	stmts, _ := parser.Classify(q.String, classify_pg.SessionState{}, classify_pg.Options{})
 	rs := pc.srv.policy()
+	parser := pc.srv.classifierFor(pc.svc.Dialect)
+	opts := classifierOptionsFromPolicy(rs)
+	stmts, _ := parser.Classify(q.String, classify_pg.SessionState{}, opts)
 	decisions := make([]policy.Decision, len(stmts))
 	anyDeny := false
 	for i, s := range stmts {
@@ -123,7 +145,7 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 			break
 		}
 	}
-	denyRule := lookupStatementRuleByName(pc.srv.policy(), denyDecision.RuleName)
+	denyRule := lookupStatementRuleByName(rs, denyDecision.RuleName)
 	denyAction := "none"
 	if pc.state.smState != nil && (pc.state.smState.LastUpstreamRFQ == 'T' || pc.state.smState.LastUpstreamRFQ == 'E') {
 		if denyRule.DenyModeInTx == "rollback_then_continue" {

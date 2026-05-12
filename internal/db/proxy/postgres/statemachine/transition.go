@@ -35,7 +35,7 @@ func Transition(
 	svc policy.ServiceID,
 ) (ConnState, []Action) {
 	parser := classify_pg.New(classify_pg.DialectPostgres)
-	return TransitionWithParser(s, frame, cache, rules, svc, parser)
+	return TransitionWithParser(s, frame, cache, rules, svc, parser, classify_pg.Options{})
 }
 
 // TransitionWithParser is the parser-injected variant; tests use it when
@@ -47,14 +47,15 @@ func TransitionWithParser(
 	rules *policy.RuleSet,
 	svc policy.ServiceID,
 	parser PolicyClassifier,
+	opts classify_pg.Options,
 ) (ConnState, []Action) {
 	switch f := frame.(type) {
 	case *SyncFrame:
 		return handleSync(s, f)
 	case *QueryFrame:
-		return handleQuery(s, f, rules, svc, parser)
+		return handleQuery(s, f, rules, svc, parser, opts)
 	case *ParseFrame:
-		return handleParse(s, f, cache, rules, svc, parser)
+		return handleParse(s, f, cache, rules, svc, parser, opts)
 	case *BindFrame:
 		return handleBind(s, f, cache)
 	case *DescribeFrame:
@@ -105,11 +106,12 @@ func handleParse(
 	rules *policy.RuleSet,
 	svc policy.ServiceID,
 	parser PolicyClassifier,
+	opts classify_pg.Options,
 ) (ConnState, []Action) {
 	if s.Absorbing {
 		return s, []Action{&ActionSuppress{}}
 	}
-	stmts, _ := parser.Classify(f.SQL, classify_pg.SessionState{}, classify_pg.Options{})
+	stmts, _ := parser.Classify(f.SQL, classify_pg.SessionState{}, opts)
 	anyDeny := false
 	var denyDecision policy.Decision
 	var denyRule policy.StatementRule
@@ -232,6 +234,7 @@ func handleQuery(
 	s ConnState, f *QueryFrame,
 	rules *policy.RuleSet, svc policy.ServiceID,
 	parser PolicyClassifier,
+	opts classify_pg.Options,
 ) (ConnState, []Action) {
 	if s.Absorbing {
 		// A 'Q' arriving inside an absorbing window means the client jumped
@@ -240,7 +243,7 @@ func handleQuery(
 		// cleanly on the next Sync.
 		return s, []Action{&ActionSuppress{}}
 	}
-	stmts, _ := parser.Classify(f.SQL, classify_pg.SessionState{}, classify_pg.Options{})
+	stmts, _ := parser.Classify(f.SQL, classify_pg.SessionState{}, opts)
 	var denyDecision policy.Decision
 	var denyRule policy.StatementRule
 	anyDeny := false

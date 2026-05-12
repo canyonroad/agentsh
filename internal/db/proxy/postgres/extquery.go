@@ -26,13 +26,16 @@ func (pc *proxyConn) handleExtendedFrame(ctx context.Context, msg pgproto3.Front
 	}
 	wireView := wireCacheView{c: pc.wireCache}
 	parser := pc.srv.classifierFor(pc.svc.Dialect)
+	rs := pc.srv.policy()
+	opts := classifierOptionsFromPolicy(rs)
 	next, actions := statemachine.TransitionWithParser(
 		*pc.state.smState,
 		frame,
 		wireView,
-		pc.srv.policy(),
+		rs,
 		policy.ServiceID(pc.svc.Name),
 		parser,
+		opts,
 	)
 	*pc.state.smState = next
 	return pc.executeActions(ctx, msg, actions)
