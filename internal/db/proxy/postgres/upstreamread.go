@@ -19,6 +19,7 @@ import (
 // frames arrived in. Statements that did not produce a CommandComplete frame
 // (mid-batch ErrorResponse aborted them) get null counters at event-build time.
 type upstreamResult struct {
+	BytesIn        int64
 	BytesOut       int64
 	RowsByStmt     []*int64
 	AffectedByStmt []*int64
