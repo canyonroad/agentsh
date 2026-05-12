@@ -101,6 +101,23 @@ func loadRawFilter(prog []byte, withWaitKill bool) (int, error) {
 		return -1, fmt.Errorf("seccomp export produced unaligned filter: %d bytes (want multiple of 8)", len(prog))
 	}
 
+	// Pin the calling goroutine to the OS thread that will receive
+	// the seccomp filter. The filter applies only to the thread that
+	// makes the seccomp(2) syscall (we deliberately don't use
+	// SECCOMP_FILTER_FLAG_TSYNC because combining it with
+	// NEW_LISTENER has had kernel-version-dependent behavior in
+	// practice). In Go, goroutines migrate freely between Ms unless
+	// explicitly locked — so without this pin, the wrapper's main
+	// goroutine could land on a different M before reaching
+	// syscall.Exec, and the post-execve target would inherit the
+	// (unfiltered) seccomp state of THAT thread.
+	//
+	// We never UnlockOSThread: the caller of InstallFilterWithConfig
+	// is the unixwrap binary, which is about to execve and replace
+	// the entire process. Leaving the goroutine pinned through
+	// execve is the goal, not a side effect.
+	runtime.LockOSThread()
+
 	if err := prctlSetNoNewPrivs(); err != nil {
 		return -1, fmt.Errorf("prctl PR_SET_NO_NEW_PRIVS: %w", err)
 	}
