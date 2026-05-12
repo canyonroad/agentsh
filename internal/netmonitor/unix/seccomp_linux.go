@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"time"
 	"unsafe"
 
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
@@ -675,76 +674,6 @@ func filterConfigNeedsNotifyFD(cfg FilterConfig, blockListMap map[uint32]seccomp
 		len(blockListMap) > 0 ||
 		len(blockedFamilyMap) > 0 ||
 		len(socketRules) > 0
-}
-
-// loadWithRetryOnWaitKillFailure loads a seccomp filter and, if the load
-// fails with WaitKill set AND the underlying errno is EINVAL, clears
-// WaitKill and retries once. This handles custom or vendor kernels that
-// report 6.0+ but reject SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV at filter
-// load time — the kernel returns EINVAL from the flag-mask check in
-// seccomp_set_mode_filter when an unknown flag is set.
-//
-// For any other errno (EBUSY, EPERM, EACCES, ENOMEM, ...) the failure is
-// unrelated to WaitKill, so we surface the original error verbatim
-// instead of emitting a misleading "WaitKillable rejected" warning and
-// wasting a retry that will fail with the same kernel reason. This
-// requires SetRawRC(true) on the filter so libseccomp does not mask the
-// underlying errno as ECANCELED — InstallFilterWithConfig sets that
-// flag.
-//
-// Each Load() attempt is logged with timing and the resulting errno so a
-// hostile-kernel rejection (issue #282 EFAULT on Runloop+Freestyle) lands
-// in the wrapper's stderr capture with enough detail to point at the
-// failing flag combination. Success-path lines log at DEBUG so they do
-// not pollute stderr captured by integration tests on the success path
-// — the diagnostic snapshot/timing is still available when the slog
-// level is set to debug. Failure-path lines log at WARN with the full
-// snapshot inline so a single visible line is enough to triage.
-//
-// snapshot is the slice of structured fields produced by
-// filterDiagnosticFields and is included in failure WARN entries.
-//
-// loadFn is injected so tests can simulate Load() failures deterministically.
-// Production call sites pass `filt.Load`.
-func loadWithRetryOnWaitKillFailure(filt *seccomp.ScmpFilter, waitKillSet bool, snapshot []any, loadFn func() error) error {
-	start := time.Now()
-	err := loadFn()
-	dur := time.Since(start)
-	if err == nil {
-		slog.Debug("seccomp: filter Load succeeded",
-			"attempt", 1, "wait_kill", waitKillSet, "duration_ms", dur.Milliseconds())
-		return nil
-	}
-	slog.Warn("seccomp: filter Load failed",
-		appendSnapshot(snapshot,
-			"attempt", 1, "wait_kill", waitKillSet, "duration_ms", dur.Milliseconds(),
-			"errno", errnoString(err), "error", err)...)
-	if !waitKillSet {
-		return err
-	}
-	if !errors.Is(err, unix.EINVAL) {
-		return err
-	}
-	slog.Warn("seccomp: WaitKillable rejected at filter load time; falling back to SIGURG signal mask only",
-		"error", err)
-	if clearErr := filt.SetWaitKill(false); clearErr != nil {
-		slog.Warn("seccomp: SetWaitKill(false) failed; cannot retry without WaitKill",
-			"error", clearErr)
-		return err
-	}
-	start = time.Now()
-	err = loadFn()
-	dur = time.Since(start)
-	if err == nil {
-		slog.Debug("seccomp: filter Load succeeded on retry without WaitKill",
-			"attempt", 2, "duration_ms", dur.Milliseconds())
-		return nil
-	}
-	slog.Warn("seccomp: filter Load failed on retry without WaitKill",
-		appendSnapshot(snapshot,
-			"attempt", 2, "duration_ms", dur.Milliseconds(),
-			"errno", errnoString(err), "error", err)...)
-	return err
 }
 
 // appendSnapshot returns a new slice that prepends snapshot's fields to
