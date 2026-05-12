@@ -126,3 +126,39 @@ func TestClassifiedStatement_SourceSpan_ZeroOmitted(t *testing.T) {
 		t.Fatalf("zero span fields must be omitted: %s", bs)
 	}
 }
+
+func TestClassifiedStatement_PreparedName_JSON_RoundTrip(t *testing.T) {
+	in := ClassifiedStatement{
+		Effects:      []Effect{{Group: GroupSession, Subtype: SubtypeDiscardPlans}},
+		RawVerb:      "DEALLOCATE",
+		PreparedName: "s1",
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(bs), `"prepared_name":"s1"`) {
+		t.Fatalf("missing prepared_name in JSON: %s", bs)
+	}
+	var out ClassifiedStatement
+	if err := json.Unmarshal(bs, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.PreparedName != "s1" {
+		t.Fatalf("PreparedName=%q", out.PreparedName)
+	}
+}
+
+func TestClassifiedStatement_PreparedName_OmitEmpty(t *testing.T) {
+	in := ClassifiedStatement{
+		Effects: []Effect{{Group: GroupRead}},
+		RawVerb: "SELECT",
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(bs), "prepared_name") {
+		t.Fatalf("prepared_name should be omitted; got: %s", bs)
+	}
+}

@@ -35,6 +35,11 @@ type ClassifiedStatement struct {
 	// zero when the parser cannot supply them (e.g. unknown-statement path).
 	SourceStart int32 `json:"source_start,omitempty"`
 	SourceEnd   int32 `json:"source_end,omitempty"`
+
+	// PreparedName is populated for PREPARE / EXECUTE / DEALLOCATE classifications.
+	// Empty for any other verb. For DEALLOCATE ALL, PreparedName is "" (the
+	// proxy's sqlprepared.Intercept distinguishes by RawVerb).
+	PreparedName string `json:"prepared_name,omitempty"`
 }
 
 // Primary returns the first (canonical) effect. ok=false on empty effects list.
