@@ -59,6 +59,20 @@ jobs:
 
       - name: Install build deps (envshim, fuse, seccomp, multiarch)
         run: |
+          # Ubuntu 24.04 hosts arm64 packages on ports.ubuntu.com, not
+          # archive.ubuntu.com. Without restricting the default sources
+          # to amd64 and adding a ports source for arm64, `apt-get
+          # update` after `dpkg --add-architecture arm64` 404s on every
+          # arm64 Packages file.
+          sudo sed -i '/^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+          sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-security
+          Components: main universe restricted multiverse
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
           sudo dpkg --add-architecture arm64
           sudo apt-get update
           sudo apt-get install -y \
