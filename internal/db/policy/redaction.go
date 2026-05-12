@@ -38,11 +38,23 @@ func ParseRedactionTier(s string) (RedactionTier, bool) {
 // RedactionConfig is the policies.db block. See §10.3.
 //
 // Defaults applied by Decode when a field is missing:
-//   LogStatements:            RedactParametersRedacted
-//   ApprovalStatementPreview: RedactParametersRedacted (named "redacted" in YAML)
-//   ApprovalStatementChars:   200
+//
+//	LogStatements:            RedactParametersRedacted
+//	ApprovalStatementPreview: RedactParametersRedacted (named "redacted" in YAML)
+//	ApprovalStatementChars:   200
 type RedactionConfig struct {
 	LogStatements            RedactionTier
 	ApprovalStatementPreview RedactionTier
 	ApprovalStatementChars   int
+
+	// EscalateUnknownFunctions reflects policies.db.escalate_unknown_functions.
+	// When true, classifier reclassifies SELECT calling a function NOT in
+	// SafeFunctionAllowlist as procedural rather than read.
+	EscalateUnknownFunctions bool
+
+	// SafeFunctionAllowlist is the lowercase canonical function names that
+	// stay classified as `read` when EscalateUnknownFunctions is on. When
+	// the config omits the key but escalate is on, Decode populates this
+	// with classify/postgres.DefaultSafeFunctionAllowlist() keys.
+	SafeFunctionAllowlist []string
 }

@@ -3,9 +3,11 @@ package policy
 import (
 	"bytes"
 	"fmt"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 
+	classifybuiltins "github.com/agentsh/agentsh/internal/db/classify/postgres/builtins"
 	"github.com/agentsh/agentsh/internal/db/service"
 	rootpolicy "github.com/agentsh/agentsh/internal/policy"
 )
@@ -114,10 +116,12 @@ func decodeConnectionRules(n yaml.Node) ([]*ConnectionRule, error) {
 // redaction and unavoidability fields are decoded here; the rest of the
 // policies block is owned by other packages.
 type redactionYAML struct {
-	LogStatements                 string `yaml:"log_statements,omitempty"`
-	ApprovalStatementPreview      string `yaml:"approval_statement_preview,omitempty"`
-	ApprovalStatementPreviewChars int    `yaml:"approval_statement_preview_chars,omitempty"`
-	Unavoidability                string `yaml:"unavoidability,omitempty"`
+	LogStatements                 string   `yaml:"log_statements,omitempty"`
+	ApprovalStatementPreview      string   `yaml:"approval_statement_preview,omitempty"`
+	ApprovalStatementPreviewChars int      `yaml:"approval_statement_preview_chars,omitempty"`
+	Unavoidability                string   `yaml:"unavoidability,omitempty"`
+	EscalateUnknownFunctions      bool     `yaml:"escalate_unknown_functions"`
+	SafeFunctionAllowlist         []string `yaml:"safe_function_allowlist"`
 }
 
 // dbPoliciesWrapper is the on-disk shape of the policies block as far as
@@ -160,7 +164,25 @@ func decodeRedaction(p *rootpolicy.Policy) (RedactionConfig, error) {
 	if rb.ApprovalStatementPreviewChars > 0 {
 		out.ApprovalStatementChars = rb.ApprovalStatementPreviewChars
 	}
+	out.EscalateUnknownFunctions = rb.EscalateUnknownFunctions
+	if len(rb.SafeFunctionAllowlist) > 0 {
+		out.SafeFunctionAllowlist = append([]string(nil), rb.SafeFunctionAllowlist...)
+	} else if out.EscalateUnknownFunctions {
+		out.SafeFunctionAllowlist = defaultAllowlistKeys()
+	}
 	return out, nil
+}
+
+// defaultAllowlistKeys returns the builtin seed list as a sorted []string.
+// Sorting is deterministic and makes test assertions order-stable.
+func defaultAllowlistKeys() []string {
+	m := classifybuiltins.DefaultSafeFunctionAllowlist()
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // decodeUnavoidability reads policies.db.unavoidability. Default: UnavoidabilityOff.

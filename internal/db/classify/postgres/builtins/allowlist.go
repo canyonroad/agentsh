@@ -1,4 +1,4 @@
-package postgres
+package builtins
 
 // DefaultSafeFunctionAllowlist returns the curated set of immutable PostgreSQL
 // builtin function names safe to treat as `read` when

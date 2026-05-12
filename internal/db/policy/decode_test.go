@@ -241,6 +241,65 @@ policies:
 	}
 }
 
+func TestDecode_EscalateUnknownFunctions_DefaultFalse(t *testing.T) {
+	rs, _, err := loadDB(t, `version: 1
+name: t
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: "127.0.0.1:5432", tls_mode: terminate_reissue}
+`)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if rs.Redaction().EscalateUnknownFunctions {
+		t.Error("default EscalateUnknownFunctions should be false")
+	}
+}
+
+func TestDecode_EscalateUnknownFunctions_True(t *testing.T) {
+	rs, _, err := loadDB(t, `version: 1
+name: t
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: "127.0.0.1:5432", tls_mode: terminate_reissue}
+policies:
+  db:
+    escalate_unknown_functions: true
+`)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !rs.Redaction().EscalateUnknownFunctions {
+		t.Error("expected EscalateUnknownFunctions to be true")
+	}
+	if len(rs.Redaction().SafeFunctionAllowlist) == 0 {
+		t.Error("default allowlist should be populated when escalate is true and allowlist omitted")
+	}
+}
+
+func TestDecode_SafeFunctionAllowlist_Custom(t *testing.T) {
+	rs, _, err := loadDB(t, `version: 1
+name: t
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: "127.0.0.1:5432", tls_mode: terminate_reissue}
+policies:
+  db:
+    escalate_unknown_functions: true
+    safe_function_allowlist: ["my_func", "schema.fn"]
+`)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	want := []string{"my_func", "schema.fn"}
+	got := rs.Redaction().SafeFunctionAllowlist
+	if len(got) != len(want) {
+		t.Fatalf("len(got)=%d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d]=%q want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestDecode_WarnsOnApproveDecision(t *testing.T) {
 	src := `version: 1
 name: t
