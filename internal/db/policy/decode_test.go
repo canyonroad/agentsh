@@ -300,7 +300,7 @@ policies:
 	}
 }
 
-func TestDecode_WarnsOnApproveDecision(t *testing.T) {
+func TestDecode_ApproveDecision_NoLongerWarns(t *testing.T) {
 	src := `version: 1
 name: t
 db_services:
@@ -319,13 +319,9 @@ database_rules:
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	found := false
 	for _, w := range warns {
 		if w.Code == "APPROVE_NOT_YET_SUPPORTED" && w.Rule == "review-deletes" {
-			found = true
+			t.Fatalf("APPROVE_NOT_YET_SUPPORTED warning should no longer be emitted: %#v", w)
 		}
-	}
-	if !found {
-		t.Fatalf("expected APPROVE_NOT_YET_SUPPORTED warning, got %v", warns)
 	}
 }
