@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	classify_pg "github.com/agentsh/agentsh/internal/db/classify/postgres"
 	"github.com/agentsh/agentsh/internal/db/effects"
@@ -137,5 +138,60 @@ func TestBuildStatementEvent_NoneTierStripsText(t *testing.T) {
 	}
 	if ev.StatementDigest == "" {
 		t.Fatalf("StatementDigest must be populated under RedactNone")
+	}
+}
+
+func TestBuildEvent_TxStartedAt_PopulatedWhenInTx(t *testing.T) {
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	conn := connStateForTest("appdb", "postgres", "terminate_reissue")
+	conn.smState = &statemachine.ConnState{
+		LastUpstreamRFQ: 'T',
+		TxStartedAt:     now,
+	}
+	sql := "SELECT 1"
+	stmt := effects.ClassifiedStatement{
+		Effects:     []effects.Effect{{Group: effects.GroupRead}},
+		SourceStart: 0, SourceEnd: int32(len(sql)),
+	}
+	parser := classify_pg.New(classify_pg.DialectPostgres)
+	ev := buildStatementEvent(buildArgs{
+		Stmt:     stmt,
+		SQL:      sql,
+		Tier:     policy.RedactParametersRedacted,
+		Conn:     conn,
+		Decision: policy.Decision{Verb: policy.VerbAllow, RuleKind: policy.RuleKindStatement},
+		DenyAction: "none",
+		BatchSHA: sha256Hex(sql),
+		Parser:   parser,
+	})
+	if !ev.TxContext.InTransaction {
+		t.Error("InTransaction should be true under LastUpstreamRFQ='T'")
+	}
+	if !ev.TxContext.TxStartedAt.Equal(now) {
+		t.Errorf("TxStartedAt=%v want %v", ev.TxContext.TxStartedAt, now)
+	}
+}
+
+func TestBuildEvent_DenyActionRollbackInjected(t *testing.T) {
+	conn := connStateForTest("appdb", "postgres", "terminate_reissue")
+	conn.smState = &statemachine.ConnState{LastUpstreamRFQ: 'T', TxStartedAt: time.Now()}
+	sql := "DELETE FROM users"
+	stmt := effects.ClassifiedStatement{
+		Effects:     []effects.Effect{{Group: effects.GroupDelete}},
+		SourceStart: 0, SourceEnd: int32(len(sql)),
+	}
+	parser := classify_pg.New(classify_pg.DialectPostgres)
+	ev := buildStatementEvent(buildArgs{
+		Stmt:     stmt,
+		SQL:      sql,
+		Tier:     policy.RedactParametersRedacted,
+		Conn:     conn,
+		Decision: policy.Decision{Verb: policy.VerbDeny, RuleName: "block-delete-soft"},
+		DenyAction: "rollback_injected",
+		BatchSHA: sha256Hex(sql),
+		Parser:   parser,
+	})
+	if ev.TxContext.DenyAction != "rollback_injected" {
+		t.Errorf("DenyAction=%q want rollback_injected", ev.TxContext.DenyAction)
 	}
 }

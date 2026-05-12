@@ -86,6 +86,9 @@ func buildStatementEvent(a buildArgs) events.DBEvent {
 		InTransaction: connInTx(a.Conn),
 		DenyAction:    a.DenyAction,
 	}
+	if a.Conn.smState != nil && !a.Conn.smState.TxStartedAt.IsZero() {
+		tx.TxStartedAt = a.Conn.smState.TxStartedAt
+	}
 
 	predicates := events.EventPredicates{HasFilter: hasFilter(a.Stmt)}
 
