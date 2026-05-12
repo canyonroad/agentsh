@@ -57,17 +57,17 @@ jobs:
           echo "=== Disk space after cleanup ==="
           df -h /tmp /home/runner
 
-      - name: Install build deps (envshim, fuse, seccomp)
+      - name: Install build deps (envshim, fuse, seccomp, multiarch)
         run: |
+          sudo dpkg --add-architecture arm64
           sudo apt-get update
           sudo apt-get install -y \
             libfuse-dev \
             libseccomp-dev \
+            libseccomp-dev:arm64 \
             pkg-config \
             gcc-aarch64-linux-gnu \
-            make \
-            gpg \
-            gperf
+            make
 
       - name: Test
         run: |
