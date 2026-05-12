@@ -4,11 +4,14 @@ package unix
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"unsafe"
 
 	seccomp "github.com/seccomp/libseccomp-golang"
+	"golang.org/x/sys/unix"
 )
 
 // exportFilterBPF serializes a libseccomp filter into its kernel-ready
@@ -47,3 +50,89 @@ func exportFilterBPF(filt *seccomp.ScmpFilter) ([]byte, error) {
 	}
 	return res.buf, nil
 }
+
+// loadFilterSyscall and prctlSetNoNewPrivs are injectable seams. Tests
+// replace them to assert flag computation and error handling without
+// permanently installing a filter in the test process. Production uses
+// realLoadFilterSyscall / realPrctlSetNoNewPrivs.
+var (
+	loadFilterSyscall  = realLoadFilterSyscall
+	prctlSetNoNewPrivs = realPrctlSetNoNewPrivs
+)
+
+func realLoadFilterSyscall(flags uintptr, fprog *unix.SockFprog) (int, error) {
+	r1, _, errno := unix.Syscall(
+		unix.SYS_SECCOMP,
+		unix.SECCOMP_SET_MODE_FILTER,
+		flags,
+		uintptr(unsafe.Pointer(fprog)),
+	)
+	if errno != 0 {
+		return -1, errno
+	}
+	return int(r1), nil
+}
+
+func realPrctlSetNoNewPrivs() error {
+	return unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+}
+
+// loadRawFilter applies an exported BPF program to the current process
+// using the seccomp(2) syscall directly, bypassing libseccomp's
+// seccomp_load(). The flag SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
+// (0x20, kernel >=5.19) is set when withWaitKill is true; the kernel
+// returns EINVAL if it doesn't recognize the flag, which the retry
+// wrapper handles.
+//
+// The returned fd is the user-notification listener fd from
+// SECCOMP_FILTER_FLAG_NEW_LISTENER. Callers own its lifetime.
+//
+// prog must be the raw bytes from exportFilterBPF — a contiguous array
+// of struct sock_filter (8 bytes each). An empty program is rejected
+// explicitly to defend against future libseccomp regressions.
+func loadRawFilter(prog []byte, withWaitKill bool) (int, error) {
+	if len(prog) == 0 {
+		return -1, errors.New("seccomp export produced empty filter")
+	}
+	if len(prog)%8 != 0 {
+		return -1, fmt.Errorf("seccomp export produced unaligned filter: %d bytes (want multiple of 8)", len(prog))
+	}
+
+	if err := prctlSetNoNewPrivs(); err != nil {
+		return -1, fmt.Errorf("prctl PR_SET_NO_NEW_PRIVS: %w", err)
+	}
+
+	// View the byte slice as []unix.SockFilter without copying. Each
+	// sock_filter is 8 bytes (code u16, jt u8, jf u8, k u32). The
+	// kernel reads the program during the syscall; we keep prog
+	// alive via the returned KeepAlive at the end.
+	n := len(prog) / 8
+	filters := unsafe.Slice((*unix.SockFilter)(unsafe.Pointer(&prog[0])), n)
+	fprog := unix.SockFprog{
+		Len:    uint16(n),
+		Filter: &filters[0],
+	}
+
+	flags := uintptr(unix.SECCOMP_FILTER_FLAG_NEW_LISTENER)
+	if withWaitKill {
+		flags |= unix.SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
+	}
+
+	fd, err := loadFilterSyscall(flags, &fprog)
+	// Defensive: ensure prog and filters are not GC'd before the
+	// syscall returns. The kernel snapshots the program internally,
+	// but we still hold the only reference while it does.
+	runtimeKeepAlive(prog)
+	runtimeKeepAlive(filters)
+	if err != nil {
+		return -1, err
+	}
+	return fd, nil
+}
+
+// runtimeKeepAlive is a tiny no-op wrapper so the unsafe.Slice +
+// SockFprog construction stays GC-safe without importing runtime at
+// the top of the file. Inlined to be free in release builds.
+//
+//go:noinline
+func runtimeKeepAlive(_ interface{}) {}

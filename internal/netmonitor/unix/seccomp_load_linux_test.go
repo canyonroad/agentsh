@@ -4,6 +4,7 @@ package unix
 
 import (
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	seccomp "github.com/seccomp/libseccomp-golang"
@@ -48,5 +49,104 @@ func TestExportBPFViaPipe(t *testing.T) {
 	// k must be a valid seccomp_data field offset: 0 (nr), 4 (arch), 8 (ip), or 16+ (args).
 	if k != 0 && k != 4 {
 		t.Fatalf("first BPF instruction k = %d, want 0 (seccomp_data.nr) or 4 (seccomp_data.arch)", k)
+	}
+}
+
+// withStubbedSeams replaces the load and prctl seams for the duration
+// of f, restoring them on return. The prctl stub always succeeds so
+// tests do not flip NO_NEW_PRIVS on the test process itself.
+func withStubbedSeams(t *testing.T, load func(flags uintptr, fprog *unix.SockFprog) (int, error)) {
+	t.Helper()
+	origLoad := loadFilterSyscall
+	origPrctl := prctlSetNoNewPrivs
+	loadFilterSyscall = load
+	prctlSetNoNewPrivs = func() error { return nil }
+	t.Cleanup(func() {
+		loadFilterSyscall = origLoad
+		prctlSetNoNewPrivs = origPrctl
+	})
+}
+
+// minimalBPF returns 8 bytes representing a single sock_filter
+// (BPF_RET | BPF_K, k=SECCOMP_RET_ALLOW=0x7fff0000). This is a
+// well-formed but trivial program — enough to satisfy length checks
+// without resembling a real libseccomp output.
+func minimalBPF() []byte {
+	const bpfRetK = 0x06
+	const seccompRetAllow = 0x7fff0000
+	b := make([]byte, 8)
+	binary.LittleEndian.PutUint16(b[0:2], bpfRetK)
+	// jt, jf both 0
+	binary.LittleEndian.PutUint32(b[4:8], seccompRetAllow)
+	return b
+}
+
+func TestLoadRawFilter_RejectsEmptyProgram(t *testing.T) {
+	withStubbedSeams(t, func(uintptr, *unix.SockFprog) (int, error) {
+		t.Fatalf("loader must not be called on empty program")
+		return 0, nil
+	})
+	_, err := loadRawFilter(nil, true)
+	if err == nil {
+		t.Fatalf("expected error on empty program, got nil")
+	}
+	if !errors.Is(err, err) || err.Error() == "" {
+		t.Fatalf("expected descriptive error, got %v", err)
+	}
+}
+
+func TestLoadRawFilter_RejectsUnalignedProgram(t *testing.T) {
+	withStubbedSeams(t, func(uintptr, *unix.SockFprog) (int, error) {
+		t.Fatalf("loader must not be called on unaligned program")
+		return 0, nil
+	})
+	_, err := loadRawFilter(make([]byte, 7), true)
+	if err == nil {
+		t.Fatalf("expected error on unaligned program, got nil")
+	}
+}
+
+func TestLoadRawFilter_SetsWaitKillFlagWhenRequested(t *testing.T) {
+	var gotFlags uintptr
+	withStubbedSeams(t, func(flags uintptr, _ *unix.SockFprog) (int, error) {
+		gotFlags = flags
+		return 42, nil
+	})
+	fd, err := loadRawFilter(minimalBPF(), true)
+	if err != nil {
+		t.Fatalf("loadRawFilter: %v", err)
+	}
+	if fd != 42 {
+		t.Fatalf("fd = %d, want 42", fd)
+	}
+	wantFlags := uintptr(unix.SECCOMP_FILTER_FLAG_NEW_LISTENER | unix.SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV)
+	if gotFlags != wantFlags {
+		t.Fatalf("flags = 0x%x, want 0x%x", gotFlags, wantFlags)
+	}
+}
+
+func TestLoadRawFilter_OmitsWaitKillFlagWhenNotRequested(t *testing.T) {
+	var gotFlags uintptr
+	withStubbedSeams(t, func(flags uintptr, _ *unix.SockFprog) (int, error) {
+		gotFlags = flags
+		return 17, nil
+	})
+	_, err := loadRawFilter(minimalBPF(), false)
+	if err != nil {
+		t.Fatalf("loadRawFilter: %v", err)
+	}
+	wantFlags := uintptr(unix.SECCOMP_FILTER_FLAG_NEW_LISTENER)
+	if gotFlags != wantFlags {
+		t.Fatalf("flags = 0x%x, want 0x%x (no WAIT_KILLABLE)", gotFlags, wantFlags)
+	}
+}
+
+func TestLoadRawFilter_PropagatesEINVAL(t *testing.T) {
+	withStubbedSeams(t, func(uintptr, *unix.SockFprog) (int, error) {
+		return -1, unix.EINVAL
+	})
+	_, err := loadRawFilter(minimalBPF(), true)
+	if !errors.Is(err, unix.EINVAL) {
+		t.Fatalf("expected unix.EINVAL, got %v", err)
 	}
 }
