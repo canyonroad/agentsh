@@ -25,6 +25,24 @@
 
 ---
 
+## Reconciliation with current code (post-05a audit, 2026-05-12)
+
+After 05a landed (commit `ba88ab2e`), an audit identified four drift items between this plan's prose and the codebase. Implementers MUST follow these reconciliations rather than the original prose where they conflict:
+
+**R1. Test harness mismatch.** The plan's test snippets reference `mustNewServerWithYAML`, `mustPCFromSrv`, `pc.upstreamFake.SawQuery`, `pc.upstreamFake.SawSyntheticErrorResponse`, `pc.clientFake.SawSQLState`, `mustStartSpineServer`, `newRawTLSClient`, and `sink.StatementEvents()`. None exist — 04c/05a built a single `startSpineHarness(t, ...)` helper in `internal/db/proxy/postgres/spine_test.go` against a real fake-upstream socket and a `SyncSink`. Adapt every test snippet in this plan accordingly:
+
+- **Task 6** (`Intercept` unit tests) is pure-function; no harness needed; keep snippets as written.
+- **Tasks 7, 9** (proxyConn-level tests) — use `startSpineHarness` and assert against the sink's recorded events plus direct field access on `proxyConn` (e.g., `pc.sqlCache.Get(...)`). Do NOT build a new fake-upstream stack. The "Saw X" calls in the snippets are illustrative; replace with sink-event introspection (the harness already records every emitted `db_statement` event with `Decision.Verb`, `Effects`, and the redacted statement).
+- **Task 11** (spine) — `mustStartSpineServer` is `startSpineHarness`. The `newRawTLSClient` helper for raw `FunctionCall` injection does not exist; add a minimal `sendRawFrontend(t, harness, msg pgproto3.FrontendMessage)` helper inline in `spine_test.go` that bypasses pgx and writes through the harness's existing client socket.
+
+**R2. `AllowFunctionCallProtocol` field location.** The plan's `pc.svc.Service.AllowFunctionCallProtocol` reference resolves through `proxy/postgres/server.go:Service.Service` (a nested `policy.DBService`). The field already exists at `internal/db/policy/types.go:88` with YAML tag `allow_function_call_protocol,omitempty`. No new task needed; the plan's prose is correct as written, but implementers should reach the field via `pc.svc.Service.AllowFunctionCallProtocol` (not via `service.Service` — that struct is a separate listener-flattening view that does not carry this field).
+
+**R3. `SubtypeFunctionCallProtocol` already exists** at `internal/db/effects/subtype.go:68` (05a added it). **Drop the `SubtypeFunctionCallProtocol` line from Task 8 Step 3** — keep only `SubtypeEscalatedFunctionCall`. The Task 8 round-trip test's reference to `SubtypeFunctionCallProtocol` is fine since the constant already exists.
+
+**R4. `classify_pg.Options.EscalateUnknownFunctions` already exists** at `internal/db/classify/postgres/parser.go:62-66`, and `escalation.go` is already wired into `classifySelect`. Task 5 is purely a threading exercise: take the existing classifier option and supply it from the proxy. The plan's framing is accurate; this note exists so the implementer does not re-add the option.
+
+---
+
 ## File Structure
 
 **Created:**
@@ -604,6 +622,8 @@ git commit -m "db: policy — decode policies.db.escalate_unknown_functions and 
 ## Task 5: Thread escalation `Options` at proxy classify call sites
 
 **Why:** Every `parser.Classify(sql, sess, opts)` call in the proxy must populate `Options.EscalateUnknownFunctions` + `SafeFunctionAllowlist` from the active policy snapshot. Two call sites today: `handleQuery` (Simple Query) and `statemachine.handleParse` + `statemachine.handleQuery` (Plan 05a).
+
+**Note (post-05a audit):** `classify_pg.Options.EscalateUnknownFunctions` and `classify_pg.Options.SafeFunctionAllowlist` already exist in `internal/db/classify/postgres/parser.go` and are honored by `escalation.go`. This task is purely threading — do not redefine them.
 
 **Files:**
 - Modify: `internal/db/proxy/postgres/simplequery.go`
@@ -1381,12 +1401,11 @@ type Effect struct {
 }
 ```
 
-Then locate the `Subtype` constants in the same file (or wherever they're defined) and add:
+Then locate the `Subtype` constants in the same file (or wherever they're defined) and add `SubtypeEscalatedFunctionCall` ONLY. `SubtypeFunctionCallProtocol` was added in 05a (`internal/db/effects/subtype.go:68`) — do not redeclare it:
 
 ```go
 const (
-	// ... existing subtypes ...
-	SubtypeFunctionCallProtocol  Subtype = "function_call_protocol"
+	// ... existing subtypes (including SubtypeFunctionCallProtocol from 05a) ...
 	SubtypeEscalatedFunctionCall Subtype = "escalated_function_call"
 )
 ```
