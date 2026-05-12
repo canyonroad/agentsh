@@ -14,6 +14,7 @@ import (
 	classify_pg "github.com/agentsh/agentsh/internal/db/classify/postgres"
 	"github.com/agentsh/agentsh/internal/db/effects"
 	"github.com/agentsh/agentsh/internal/db/policy"
+	"github.com/agentsh/agentsh/internal/db/proxy/postgres/statemachine"
 )
 
 var (
@@ -112,22 +113,45 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 		return ferr
 	}
 
-	// Deny path.
+	// Deny path: route through statemachine.DenyRoute so the §14.3/§14.4
+	// fork lives in one place. The first denying decision determines the
+	// rule (for DenyModeInTx) and the deny event tags.
+	var denyDecision policy.Decision
+	for _, d := range decisions {
+		if d.Verb == policy.VerbDeny {
+			denyDecision = d
+			break
+		}
+	}
+	denyRule := lookupStatementRuleByName(pc.srv.policy(), denyDecision.RuleName)
 	denyAction := "none"
-	if pc.state.smState.LastUpstreamRFQ == 'T' || pc.state.smState.LastUpstreamRFQ == 'E' {
-		denyAction = "connection_terminated"
+	if pc.state.smState != nil && (pc.state.smState.LastUpstreamRFQ == 'T' || pc.state.smState.LastUpstreamRFQ == 'E') {
+		if denyRule.DenyModeInTx == "rollback_then_continue" {
+			denyAction = "rollback_injected"
+		} else {
+			denyAction = "connection_terminated"
+		}
 	}
 	pc.emitDenyEvents(ctx, stmts, decisions, q.String, batchSHA, denyAction)
 	rendered, sqlstate := pickDenySynth(decisions)
-	switch pc.state.smState.LastUpstreamRFQ {
-	case 0, 'I':
-		return pc.synthErrorAndRFQ(sqlstate, rendered)
-	case 'T', 'E':
-		_ = pc.synthErrorOnly(sqlstate, rendered)
-		return errInTxTerminate
-	default:
-		return fmt.Errorf("postgres.handleQuery: unexpected RFQ byte %q", pc.state.smState.LastUpstreamRFQ)
+	actions := statemachine.DenyRoute(*pc.state.smState, denyRule, rendered, sqlstate)
+	return pc.executeActions(ctx, q, actions)
+}
+
+// lookupStatementRuleByName is a 04c-friendly wrapper around
+// policy.RuleSet.AllStatementRules() — returns the first rule whose Name
+// matches, or the zero StatementRule on miss (which DenyRoute treats as
+// terminate-in-tx).
+func lookupStatementRuleByName(rs *policy.RuleSet, name string) policy.StatementRule {
+	if rs == nil || name == "" {
+		return policy.StatementRule{}
 	}
+	for _, r := range rs.AllStatementRules() {
+		if r.Name == name {
+			return r
+		}
+	}
+	return policy.StatementRule{}
 }
 
 func (pc *proxyConn) emitDenyEvents(
