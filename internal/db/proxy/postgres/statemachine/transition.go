@@ -3,6 +3,8 @@
 package statemachine
 
 import (
+	"time"
+
 	classify_pg "github.com/agentsh/agentsh/internal/db/classify/postgres"
 	"github.com/agentsh/agentsh/internal/db/effects"
 	"github.com/agentsh/agentsh/internal/db/policy"
@@ -118,11 +120,8 @@ func handleParse(
 	for _, cs := range stmts {
 		d := policy.Evaluate(cs, rules, svc)
 		if d.Verb == policy.VerbApprove {
-			// Plan 05a still stubs approve as deny + APPROVE_NOT_YET_SUPPORTED.
-			d.Verb = policy.VerbDeny
-			if d.Reason == "" {
-				d.Reason = "APPROVE_NOT_YET_SUPPORTED"
-			}
+			rule := lookupStatementRule(rules, d.RuleName)
+			return s, []Action{newApproverWaitAction(d, cs, rule)}
 		}
 		if d.Verb == policy.VerbDeny {
 			anyDeny = true
@@ -250,10 +249,8 @@ func handleQuery(
 	for _, cs := range stmts {
 		d := policy.Evaluate(cs, rules, svc)
 		if d.Verb == policy.VerbApprove {
-			d.Verb = policy.VerbDeny
-			if d.Reason == "" {
-				d.Reason = "APPROVE_NOT_YET_SUPPORTED"
-			}
+			rule := lookupStatementRule(rules, d.RuleName)
+			return s, []Action{newApproverWaitAction(d, cs, rule)}
 		}
 		if d.Verb == policy.VerbDeny {
 			anyDeny = true
@@ -269,6 +266,21 @@ func handleQuery(
 	msg := renderDenyMessage(denyDecision)
 	actions := DenyRoute(s, denyRule, msg, sqlstateForDecision(denyDecision))
 	return s, actions
+}
+
+func newApproverWaitAction(d policy.Decision, cs effects.ClassifiedStatement, rule policy.StatementRule) *ActionApproverWait {
+	timeout := rule.Timeout
+	if timeout == 0 && d.Approval != nil {
+		timeout = d.Approval.Timeout
+	}
+	if timeout == 0 {
+		timeout = 60 * time.Second
+	}
+	return &ActionApproverWait{
+		Timeout: timeout,
+		Stmt:    cs,
+		Rule:    rule,
+	}
 }
 
 // lookupStatementRule finds the named rule in rs.AllStatementRules().
