@@ -13,12 +13,17 @@ import (
 )
 
 // handleFunctionCall handles an 'F' FunctionCall frame. Default behavior
-// (when pc.svc.Service.AllowFunctionCallProtocol is false) preserves 04c's
-// 42501 stub: emit lifecycle event, synth FATAL error, return errUnsupportedFrame.
+// (when the live policy's DBService.AllowFunctionCallProtocol is false) preserves
+// 04c's 42501 stub: emit lifecycle event, synth FATAL error, return errUnsupportedFrame.
 // Opt-in behavior classifies as procedural/function_call_protocol with FunctionOID,
 // evaluates, and either forwards or routes through DenyRoute.
 func (pc *proxyConn) handleFunctionCall(ctx context.Context, msg *pgproto3.FunctionCall) error {
-	if !pc.svc.Service.AllowFunctionCallProtocol {
+	// Always read from the live policy so that YAML changes take effect without
+	// a server restart.  If the service is not found in the policy (nil RuleSet
+	// or missing entry) AllowFunctionCallProtocol defaults to false.
+	rs := pc.srv.policy()
+	liveSvc, _ := rs.Service(policy.ServiceID(pc.svc.Name))
+	if !liveSvc.AllowFunctionCallProtocol {
 		// 04c default path: preserve the existing stub behavior from handleUnsupportedFrame.
 		pc.emitUnsupportedFrame(ctx, "FUNCTION_CALL_PROTOCOL_DENIED", "FunctionCall")
 		_ = pc.synthesizeError(sqlstateInsufficientPrivilege, "FunctionCall sub-protocol denied by AgentSH policy")
@@ -35,7 +40,6 @@ func (pc *proxyConn) handleFunctionCall(ctx context.Context, msg *pgproto3.Funct
 			FunctionOID: &oid,
 		}},
 	}
-	rs := pc.srv.policy()
 	d := policy.Evaluate(cs, rs, policy.ServiceID(pc.svc.Name))
 	if d.Verb == policy.VerbApprove {
 		d = synthApproveAsDeny(d)

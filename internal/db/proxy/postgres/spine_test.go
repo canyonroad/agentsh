@@ -1025,3 +1025,329 @@ func TestSpine_Plan04c_SimpleQuery_DenyInTx_Terminates(t *testing.T) {
 		t.Fatalf("DenyAction = %q want connection_terminated (event=%+v)", deny.TxContext.DenyAction, deny)
 	}
 }
+
+// ----------------------------------------------------------------------------
+// Plan 05b — SQL PREPARE deny spine test
+// ----------------------------------------------------------------------------
+
+// prepareDenyScript handles the PostgreSQL handshake (StartupMessage →
+// AuthOk + ParameterStatus + BKD + RFQ) and then drains. The proxy intercepts
+// PREPARE x AS DELETE FROM users before forwarding, so the upstream never
+// receives a Query frame.
+func prepareDenyScript(t *testing.T, be *pgproto3.Backend, conn net.Conn) error {
+	t.Helper()
+	if _, err := be.ReceiveStartupMessage(); err != nil {
+		return fmt.Errorf("receive startup: %w", err)
+	}
+	be.Send(&pgproto3.AuthenticationOk{})
+	be.Send(&pgproto3.ParameterStatus{Name: "standard_conforming_strings", Value: "on"})
+	be.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
+	be.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "16.0"})
+	be.Send(&pgproto3.BackendKeyData{ProcessID: 42, SecretKey: append([]byte(nil), wantSecret...)})
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := be.Flush(); err != nil {
+		return fmt.Errorf("flush handshake: %w", err)
+	}
+	// Drain until client closes; the PREPARE should never arrive.
+	buf := make([]byte, 256)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		if _, err := conn.Read(buf); err != nil {
+			return nil
+		}
+	}
+}
+
+// prepareDenyPolicyYAML builds a policy that allows all reads but denies
+// DELETE (which is the inner effect of PREPARE x AS DELETE FROM users).
+func prepareDenyPolicyYAML(upstream string) string {
+	return `version: 1
+name: prepare-deny-spine
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: ` + upstream + `
+    tls_mode: terminate_plaintext_upstream
+    trusted_network: true
+database_connection_rules:
+  - name: allow-everyone
+    db_service: appdb
+    decision: allow
+database_rules:
+  - name: allow-all
+    db_service: appdb
+    operations: ["*"]
+    decision: allow
+  - name: allow-transaction
+    db_service: appdb
+    operations: [transaction]
+    decision: allow
+  - name: allow-session
+    db_service: appdb
+    operations: [session]
+    decision: allow
+  - name: deny-delete
+    db_service: appdb
+    operations: [DELETE]
+    decision: deny
+`
+}
+
+// TestSpine_SQLPrepare_DenyOverPGX verifies end-to-end that
+// "PREPARE delx AS DELETE FROM users" sent through pgx is intercepted by the
+// proxy and returned to the client as SQLSTATE 42501, and that the sink
+// records a deny event — without forwarding to the upstream.
+func TestSpine_SQLPrepare_DenyOverPGX(t *testing.T) {
+	up := newFakeUpstream(t, withFakeUpstreamScript(prepareDenyScript))
+	upAddr := up.Address()
+
+	h := startSpineHarness(t, upstreamWithLocalhostHost(upAddr), "terminate_plaintext_upstream", nil, "")
+	h.srv.SetPolicy(loadRuleSet(t, prepareDenyPolicyYAML(upAddr)))
+
+	stop := runServer(t, h.srv)
+	defer stop()
+
+	sockDir := renameSocketForPgx(t, h.sock, 5442)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, pgxConnString(sockDir, 5442))
+	if err != nil {
+		t.Fatalf("pgx.Connect: %v", err)
+	}
+	defer conn.Close(context.Background())
+
+	// PREPARE delx AS DELETE FROM users → classifier sees inner DELETE effect →
+	// deny-delete rule fires → proxy synthesizes 42501 without forwarding.
+	_, err = conn.Exec(ctx, "PREPARE delx AS DELETE FROM users")
+	if err == nil {
+		t.Fatal("expected deny error for PREPARE DELETE, got nil")
+	}
+	if code := pgxErrorCode(err); code != "42501" {
+		t.Errorf("expected SQLSTATE 42501; got code=%q err=%v", code, err)
+	}
+
+	// Upstream must not have received the PREPARE query.
+	time.Sleep(200 * time.Millisecond)
+
+	// Confirm the sink recorded a deny event for the PREPARE.
+	evs := drainStatements(h.sink, 1, 2*time.Second)
+	var gotDeny bool
+	for _, ev := range evs {
+		if ev.Decision.Verb == "deny" {
+			gotDeny = true
+			break
+		}
+	}
+	if !gotDeny {
+		t.Errorf("expected deny event for PREPARE DELETE; got %+v", evs)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Plan 05b — FunctionCall opt-in spine test
+// ----------------------------------------------------------------------------
+
+// funcCallOptInScript handles the PostgreSQL handshake and then handles one
+// FunctionCall frame by sending back a FunctionCallResponse + ReadyForQuery.
+func funcCallOptInScript(t *testing.T, be *pgproto3.Backend, conn net.Conn) error {
+	t.Helper()
+	if _, err := be.ReceiveStartupMessage(); err != nil {
+		return fmt.Errorf("receive startup: %w", err)
+	}
+	be.Send(&pgproto3.AuthenticationOk{})
+	be.Send(&pgproto3.ParameterStatus{Name: "standard_conforming_strings", Value: "on"})
+	be.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
+	be.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "16.0"})
+	be.Send(&pgproto3.BackendKeyData{ProcessID: 42, SecretKey: append([]byte(nil), wantSecret...)})
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := be.Flush(); err != nil {
+		return fmt.Errorf("flush handshake: %w", err)
+	}
+	// Expect a FunctionCall frame.
+	msg, err := be.Receive()
+	if err != nil {
+		return nil // client closed before sending frame
+	}
+	if _, ok := msg.(*pgproto3.FunctionCall); !ok {
+		return fmt.Errorf("expected FunctionCall, got %T", msg)
+	}
+	be.Send(&pgproto3.FunctionCallResponse{Result: []byte{0x01}})
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := be.Flush(); err != nil {
+		return fmt.Errorf("flush FunctionCallResponse: %w", err)
+	}
+	// Drain until client closes.
+	buf := make([]byte, 256)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		if _, err := conn.Read(buf); err != nil {
+			return nil
+		}
+	}
+}
+
+// funcCallOptInPolicyYAML returns a policy that opts in to FunctionCall and
+// allows procedural operations.
+func funcCallOptInPolicyYAML(upstream string) string {
+	return `version: 1
+name: funccall-optin-spine
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: ` + upstream + `
+    tls_mode: terminate_plaintext_upstream
+    trusted_network: true
+    allow_function_call_protocol: true
+database_connection_rules:
+  - name: allow-everyone
+    db_service: appdb
+    decision: allow
+database_rules:
+  - name: allow-procedural
+    db_service: appdb
+    operations: [procedural]
+    decision: allow
+`
+}
+
+// sendRawFrontendFunctionCall connects directly to the harness's Unix socket,
+// completes the TLS + PostgreSQL startup handshake, sends a FunctionCall frame
+// for the given OID, and returns the next backend frame received.
+//
+// It mirrors the pattern in handRolledTerminateReissueHandshake but goes
+// further: after reading the startup response (AuthOk + params + BKD + RFQ)
+// it sends a FunctionCall and reads the reply.
+func sendRawFrontendFunctionCall(t *testing.T, h *spineHarness, functionOID uint32) pgproto3.BackendMessage {
+	t.Helper()
+
+	raw, err := net.Dial("unix", h.sock)
+	if err != nil {
+		t.Fatalf("dial unix: %v", err)
+	}
+	defer raw.Close()
+
+	// SSLRequest.
+	sslReq := make([]byte, 8)
+	binary.BigEndian.PutUint32(sslReq[0:4], 8)
+	binary.BigEndian.PutUint32(sslReq[4:8], sslRequestMagic)
+	if _, err := raw.Write(sslReq); err != nil {
+		t.Fatalf("write SSLRequest: %v", err)
+	}
+	resp := make([]byte, 1)
+	if _, err := io.ReadFull(raw, resp); err != nil {
+		t.Fatalf("read 'S': %v", err)
+	}
+	if resp[0] != 'S' {
+		t.Fatalf("expected 'S', got %q", resp[0])
+	}
+
+	// TLS handshake against the proxy's CA.
+	pool := x509.NewCertPool()
+	pool.AddCert(h.ca.Cert())
+	tlsConn := tls.Client(raw, &tls.Config{
+		RootCAs:    pool,
+		ServerName: "localhost",
+		MinVersion: tls.VersionTLS12,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+
+	// StartupMessage.
+	body := make([]byte, 4)
+	binary.BigEndian.PutUint32(body, 196608) // protocol 3.0
+	body = append(body, []byte("user\x00alice\x00database\x00app\x00\x00")...)
+	hdr := make([]byte, 4)
+	binary.BigEndian.PutUint32(hdr, uint32(len(body)+4))
+	if _, err := tlsConn.Write(append(hdr, body...)); err != nil {
+		t.Fatalf("write StartupMessage: %v", err)
+	}
+
+	// Read until ReadyForQuery (AuthOk + params + BKD + RFQ).
+	// Use a single Frontend for the entire connection lifetime — a second
+	// buffered reader on the same conn would cause frame misalignment.
+	fe := pgproto3.NewFrontend(tlsConn, tlsConn)
+	for {
+		m, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("readUntilRFQ (inline): %v", err)
+		}
+		if _, ok := m.(*pgproto3.ReadyForQuery); ok {
+			break
+		}
+	}
+
+	// Send the FunctionCall frame.
+	fe.Send(&pgproto3.FunctionCall{Function: functionOID})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("flush FunctionCall: %v", err)
+	}
+
+	// Read the next backend message (FunctionCallResponse or ErrorResponse).
+	_ = tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	msg, err := fe.Receive()
+	if err != nil {
+		t.Fatalf("receive after FunctionCall: %v", err)
+	}
+	return msg
+}
+
+// hasFunctionOID reports whether any Effect in ev has a FunctionOID matching want.
+func hasFunctionOID(ev events.DBEvent, want int32) bool {
+	for _, e := range ev.Effects {
+		if e.FunctionOID != nil && *e.FunctionOID == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSpine_FunctionCall_OptInForwards verifies end-to-end that a raw
+// FunctionCall frame (function OID 12345), when allow_function_call_protocol
+// is enabled and operations:[procedural] is allowed, is forwarded through the
+// proxy to the upstream, which replies with FunctionCallResponse.
+// The sink records an allow event with the matching FunctionOID.
+func TestSpine_FunctionCall_OptInForwards(t *testing.T) {
+	up := newFakeUpstream(t, withFakeUpstreamScript(funcCallOptInScript))
+	upAddr := up.Address()
+
+	h := startSpineHarness(t, upstreamWithLocalhostHost(upAddr), "terminate_plaintext_upstream", nil, "")
+	h.srv.SetPolicy(loadRuleSet(t, funcCallOptInPolicyYAML(upAddr)))
+
+	stop := runServer(t, h.srv)
+	defer stop()
+
+	// Use port 5443 for this test's socket rename.
+	sockPath := h.sock
+	sockDir := filepath.Dir(sockPath)
+	newSockPath := filepath.Join(sockDir, fmt.Sprintf(".s.PGSQL.%d", 5443))
+	if err := os.Rename(sockPath, newSockPath); err != nil {
+		t.Fatalf("rename socket: %v", err)
+	}
+	// Update h.sock so sendRawFrontendFunctionCall dials the renamed path.
+	h.sock = newSockPath
+
+	got := sendRawFrontendFunctionCall(t, h, 12345)
+	if _, ok := got.(*pgproto3.FunctionCallResponse); !ok {
+		t.Fatalf("got %T; want *pgproto3.FunctionCallResponse", got)
+	}
+
+	// Wait for the allow event.
+	evs := drainStatements(h.sink, 1, 2*time.Second)
+	var gotAllow bool
+	for _, ev := range evs {
+		if ev.Decision.Verb == "allow" && hasFunctionOID(ev, 12345) {
+			gotAllow = true
+			break
+		}
+	}
+	if !gotAllow {
+		t.Errorf("expected allow event with FunctionOID=12345; got %+v", evs)
+	}
+}

@@ -121,7 +121,6 @@ func TestFunctionCall_DefaultDenied(t *testing.T) {
 //     Effects[0].Subtype == function_call_protocol, FunctionOID == 12345.
 func TestFunctionCall_OptIn_Allow(t *testing.T) {
 	pc, clientFE, sink := newSimpleQueryFixture(t)
-	pc.svc.Service.AllowFunctionCallProtocol = true
 	pc.state.smState.LastUpstreamRFQ = 'I'
 	pc.srv.SetPolicy(loadRuleSet(t, funcCallPolicyYAML(true)))
 
@@ -232,7 +231,6 @@ func TestFunctionCall_OptIn_Allow(t *testing.T) {
 //   - the sink has a deny event with the right FunctionOID.
 func TestFunctionCall_OptIn_Deny(t *testing.T) {
 	pc, clientFE, sink := newSimpleQueryFixture(t)
-	pc.svc.Service.AllowFunctionCallProtocol = true
 	pc.state.smState.LastUpstreamRFQ = 'I'
 	pc.srv.SetPolicy(loadRuleSet(t, funcCallPolicyYAML(false)))
 
