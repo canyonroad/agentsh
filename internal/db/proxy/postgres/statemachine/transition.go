@@ -233,6 +233,13 @@ func handleQuery(
 	rules *policy.RuleSet, svc policy.ServiceID,
 	parser PolicyClassifier,
 ) (ConnState, []Action) {
+	if s.Absorbing {
+		// A 'Q' arriving inside an absorbing window means the client jumped
+		// from Extended Query to Simple Query without a Sync first; absorb
+		// it like every other non-Sync frame so the prior deny resolves
+		// cleanly on the next Sync.
+		return s, []Action{&ActionSuppress{}}
+	}
 	stmts, _ := parser.Classify(f.SQL, classify_pg.SessionState{}, classify_pg.Options{})
 	var denyDecision policy.Decision
 	var denyRule policy.StatementRule
