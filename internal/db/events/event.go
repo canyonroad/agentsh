@@ -52,8 +52,7 @@ type EventTLS struct {
 }
 
 // EventDecision mirrors spec §8 decision{}. Verb is one of "allow"|"deny"|
-// "approve"|"audit" (approve never emitted live in 04c; the runtime stubs it
-// out as deny + APPROVE_NOT_YET_SUPPORTED).
+// "approve"|"audit".
 type EventDecision struct {
 	Verb                   string   `json:"verb"`
 	RuleKind               string   `json:"rule_kind"`
@@ -75,9 +74,9 @@ type EventResult struct {
 	ErrorCode    string `json:"error_code,omitempty"`
 }
 
-// EventTxContext mirrors spec §8 tx_context{}. TxStartedAt is zero-valued
-// in 04c; Plan 05's state machine populates it. DenyAction is one of
-// "none"|"connection_terminated"|"rollback_injected" (last value Plan 05).
+// EventTxContext mirrors spec §8 tx_context{}. DenyAction is one of "none",
+// "connection_terminated", "rollback_injected", "approval_timeout",
+// "approval_denied", or "cancelled_during_approval".
 type EventTxContext struct {
 	InTransaction bool      `json:"in_transaction"`
 	TxStartedAt   time.Time `json:"tx_started_at,omitempty"`
@@ -88,4 +87,3 @@ type EventTxContext struct {
 type EventPredicates struct {
 	HasFilter bool `json:"has_filter"`
 }
-
