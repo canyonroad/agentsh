@@ -6,155 +6,49 @@ import (
 	"errors"
 	"testing"
 
-	seccomp "github.com/seccomp/libseccomp-golang"
 	"golang.org/x/sys/unix"
 )
 
-// TestLoadWithRetryOnWaitKillFailure_RetriesOnWaitKillFailure verifies that
-// when the first Load() call fails with EINVAL (the kernel's response to
-// an unknown filter flag) and WaitKill set, the helper calls
-// SetWaitKill(false) and retries — reproducing the fallback path used for
-// custom kernels that report >=6.0 but reject WAIT_KILLABLE_RECV.
-func TestLoadWithRetryOnWaitKillFailure_RetriesOnWaitKillFailure(t *testing.T) {
-	filt, err := seccomp.NewFilter(seccomp.ActAllow)
-	if err != nil {
-		t.Fatalf("NewFilter: %v", err)
-	}
-	defer filt.Release()
-
-	if err := filt.SetWaitKill(true); err != nil {
-		t.Skipf("SetWaitKill unsupported on this libseccomp build: %v", err)
-	}
-
-	calls := 0
-	loadFn := func() error {
-		calls++
-		if calls == 1 {
-			return unix.EINVAL
+// TestLoadFilterWithRetry_RetriesOnEINVAL is the regression check for
+// the WAIT_KILLABLE-rejection fallback used by custom/vendor kernels
+// that report kernel >=5.19 but return EINVAL when given the flag.
+// (Equivalent unit-level coverage also lives in seccomp_load_linux_test.go;
+// this file is the long-term home of retry-semantic regression checks.)
+func TestLoadFilterWithRetry_RetriesOnEINVAL(t *testing.T) {
+	var attempts []uintptr
+	withStubbedSeams(t, func(flags uintptr, _ *unix.SockFprog) (int, error) {
+		attempts = append(attempts, flags)
+		if len(attempts) == 1 {
+			return -1, unix.EINVAL
 		}
-		return nil
-	}
-
-	if err := loadWithRetryOnWaitKillFailure(filt, true, nil, loadFn); err != nil {
-		t.Fatalf("loadWithRetryOnWaitKillFailure: %v", err)
-	}
-	if calls != 2 {
-		t.Fatalf("expected 2 load calls (initial + retry), got %d", calls)
-	}
-
-	got, err := filt.GetWaitKill()
+		return 7, nil
+	})
+	fd, gotWaitKill, err := loadFilterWithRetry(minimalBPF(), true, nil)
 	if err != nil {
-		t.Fatalf("GetWaitKill: %v", err)
+		t.Fatalf("loadFilterWithRetry: %v", err)
 	}
-	if got {
-		t.Fatalf("expected WaitKill to be cleared after retry, got true")
+	if fd != 7 {
+		t.Fatalf("fd = %d, want 7", fd)
+	}
+	if gotWaitKill {
+		t.Fatalf("expected gotWaitKill=false after retry, got true")
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("expected 2 attempts, got %d", len(attempts))
 	}
 }
 
-// TestLoadWithRetryOnWaitKillFailure_NoRetryWhenWaitKillNotSet verifies that
-// a failure without WaitKill set surfaces the original error — no retry
-// attempted, no silent recovery.
-func TestLoadWithRetryOnWaitKillFailure_NoRetryWhenWaitKillNotSet(t *testing.T) {
-	filt, err := seccomp.NewFilter(seccomp.ActAllow)
-	if err != nil {
-		t.Fatalf("NewFilter: %v", err)
-	}
-	defer filt.Release()
-
-	origErr := errors.New("simulated: transient load error")
-	calls := 0
-	loadFn := func() error {
-		calls++
-		return origErr
-	}
-
-	err = loadWithRetryOnWaitKillFailure(filt, false, nil, loadFn)
-	if !errors.Is(err, origErr) {
-		t.Fatalf("expected original error to propagate, got %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("expected 1 load call, got %d", calls)
-	}
-}
-
-// TestLoadWithRetryOnWaitKillFailure_NoRetryOnNonEINVAL verifies that when
-// the first load fails with an errno other than EINVAL — i.e., the failure
-// is unrelated to WAIT_KILLABLE_RECV being unsupported — the helper does
-// not retry and does not clear WaitKill. The original error is propagated
-// verbatim so callers can see the real kernel reason. EINVAL is the only
-// errno the kernel returns when it rejects the WAIT_KILLABLE_RECV flag at
-// load time (the flag-mask validation in seccomp_set_mode_filter), so any
-// other errno indicates a different problem (e.g., EBUSY from listener
-// conflicts, EPERM from missing NO_NEW_PRIVS, ENOMEM, EACCES, ...).
-// Without this gate the helper silently misattributes those failures to
-// WaitKill in its slog.Warn line and wastes a retry that will fail with
-// the same errno — exactly the symptom of issue #282 on Runloop devboxes.
-func TestLoadWithRetryOnWaitKillFailure_NoRetryOnNonEINVAL(t *testing.T) {
-	filt, err := seccomp.NewFilter(seccomp.ActAllow)
-	if err != nil {
-		t.Fatalf("NewFilter: %v", err)
-	}
-	defer filt.Release()
-
-	if err := filt.SetWaitKill(true); err != nil {
-		t.Skipf("SetWaitKill unsupported on this libseccomp build: %v", err)
-	}
-
-	calls := 0
-	loadFn := func() error {
-		calls++
-		return unix.EBUSY
-	}
-
-	err = loadWithRetryOnWaitKillFailure(filt, true, nil, loadFn)
-	if !errors.Is(err, unix.EBUSY) {
-		t.Fatalf("expected EBUSY to propagate, got %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("expected 1 load call (no retry on non-EINVAL), got %d", calls)
-	}
-
-	got, err := filt.GetWaitKill()
-	if err != nil {
-		t.Fatalf("GetWaitKill: %v", err)
-	}
-	if !got {
-		t.Fatalf("expected WaitKill to remain true on non-EINVAL failure, got false")
-	}
-}
-
-// TestLoadWithRetryOnWaitKillFailure_SuccessFirstCall verifies that when
-// the first load succeeds, no retry is attempted and no WaitKill state
-// change happens.
-func TestLoadWithRetryOnWaitKillFailure_SuccessFirstCall(t *testing.T) {
-	filt, err := seccomp.NewFilter(seccomp.ActAllow)
-	if err != nil {
-		t.Fatalf("NewFilter: %v", err)
-	}
-	defer filt.Release()
-
-	if err := filt.SetWaitKill(true); err != nil {
-		t.Skipf("SetWaitKill unsupported on this libseccomp build: %v", err)
-	}
-
-	calls := 0
-	loadFn := func() error {
-		calls++
-		return nil
-	}
-
-	if err := loadWithRetryOnWaitKillFailure(filt, true, nil, loadFn); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("expected 1 load call (no retry on success), got %d", calls)
-	}
-
-	got, err := filt.GetWaitKill()
-	if err != nil {
-		t.Fatalf("GetWaitKill: %v", err)
-	}
-	if !got {
-		t.Fatalf("expected WaitKill to remain true after successful load, got false")
+// TestLoadFilterWithRetry_PropagatesOriginalErrno is the regression
+// check for issue #282 — non-EINVAL errnos must surface verbatim so
+// hostile-kernel rejections (EFAULT on Runloop/Freestyle) land in the
+// wrapper's stderr with their real cause, not a misleading
+// "WaitKillable rejected" warning.
+func TestLoadFilterWithRetry_PropagatesOriginalErrno(t *testing.T) {
+	withStubbedSeams(t, func(uintptr, *unix.SockFprog) (int, error) {
+		return -1, unix.EFAULT
+	})
+	_, _, err := loadFilterWithRetry(minimalBPF(), true, nil)
+	if !errors.Is(err, unix.EFAULT) {
+		t.Fatalf("expected EFAULT to propagate, got %v", err)
 	}
 }

@@ -1,5 +1,7 @@
 # libseccomp 2.6 Defense-in-Depth Design
 
+> **Superseded by [2026-05-11 libseccomp 2.5 system-link design](./2026-05-11-libseccomp25-system-link-design.md).** The source-built static-link approach below is no longer the chosen architecture — issue #296 (RHEL 10 + EPEL only ship libseccomp 2.5.x) made the build-time 2.6 dependency a hard blocker for distro packagers. The replacement bypasses libseccomp-golang's silent-no-op SetWaitKill and sets `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV` via the raw seccomp(2) syscall, decoupling Layer 1 from the linked libseccomp's userspace version. This document is retained for historical context.
+
 **Date:** 2026-04-14
 **Status:** Approved design — ready for implementation plan
 **Related:** [2026-04-13 SIGURG seccomp preemption fix](./2026-04-13-sigurg-seccomp-preemption-fix-design.md), PR #225
