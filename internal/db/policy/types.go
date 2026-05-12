@@ -214,6 +214,23 @@ func (rs *RuleSet) AllServices() []DBService {
 	return out
 }
 
+// AllStatementRules returns a copy of every parsed StatementRule. Order is
+// preserved from the source YAML. Returns nil when rs is nil. Used by the
+// Extended Query state machine to look up the deny_mode_in_tx field for a
+// matched rule.
+func (rs *RuleSet) AllStatementRules() []StatementRule {
+	if rs == nil || len(rs.statement) == 0 {
+		return nil
+	}
+	out := make([]StatementRule, 0, len(rs.statement))
+	for _, cr := range rs.statement {
+		if cr.src != nil {
+			out = append(out, *cr.src)
+		}
+	}
+	return out
+}
+
 // Unavoidability returns the policies.db.unavoidability mode. Returns
 // UnavoidabilityOff when rs is nil so startup code holding a not-yet-loaded
 // *RuleSet does not panic.
