@@ -82,15 +82,14 @@ func (pc *proxyConn) simpleQueryLoop(ctx context.Context) error {
 }
 
 // handleUnsupportedFrame synthesizes ErrorResponse for any non-Q/non-X
-// post-handshake frame and closes the connection. Distinguishes FunctionCall
-// (PG 42501) from generic extended-query frames (0A000).
+// post-handshake frame and closes the connection. Delegates FunctionCall
+// frames to handleFunctionCall (which implements the 04c default-deny stub
+// and the Plan-05b opt-in path). Other frames get a generic 0A000 response.
 func (pc *proxyConn) handleUnsupportedFrame(ctx context.Context, msg pgproto3.FrontendMessage) error {
-	frameType := fmt.Sprintf("%T", msg)
-	if _, isFunc := msg.(*pgproto3.FunctionCall); isFunc {
-		pc.emitUnsupportedFrame(ctx, "FUNCTION_CALL_PROTOCOL_DENIED", "FunctionCall")
-		_ = pc.synthesizeError(sqlstateInsufficientPrivilege, "FunctionCall sub-protocol denied by AgentSH policy")
-		return errUnsupportedFrame
+	if fc, isFunc := msg.(*pgproto3.FunctionCall); isFunc {
+		return pc.handleFunctionCall(ctx, fc)
 	}
+	frameType := fmt.Sprintf("%T", msg)
 	pc.emitUnsupportedFrame(ctx, "EXTENDED_QUERY_NOT_SUPPORTED", frameType)
 	_ = pc.synthesizeError(sqlstateFeatureNotSupported, "Extended Query / COPY / FunctionCall not supported in AgentSH proxy phase 1")
 	return errUnsupportedFrame

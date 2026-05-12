@@ -76,9 +76,10 @@ func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effec
 	// Exception: groups that *inherently* have no objects — Transaction,
 	// Session, Notify — would otherwise be unreachable through the §10.2
 	// coverage rules. Treat those as covered by any non-objects-constrained
-	// rule whose effect-meta matches.
+	// rule whose effect-meta matches. isObjectlessEffect also covers
+	// SubtypeFunctionCallProtocol (FunctionCall 'F' frames carry only an OID).
 	if len(e.Objects) == 0 {
-		if isObjectlessGroup(e.Group) {
+		if isObjectlessEffect(e) {
 			return evaluateEffectObjectless(e, applicable)
 		}
 		return effectDecision{verb: verbImplicitDeny}
@@ -202,6 +203,22 @@ func isObjectlessGroup(g effects.Group) bool {
 		return true
 	}
 	return false
+}
+
+// isObjectlessEffect reports whether the effect is inherently object-less and
+// should be evaluated using the degenerate per-group path rather than returning
+// verbImplicitDeny. This extends isObjectlessGroup for cases where the group
+// alone is insufficient: FunctionCall protocol effects (Subtype ==
+// SubtypeFunctionCallProtocol) carry only a function OID with no resolvable
+// object name, so they must be reachable through object-less coverage rules.
+// SQL-escalated unknown-function procedural effects (Group == GroupProcedural,
+// Subtype == 0) remain implicit-deny by design (fail-closed escalation).
+func isObjectlessEffect(e effects.Effect) bool {
+	if isObjectlessGroup(e.Group) {
+		return true
+	}
+	// FunctionCall protocol: OID-only effect, no resolvable Objects.
+	return e.Subtype == effects.SubtypeFunctionCallProtocol
 }
 
 // evaluateEffectObjectless handles effects with no Objects (e.g. transaction
