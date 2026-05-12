@@ -229,6 +229,7 @@ func classifyPrepare(cs *effects.ClassifiedStatement, s *pg_query.PrepareStmt, s
 		cs.Error = "unmapped form: PREPARE without query"
 		return
 	}
+	cs.PreparedName = s.Name
 	inner := classifyRawStmt(DialectPostgres, &pg_query.RawStmt{Stmt: s.Query}, sess, opts, cs.ParserBackend)
 	cs.Effects = inner.Effects
 	if inner.RawVerb != "" {
@@ -239,16 +240,23 @@ func classifyPrepare(cs *effects.ClassifiedStatement, s *pg_query.PrepareStmt, s
 	}
 }
 
-func classifyExecute(cs *effects.ClassifiedStatement, _ *pg_query.ExecuteStmt, _ SessionState, _ Options) {
+func classifyExecute(cs *effects.ClassifiedStatement, s *pg_query.ExecuteStmt, _ SessionState, _ Options) {
 	// Cache lookup is owned by Plan 05 (proxy). Plan 03 returns unknown so the
 	// proxy can synthesize the cache-miss deny path per spec §7.4.
 	cs.RawVerb = "EXECUTE"
+	if s != nil {
+		cs.PreparedName = s.Name
+	}
 	cs.Effects = []effects.Effect{{Group: effects.GroupUnknown, Resolution: effects.ResolutionUnresolved}}
 	cs.Error = "execute: cache lookup deferred to proxy (Plan 05)"
 }
 
-func classifyDeallocate(cs *effects.ClassifiedStatement, _ *pg_query.DeallocateStmt) {
+func classifyDeallocate(cs *effects.ClassifiedStatement, s *pg_query.DeallocateStmt) {
 	cs.RawVerb = "DEALLOCATE"
+	// pg_query represents DEALLOCATE ALL with an empty Name field.
+	if s != nil {
+		cs.PreparedName = s.Name
+	}
 	cs.Effects = []effects.Effect{{
 		Group:   effects.GroupSession,
 		Subtype: effects.SubtypeDiscardPlans, // §7.3: DEALLOCATE → discard_plans

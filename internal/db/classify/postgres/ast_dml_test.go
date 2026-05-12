@@ -275,3 +275,53 @@ func TestClassifySelect_TempShadowed(t *testing.T) {
 		t.Fatalf("resolution: got %v want maybe_temp_shadowed", prim.Resolution)
 	}
 }
+
+func TestClassifyPrepare_PopulatesPreparedName(t *testing.T) {
+	p := New(DialectPostgres)
+	got, err := p.Classify("PREPARE s1 AS SELECT 1", SessionState{}, Options{})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len=%d", len(got))
+	}
+	if got[0].PreparedName != "s1" {
+		t.Fatalf("PreparedName=%q want s1", got[0].PreparedName)
+	}
+}
+
+func TestClassifyExecute_PopulatesPreparedName(t *testing.T) {
+	p := New(DialectPostgres)
+	got, err := p.Classify("EXECUTE s1(42)", SessionState{}, Options{})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if got[0].PreparedName != "s1" {
+		t.Fatalf("PreparedName=%q want s1", got[0].PreparedName)
+	}
+}
+
+func TestClassifyDeallocate_Named(t *testing.T) {
+	p := New(DialectPostgres)
+	got, err := p.Classify("DEALLOCATE s1", SessionState{}, Options{})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if got[0].RawVerb != "DEALLOCATE" {
+		t.Fatalf("RawVerb=%q", got[0].RawVerb)
+	}
+	if got[0].PreparedName != "s1" {
+		t.Fatalf("PreparedName=%q want s1", got[0].PreparedName)
+	}
+}
+
+func TestClassifyDeallocate_All(t *testing.T) {
+	p := New(DialectPostgres)
+	got, err := p.Classify("DEALLOCATE ALL", SessionState{}, Options{})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if got[0].PreparedName != "" {
+		t.Fatalf("PreparedName=%q want \"\" for DEALLOCATE ALL", got[0].PreparedName)
+	}
+}
