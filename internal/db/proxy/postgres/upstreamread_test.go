@@ -78,7 +78,7 @@ func upstreamReadFixture(t *testing.T) (pc *proxyConn, scriptUpstream func([]pgp
 
 func TestForwardUpstreamUntilRFQ_HappyPath(t *testing.T) {
 	pc, scriptUpstream, clientFE := upstreamReadFixture(t)
-	pc.state.lastUpstreamRFQ = 'I'
+	pc.state.smState.LastUpstreamRFQ = 'I'
 
 	// Drain client side so backend writes from forwardUpstreamUntilRFQ unblock.
 	drained := make(chan struct{})
@@ -114,14 +114,14 @@ func TestForwardUpstreamUntilRFQ_HappyPath(t *testing.T) {
 	if r.ErrorCode != "" {
 		t.Fatalf("ErrorCode = %q want empty", r.ErrorCode)
 	}
-	if pc.state.lastUpstreamRFQ != 'I' {
-		t.Fatalf("lastUpstreamRFQ = %q want 'I'", pc.state.lastUpstreamRFQ)
+	if pc.state.smState.LastUpstreamRFQ != 'I' {
+		t.Fatalf("lastUpstreamRFQ = %q want 'I'", pc.state.smState.LastUpstreamRFQ)
 	}
 }
 
 func TestForwardUpstreamUntilRFQ_MultiStmt(t *testing.T) {
 	pc, scriptUpstream, clientFE := upstreamReadFixture(t)
-	pc.state.lastUpstreamRFQ = 'I'
+	pc.state.smState.LastUpstreamRFQ = 'I'
 
 	go func() {
 		for {
@@ -152,14 +152,14 @@ func TestForwardUpstreamUntilRFQ_MultiStmt(t *testing.T) {
 	if r.AffectedByStmt[1] == nil || *r.AffectedByStmt[1] != 5 {
 		t.Fatalf("AffectedByStmt[1] = %v want 5", r.AffectedByStmt[1])
 	}
-	if pc.state.lastUpstreamRFQ != 'T' {
-		t.Fatalf("lastUpstreamRFQ = %q want 'T'", pc.state.lastUpstreamRFQ)
+	if pc.state.smState.LastUpstreamRFQ != 'T' {
+		t.Fatalf("lastUpstreamRFQ = %q want 'T'", pc.state.smState.LastUpstreamRFQ)
 	}
 }
 
 func TestForwardUpstreamUntilRFQ_MidBatchError(t *testing.T) {
 	pc, scriptUpstream, clientFE := upstreamReadFixture(t)
-	pc.state.lastUpstreamRFQ = 'I'
+	pc.state.smState.LastUpstreamRFQ = 'I'
 
 	go func() {
 		for {
@@ -184,7 +184,7 @@ func TestForwardUpstreamUntilRFQ_MidBatchError(t *testing.T) {
 	if r.ErrorCode != "23505" {
 		t.Fatalf("ErrorCode = %q want 23505", r.ErrorCode)
 	}
-	if pc.state.lastUpstreamRFQ != 'E' {
-		t.Fatalf("lastUpstreamRFQ = %q want 'E'", pc.state.lastUpstreamRFQ)
+	if pc.state.smState.LastUpstreamRFQ != 'E' {
+		t.Fatalf("lastUpstreamRFQ = %q want 'E'", pc.state.smState.LastUpstreamRFQ)
 	}
 }

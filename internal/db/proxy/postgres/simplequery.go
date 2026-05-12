@@ -23,8 +23,10 @@ var (
 )
 
 // simpleQueryLoop is the post-handshake driver. It reads client frames one at
-// a time, dispatches to handleQuery for 'Q', forwards 'X' (Terminate), and
-// rejects any other frame with a synthetic ErrorResponse.
+// a time, dispatches to handleQuery for 'Q', forwards 'X' (Terminate) directly,
+// routes Plan-05a Extended Query frames (Parse/Bind/Describe/Execute/Sync/
+// Flush/Close) through handleExtendedFrame, and rejects any other frame with
+// a synthetic ErrorResponse.
 func (pc *proxyConn) simpleQueryLoop(ctx context.Context) error {
 	for {
 		if err := ctx.Err(); err != nil {
@@ -45,6 +47,11 @@ func (pc *proxyConn) simpleQueryLoop(ctx context.Context) error {
 				_ = pc.state.upstreamFE.Flush()
 			}
 			return nil
+		case *pgproto3.Parse, *pgproto3.Bind, *pgproto3.Describe, *pgproto3.Execute,
+			*pgproto3.Sync, *pgproto3.Flush, *pgproto3.Close:
+			if err := pc.handleExtendedFrame(ctx, m); err != nil {
+				return err
+			}
 		default:
 			return pc.handleUnsupportedFrame(ctx, m)
 		}
@@ -107,19 +114,19 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 
 	// Deny path.
 	denyAction := "none"
-	if pc.state.lastUpstreamRFQ == 'T' || pc.state.lastUpstreamRFQ == 'E' {
+	if pc.state.smState.LastUpstreamRFQ == 'T' || pc.state.smState.LastUpstreamRFQ == 'E' {
 		denyAction = "connection_terminated"
 	}
 	pc.emitDenyEvents(ctx, stmts, decisions, q.String, batchSHA, denyAction)
 	rendered, sqlstate := pickDenySynth(decisions)
-	switch pc.state.lastUpstreamRFQ {
+	switch pc.state.smState.LastUpstreamRFQ {
 	case 0, 'I':
 		return pc.synthErrorAndRFQ(sqlstate, rendered)
 	case 'T', 'E':
 		_ = pc.synthErrorOnly(sqlstate, rendered)
 		return errInTxTerminate
 	default:
-		return fmt.Errorf("postgres.handleQuery: unexpected RFQ byte %q", pc.state.lastUpstreamRFQ)
+		return fmt.Errorf("postgres.handleQuery: unexpected RFQ byte %q", pc.state.smState.LastUpstreamRFQ)
 	}
 }
 

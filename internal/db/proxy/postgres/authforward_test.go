@@ -249,7 +249,7 @@ func TestForwardAuth_CapturesUpstreamRFQByte(t *testing.T) {
 		t.Fatalf("forwardAuth: %v", err)
 	}
 
-	if pc.state.lastUpstreamRFQ != 'I' {
-		t.Fatalf("lastUpstreamRFQ = %q want 'I'", pc.state.lastUpstreamRFQ)
+	if pc.state.smState.LastUpstreamRFQ != 'I' {
+		t.Fatalf("lastUpstreamRFQ = %q want 'I'", pc.state.smState.LastUpstreamRFQ)
 	}
 }

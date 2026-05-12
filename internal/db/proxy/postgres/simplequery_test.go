@@ -87,43 +87,9 @@ func mustReceiveClientFrame(t *testing.T, fe *pgproto3.Frontend) pgproto3.Backen
 	return m
 }
 
-func TestSimpleQueryLoop_RejectsExtendedQuery(t *testing.T) {
-	pc, clientFE, sink := newSimpleQueryFixture(t)
-	pc.state.lastUpstreamRFQ = 'I'
-
-	// Run simpleQueryLoop in a goroutine — net.Pipe is synchronous, so the
-	// ErrorResponse write blocks until the test reads it below.
-	loopErr := make(chan error, 1)
-	go func() { loopErr <- pc.simpleQueryLoop(context.Background()) }()
-
-	// Client sends Parse after the loop is running.
-	mustSendFromClient(t, clientFE, &pgproto3.Parse{Name: "s1", Query: "SELECT 1"})
-
-	msg := mustReceiveClientFrame(t, clientFE)
-	er, ok := msg.(*pgproto3.ErrorResponse)
-	if !ok {
-		t.Fatalf("unexpected first frame: %T", msg)
-	}
-	if er.Code != "0A000" {
-		t.Fatalf("Code = %q want 0A000", er.Code)
-	}
-
-	if err := <-loopErr; err == nil {
-		t.Fatalf("simpleQueryLoop: want non-nil error on extended-query frame")
-	}
-
-	evs := sink.DrainLifecycle()
-	if len(evs) != 1 || evs[0].Kind != "db_handshake_fail" {
-		t.Fatalf("lifecycle events = %+v", evs)
-	}
-	if evs[0].ErrorCode != "EXTENDED_QUERY_NOT_SUPPORTED" {
-		t.Fatalf("ErrorCode = %q want EXTENDED_QUERY_NOT_SUPPORTED", evs[0].ErrorCode)
-	}
-}
-
 func TestSimpleQueryLoop_RejectsFunctionCall(t *testing.T) {
 	pc, clientFE, sink := newSimpleQueryFixture(t)
-	pc.state.lastUpstreamRFQ = 'I'
+	pc.state.smState.LastUpstreamRFQ = 'I'
 
 	// Run loop in goroutine so ErrorResponse write doesn't deadlock.
 	loopErr := make(chan error, 1)
@@ -152,7 +118,7 @@ func TestSimpleQueryLoop_RejectsFunctionCall(t *testing.T) {
 
 func TestSimpleQueryLoop_TerminateForwarded(t *testing.T) {
 	pc, clientFE, _ := newSimpleQueryFixtureWithUpstream(t)
-	pc.state.lastUpstreamRFQ = 'I'
+	pc.state.smState.LastUpstreamRFQ = 'I'
 
 	loopErr := make(chan error, 1)
 	go func() { loopErr <- pc.simpleQueryLoop(context.Background()) }()
@@ -166,7 +132,7 @@ func TestSimpleQueryLoop_TerminateForwarded(t *testing.T) {
 
 func TestHandleQuery_FrameTooLarge(t *testing.T) {
 	pc, clientFE, sink := newSimpleQueryFixture(t)
-	pc.state.lastUpstreamRFQ = 'I'
+	pc.state.smState.LastUpstreamRFQ = 'I'
 	pc.srv.cfg.MaxQueryBytes = 32
 
 	big := &pgproto3.Query{String: strings.Repeat("SELECT 1; ", 10)} // > 32 bytes
@@ -261,7 +227,7 @@ func drainNFrames(t *testing.T, fe *pgproto3.Frontend, n int) []pgproto3.Backend
 
 func TestHandleQuery_AllowPath_ForwardsAndEmits(t *testing.T) {
 	pc, clientFE, sink, script := allowPathFixture(t)
-	pc.state.lastUpstreamRFQ = 'I'
+	pc.state.smState.LastUpstreamRFQ = 'I'
 	pc.srv.SetPolicy(allowAllRuleSet(t))
 
 	script([]pgproto3.BackendMessage{
@@ -307,7 +273,7 @@ func TestHandleQuery_AllowPath_ForwardsAndEmits(t *testing.T) {
 
 func TestHandleQuery_AllowPath_MultiStmt(t *testing.T) {
 	pc, clientFE, sink, script := allowPathFixture(t)
-	pc.state.lastUpstreamRFQ = 'I'
+	pc.state.smState.LastUpstreamRFQ = 'I'
 	pc.srv.SetPolicy(allowAllRuleSet(t))
 
 	script([]pgproto3.BackendMessage{
@@ -373,7 +339,7 @@ database_rules:
 
 func TestHandleQuery_DenyPath_PreTx(t *testing.T) {
 	pc, clientFE, sink, _ := allowPathFixture(t)
-	pc.state.lastUpstreamRFQ = 'I'
+	pc.state.smState.LastUpstreamRFQ = 'I'
 	pc.srv.SetPolicy(denyDeletesRuleSet(t))
 
 	loopErr := make(chan error, 1)
@@ -410,7 +376,7 @@ func TestHandleQuery_DenyPath_PreTx(t *testing.T) {
 
 func TestHandleQuery_DenyPath_InTx_Terminates(t *testing.T) {
 	pc, clientFE, sink, _ := allowPathFixture(t)
-	pc.state.lastUpstreamRFQ = 'T' // simulate prior BEGIN forwarded + upstream RFQ=T
+	pc.state.smState.LastUpstreamRFQ = 'T' // simulate prior BEGIN forwarded + upstream RFQ=T
 	pc.srv.SetPolicy(denyDeletesRuleSet(t))
 
 	loopErr := make(chan error, 1)
@@ -443,7 +409,7 @@ func TestHandleQuery_DenyPath_InTx_Terminates(t *testing.T) {
 
 func TestHandleQuery_DenyPath_MultiStmt_TagsSiblings(t *testing.T) {
 	pc, clientFE, sink, _ := allowPathFixture(t)
-	pc.state.lastUpstreamRFQ = 'I'
+	pc.state.smState.LastUpstreamRFQ = 'I'
 	pc.srv.SetPolicy(denyDeletesRuleSet(t))
 
 	loopErr := make(chan error, 1)

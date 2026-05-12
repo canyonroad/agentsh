@@ -11,6 +11,7 @@ import (
 	classify_pg "github.com/agentsh/agentsh/internal/db/classify/postgres"
 	"github.com/agentsh/agentsh/internal/db/effects"
 	"github.com/agentsh/agentsh/internal/db/policy"
+	"github.com/agentsh/agentsh/internal/db/proxy/postgres/statemachine"
 )
 
 func sha256Hex(s string) string {
@@ -26,6 +27,7 @@ func connStateForTest(svc, dialect, tlsMode string) connState {
 		database:       "app",
 		appName:        "tests",
 		tlsMode:        tlsMode,
+		smState:        &statemachine.ConnState{},
 	}
 }
 

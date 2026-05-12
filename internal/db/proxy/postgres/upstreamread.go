@@ -26,7 +26,7 @@ type upstreamResult struct {
 
 // forwardUpstreamUntilRFQ reads upstream frames one at a time and forwards
 // each to the client. Returns when the upstream sends ReadyForQuery, updating
-// pc.state.lastUpstreamRFQ.
+// pc.state.smState.LastUpstreamRFQ.
 //
 // bytesIn is the inbound 'Q' frame body length; the caller knows it and we
 // just pass it through for completeness — the value is currently unused inside
@@ -74,7 +74,7 @@ func (pc *proxyConn) forwardUpstreamUntilRFQ(ctx context.Context, sentAt time.Ti
 			pc.backend.Send(m)
 
 		case *pgproto3.ReadyForQuery:
-			pc.state.lastUpstreamRFQ = m.TxStatus
+			pc.state.smState.LastUpstreamRFQ = m.TxStatus
 			r.BytesOut += int64(estimatedFrameSize(m))
 			pc.backend.Send(m)
 			if err := pc.backend.Flush(); err != nil {

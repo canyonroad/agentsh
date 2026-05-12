@@ -12,6 +12,8 @@ import (
 
 	"github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/db/policy"
+	"github.com/agentsh/agentsh/internal/db/proxy/postgres/preparedcache"
+	"github.com/agentsh/agentsh/internal/db/proxy/postgres/statemachine"
 )
 
 // connState is the per-connection state carried through the 04b handshake.
@@ -51,9 +53,12 @@ type connState struct {
 	degradedReason string
 
 	// Task 6 captures from forwardAuth.
-	lastUpstreamRFQ byte                 // 'I' | 'T' | 'E' | 0 (pre-auth)
-	redactionTier   policy.RedactionTier // resolved at handshake end
-	tlsMode         string               // svc.TLSMode at handshake end, for EventTLS.Mode
+	// smState carries the Extended Query state machine's per-connection
+	// state (Plan 05a). LastUpstreamRFQ replaces the 04c byte field; the
+	// dispatcher and authforward write it directly.
+	smState        *statemachine.ConnState
+	redactionTier  policy.RedactionTier // resolved at handshake end
+	tlsMode        string               // svc.TLSMode at handshake end, for EventTLS.Mode
 }
 
 // logger narrows *slog.Logger to just the methods we use, so tests can
@@ -74,12 +79,14 @@ type logger interface {
 //
 // On exit the conn is closed by the caller (acceptLoop's deferred Close).
 type proxyConn struct {
-	srv     *Server
-	svc     Service
-	logger  logger
-	conn    net.Conn // current client-facing conn (becomes *tls.Conn after Task 6)
-	backend *pgproto3.Backend
-	state   *connState
+	srv       *Server
+	svc       Service
+	logger    logger
+	conn      net.Conn // current client-facing conn (becomes *tls.Conn after Task 6)
+	backend   *pgproto3.Backend
+	state     *connState
+	wireCache *preparedcache.Cache // 05a wire-protocol Extended Query cache
+	sqlCache  *preparedcache.Cache // 05b SQL-level PREPARE cache (unused in 05a)
 }
 
 func newProxyConn(srv *Server, svc Service, conn net.Conn, peerUID uint32) *proxyConn {
@@ -93,7 +100,10 @@ func newProxyConn(srv *Server, svc Service, conn net.Conn, peerUID uint32) *prox
 			dbService:      svc.Name,
 			peerUID:        peerUID,
 			clientIdentity: clientIdentityFromUID(peerUID),
+			smState:        &statemachine.ConnState{},
 		},
+		wireCache: preparedcache.New(0),
+		sqlCache:  preparedcache.New(0),
 	}
 }
 

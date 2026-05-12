@@ -83,7 +83,7 @@ func buildStatementEvent(a buildArgs) events.DBEvent {
 	}
 
 	tx := events.EventTxContext{
-		InTransaction: a.Conn.lastUpstreamRFQ == 'T' || a.Conn.lastUpstreamRFQ == 'E',
+		InTransaction: connInTx(a.Conn),
 		DenyAction:    a.DenyAction,
 	}
 
@@ -158,4 +158,16 @@ func perStmtSlice(sql string, stmt effects.ClassifiedStatement) string {
 // then we conservatively return false.
 func hasFilter(_ effects.ClassifiedStatement) bool {
 	return false
+}
+
+// connInTx returns true when the connection is currently inside an upstream
+// transaction (RFQ status 'T' or 'E'). Plan 05a routes the byte through
+// smState; pre-smState callers (or tests that hand-build connState without
+// initializing smState) get false.
+func connInTx(c connState) bool {
+	if c.smState == nil {
+		return false
+	}
+	b := c.smState.LastUpstreamRFQ
+	return b == 'T' || b == 'E'
 }
