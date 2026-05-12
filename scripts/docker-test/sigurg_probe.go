@@ -1,3 +1,5 @@
+//go:build linux
+
 // sigurg_probe is a best-effort sanity check that the WAIT_KILLABLE_RECV
 // flag is functionally engaged end-to-end. It is invoked inside every
 // docker-test matrix cell to catch gross regressions where the kernel

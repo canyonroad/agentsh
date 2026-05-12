@@ -149,9 +149,10 @@ func runtimeKeepAlive(_ interface{}) {}
 // entries so a single visible log line carries enough context to
 // triage hostile-kernel rejections (issue #282 EFAULT class).
 //
-// Log strings match the existing loadWithRetryOnWaitKillFailure
-// helper byte-for-byte so log scrapers and the sigurg_probe_test
-// regression check continue to function.
+// Log strings deliberately match the pre-migration
+// loadWithRetryOnWaitKillFailure helper byte-for-byte so log scrapers
+// and sigurg_probe_test's regression assertions continue to function
+// across the transition.
 func loadFilterWithRetry(prog []byte, withWaitKill bool, snapshot []any) (int, bool, error) {
 	start := time.Now()
 	fd, err := loadRawFilter(prog, withWaitKill)
