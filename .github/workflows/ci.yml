@@ -174,7 +174,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y libfuse-dev libfuse3-dev pkg-config gcc-aarch64-linux-gnu
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev libfuse3-dev pkg-config gcc-aarch64-linux-gnu libseccomp-dev libseccomp-dev:arm64
 
       - uses: actions/setup-go@v5
         with:
@@ -198,6 +201,7 @@ jobs:
           GOARCH: arm64
           CGO_ENABLED: "1"
           CC: aarch64-linux-gnu-gcc
+          PKG_CONFIG_LIBDIR: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
 
   integration:
     needs: [test-linux]

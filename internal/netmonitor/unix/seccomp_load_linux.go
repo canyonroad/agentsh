@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime"
 	"time"
 	"unsafe"
 
@@ -121,23 +122,18 @@ func loadRawFilter(prog []byte, withWaitKill bool) (int, error) {
 	}
 
 	fd, err := loadFilterSyscall(flags, &fprog)
-	// Defensive: ensure prog and filters are not GC'd before the
-	// syscall returns. The kernel snapshots the program internally,
-	// but we still hold the only reference while it does.
-	runtimeKeepAlive(prog)
-	runtimeKeepAlive(filters)
+	// Keep prog and filters reachable until after the syscall returns:
+	// the kernel snapshots the program internally, but we still hold
+	// the only references to its memory while it does. Without these
+	// KeepAlive calls, the GC could (in theory) reclaim prog while the
+	// syscall is in flight.
+	runtime.KeepAlive(prog)
+	runtime.KeepAlive(filters)
 	if err != nil {
 		return -1, err
 	}
 	return fd, nil
 }
-
-// runtimeKeepAlive is a tiny no-op wrapper so the unsafe.Slice +
-// SockFprog construction stays GC-safe without importing runtime at
-// the top of the file. Inlined to be free in release builds.
-//
-//go:noinline
-func runtimeKeepAlive(_ interface{}) {}
 
 // loadFilterWithRetry loads prog via loadRawFilter, retrying once
 // without WAIT_KILLABLE_RECV if the kernel returns EINVAL — the

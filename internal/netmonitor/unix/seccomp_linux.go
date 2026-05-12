@@ -526,7 +526,7 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	slog.Info("seccomp: filter loaded",
 		"fd", rawFd,
 		"wait_killable", gotWaitKill,
-		"kernel_supports", wantWaitKill,
+		"kernel_probe_supports", wantWaitKill,
 		"libseccomp_runtime", libVer)
 
 	if !filterConfigNeedsNotifyFD(cfg, blockListMap, blockedFamilyMap, socketRules) {
