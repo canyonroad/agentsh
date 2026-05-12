@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"time"
 	"unsafe"
 
 	seccomp "github.com/seccomp/libseccomp-golang"
@@ -136,3 +138,53 @@ func loadRawFilter(prog []byte, withWaitKill bool) (int, error) {
 //
 //go:noinline
 func runtimeKeepAlive(_ interface{}) {}
+
+// loadFilterWithRetry loads prog via loadRawFilter, retrying once
+// without WAIT_KILLABLE_RECV if the kernel returns EINVAL — the
+// rejection path for custom or vendor kernels that report >=5.19 but
+// don't recognize the flag. Any other errno surfaces verbatim.
+//
+// snapshot is the structured-field slice produced by
+// filterDiagnosticFields; it is embedded inline in failure-path WARN
+// entries so a single visible log line carries enough context to
+// triage hostile-kernel rejections (issue #282 EFAULT class).
+//
+// Log strings match the existing loadWithRetryOnWaitKillFailure
+// helper byte-for-byte so log scrapers and the sigurg_probe_test
+// regression check continue to function.
+func loadFilterWithRetry(prog []byte, withWaitKill bool, snapshot []any) (int, error) {
+	start := time.Now()
+	fd, err := loadRawFilter(prog, withWaitKill)
+	dur := time.Since(start)
+	if err == nil {
+		slog.Debug("seccomp: filter Load succeeded",
+			"attempt", 1, "wait_kill", withWaitKill, "duration_ms", dur.Milliseconds())
+		return fd, nil
+	}
+	slog.Warn("seccomp: filter Load failed",
+		appendSnapshot(snapshot,
+			"attempt", 1, "wait_kill", withWaitKill, "duration_ms", dur.Milliseconds(),
+			"errno", errnoString(err), "error", err)...)
+	if !withWaitKill {
+		return -1, err
+	}
+	if !errors.Is(err, unix.EINVAL) {
+		return -1, err
+	}
+	slog.Warn("seccomp: WaitKillable rejected at filter load time; falling back to SIGURG signal mask only",
+		"error", err)
+
+	start = time.Now()
+	fd, err = loadRawFilter(prog, false)
+	dur = time.Since(start)
+	if err == nil {
+		slog.Debug("seccomp: filter Load succeeded on retry without WaitKill",
+			"attempt", 2, "duration_ms", dur.Milliseconds())
+		return fd, nil
+	}
+	slog.Warn("seccomp: filter Load failed on retry without WaitKill",
+		appendSnapshot(snapshot,
+			"attempt", 2, "duration_ms", dur.Milliseconds(),
+			"errno", errnoString(err), "error", err)...)
+	return -1, err
+}

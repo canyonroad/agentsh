@@ -150,3 +150,75 @@ func TestLoadRawFilter_PropagatesEINVAL(t *testing.T) {
 		t.Fatalf("expected unix.EINVAL, got %v", err)
 	}
 }
+
+func TestLoadFilterWithRetry_RetriesOnEINVALAndDropsFlag(t *testing.T) {
+	var seenFlags []uintptr
+	withStubbedSeams(t, func(flags uintptr, _ *unix.SockFprog) (int, error) {
+		seenFlags = append(seenFlags, flags)
+		if len(seenFlags) == 1 {
+			return -1, unix.EINVAL
+		}
+		return 99, nil
+	})
+	fd, err := loadFilterWithRetry(minimalBPF(), true, nil)
+	if err != nil {
+		t.Fatalf("loadFilterWithRetry: %v", err)
+	}
+	if fd != 99 {
+		t.Fatalf("fd = %d, want 99", fd)
+	}
+	if len(seenFlags) != 2 {
+		t.Fatalf("expected 2 syscall attempts, got %d", len(seenFlags))
+	}
+	if seenFlags[0]&uintptr(unix.SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV) == 0 {
+		t.Fatalf("first attempt missing WAIT_KILLABLE flag: 0x%x", seenFlags[0])
+	}
+	if seenFlags[1]&uintptr(unix.SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV) != 0 {
+		t.Fatalf("retry attempt still has WAIT_KILLABLE flag: 0x%x", seenFlags[1])
+	}
+}
+
+func TestLoadFilterWithRetry_NoRetryWhenFlagNotSet(t *testing.T) {
+	calls := 0
+	withStubbedSeams(t, func(uintptr, *unix.SockFprog) (int, error) {
+		calls++
+		return -1, unix.EINVAL
+	})
+	_, err := loadFilterWithRetry(minimalBPF(), false, nil)
+	if !errors.Is(err, unix.EINVAL) {
+		t.Fatalf("expected EINVAL, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 attempt, got %d", calls)
+	}
+}
+
+func TestLoadFilterWithRetry_NoRetryOnNonEINVAL(t *testing.T) {
+	calls := 0
+	withStubbedSeams(t, func(uintptr, *unix.SockFprog) (int, error) {
+		calls++
+		return -1, unix.EFAULT
+	})
+	_, err := loadFilterWithRetry(minimalBPF(), true, nil)
+	if !errors.Is(err, unix.EFAULT) {
+		t.Fatalf("expected EFAULT, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 attempt, got %d", calls)
+	}
+}
+
+func TestLoadFilterWithRetry_BothAttemptsFail(t *testing.T) {
+	calls := 0
+	withStubbedSeams(t, func(uintptr, *unix.SockFprog) (int, error) {
+		calls++
+		return -1, unix.EINVAL
+	})
+	_, err := loadFilterWithRetry(minimalBPF(), true, nil)
+	if !errors.Is(err, unix.EINVAL) {
+		t.Fatalf("expected EINVAL after retry failure, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 attempts (initial + retry), got %d", calls)
+	}
+}
