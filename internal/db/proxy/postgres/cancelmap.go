@@ -130,7 +130,7 @@ func (m *cancelMap) Register(meta cancelMeta, realPID uint32, realSecret []byte)
 	for i := 0; i < cancelKeyGenerationRetries; i++ {
 		pid, secret, err := m.generate()
 		if err != nil {
-			return cancelRegistration{}, err
+			return cancelRegistration{}, errors.Join(errBackendKeyGenerationFailed, err)
 		}
 
 		key := newCancelKey(pid, secret)

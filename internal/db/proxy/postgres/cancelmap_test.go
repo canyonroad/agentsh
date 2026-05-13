@@ -150,6 +150,81 @@ func TestCancelMap_CapPrunesOnlyPastGrace(t *testing.T) {
 	}
 }
 
+func TestCancelMap_RegisterClassifiesGeneratorErrors(t *testing.T) {
+	generateErr := errors.New("entropy unavailable")
+	cm := newCancelMap(cancelMapConfig{
+		Max:         10,
+		GraceWindow: time.Minute,
+		Generate: func() (uint32, []byte, error) {
+			return 0, nil, generateErr
+		},
+	})
+
+	_, err := cm.Register(cancelMeta{ServiceName: "appdb"}, 10, []byte{10})
+	if !errors.Is(err, errBackendKeyGenerationFailed) {
+		t.Fatalf("Register err = %v, want errBackendKeyGenerationFailed", err)
+	}
+	if !errors.Is(err, generateErr) {
+		t.Fatalf("Register err = %v, want wrapped generator error", err)
+	}
+}
+
+func TestCancelMap_ClonesSecrets(t *testing.T) {
+	now := time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC)
+	realSecret := []byte{0, 0, 0, 99}
+	cm := newCancelMap(cancelMapConfig{
+		Max:         10,
+		GraceWindow: time.Minute,
+		Now:         func() time.Time { return now },
+		Generate: fixedCancelKeyGenerator([]generatedCancelKey{
+			{pid: 1001, secret: []byte{0, 0, 0, 7}},
+		}),
+	})
+
+	reg, err := cm.Register(cancelMeta{ServiceName: "appdb"}, 42, realSecret)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	realSecret[3] = 1
+	reg.SyntheticSecret[3] = 1
+
+	entry, status := cm.Lookup(1001, []byte{0, 0, 0, 7})
+	if status != cancelLookupFound {
+		t.Fatalf("Lookup status = %v, want found", status)
+	}
+	if !bytes.Equal(entry.RealSecret, []byte{0, 0, 0, 99}) {
+		t.Fatalf("stored real secret = %x, want 00000063", entry.RealSecret)
+	}
+	if !bytes.Equal(entry.SyntheticSecret, []byte{0, 0, 0, 7}) {
+		t.Fatalf("stored synthetic secret = %x, want 00000007", entry.SyntheticSecret)
+	}
+
+	entry.RealSecret[3] = 2
+	entry.SyntheticSecret[3] = 2
+
+	entry, status = cm.Lookup(1001, []byte{0, 0, 0, 7})
+	if status != cancelLookupFound {
+		t.Fatalf("second Lookup status = %v, want found", status)
+	}
+	if !bytes.Equal(entry.RealSecret, []byte{0, 0, 0, 99}) {
+		t.Fatalf("stored real secret after lookup mutation = %x, want 00000063", entry.RealSecret)
+	}
+	if !bytes.Equal(entry.SyntheticSecret, []byte{0, 0, 0, 7}) {
+		t.Fatalf("stored synthetic secret after lookup mutation = %x, want 00000007", entry.SyntheticSecret)
+	}
+}
+
+func TestCancelMap_GenerateCancelKeyReturnsFourByteSecret(t *testing.T) {
+	_, secret, err := generateCancelKey()
+	if err != nil {
+		t.Fatalf("generateCancelKey: %v", err)
+	}
+	if len(secret) != 4 {
+		t.Fatalf("secret length = %d, want 4", len(secret))
+	}
+}
+
 type generatedCancelKey struct {
 	pid    uint32
 	secret []byte
