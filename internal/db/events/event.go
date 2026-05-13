@@ -10,6 +10,9 @@ import (
 // DBEvent is the normalized audit event emitted per database statement, per §8.
 // This is the skeleton; emission lands in Plan 04. Fields here are the v0.8
 // schema; additional sub-structs (decision, result, tx_context) ship in Plan 04.
+// Cancel governance events also use DBEvent with decision.rule_kind="cancel",
+// operation_group="session", and operation_subtype="cancel_request"; they
+// intentionally carry no statement text or digest.
 type DBEvent struct {
 	EventID   string    `json:"event_id"`
 	SessionID string    `json:"session_id"`
