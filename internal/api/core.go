@@ -573,8 +573,10 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		policyVars["HOME"] = home
 	}
 
-	// Load and expand policy (or use global policy if no policy dir configured)
-	var engine *policy.Engine
+	// Load policy (or use global policy if no policy dir configured). Policy
+	// compilation is deferred until after session creation so generated DB
+	// unavoidability rules can include the real session ID.
+	var basePolicy *policy.Policy
 	if a.cfg.Policies.Dir != "" {
 		policyPath, err := policy.ResolvePolicyPath(a.cfg.Policies.Dir, policyName)
 		if err != nil {
@@ -617,15 +619,12 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		if err != nil {
 			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("load policy: %w", err)
 		}
-
-		enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
-		engine, err = policy.NewEngineWithVariables(pol, enforceApprovals, true, policyVars)
-		if err != nil {
-			return types.Session{}, http.StatusBadRequest, fmt.Errorf("compile policy: %w", err)
-		}
+		basePolicy = pol
 	} else {
 		// Fall back to global policy (e.g., in tests or when policies dir not configured)
-		engine = a.policy
+		if a.policy != nil {
+			basePolicy = a.policy.Policy()
+		}
 	}
 
 	var s *session.Session
@@ -643,6 +642,13 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		return types.Session{}, code, sessionErr
 	}
 
+	enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
+	engine, dbRuleSet, dbStateDir, err := a.compileDBPolicyForSession(ctx, s, basePolicy, policyVars, enforceApprovals)
+	if err != nil {
+		a.cleanupCreatedSession(s)
+		return types.Session{}, http.StatusBadRequest, fmt.Errorf("compile policy: %w", err)
+	}
+
 	// Store roots and session-specific policy engine
 	s.ProjectRoot = policyVars["PROJECT_ROOT"]
 	s.GitRoot = policyVars["GIT_ROOT"]
@@ -655,7 +661,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	if a.cfg.Approvals.Mode == "totp" {
 		secret, err := approvals.GenerateTOTPSecret()
 		if err != nil {
-			_ = a.sessions.Destroy(s.ID)
+			a.cleanupCreatedSession(s)
 			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("generate TOTP secret: %w", err)
 		}
 		s.TOTPSecret = secret
@@ -665,6 +671,11 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 			_ = approvals.DisplayTOTPSetup(tty, s.ID, s.TOTPSecret)
 			tty.Close()
 		}
+	}
+
+	if err := a.startSessionDBProxy(ctx, s, dbRuleSet, dbStateDir); err != nil {
+		a.cleanupCreatedSession(s)
+		return types.Session{}, http.StatusInternalServerError, fmt.Errorf("start DB proxy: %w", err)
 	}
 
 	ev := types.Event{

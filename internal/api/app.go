@@ -25,9 +25,9 @@ import (
 	"github.com/agentsh/agentsh/internal/netmonitor"
 	ebpftrace "github.com/agentsh/agentsh/internal/netmonitor/ebpf"
 	"github.com/agentsh/agentsh/internal/netmonitor/redirect"
+	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
-	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/policy/signing"
 	"github.com/agentsh/agentsh/internal/proxy"
 	"github.com/agentsh/agentsh/internal/session"
@@ -716,6 +716,7 @@ func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
 		return
 	}
+	_ = s.CloseDBProxy()
 	_ = s.CloseNetNS()
 	_ = s.CloseProxy()
 	_ = s.UnmountWorkspace()
@@ -1483,10 +1484,10 @@ func (a *App) policyTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := map[string]any{
-		"decision":           string(decision.EffectiveDecision),
-		"policy_decision":    string(decision.PolicyDecision),
-		"rule":               decision.Rule,
-		"reason":             decision.Message,
+		"decision":        string(decision.EffectiveDecision),
+		"policy_decision": string(decision.PolicyDecision),
+		"rule":            decision.Rule,
+		"reason":          decision.Message,
 	}
 
 	if decision.Redirect != nil {

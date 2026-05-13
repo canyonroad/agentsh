@@ -134,27 +134,3 @@ func collectDBProxyServices(rs *dbpolicy.RuleSet, stateDir string) []dbProxyServ
 	}
 	return out
 }
-
-// NewDBProxy builds a *postgres.Server from the loaded policy without starting
-// it. The caller is responsible for calling Start(ctx) and eventually Shutdown.
-// This is the supervisor-facing constructor when the lifetime ctx is not yet
-// available at construction time (e.g., inside server.New before server.Run is
-// called).
-func NewDBProxy(p *rootpolicy.Policy, stateDir string, sink events.Sink) (*postgres.Server, error) {
-	rs, err := loadDBRuleSet(p)
-	if err != nil {
-		return nil, err
-	}
-	deps := dbProxyDeps{
-		Unavoidability: rs.Unavoidability(),
-		StateDir:       stateDir,
-		Sink:           sink,
-		Services:       collectDBProxyServices(rs, stateDir),
-		Policy:         rs,
-	}
-	cfg, err := buildDBProxyConfig(deps)
-	if err != nil {
-		return nil, fmt.Errorf("NewDBProxy: %w", err)
-	}
-	return postgres.New(cfg)
-}
