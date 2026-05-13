@@ -131,6 +131,51 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 		recvErrCh = t.recv.errCh
 	}
 
+	teardownForReconnect := func() {
+		_ = t.conn.Close()
+		t.teardownRecv()
+		t.conn = nil
+	}
+	sendBatch := func(outBatch *Batch) error {
+		if outBatch == nil {
+			return nil
+		}
+		msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons, t.compressor, t.compressMetrics)
+		if err != nil {
+			return err
+		}
+		for _, msg := range msgs {
+			if err := t.conn.Send(msg); err != nil {
+				return fmt.Errorf("send EventBatch: %w", err)
+			}
+			t.logEmittedLossIfApplicable(ctx, msg)
+			gen, seq := extractWireHighWatermark(msg)
+			inflight.Push(gen, seq)
+		}
+		return nil
+	}
+	drainAvailable := func() error {
+		for inflight.Len() < opts.MaxInflight {
+			rec, ok, err := rdr.TryNext()
+			if err != nil {
+				return fmt.Errorf("reader: %w", err)
+			}
+			if !ok {
+				break
+			}
+			if outBatch := b.Add(rec); outBatch != nil {
+				if err := sendBatch(outBatch); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := drainAvailable(); err != nil {
+		teardownForReconnect()
+		return StateConnecting, err
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -180,6 +225,10 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 				// excluded here.
 				if outcome == AckOutcomeAdopted {
 					inflight.Release(ev.gen, ev.seq)
+					if err := drainAvailable(); err != nil {
+						teardownForReconnect()
+						return StateConnecting, err
+					}
 				}
 			case recvAckEventHeartbeat:
 				// Heartbeat carries no gen on the wire; FIFO order on
@@ -196,6 +245,10 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 				outcome := t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, ev.seq)
 				if outcome == AckOutcomeAdopted {
 					inflight.Release(t.persistedAck.Generation, ev.seq)
+					if err := drainAvailable(); err != nil {
+						teardownForReconnect()
+						return StateConnecting, err
+					}
 				}
 			}
 		case err := <-recvErrCh:
@@ -209,37 +262,9 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			return StateConnecting, fmt.Errorf("recv: %w", err)
 		case <-rdr.Notify():
 			// Pull as many records as the window and batcher allow.
-			for inflight.Len() < opts.MaxInflight {
-				rec, ok, err := rdr.TryNext()
-				if err != nil {
-					_ = t.conn.Close()
-					t.teardownRecv()
-					t.conn = nil
-					return StateConnecting, fmt.Errorf("reader: %w", err)
-				}
-				if !ok {
-					break
-				}
-				if outBatch := b.Add(rec); outBatch != nil {
-					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons, t.compressor, t.compressMetrics)
-					if err != nil {
-						_ = t.conn.Close()
-						t.teardownRecv()
-						t.conn = nil
-						return StateConnecting, err
-					}
-					for _, msg := range msgs {
-						if err := t.conn.Send(msg); err != nil {
-							_ = t.conn.Close()
-							t.teardownRecv()
-							t.conn = nil
-							return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
-						}
-						t.logEmittedLossIfApplicable(ctx, msg)
-						gen, seq := extractWireHighWatermark(msg)
-						inflight.Push(gen, seq)
-					}
-				}
+			if err := drainAvailable(); err != nil {
+				teardownForReconnect()
+				return StateConnecting, err
 			}
 		case now := <-tick.C:
 			// Gate the tick-driven flush on available inflight
@@ -261,23 +286,9 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 			// returns the buffered batch.
 			if inflight.Len() < opts.MaxInflight {
 				if outBatch := b.Tick(now); outBatch != nil {
-					msgs, err := encodeBatchMessageFn(outBatch.Records, t.emitExtendedLossReasons, t.compressor, t.compressMetrics)
-					if err != nil {
-						_ = t.conn.Close()
-						t.teardownRecv()
-						t.conn = nil
+					if err := sendBatch(outBatch); err != nil {
+						teardownForReconnect()
 						return StateConnecting, err
-					}
-					for _, msg := range msgs {
-						if err := t.conn.Send(msg); err != nil {
-							_ = t.conn.Close()
-							t.teardownRecv()
-							t.conn = nil
-							return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
-						}
-						t.logEmittedLossIfApplicable(ctx, msg)
-						gen, seq := extractWireHighWatermark(msg)
-						inflight.Push(gen, seq)
 					}
 				}
 			}

@@ -6,12 +6,50 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"google.golang.org/protobuf/proto"
 )
+
+type liveDrainConn struct {
+	sendCh chan *wtpv1.ClientMessage
+	closed chan struct{}
+}
+
+func newLiveDrainConn() *liveDrainConn {
+	return &liveDrainConn{
+		sendCh: make(chan *wtpv1.ClientMessage, 8),
+		closed: make(chan struct{}),
+	}
+}
+
+func (c *liveDrainConn) Send(msg *wtpv1.ClientMessage) error {
+	select {
+	case c.sendCh <- msg:
+		return nil
+	case <-c.closed:
+		return context.Canceled
+	}
+}
+
+func (c *liveDrainConn) Recv() (*wtpv1.ServerMessage, error) {
+	<-c.closed
+	return nil, context.Canceled
+}
+
+func (c *liveDrainConn) CloseSend() error { return nil }
+
+func (c *liveDrainConn) Close() error {
+	select {
+	case <-c.closed:
+	default:
+		close(c.closed)
+	}
+	return nil
+}
 
 // marshalCompactEvent marshals a minimal CompactEvent with the given sequence
 // into bytes suitable for wal.Record.Payload.
@@ -27,6 +65,78 @@ func marshalCompactEvent(t *testing.T, seq uint64) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return b
+}
+
+func TestRunLiveDrainsRecordsAlreadyVisibleAtEntry(t *testing.T) {
+	w, err := wal.Open(wal.Options{Dir: t.TempDir(), SegmentSize: 64 * 1024})
+	if err != nil {
+		t.Fatalf("wal.Open: %v", err)
+	}
+	defer w.Close()
+
+	for seq := uint64(17); seq <= 20; seq++ {
+		if _, err := w.Append(int64(seq), 1, marshalCompactEvent(t, seq)); err != nil {
+			t.Fatalf("wal.Append(%d): %v", seq, err)
+		}
+	}
+
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 17})
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	conn := newLiveDrainConn()
+	tr, err := New(Options{
+		Dialer: DialerFunc(func(context.Context) (Conn, error) {
+			return conn, nil
+		}),
+		AgentID:   "a",
+		SessionID: "s",
+		WAL:       w,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr.conn = conn
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := tr.runLive(ctx, rdr, LiveOptions{
+			Batcher: BatcherOptions{
+				MaxRecords: 8,
+				MaxBytes:   64 * 1024,
+				MaxAge:     20 * time.Millisecond,
+			},
+			MaxInflight: 8,
+		})
+		done <- err
+	}()
+
+	select {
+	case msg := <-conn.sendCh:
+		events := msg.GetEventBatch().GetUncompressed().GetEvents()
+		if got := len(events); got != 4 {
+			t.Fatalf("events len=%d, want 4", got)
+		}
+		for i, ev := range events {
+			if want := uint64(17 + i); ev.GetSequence() != want {
+				t.Fatalf("event[%d].Sequence=%d, want %d", i, ev.GetSequence(), want)
+			}
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("runLive did not send records that were already visible when the reader was opened")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("runLive returned nil after context cancellation; want context error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runLive did not return after context cancellation")
+	}
 }
 
 // TestEncodeBatchMessage_HappyPathDataRecords pins the production
