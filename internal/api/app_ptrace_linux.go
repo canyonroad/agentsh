@@ -228,6 +228,9 @@ func (a *App) dbProxySessionResolver() interface {
 		return a.dbProxySessionResolverForTest
 	}
 	tr, _ := a.ptraceTracer.(*ptrace.Tracer)
+	if tr == nil {
+		return nil
+	}
 	return tr
 }
 

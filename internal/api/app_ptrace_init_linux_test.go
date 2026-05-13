@@ -80,6 +80,27 @@ func newPtraceTestApp(t *testing.T, mutate func(*config.Config)) *App {
 	return app
 }
 
+type appPtraceSessionResolverForTest struct{}
+
+func (*appPtraceSessionResolverForTest) ResolveSessionID(int32) (string, bool) {
+	return "test-session", true
+}
+
+func TestDBProxySessionResolver_NilTracerReturnsNil(t *testing.T) {
+	app := &App{}
+	if got := app.dbProxySessionResolver(); got != nil {
+		t.Fatalf("dbProxySessionResolver() = %T, want nil", got)
+	}
+}
+
+func TestDBProxySessionResolver_TestOverrideWins(t *testing.T) {
+	resolver := &appPtraceSessionResolverForTest{}
+	app := &App{dbProxySessionResolverForTest: resolver}
+	if got := app.dbProxySessionResolver(); got != resolver {
+		t.Fatalf("dbProxySessionResolver() = %T, want test override", got)
+	}
+}
+
 // TestInitPtraceTracer_AttachModePidFromTargetPID verifies the runtime path
 // for `sandbox.ptrace.attach_mode: "pid"` with `target_pid: N` actually
 // attaches to the configured pid.

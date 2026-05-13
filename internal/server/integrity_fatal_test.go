@@ -116,6 +116,47 @@ func TestServer_Run_RejectsMissingHTTPListener(t *testing.T) {
 	}
 }
 
+func TestServer_New_DBObservePolicyDoesNotStartGlobalProxy(t *testing.T) {
+	cfg := testServerConfig(t)
+	policyContent := `version: 1
+name: default
+policies:
+  db:
+    unavoidability: observe
+command_rules:
+  - name: allow-all
+    commands: ["*"]
+    decision: allow
+file_rules:
+  - name: allow-all
+    paths: ["/**"]
+    operations: ["*"]
+    decision: allow
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: 127.0.0.1:5432
+    tls_mode: terminate_reissue
+database_connection_rules:
+  - name: allow-appdb
+    db_service: appdb
+    decision: allow
+`
+	if err := os.WriteFile(filepath.Join(cfg.Policies.Dir, "default.yaml"), []byte(policyContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(cfg)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("listening not permitted in this environment: %v", err)
+		}
+		t.Fatalf("New() error = %v, want nil without global DB proxy construction", err)
+	}
+	defer s.Close()
+}
+
 func TestServer_New_ReleasesJSONLLockWhenWebhookConfigInvalid(t *testing.T) {
 	cfg := testServerConfig(t)
 	cfg.Audit.Output = filepath.Join(filepath.Dir(cfg.Sessions.BaseDir), "audit.jsonl")
