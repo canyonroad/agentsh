@@ -594,9 +594,22 @@ func TestSpine_Passthrough_BytePump(t *testing.T) {
 
 func TestSpine_ReplicationOptIn_BytePump_EmitsDVW(t *testing.T) {
 	// Read the StartupMessage the proxy forwards, then echo subsequent bytes.
-	echoAfterStartup := func(t *testing.T, be *pgproto3.Backend, conn net.Conn) error {
-		if _, err := be.ReceiveStartupMessage(); err != nil {
+	echoAfterStartup := func(t *testing.T, _ *pgproto3.Backend, conn net.Conn) error {
+		t.Helper()
+		hdr := make([]byte, 4)
+		if _, err := io.ReadFull(conn, hdr); err != nil {
 			return err
+		}
+		bodyLen := int(binary.BigEndian.Uint32(hdr)) - 4
+		if bodyLen < 0 {
+			return fmt.Errorf("invalid StartupMessage length: %d", bodyLen+4)
+		}
+		body := make([]byte, bodyLen)
+		if _, err := io.ReadFull(conn, body); err != nil {
+			return err
+		}
+		if !bytes.Contains(body, []byte("replication\x00true")) {
+			return fmt.Errorf("upstream startup body missing replication=true: %q", body)
 		}
 		// Echo subsequent bytes verbatim until the client closes.
 		buf := make([]byte, 256)
