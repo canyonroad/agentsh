@@ -1033,6 +1033,8 @@ Three explicit scoping clauses:
 
 Inside this scope, the threat model and defenses below apply. Outside this scope, AgentSH makes no claim. Customer-facing material should always pair the unavoidability claim with these scoping clauses.
 
+For declared Phase 1 Postgres services, `policies.db.unavoidability: enforce` is the high-assurance recommendation once the Plan 07c real-Postgres integration suite is passing in CI. The claim is scoped to processes inside the AgentSH-governed process tree, declared DB services, and an uncompromised AgentSH supervisor plus DB proxy. Aurora Postgres, Redshift, CockroachDB, MySQL, and MariaDB remain outside the automated high-assurance CI claim for Phase 1.
+
 ### 12.2 Threat model
 
 An agent process (or any process in its tree) may attempt to bypass the proxy by:
@@ -1648,7 +1650,7 @@ Required test categories:
 8. CancelRequest mapping.
 9. Transaction state tracking and `deny_mode_in_tx`.
 10. Unavoidability bundle generation from `db_services` config.
-11. Integration tests against real Postgres, Aurora PG, Redshift, CockroachDB.
+11. Required CI integration tests against real Postgres; Aurora PG, Redshift, and CockroachDB remain best-effort/manual validation targets outside the automated Phase 1 high-assurance claim.
 
 The first four steps can be built and tested without any socket code. That's the right place to start.
 

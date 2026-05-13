@@ -37,6 +37,7 @@ type cancelMapConfig struct {
 }
 
 type cancelMeta struct {
+	AgentSessionID  string
 	ServiceName     string
 	UpstreamAddr    string
 	ClientIdentity  string

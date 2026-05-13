@@ -100,6 +100,7 @@ func forwardAuth(ctx context.Context, pc *proxyConn) error {
 			// could reuse the slice in some impls).
 			pc.state.upstreamBKD.SecretKey = append(pc.state.upstreamBKD.SecretKey[:0], m.SecretKey...)
 			reg, err := pc.srv.cancelMap.Register(cancelMeta{
+				AgentSessionID:  pc.state.agentSessionID,
 				ServiceName:     pc.svc.Name,
 				UpstreamAddr:    pc.svc.Upstream,
 				ClientIdentity:  pc.state.clientIdentity,

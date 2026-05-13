@@ -74,6 +74,8 @@ var pendingTypes = map[string]struct{}{
 	// DNS Activity (4003) — Task 20
 	"dns_query":    {},
 	"dns_redirect": {},
+	// DB Activity - pending a dedicated OCSF database projection.
+	"db_statement": {},
 	// Detection Finding (2004) — Task 21
 	"command_policy":                {},
 	"seccomp_blocked":               {},

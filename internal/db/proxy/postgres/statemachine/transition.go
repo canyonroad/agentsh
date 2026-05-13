@@ -96,9 +96,17 @@ func handleSync(s ConnState, _ *SyncFrame) (ConnState, []Action) {
 		next.Absorbing = false
 		return next, []Action{&ActionSynthReadyForQuery{Status: 'I'}}
 	default:
-		// Not absorbing but dirty: forward; upstream RFQ flows back.
-		return s, []Action{&ActionForward{}}
+		// Not absorbing but dirty: this Sync completes an allowed extended
+		// query batch. Drain upstream responses through RFQ so the client does
+		// not deadlock waiting for frames the proxy has not read.
+		next := s
+		next.UpstreamDirtySinceSync = false
+		return next, []Action{&ActionForward{}, &ActionDrainUntilRFQ{}}
 	}
+}
+
+func portalCacheKey(name string) string {
+	return "\x00portal:" + name
 }
 
 func handleParse(
@@ -160,13 +168,15 @@ func handleBind(s ConnState, f *BindFrame, cache CacheView) (ConnState, []Action
 	if s.Absorbing {
 		return s, []Action{&ActionSuppress{}}
 	}
-	if _, ok := cache.Get(f.Statement); !ok {
+	entry, ok := cache.Get(f.Statement)
+	if !ok {
 		next := s
 		next.Absorbing = true
 		return next, []Action{
 			&ActionSynthError{SQLState: "34000", Message: "prepared statement \"" + f.Statement + "\" does not exist"},
 		}
 	}
+	cache.Put(portalCacheKey(f.Portal), entry)
 	next := s
 	next.UpstreamDirtySinceSync = true
 	return next, []Action{&ActionForward{}}
@@ -188,12 +198,9 @@ func handleExecute(
 	if s.Absorbing {
 		return s, []Action{&ActionSuppress{}}
 	}
-	// Portal name → prepared-statement classification. Plan 05a does not
-	// maintain a portal→statement map separately; the client-issued portal
-	// name is used as the cache key directly. In the typical pgx pipeline
-	// the portal name == statement name. Plan 05b adds a portal map for
-	// workloads that use distinct portal/statement names.
-	if _, ok := cache.Get(f.Portal); !ok {
+	// Portal entries are stored in a separate synthetic keyspace so Close(P)
+	// cannot collide with prepared statement names from Parse/Close(S).
+	if _, ok := cache.Get(portalCacheKey(f.Portal)); !ok {
 		next := s
 		next.Absorbing = true
 		return next, []Action{
@@ -221,8 +228,11 @@ func handleClose(s ConnState, f *CloseFrame, cache CacheView) (ConnState, []Acti
 	if s.Absorbing {
 		return s, []Action{&ActionSuppress{}}
 	}
-	if f.ObjectType == 'S' {
+	switch f.ObjectType {
+	case 'S':
 		cache.Delete(f.Name)
+	case 'P':
+		cache.Delete(portalCacheKey(f.Name))
 	}
 	next := s
 	next.UpstreamDirtySinceSync = true

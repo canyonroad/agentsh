@@ -91,10 +91,11 @@ func buildStatementEvent(a buildArgs) events.DBEvent {
 	}
 
 	predicates := events.EventPredicates{HasFilter: hasFilter(a.Stmt)}
+	opGroup, opGroupID, opSubtype := operationFromStatement(a.Stmt)
 
 	return events.DBEvent{
 		EventID:            newEventID(),
-		SessionID:          a.Conn.clientIdentity,
+		SessionID:          eventSessionID(a.Conn.agentSessionID, a.Conn.clientIdentity),
 		CommandID:          fmt.Sprintf("%s:%d", a.BatchSHA, a.StmtIndex),
 		Timestamp:          timeNow(),
 		DBService:          a.Conn.dbService,
@@ -105,6 +106,9 @@ func buildStatementEvent(a buildArgs) events.DBEvent {
 		ApplicationName:    a.Conn.appName,
 		ClientIdentity:     a.Conn.clientIdentity,
 		Effects:            a.Stmt.Effects,
+		OperationGroup:     opGroup,
+		OperationGroupID:   opGroupID,
+		OperationSubtype:   opSubtype,
 		RawVerb:            a.Stmt.RawVerb,
 		ParserBackend:      a.Stmt.ParserBackend,
 		StatementText:      stmtText,
@@ -121,7 +125,7 @@ func buildStatementEvent(a buildArgs) events.DBEvent {
 func buildCancelEvent(entry cancelEntry, d policy.Decision, resultErr string) events.DBEvent {
 	return events.DBEvent{
 		EventID:            newEventID(),
-		SessionID:          entry.ClientIdentity,
+		SessionID:          eventSessionID(entry.AgentSessionID, entry.ClientIdentity),
 		Timestamp:          timeNow(),
 		DBService:          entry.ServiceName,
 		DBFamily:           "postgres",
@@ -132,12 +136,28 @@ func buildCancelEvent(entry cancelEntry, d policy.Decision, resultErr string) ev
 		ClientIdentity:     entry.ClientIdentity,
 		Effects:            []effects.Effect{{Group: effects.GroupSession, Subtype: effects.SubtypeCancelRequest}},
 		OperationGroup:     "session",
+		OperationGroupID:   effects.GroupSession.ID(),
 		OperationSubtype:   "cancel_request",
 		StatementRedaction: events.RedactionNone,
 		Decision:           buildDecision(d, false),
 		Result:             events.EventResult{ErrorCode: resultErr},
 		TxContext:          events.EventTxContext{DenyAction: "none"},
 	}
+}
+
+func eventSessionID(agentSessionID, clientIdentity string) string {
+	if agentSessionID != "" {
+		return agentSessionID
+	}
+	return clientIdentity
+}
+
+func operationFromStatement(stmt effects.ClassifiedStatement) (string, uint8, string) {
+	primary, ok := stmt.Primary()
+	if !ok {
+		return "", 0, ""
+	}
+	return primary.Group.String(), primary.Group.ID(), primary.Subtype.String()
 }
 
 func buildDecision(d policy.Decision, deniedBySibling bool) events.EventDecision {

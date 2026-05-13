@@ -106,6 +106,22 @@ func TestTransition_Sync_Absorbing_NotDirty(t *testing.T) {
 	}
 }
 
+func TestTransition_Sync_NotAbsorbing_Dirty(t *testing.T) {
+	s := ConnState{LastUpstreamRFQ: 'I', Absorbing: false, UpstreamDirtySinceSync: true}
+	cache := NewFakeCacheView()
+	next, acts := Transition(s, &SyncFrame{}, cache, dummyRules(t), "appdb")
+	want := []Action{&ActionForward{}, &ActionDrainUntilRFQ{}}
+	if diff := cmp.Diff(want, acts); diff != "" {
+		t.Errorf("acts diff: %s", diff)
+	}
+	if next.Absorbing {
+		t.Error("absorbing should remain false")
+	}
+	if next.UpstreamDirtySinceSync {
+		t.Error("dirty should reset")
+	}
+}
+
 // Parse handler --------------------------------------------------------------
 
 func TestTransition_Parse_Allow_PopulatesCacheAndForwards(t *testing.T) {
@@ -219,6 +235,45 @@ func TestTransition_Bind_CacheHit_Forwards(t *testing.T) {
 	}
 }
 
+func TestTransition_Bind_DistinctPortalPopulatesPortalKeyAndExecuteForwards(t *testing.T) {
+	s := ConnState{LastUpstreamRFQ: 'I'}
+	cache := NewFakeCacheView()
+	cache.Put("s1", CacheValue{Verb: "SELECT"})
+	_, bindActs := Transition(s, &BindFrame{Portal: "p1", Statement: "s1"}, cache, mustDecode(t, denyDeletePolicyYAML()), "appdb")
+	if diff := cmp.Diff([]Action{&ActionForward{}}, bindActs); diff != "" {
+		t.Fatalf("Bind acts diff: %s", diff)
+	}
+	if _, ok := cache.Get(portalCacheKey("p1")); !ok {
+		t.Fatal("Bind did not populate portal key")
+	}
+	if _, ok := cache.Get("p1"); ok {
+		t.Fatal("Bind populated raw portal name in prepared statement keyspace")
+	}
+
+	_, execActs := Transition(s, &ExecuteFrame{Portal: "p1"}, cache, mustDecode(t, denyDeletePolicyYAML()), "appdb")
+	if diff := cmp.Diff([]Action{&ActionForward{}}, execActs); diff != "" {
+		t.Errorf("Execute acts diff: %s", diff)
+	}
+}
+
+func TestTransition_Bind_SamePortalClosePortalRetainsPreparedStatement(t *testing.T) {
+	s := ConnState{LastUpstreamRFQ: 'I'}
+	cache := NewFakeCacheView()
+	cache.Put("s", CacheValue{Verb: "SELECT"})
+	_, bindActs := Transition(s, &BindFrame{Portal: "s", Statement: "s"}, cache, mustDecode(t, denyDeletePolicyYAML()), "appdb")
+	if diff := cmp.Diff([]Action{&ActionForward{}}, bindActs); diff != "" {
+		t.Fatalf("Bind acts diff: %s", diff)
+	}
+	_, closeActs := Transition(s, &CloseFrame{ObjectType: 'P', Name: "s"}, cache, mustDecode(t, denyDeletePolicyYAML()), "appdb")
+	if diff := cmp.Diff([]Action{&ActionForward{}}, closeActs); diff != "" {
+		t.Fatalf("Close acts diff: %s", diff)
+	}
+	_, secondBindActs := Transition(s, &BindFrame{Portal: "again", Statement: "s"}, cache, mustDecode(t, denyDeletePolicyYAML()), "appdb")
+	if diff := cmp.Diff([]Action{&ActionForward{}}, secondBindActs); diff != "" {
+		t.Errorf("second Bind acts diff: %s", diff)
+	}
+}
+
 func TestTransition_Bind_CacheMiss_SynthErrorAndAbsorb(t *testing.T) {
 	s := ConnState{LastUpstreamRFQ: 'I'}
 	cache := NewFakeCacheView()
@@ -265,7 +320,7 @@ func TestTransition_Describe_Absorbing_Suppresses(t *testing.T) {
 
 func TestTransition_Execute_CacheHit_AllowForwards(t *testing.T) {
 	cache := NewFakeCacheView()
-	cache.Put("p1", CacheValue{Verb: "SELECT"})
+	cache.Put(portalCacheKey("p1"), CacheValue{Verb: "SELECT"})
 	_, acts := Transition(ConnState{LastUpstreamRFQ: 'I'}, &ExecuteFrame{Portal: "p1"}, cache, mustDecode(t, denyDeletePolicyYAML()), "appdb")
 	if diff := cmp.Diff([]Action{&ActionForward{}}, acts); diff != "" {
 		t.Errorf("diff: %s", diff)
@@ -311,6 +366,22 @@ func TestTransition_Close_DeletesCacheEntry(t *testing.T) {
 	}
 	if _, ok := cache.Get("s1"); ok {
 		t.Error("cache should not retain s1 after Close")
+	}
+}
+
+func TestTransition_Close_PortalDeletesOnlyPortalKey(t *testing.T) {
+	cache := NewFakeCacheView()
+	cache.Put("s", CacheValue{Verb: "SELECT"})
+	cache.Put(portalCacheKey("s"), CacheValue{Verb: "SELECT"})
+	_, acts := Transition(ConnState{LastUpstreamRFQ: 'I'}, &CloseFrame{ObjectType: 'P', Name: "s"}, cache, mustDecode(t, denyDeletePolicyYAML()), "appdb")
+	if diff := cmp.Diff([]Action{&ActionForward{}}, acts); diff != "" {
+		t.Errorf("diff: %s", diff)
+	}
+	if _, ok := cache.Get("s"); !ok {
+		t.Error("Close(P) deleted prepared statement key")
+	}
+	if _, ok := cache.Get(portalCacheKey("s")); ok {
+		t.Error("Close(P) retained portal key")
 	}
 }
 

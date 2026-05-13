@@ -1,6 +1,6 @@
 # DB Access Plan 07 Split - Unavoidability Design
 
-**Status:** Draft for user review.
+**Status:** Implemented.
 **Date:** 2026-05-13
 **Source roadmap:** `docs/superpowers/specs/2026-05-08-db-access-phase-1-roadmap-design.md`
 **Source spec:** `docs/agentsh-db-access-spec.md` v0.8, sections 11.1, 12, 17, and 23.4 steps 10-11.
@@ -49,7 +49,7 @@ Add integration coverage that exercises the full path:
 - Client traffic through the redirected path.
 - Direct bypass attempts.
 
-Plan 07c closes Phase 1 by updating documentation and defaults so `policies.db.unavoidability: enforce` is the high-assurance recommendation.
+Plan 07c is the CI closeout gate: it runs `go test -v -tags=integration ./internal/integration/...` against a real `postgres:16-alpine` container, exercises the AgentSH Postgres proxy path through a governed session, and asserts `db_bypass_attempt` plus `db_listener_auth_fail` lifecycle events. Plan 07 is complete only after that suite passes in CI.
 
 ## Architecture
 
@@ -198,7 +198,7 @@ The canonical event for a 60-second window carries `suppressed_count`, updated a
 
 ## 07c Integration Coverage
 
-Plan 07c should use a real Postgres server as the required integration target. Testcontainers are preferred when available in CI; otherwise the tests should be gated with explicit environment variables and skipped with clear messages.
+Plan 07c should use a real Postgres server as the required integration target. The required 07c Postgres tests run through Testcontainers in CI; Docker or Postgres startup failure is a gate failure, not a skip.
 
 Required flows:
 
@@ -272,4 +272,4 @@ Fail closed where the boundary would otherwise weaken:
 2. Land 07b with SessionID listener auth and bypass-event mapping.
 3. Land 07c with integration tests and documentation updates.
 
-After 07c passes, the roadmap's Plan 07 is complete and DB Access Phase 1 can claim `policies.db.unavoidability: enforce` as the high-assurance default for declared DB services.
+After 07c passes in CI, Plan 07 is complete and DB Access Phase 1 recommends `policies.db.unavoidability: enforce` for declared Postgres services inside the AgentSH-governed process tree. This recommendation assumes an uncompromised AgentSH supervisor and DB proxy.

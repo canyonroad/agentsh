@@ -35,18 +35,18 @@ func connStateForTest(svc, dialect, tlsMode string) connState {
 func TestBuildStatementEvent_FullTier_VerbatimSlice(t *testing.T) {
 	sql := "SELECT 1; SELECT 2"
 	stmt := effects.ClassifiedStatement{
-		Effects: []effects.Effect{{Group: effects.GroupRead, Resolution: effects.ResolutionQualified}},
+		Effects:     []effects.Effect{{Group: effects.GroupRead, Resolution: effects.ResolutionQualified}},
 		SourceStart: 0, SourceEnd: 8, RawVerb: "SELECT",
 	}
 	parser := classify_pg.New(classify_pg.DialectPostgres)
 	ev := buildStatementEvent(buildArgs{
 		Stmt: stmt, StmtIndex: 0, BatchTotal: 2,
 		Decision: policy.Decision{Verb: policy.VerbAllow, RuleKind: policy.RuleKindStatement, RuleName: "app-allow-read"},
-		SQL: sql, Tier: policy.RedactFull,
-		Conn: connStateForTest("appdb", "postgres", "terminate_reissue"),
+		SQL:      sql, Tier: policy.RedactFull,
+		Conn:       connStateForTest("appdb", "postgres", "terminate_reissue"),
 		DenyAction: "none",
-		BatchSHA: sha256Hex(sql),
-		Parser: parser,
+		BatchSHA:   sha256Hex(sql),
+		Parser:     parser,
 	})
 	if ev.StatementText != "SELECT 1" {
 		t.Fatalf("StatementText = %q want %q", ev.StatementText, "SELECT 1")
@@ -65,6 +65,63 @@ func TestBuildStatementEvent_FullTier_VerbatimSlice(t *testing.T) {
 	}
 }
 
+func TestBuildStatementEvent_UsesAgentSessionAndPrimaryOperation(t *testing.T) {
+	sql := "COPY users TO STDOUT"
+	stmt := effects.ClassifiedStatement{
+		RawVerb: "COPY_TO_STDOUT",
+		Effects: []effects.Effect{{
+			Group:   effects.GroupBulkExport,
+			Subtype: effects.SubtypeCopyToStdout,
+		}},
+		SourceStart: 0, SourceEnd: int32(len(sql)),
+	}
+	conn := connStateForTest("appdb", "postgres", "terminate_plaintext_upstream")
+	conn.agentSessionID = "session-123"
+	parser := classify_pg.New(classify_pg.DialectPostgres)
+
+	ev := buildStatementEvent(buildArgs{
+		Stmt: stmt, SQL: sql, Tier: policy.RedactParametersRedacted,
+		Conn:       conn,
+		Decision:   policy.Decision{Verb: policy.VerbAllow, RuleKind: policy.RuleKindStatement},
+		DenyAction: "none",
+		BatchSHA:   sha256Hex(sql),
+		Parser:     parser,
+	})
+
+	if ev.SessionID != "session-123" {
+		t.Fatalf("SessionID = %q, want agent session", ev.SessionID)
+	}
+	if ev.ClientIdentity != "uid:1000" {
+		t.Fatalf("ClientIdentity = %q, want peer identity", ev.ClientIdentity)
+	}
+	if ev.OperationGroup != "bulk_export" || ev.OperationGroupID != effects.GroupBulkExport.ID() {
+		t.Fatalf("operation = %q/%d, want bulk_export/%d", ev.OperationGroup, ev.OperationGroupID, effects.GroupBulkExport.ID())
+	}
+	if ev.OperationSubtype != "copy_to_stdout" {
+		t.Fatalf("OperationSubtype = %q, want copy_to_stdout", ev.OperationSubtype)
+	}
+}
+
+func TestBuildCancelEvent_UsesAgentSessionID(t *testing.T) {
+	ev := buildCancelEvent(cancelEntry{
+		cancelMeta: cancelMeta{
+			AgentSessionID: "session-123",
+			ServiceName:    "appdb",
+			ClientIdentity: "uid:1000",
+		},
+	}, policy.Decision{Verb: policy.VerbAllow, RuleKind: policy.RuleKindCancel}, "")
+
+	if ev.SessionID != "session-123" {
+		t.Fatalf("SessionID = %q, want agent session", ev.SessionID)
+	}
+	if ev.ClientIdentity != "uid:1000" {
+		t.Fatalf("ClientIdentity = %q, want peer identity", ev.ClientIdentity)
+	}
+	if ev.OperationGroup != "session" || ev.OperationGroupID != effects.GroupSession.ID() {
+		t.Fatalf("operation = %q/%d, want session/%d", ev.OperationGroup, ev.OperationGroupID, effects.GroupSession.ID())
+	}
+}
+
 func TestBuildStatementEvent_DigestStableAcrossTiers(t *testing.T) {
 	sql := "SELECT 'hello'"
 	stmt := effects.ClassifiedStatement{
@@ -76,11 +133,11 @@ func TestBuildStatementEvent_DigestStableAcrossTiers(t *testing.T) {
 	for _, tier := range []policy.RedactionTier{policy.RedactFull, policy.RedactParametersRedacted, policy.RedactNone} {
 		ev := buildStatementEvent(buildArgs{
 			Stmt: stmt, SQL: sql, Tier: tier,
-			Conn: connStateForTest("appdb", "postgres", "terminate_reissue"),
-			Decision: policy.Decision{Verb: policy.VerbAllow, RuleKind: policy.RuleKindStatement},
+			Conn:       connStateForTest("appdb", "postgres", "terminate_reissue"),
+			Decision:   policy.Decision{Verb: policy.VerbAllow, RuleKind: policy.RuleKindStatement},
 			DenyAction: "none",
-			BatchSHA: sha256Hex(sql),
-			Parser: parser,
+			BatchSHA:   sha256Hex(sql),
+			Parser:     parser,
 		})
 		digests[tier] = ev.StatementDigest
 	}
@@ -100,12 +157,12 @@ func TestBuildStatementEvent_DeniedBySibling(t *testing.T) {
 	ev := buildStatementEvent(buildArgs{
 		Stmt: stmt0, StmtIndex: 0, BatchTotal: 2,
 		Decision: policy.Decision{Verb: policy.VerbDeny, RuleKind: policy.RuleKindStatement, Reason: "denied by sibling statement"},
-		SQL: sql, Tier: policy.RedactParametersRedacted,
-		Conn: connStateForTest("appdb", "postgres", "terminate_reissue"),
-		DenyAction: "none",
+		SQL:      sql, Tier: policy.RedactParametersRedacted,
+		Conn:              connStateForTest("appdb", "postgres", "terminate_reissue"),
+		DenyAction:        "none",
 		IsDeniedBySibling: true,
-		BatchSHA: sha256Hex(sql),
-		Parser: parser,
+		BatchSHA:          sha256Hex(sql),
+		Parser:            parser,
 	})
 	if ev.Decision.Verb != "deny" {
 		t.Fatalf("Decision.Verb = %q want deny", ev.Decision.Verb)
@@ -127,11 +184,11 @@ func TestBuildStatementEvent_NoneTierStripsText(t *testing.T) {
 	parser := classify_pg.New(classify_pg.DialectPostgres)
 	ev := buildStatementEvent(buildArgs{
 		Stmt: stmt, SQL: sql, Tier: policy.RedactNone,
-		Conn: connStateForTest("appdb", "postgres", "terminate_reissue"),
-		Decision: policy.Decision{Verb: policy.VerbAllow, RuleKind: policy.RuleKindStatement},
+		Conn:       connStateForTest("appdb", "postgres", "terminate_reissue"),
+		Decision:   policy.Decision{Verb: policy.VerbAllow, RuleKind: policy.RuleKindStatement},
 		DenyAction: "none",
-		BatchSHA: sha256Hex(sql),
-		Parser: parser,
+		BatchSHA:   sha256Hex(sql),
+		Parser:     parser,
 	})
 	if ev.StatementText != "" {
 		t.Fatalf("StatementText must be empty under RedactNone: %q", ev.StatementText)
@@ -155,14 +212,14 @@ func TestBuildEvent_TxStartedAt_PopulatedWhenInTx(t *testing.T) {
 	}
 	parser := classify_pg.New(classify_pg.DialectPostgres)
 	ev := buildStatementEvent(buildArgs{
-		Stmt:     stmt,
-		SQL:      sql,
-		Tier:     policy.RedactParametersRedacted,
-		Conn:     conn,
-		Decision: policy.Decision{Verb: policy.VerbAllow, RuleKind: policy.RuleKindStatement},
+		Stmt:       stmt,
+		SQL:        sql,
+		Tier:       policy.RedactParametersRedacted,
+		Conn:       conn,
+		Decision:   policy.Decision{Verb: policy.VerbAllow, RuleKind: policy.RuleKindStatement},
 		DenyAction: "none",
-		BatchSHA: sha256Hex(sql),
-		Parser:   parser,
+		BatchSHA:   sha256Hex(sql),
+		Parser:     parser,
 	})
 	if !ev.TxContext.InTransaction {
 		t.Error("InTransaction should be true under LastUpstreamRFQ='T'")
@@ -182,14 +239,14 @@ func TestBuildEvent_DenyActionRollbackInjected(t *testing.T) {
 	}
 	parser := classify_pg.New(classify_pg.DialectPostgres)
 	ev := buildStatementEvent(buildArgs{
-		Stmt:     stmt,
-		SQL:      sql,
-		Tier:     policy.RedactParametersRedacted,
-		Conn:     conn,
-		Decision: policy.Decision{Verb: policy.VerbDeny, RuleName: "block-delete-soft"},
+		Stmt:       stmt,
+		SQL:        sql,
+		Tier:       policy.RedactParametersRedacted,
+		Conn:       conn,
+		Decision:   policy.Decision{Verb: policy.VerbDeny, RuleName: "block-delete-soft"},
 		DenyAction: "rollback_injected",
-		BatchSHA: sha256Hex(sql),
-		Parser:   parser,
+		BatchSHA:   sha256Hex(sql),
+		Parser:     parser,
 	})
 	if ev.TxContext.DenyAction != "rollback_injected" {
 		t.Errorf("DenyAction=%q want rollback_injected", ev.TxContext.DenyAction)
@@ -209,14 +266,14 @@ func TestBuildEvent_PropagatesFunctionOID(t *testing.T) {
 	}
 	parser := classify_pg.New(classify_pg.DialectPostgres)
 	ev := buildStatementEvent(buildArgs{
-		Stmt:     stmt,
-		SQL:      sql,
-		Tier:     policy.RedactParametersRedacted,
-		Conn:     connStateForTest("appdb", "postgres", "terminate_reissue"),
-		Decision: policy.Decision{Verb: policy.VerbAllow},
+		Stmt:       stmt,
+		SQL:        sql,
+		Tier:       policy.RedactParametersRedacted,
+		Conn:       connStateForTest("appdb", "postgres", "terminate_reissue"),
+		Decision:   policy.Decision{Verb: policy.VerbAllow},
 		DenyAction: "none",
-		BatchSHA: sha256Hex(sql),
-		Parser:   parser,
+		BatchSHA:   sha256Hex(sql),
+		Parser:     parser,
 	})
 	if len(ev.Effects) != 1 {
 		t.Fatalf("len(Effects)=%d want 1", len(ev.Effects))

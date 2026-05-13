@@ -21,6 +21,7 @@ import (
 // 04b₂ grows this with upstream-side fields (BackendKeyData, RFQ tracker).
 type connState struct {
 	dbService      string
+	agentSessionID string
 	dbUser         string
 	database       string
 	appName        string
@@ -100,6 +101,7 @@ func newProxyConn(srv *Server, svc Service, conn net.Conn, peerUID uint32) *prox
 		backend: pgproto3.NewBackend(conn, conn),
 		state: &connState{
 			dbService:      svc.Name,
+			agentSessionID: srv.cfg.AgentSessionID,
 			peerUID:        peerUID,
 			clientIdentity: clientIdentityFromUID(peerUID),
 			smState:        &statemachine.ConnState{},
