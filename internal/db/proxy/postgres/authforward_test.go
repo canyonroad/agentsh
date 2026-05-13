@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -65,6 +66,13 @@ func newTestProxyConnForAuth(t *testing.T, clientSide, upstreamSide net.Conn) *p
 func TestForwardAuth_AuthOK_ForwardsToRFQ(t *testing.T) {
 	clientFE, proxyClientBE, proxyUpstreamFE, upstreamBE := pairedConns(t)
 	pc := newTestProxyConnForAuth(t, proxyClientBE, proxyUpstreamFE)
+	syntheticSecret := []byte{0, 0, 0, 7}
+	pc.srv.cancelMap = newCancelMap(cancelMapConfig{
+		Max: 10,
+		Generate: fixedCancelKeyGenerator([]generatedCancelKey{
+			{pid: 1001, secret: syntheticSecret},
+		}),
+	})
 	upstreamScript := pgproto3.NewBackend(upstreamBE, upstreamBE)
 	clientReader := pgproto3.NewFrontend(clientFE, clientFE)
 
@@ -82,6 +90,7 @@ func TestForwardAuth_AuthOK_ForwardsToRFQ(t *testing.T) {
 
 	// Client side: read four frames; expect AuthenticationOk → PS → BKD → RFQ.
 	doneClient := make(chan error, 1)
+	clientBKD := make(chan *pgproto3.BackendKeyData, 1)
 	go func() {
 		var rfqSeen bool
 		for !rfqSeen {
@@ -89,6 +98,9 @@ func TestForwardAuth_AuthOK_ForwardsToRFQ(t *testing.T) {
 			if err != nil {
 				doneClient <- err
 				return
+			}
+			if bkd, ok := msg.(*pgproto3.BackendKeyData); ok {
+				clientBKD <- bkd
 			}
 			if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
 				rfqSeen = true
@@ -105,9 +117,85 @@ func TestForwardAuth_AuthOK_ForwardsToRFQ(t *testing.T) {
 	if err := <-doneClient; err != nil {
 		t.Fatalf("client reader: %v", err)
 	}
+	select {
+	case bkd := <-clientBKD:
+		if bkd.ProcessID == 12345 || bytes.Equal(bkd.SecretKey, secretBytes) {
+			t.Fatalf("client received real upstream BKD: PID=%d SecretKey=%x", bkd.ProcessID, bkd.SecretKey)
+		}
+		entry, status := pc.srv.cancelMap.Lookup(bkd.ProcessID, bkd.SecretKey)
+		if status != cancelLookupFound {
+			t.Fatalf("Lookup synthetic key status = %v, want found", status)
+		}
+		if entry.RealPID != 12345 || !bytes.Equal(entry.RealSecret, secretBytes) {
+			t.Fatalf("mapped real key = (%d,%x), want (12345,%x)", entry.RealPID, entry.RealSecret, secretBytes)
+		}
+	default:
+		t.Fatal("client did not receive BackendKeyData")
+	}
 	if pc.state.upstreamBKD.PID != 12345 || !bytesEqual(pc.state.upstreamBKD.SecretKey, secretBytes) {
 		t.Errorf("BKD not captured: got PID=%d SecretKey=%x, want PID=12345 SecretKey=%x",
 			pc.state.upstreamBKD.PID, pc.state.upstreamBKD.SecretKey, secretBytes)
+	}
+}
+
+func TestForwardAuth_BackendKeyRegistrationFailure_FailsClosed(t *testing.T) {
+	clientFE, proxyClientBE, proxyUpstreamFE, upstreamBE := pairedConns(t)
+	pc := newTestProxyConnForAuth(t, proxyClientBE, proxyUpstreamFE)
+	pc.srv.cancelMap = newCancelMap(cancelMapConfig{
+		Max: 1,
+		Generate: fixedCancelKeyGenerator([]generatedCancelKey{
+			{pid: 1001, secret: []byte{0, 0, 0, 7}},
+			{pid: 1002, secret: []byte{0, 0, 0, 8}},
+		}),
+	})
+	if _, err := pc.srv.cancelMap.Register(cancelMeta{ServiceName: "seed"}, 42, []byte{0, 0, 0, 9}); err != nil {
+		t.Fatalf("seed Register: %v", err)
+	}
+
+	upstreamScript := pgproto3.NewBackend(upstreamBE, upstreamBE)
+	clientReader := pgproto3.NewFrontend(clientFE, clientFE)
+
+	secretBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(secretBytes, 67890)
+	go func() {
+		upstreamScript.Send(&pgproto3.AuthenticationOk{})
+		upstreamScript.Send(&pgproto3.BackendKeyData{ProcessID: 12345, SecretKey: secretBytes})
+		_ = upstreamScript.Flush()
+		_ = upstreamBE.Close()
+	}()
+
+	clientErrCh := make(chan *pgproto3.ErrorResponse, 1)
+	go func() {
+		for {
+			msg, err := clientReader.Receive()
+			if err != nil {
+				clientErrCh <- nil
+				return
+			}
+			if e, ok := msg.(*pgproto3.ErrorResponse); ok {
+				clientErrCh <- e
+				return
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := forwardAuth(ctx, pc)
+	if !errors.Is(err, errBackendKeyTableFull) {
+		t.Fatalf("forwardAuth err = %v, want errBackendKeyTableFull", err)
+	}
+	var resp *pgproto3.ErrorResponse
+	select {
+	case resp = <-clientErrCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for client ErrorResponse")
+	}
+	if resp == nil {
+		t.Fatal("client did not receive ErrorResponse")
+	}
+	if resp.Message != "BACKEND_KEY_TABLE_FULL" {
+		t.Fatalf("ErrorResponse.Message = %q, want BACKEND_KEY_TABLE_FULL", resp.Message)
 	}
 }
 

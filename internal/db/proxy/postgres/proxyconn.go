@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -157,6 +158,34 @@ func (pc *proxyConn) emitHandshakeFail(ctx context.Context, errorCode string) {
 		SNIHostname:    pc.state.sniHostname,
 	}
 	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, ev)
+}
+
+func cancelMappingErrorCode(err error) string {
+	switch {
+	case errors.Is(err, errBackendKeyGenerationFailed):
+		return "BACKEND_KEY_GENERATION_FAILED"
+	case errors.Is(err, errBackendKeyTableFull):
+		return "BACKEND_KEY_TABLE_FULL"
+	default:
+		return "BACKEND_KEY_MAPPING_FAILED"
+	}
+}
+
+func (pc *proxyConn) emitCancelMappingFail(ctx context.Context, err error) {
+	if pc.srv.cfg.Sink == nil {
+		return
+	}
+	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, events.LifecycleEvent{
+		EventID:        newEventID(),
+		Timestamp:      timeNow(),
+		DBService:      pc.svc.Name,
+		ClientIdentity: pc.state.clientIdentity,
+		Kind:           "db_cancel_mapping_fail",
+		ErrorCode:      cancelMappingErrorCode(err),
+		Reason:         err.Error(),
+		PeerUID:        pc.state.peerUID,
+		SNIHostname:    pc.state.sniHostname,
+	})
 }
 
 // emitDegradedVisibility emits a degraded_visibility_warning LifecycleEvent
