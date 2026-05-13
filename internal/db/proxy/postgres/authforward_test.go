@@ -138,6 +138,92 @@ func TestForwardAuth_AuthOK_ForwardsToRFQ(t *testing.T) {
 	}
 }
 
+func TestForwardAuth_BackendKeyMappingCommittedBeforeClientReceivesSyntheticKey(t *testing.T) {
+	clientFE, proxyClientBE, proxyUpstreamFE, upstreamBE := pairedConns(t)
+	pc := newTestProxyConnForAuth(t, proxyClientBE, proxyUpstreamFE)
+	syntheticSecret := []byte{0, 0, 1, 77}
+	pc.srv.cancelMap = newCancelMap(cancelMapConfig{
+		Max: 10,
+		Generate: fixedCancelKeyGenerator([]generatedCancelKey{
+			{pid: 17001, secret: syntheticSecret},
+		}),
+	})
+	upstreamScript := pgproto3.NewBackend(upstreamBE, upstreamBE)
+	clientReader := pgproto3.NewFrontend(clientFE, clientFE)
+
+	realSecret := []byte{0, 0, 0, 77}
+	go func() {
+		upstreamScript.Send(&pgproto3.AuthenticationOk{})
+		upstreamScript.Send(&pgproto3.BackendKeyData{ProcessID: 777, SecretKey: realSecret})
+		upstreamScript.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		_ = upstreamScript.Flush()
+	}()
+
+	clientBKD := make(chan *pgproto3.BackendKeyData, 1)
+	continueRead := make(chan struct{})
+	doneClient := make(chan error, 1)
+	go func() {
+		for {
+			msg, err := clientReader.Receive()
+			if err != nil {
+				doneClient <- err
+				return
+			}
+			switch m := msg.(type) {
+			case *pgproto3.BackendKeyData:
+				clientBKD <- &pgproto3.BackendKeyData{
+					ProcessID: m.ProcessID,
+					SecretKey: append([]byte(nil), m.SecretKey...),
+				}
+				<-continueRead
+			case *pgproto3.ReadyForQuery:
+				doneClient <- nil
+				return
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	doneForward := make(chan error, 1)
+	go func() { doneForward <- forwardAuth(ctx, pc) }()
+
+	var bkd *pgproto3.BackendKeyData
+	select {
+	case bkd = <-clientBKD:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for client BackendKeyData")
+	}
+	if bkd.ProcessID == 777 && bytes.Equal(bkd.SecretKey, realSecret) {
+		t.Fatalf("client received exact real upstream BKD pair: PID=%d SecretKey=%x", bkd.ProcessID, bkd.SecretKey)
+	}
+	entry, status := pc.srv.cancelMap.Lookup(bkd.ProcessID, bkd.SecretKey)
+	if status != cancelLookupFound {
+		t.Fatalf("Lookup synthetic key status = %v, want found", status)
+	}
+	if entry.RealPID != 777 || !bytes.Equal(entry.RealSecret, realSecret) {
+		t.Fatalf("mapped real key = (%d,%x), want (777,%x)", entry.RealPID, entry.RealSecret, realSecret)
+	}
+	close(continueRead)
+
+	select {
+	case err := <-doneClient:
+		if err != nil {
+			t.Fatalf("client reader: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for client reader")
+	}
+	select {
+	case err := <-doneForward:
+		if err != nil {
+			t.Fatalf("forwardAuth: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for forwardAuth")
+	}
+}
+
 func TestForwardAuth_BackendKeyRegistrationFailure_FailsClosed(t *testing.T) {
 	clientFE, proxyClientBE, proxyUpstreamFE, upstreamBE := pairedConns(t)
 	pc := newTestProxyConnForAuth(t, proxyClientBE, proxyUpstreamFE)

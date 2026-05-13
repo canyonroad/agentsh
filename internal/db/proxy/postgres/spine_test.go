@@ -276,11 +276,8 @@ func TestSpine_TerminateReissue_AuthOK_CloseAtRFQ(t *testing.T) {
 	if bkd == nil {
 		t.Fatal("never received BackendKeyData")
 	}
-	if bkd.ProcessID == 42 {
-		t.Errorf("BKD.ProcessID = %d, want synthetic PID", bkd.ProcessID)
-	}
-	if bytes.Equal(bkd.SecretKey, wantSecret) {
-		t.Errorf("BKD.SecretKey = %x, want synthetic secret", bkd.SecretKey)
+	if bkd.ProcessID == 42 && bytes.Equal(bkd.SecretKey, wantSecret) {
+		t.Fatalf("client received exact real upstream BKD pair: PID=%d SecretKey=%x", bkd.ProcessID, bkd.SecretKey)
 	}
 	entry, status := h.srv.cancelMap.Lookup(bkd.ProcessID, bkd.SecretKey)
 	if status != cancelLookupFound {
@@ -311,11 +308,8 @@ func TestSpine_TerminatePlaintextUpstream_AuthOK_CloseAtRFQ(t *testing.T) {
 	if bkd == nil {
 		t.Fatal("never received BackendKeyData")
 	}
-	if bkd.ProcessID == 42 {
-		t.Errorf("BKD.ProcessID = %d, want synthetic PID", bkd.ProcessID)
-	}
-	if bytes.Equal(bkd.SecretKey, wantSecret) {
-		t.Errorf("BKD.SecretKey = %x, want synthetic secret", bkd.SecretKey)
+	if bkd.ProcessID == 42 && bytes.Equal(bkd.SecretKey, wantSecret) {
+		t.Fatalf("client received exact real upstream BKD pair: PID=%d SecretKey=%x", bkd.ProcessID, bkd.SecretKey)
 	}
 	entry, status := h.srv.cancelMap.Lookup(bkd.ProcessID, bkd.SecretKey)
 	if status != cancelLookupFound {
@@ -326,6 +320,139 @@ func TestSpine_TerminatePlaintextUpstream_AuthOK_CloseAtRFQ(t *testing.T) {
 	}
 	if up.AcceptedConns() == 0 {
 		t.Fatal("upstream never received a connection")
+	}
+}
+
+func TestSpine_CancelRequest_UsesSyntheticKeyAndForwardsRealKey(t *testing.T) {
+	upLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer upLn.Close()
+
+	cancelSeen := make(chan []byte, 1)
+	upstreamDone := make(chan error, 1)
+	go func() {
+		authConn, err := upLn.Accept()
+		if err != nil {
+			upstreamDone <- fmt.Errorf("accept auth: %w", err)
+			return
+		}
+		defer authConn.Close()
+
+		be := pgproto3.NewBackend(authConn, authConn)
+		if _, err := be.ReceiveStartupMessage(); err != nil {
+			upstreamDone <- fmt.Errorf("receive startup: %w", err)
+			return
+		}
+		be.Send(&pgproto3.AuthenticationOk{})
+		be.Send(&pgproto3.BackendKeyData{ProcessID: 42, SecretKey: append([]byte(nil), wantSecret...)})
+		be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		if err := be.Flush(); err != nil {
+			upstreamDone <- fmt.Errorf("flush auth: %w", err)
+			return
+		}
+
+		cancelConn, err := upLn.Accept()
+		if err != nil {
+			upstreamDone <- fmt.Errorf("accept cancel: %w", err)
+			return
+		}
+		defer cancelConn.Close()
+
+		buf := make([]byte, len(buildCancelPacketBytes(42, wantSecret)))
+		if _, err := io.ReadFull(cancelConn, buf); err != nil {
+			upstreamDone <- fmt.Errorf("read cancel packet: %w", err)
+			return
+		}
+		cancelSeen <- buf
+		upstreamDone <- nil
+	}()
+
+	rule := `  - name: allow-cancel
+    db_service: appdb
+    match_kind: cancel
+    decision: allow
+`
+	h := startSpineHarness(t, upstreamWithLocalhostHost(upLn.Addr().String()), "terminate_plaintext_upstream", nil, rule)
+	h.srv.cancelMap = newCancelMap(cancelMapConfig{
+		Max: 10,
+		Generate: fixedCancelKeyGenerator([]generatedCancelKey{
+			{pid: 9001, secret: []byte{0, 0, 35, 41}},
+		}),
+	})
+	stop := runServer(t, h.srv)
+	defer stop()
+
+	tlsConn := handRolledTerminateReissueHandshake(t, h.sock, h.ca)
+	defer tlsConn.Close()
+
+	bkd := readUntilRFQ(t, tlsConn)
+	if bkd == nil {
+		t.Fatal("never received BackendKeyData")
+	}
+	if bkd.ProcessID == 42 && bytes.Equal(bkd.SecretKey, wantSecret) {
+		t.Fatalf("client received exact real upstream BKD pair: PID=%d SecretKey=%x", bkd.ProcessID, bkd.SecretKey)
+	}
+	entry, status := h.srv.cancelMap.Lookup(bkd.ProcessID, bkd.SecretKey)
+	if status != cancelLookupFound {
+		t.Fatalf("cancelMap.Lookup status = %v, want %v", status, cancelLookupFound)
+	}
+	if entry.RealPID != 42 || !bytes.Equal(entry.RealSecret, wantSecret) {
+		t.Fatalf("cancel map entry = (%d,%x), want (42,%x)", entry.RealPID, entry.RealSecret, wantSecret)
+	}
+
+	cancelConn, err := net.Dial("unix", h.sock)
+	if err != nil {
+		t.Fatalf("dial unix cancel: %v", err)
+	}
+	defer cancelConn.Close()
+	if _, err := cancelConn.Write(buildCancelPacketBytes(bkd.ProcessID, bkd.SecretKey)); err != nil {
+		t.Fatalf("write cancel: %v", err)
+	}
+
+	wantPacket := buildCancelPacketBytes(42, wantSecret)
+	select {
+	case got := <-cancelSeen:
+		if !bytes.Equal(got, wantPacket) {
+			t.Fatalf("upstream cancel packet = %x, want %x", got, wantPacket)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for upstream cancel packet")
+	}
+	select {
+	case err := <-upstreamDone:
+		if err != nil {
+			t.Fatalf("upstream script: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for upstream script")
+	}
+
+	var evs []events.DBEvent
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		evs = h.sink.DrainStatements()
+		if len(evs) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var cancelEvent *events.DBEvent
+	for i := range evs {
+		if evs[i].Decision.RuleKind == "cancel" {
+			cancelEvent = &evs[i]
+			break
+		}
+	}
+	if cancelEvent == nil {
+		t.Fatalf("no cancel statement event among %+v", evs)
+	}
+	if cancelEvent.Decision.Verb != "allow" {
+		t.Fatalf("Decision.Verb = %q, want allow", cancelEvent.Decision.Verb)
+	}
+	if cancelEvent.Decision.RuleName != "allow-cancel" {
+		t.Fatalf("Decision.RuleName = %q, want allow-cancel", cancelEvent.Decision.RuleName)
 	}
 }
 
