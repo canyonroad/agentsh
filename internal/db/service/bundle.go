@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/agentsh/agentsh/internal/policy"
 )
@@ -51,13 +54,73 @@ func GenerateBundle(cfg Config, opts BundleOptions) (Bundle, error) {
 	if err := validateBundleOptions(cfg, opts); err != nil {
 		return Bundle{}, err
 	}
-	return Bundle{
+	b := Bundle{
 		Policy: policy.Policy{
 			Version:     1,
 			Name:        "db-unavoidability-" + sanitizeRulePart(opts.SessionID),
 			Description: "Generated DB unavoidability bundle for AgentSH session " + opts.SessionID,
 		},
-	}, nil
+	}
+	for _, svc := range cfg.Services {
+		addCoreServiceRules(&b, svc)
+	}
+	b.Policy.Metadata = append([]policy.RuleMetadata(nil), b.Metadata...)
+	return b, nil
+}
+
+func addCoreServiceRules(b *Bundle, svc Service) {
+	servicePart := sanitizeRulePart(svc.Name)
+	destination := serviceDestination(svc)
+	redirectName := "db-" + servicePart + "-redirect"
+	networkName := "db-" + servicePart + "-deny-direct"
+	unixName := "db-" + servicePart + "-deny-local-postgres-sockets"
+
+	b.Policy.ConnectRedirectRules = append(b.Policy.ConnectRedirectRules, policy.ConnectRedirectRule{
+		Name:           redirectName,
+		Match:          "^" + regexp.QuoteMeta(destination) + "$",
+		RedirectToUnix: svc.Listen.Path,
+		Visibility:     "audit_only",
+		OnFailure:      "fail_closed",
+		Message:        "Routed through AgentSH DB proxy",
+	})
+	addMetadata(b, redirectName, svc.Name, BypassModeTCPDirect, destination)
+
+	b.Policy.NetworkRules = append(b.Policy.NetworkRules, policy.NetworkRule{
+		Name:        networkName,
+		Description: "Deny direct DB egress; traffic must use AgentSH DB proxy",
+		Domains:     []string{strings.ToLower(svc.Upstream.Host)},
+		Ports:       []int{svc.Upstream.Port},
+		Decision:    "deny",
+		Message:     "Direct database egress is blocked; use the AgentSH DB proxy",
+	})
+	addMetadata(b, networkName, svc.Name, BypassModeTCPDirect, destination)
+
+	b.Policy.UnixRules = append(b.Policy.UnixRules, policy.UnixSocketRule{
+		Name:        unixName,
+		Description: "Deny direct local Postgres Unix socket access for DB unavoidability",
+		Paths: []string{
+			"/var/run/postgresql/.s.PGSQL.*",
+			"/tmp/.s.PGSQL.*",
+		},
+		Operations: []string{"connect"},
+		Decision:   "deny",
+		Message:    "Direct local database socket access is blocked; use the AgentSH DB proxy",
+	})
+	addMetadata(b, unixName, svc.Name, BypassModeUnixSocket, "postgres-local-sockets")
+}
+
+func addMetadata(b *Bundle, ruleName, serviceName, bypassMode, destination string) {
+	b.Metadata = append(b.Metadata, policy.RuleMetadata{
+		RuleName:    ruleName,
+		Source:      RuleSourceDBUnavoidability,
+		DBService:   serviceName,
+		BypassMode:  bypassMode,
+		Destination: destination,
+	})
+}
+
+func serviceDestination(svc Service) string {
+	return net.JoinHostPort(strings.ToLower(svc.Upstream.Host), strconv.Itoa(svc.Upstream.Port))
 }
 
 func validateBundleOptions(cfg Config, opts BundleOptions) error {
