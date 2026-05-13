@@ -10,9 +10,10 @@ import (
 )
 
 type Policy struct {
-	Version     int    `yaml:"version"`
-	Name        string `yaml:"name"`
-	Description string `yaml:"description"`
+	Version     int            `yaml:"version"`
+	Name        string         `yaml:"name"`
+	Description string         `yaml:"description"`
+	Metadata    []RuleMetadata `yaml:"metadata,omitempty"`
 
 	FileRules            []FileRule            `yaml:"file_rules"`
 	NetworkRules         []NetworkRule         `yaml:"network_rules"`
@@ -65,6 +66,17 @@ type Policy struct {
 	// (e.g. policies.db is owned by internal/db/policy). Each sub-package
 	// reads its own slice via yaml.Marshal/Unmarshal round-trip.
 	Policies yaml.Node `yaml:"policies,omitempty"`
+}
+
+// RuleMetadata is non-enforcing metadata attached to generated policy rules.
+// The policy engine ignores it for decisions; consumers use it to correlate
+// generic rule names back to higher-level generated bundles.
+type RuleMetadata struct {
+	RuleName    string `yaml:"rule_name"`
+	Source      string `yaml:"source"`
+	DBService   string `yaml:"db_service,omitempty"`
+	BypassMode  string `yaml:"bypass_mode,omitempty"`
+	Destination string `yaml:"destination,omitempty"`
 }
 
 type FileRule struct {
@@ -468,6 +480,15 @@ func (p Policy) Validate() error {
 	}
 	if p.Name == "" {
 		return fmt.Errorf("name is required")
+	}
+
+	for i, m := range p.Metadata {
+		if m.RuleName == "" {
+			return fmt.Errorf("metadata[%d]: rule_name is required", i)
+		}
+		if m.Source == "" {
+			return fmt.Errorf("metadata[%d]: source is required", i)
+		}
 	}
 
 	// Validate DNS redirect rules

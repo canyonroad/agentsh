@@ -1203,3 +1203,52 @@ func TestEvaluateConnectRedirect_CaseNormalization(t *testing.T) {
 		})
 	}
 }
+
+func TestPolicyMetadataValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		meta    []RuleMetadata
+		wantErr bool
+	}{
+		{
+			name: "valid db metadata",
+			meta: []RuleMetadata{{
+				RuleName:    "db-appdb-deny-direct",
+				Source:      "db_unavoidability",
+				DBService:   "appdb",
+				BypassMode:  "tcp_direct",
+				Destination: "db.internal:5432",
+			}},
+		},
+		{
+			name: "missing rule name",
+			meta: []RuleMetadata{{
+				Source:      "db_unavoidability",
+				DBService:   "appdb",
+				BypassMode:  "tcp_direct",
+				Destination: "db.internal:5432",
+			}},
+			wantErr: true,
+		},
+		{
+			name: "missing source",
+			meta: []RuleMetadata{{
+				RuleName:    "db-appdb-deny-direct",
+				DBService:   "appdb",
+				BypassMode:  "tcp_direct",
+				Destination: "db.internal:5432",
+			}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := Policy{Version: 1, Name: "test", Metadata: tt.meta}
+			err := p.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
