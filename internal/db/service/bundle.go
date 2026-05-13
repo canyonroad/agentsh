@@ -57,6 +57,9 @@ type Bundle struct {
 }
 
 func GenerateBundle(cfg Config, opts BundleOptions) (Bundle, error) {
+	if err := cfg.validate(); err != nil {
+		return Bundle{}, fmt.Errorf("%w: %v", ErrBundleInvalidOptions, err)
+	}
 	if err := validateBundleOptions(cfg, opts); err != nil {
 		return Bundle{}, err
 	}
@@ -122,11 +125,11 @@ func addCoreServiceRules(b *Bundle, svc Service, servicePart string) {
 }
 
 func addResolvedIPRules(ctx context.Context, b *Bundle, svc Service, servicePart string, opts BundleOptions) error {
-	if opts.Resolver == nil {
-		return nil
-	}
 	if net.ParseIP(svc.Upstream.Host) != nil {
 		return nil
+	}
+	if opts.Resolver == nil {
+		return addDNSExpansionFailure(b, svc, opts, "could not resolve "+svc.Upstream.Host+": no resolver configured")
 	}
 
 	resolveCtx, cancel := context.WithTimeout(ctx, dnsResolutionTimeout)

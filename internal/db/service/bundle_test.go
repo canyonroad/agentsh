@@ -38,12 +38,31 @@ func TestGenerateBundle_RejectsTCPListenerInEnforce(t *testing.T) {
 	}
 }
 
+func TestGenerateBundle_RejectsInvalidServiceConfig(t *testing.T) {
+	svc := validBundleService(t, "appdb")
+	svc.Listen.Path = ""
+
+	_, err := GenerateBundle(Config{Services: []Service{svc}}, BundleOptions{
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		AllowHostnameOnlyInEnforce: true,
+	})
+	if !errors.Is(err, ErrBundleInvalidOptions) {
+		t.Fatalf("GenerateBundle err = %v, want ErrBundleInvalidOptions", err)
+	}
+	if !strings.Contains(err.Error(), "listen.path") {
+		t.Fatalf("error = %v, want listen.path context", err)
+	}
+}
+
 func TestGenerateBundle_SingleServiceCoreRules(t *testing.T) {
 	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
-		SessionID:        "sess-1",
-		ProxySessionID:   "db-proxy-sess",
-		Mode:             UnavoidabilityEnforce,
-		IncludeToolRules: false,
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           false,
+		AllowHostnameOnlyInEnforce: true,
 	})
 	if err != nil {
 		t.Fatalf("GenerateBundle: %v", err)
@@ -103,10 +122,11 @@ func TestGenerateBundle_MultipleServicesHaveStableNames(t *testing.T) {
 	warehouse.Listen.Path = filepath.Join(t.TempDir(), "db", "warehouse.sock")
 
 	b, err := GenerateBundle(Config{Services: []Service{app, warehouse}}, BundleOptions{
-		SessionID:        "sess-1",
-		ProxySessionID:   "db-proxy-sess",
-		Mode:             UnavoidabilityEnforce,
-		IncludeToolRules: false,
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           false,
+		AllowHostnameOnlyInEnforce: true,
 	})
 	if err != nil {
 		t.Fatalf("GenerateBundle: %v", err)
@@ -133,10 +153,11 @@ func TestGenerateBundle_MultipleServicesHaveStableNames(t *testing.T) {
 
 func TestGenerateBundle_RedirectTargetDeniedByNetworkPolicy(t *testing.T) {
 	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
-		SessionID:        "sess-1",
-		ProxySessionID:   "db-proxy-sess",
-		Mode:             UnavoidabilityEnforce,
-		IncludeToolRules: false,
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           false,
+		AllowHostnameOnlyInEnforce: true,
 	})
 	if err != nil {
 		t.Fatalf("GenerateBundle: %v", err)
@@ -168,10 +189,11 @@ func TestGenerateBundle_CollidingSanitizedServiceNamesAreUnique(t *testing.T) {
 	}
 
 	b, err := GenerateBundle(Config{Services: services}, BundleOptions{
-		SessionID:        "sess-1",
-		ProxySessionID:   "db-proxy-sess",
-		Mode:             UnavoidabilityEnforce,
-		IncludeToolRules: false,
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           false,
+		AllowHostnameOnlyInEnforce: true,
 	})
 	if err != nil {
 		t.Fatalf("GenerateBundle: %v", err)
@@ -323,6 +345,33 @@ func TestGenerateBundle_DNSFailureEnforceFailsUnlessAllowed(t *testing.T) {
 	assertDNSExpansionWarning(t, b.Warnings, "appdb", "db.internal")
 }
 
+func TestGenerateBundle_MissingResolverEnforceFailsUnlessAllowed(t *testing.T) {
+	_, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+	})
+	if err == nil {
+		t.Fatal("GenerateBundle returned nil error")
+	}
+	if !errors.Is(err, ErrBundleInvalidOptions) {
+		t.Fatalf("GenerateBundle err = %v, want ErrBundleInvalidOptions", err)
+	}
+
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           false,
+		AllowHostnameOnlyInEnforce: true,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle with hostname-only override: %v", err)
+	}
+	assertDNSExpansionWarning(t, b.Warnings, "appdb", "db.internal")
+}
+
 func TestGenerateBundle_EmptyDNSResultsObserveWarns(t *testing.T) {
 	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
 		SessionID:        "sess-1",
@@ -419,10 +468,11 @@ func TestGenerateBundle_BypassToolRules(t *testing.T) {
 	services[2].Upstream.Port = 5432
 
 	b, err := GenerateBundle(Config{Services: services}, BundleOptions{
-		SessionID:        "sess-1",
-		ProxySessionID:   "db-proxy-sess",
-		Mode:             UnavoidabilityEnforce,
-		IncludeToolRules: true,
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           true,
+		AllowHostnameOnlyInEnforce: true,
 	})
 	if err != nil {
 		t.Fatalf("GenerateBundle: %v", err)
@@ -470,10 +520,11 @@ func TestGenerateBundle_BypassToolRules(t *testing.T) {
 
 func TestGenerateBundle_BypassToolRulesOptional(t *testing.T) {
 	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
-		SessionID:        "sess-1",
-		ProxySessionID:   "db-proxy-sess",
-		Mode:             UnavoidabilityEnforce,
-		IncludeToolRules: false,
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           false,
+		AllowHostnameOnlyInEnforce: true,
 	})
 	if err != nil {
 		t.Fatalf("GenerateBundle: %v", err)
@@ -514,19 +565,21 @@ func TestGenerateBundle_BypassToolPortPatternsAreDeterministic(t *testing.T) {
 	reversed := []Service{services[2], services[1], services[0]}
 
 	first, err := GenerateBundle(Config{Services: services}, BundleOptions{
-		SessionID:        "sess-1",
-		ProxySessionID:   "db-proxy-sess",
-		Mode:             UnavoidabilityEnforce,
-		IncludeToolRules: true,
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           true,
+		AllowHostnameOnlyInEnforce: true,
 	})
 	if err != nil {
 		t.Fatalf("GenerateBundle first: %v", err)
 	}
 	second, err := GenerateBundle(Config{Services: reversed}, BundleOptions{
-		SessionID:        "sess-1",
-		ProxySessionID:   "db-proxy-sess",
-		Mode:             UnavoidabilityEnforce,
-		IncludeToolRules: true,
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           true,
+		AllowHostnameOnlyInEnforce: true,
 	})
 	if err != nil {
 		t.Fatalf("GenerateBundle second: %v", err)
@@ -553,10 +606,11 @@ func TestGenerateBundle_BypassToolPortPatternsAreDeterministic(t *testing.T) {
 
 func TestGenerateBundle_BypassToolRulesDoNotMatchAdjacentDigitPorts(t *testing.T) {
 	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
-		SessionID:        "sess-1",
-		ProxySessionID:   "db-proxy-sess",
-		Mode:             UnavoidabilityEnforce,
-		IncludeToolRules: true,
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           true,
+		AllowHostnameOnlyInEnforce: true,
 	})
 	if err != nil {
 		t.Fatalf("GenerateBundle: %v", err)
@@ -602,10 +656,11 @@ func TestGenerateBundle_BypassToolRulesDoNotMatchAdjacentDigitPorts(t *testing.T
 
 func TestGenerateBundle_BypassToolRulesCompileAndMatch(t *testing.T) {
 	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
-		SessionID:        "sess-1",
-		ProxySessionID:   "db-proxy-sess",
-		Mode:             UnavoidabilityEnforce,
-		IncludeToolRules: true,
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           true,
+		AllowHostnameOnlyInEnforce: true,
 	})
 	if err != nil {
 		t.Fatalf("GenerateBundle: %v", err)
@@ -681,10 +736,11 @@ func TestGenerateBundle_BypassToolRulesCompileAndMatch(t *testing.T) {
 
 func TestGenerateBundle_PolicyCompiles(t *testing.T) {
 	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
-		SessionID:        "sess-1",
-		ProxySessionID:   "db-proxy-sess",
-		Mode:             UnavoidabilityEnforce,
-		IncludeToolRules: false,
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           false,
+		AllowHostnameOnlyInEnforce: true,
 	})
 	if err != nil {
 		t.Fatalf("GenerateBundle: %v", err)

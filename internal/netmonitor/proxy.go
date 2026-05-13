@@ -433,7 +433,7 @@ func (p *Proxy) checkNetwork(ctx context.Context, domain string, port int) polic
 
 func (p *Proxy) checkConnectNetwork(ctx context.Context, commandID string, host string, hostPort string, port int, redirect *policy.ConnectRedirectResult) policy.Decision {
 	dec := p.checkNetwork(ctx, host, port)
-	if redirect != nil && redirect.RedirectToUnix != "" && dec.EffectiveDecision == types.DecisionDeny && p.isDBUnavoidabilityTCPDirectRule(dec.Rule) {
+	if allowUnixRedirectForDBUnavoidability(p.policy, dec, redirect) {
 		return allowConnectRedirectDecision(redirect)
 	}
 	dec = p.maybeApprove(ctx, commandID, dec, "network", hostPort)
@@ -441,10 +441,25 @@ func (p *Proxy) checkConnectNetwork(ctx context.Context, commandID string, host 
 }
 
 func (p *Proxy) isDBUnavoidabilityTCPDirectRule(ruleName string) bool {
-	if p == nil || p.policy == nil || ruleName == "" {
+	if p == nil {
 		return false
 	}
-	pol := p.policy.Policy()
+	return isDBUnavoidabilityTCPDirectRule(p.policy, ruleName)
+}
+
+func allowUnixRedirectForDBUnavoidability(engine *policy.Engine, dec policy.Decision, redirect *policy.ConnectRedirectResult) bool {
+	return redirect != nil &&
+		redirect.RedirectToUnix != "" &&
+		dec.EffectiveDecision == types.DecisionDeny &&
+		isDBUnavoidabilityTCPDirectRule(engine, dec.Rule) &&
+		isDBUnavoidabilityTCPDirectRule(engine, redirect.Rule)
+}
+
+func isDBUnavoidabilityTCPDirectRule(engine *policy.Engine, ruleName string) bool {
+	if engine == nil || ruleName == "" {
+		return false
+	}
+	pol := engine.Policy()
 	if pol == nil {
 		return false
 	}
@@ -518,14 +533,21 @@ func (p *Proxy) emitNetEvent(ctx context.Context, evType string, commandID strin
 }
 
 func (p *Proxy) emitConnectRedirectEvent(ctx context.Context, commandID string, domain string, hostPort string, port int, result *policy.ConnectRedirectResult) {
-	if p.emit == nil {
+	if p == nil {
+		return
+	}
+	emitConnectRedirectEvent(ctx, p.emit, p.sessionID, commandID, domain, hostPort, port, result)
+}
+
+func emitConnectRedirectEvent(ctx context.Context, emit Emitter, sessionID string, commandID string, domain string, hostPort string, port int, result *policy.ConnectRedirectResult) {
+	if emit == nil {
 		return
 	}
 	ev := types.Event{
 		ID:        uuid.NewString(),
 		Timestamp: time.Now().UTC(),
 		Type:      "connect_redirect",
-		SessionID: p.sessionID,
+		SessionID: sessionID,
 		CommandID: commandID,
 		Domain:    strings.ToLower(domain),
 		Remote:    hostPort,
@@ -545,8 +567,8 @@ func (p *Proxy) emitConnectRedirectEvent(ctx context.Context, commandID string, 
 	if result.SNI != "" {
 		ev.Fields["sni"] = result.SNI
 	}
-	_ = p.emit.AppendEvent(ctx, ev)
-	p.emit.Publish(ev)
+	_ = emit.AppendEvent(ctx, ev)
+	emit.Publish(ev)
 }
 
 // emitMCPConnectionIfMatched checks whether the connection target is a known

@@ -105,9 +105,34 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 			domain = d
 		}
 	}
-	dec := t.policyDecision(domain, dstIP, dstPort)
-	dec = t.maybeApprove(context.Background(), commandID, dec, "network", remote)
-	connectEv := t.netEvent("net_connect", commandID, domain, remote, dstPort, dec, nil)
+
+	redirectHostPort := net.JoinHostPort(domain, fmt.Sprintf("%d", dstPort))
+	var redirectResult *policy.ConnectRedirectResult
+	if t.policy != nil {
+		result := t.policy.EvaluateConnectRedirect(redirectHostPort)
+		if result.Matched {
+			redirectResult = result
+			if result.Visibility != "silent" {
+				emitConnectRedirectEvent(context.Background(), t.emit, t.sessionID, commandID, domain, redirectHostPort, dstPort, result)
+			}
+		}
+	}
+
+	dec := t.checkConnectNetwork(context.Background(), commandID, domain, redirectHostPort, dstIP, dstPort, redirectResult)
+	eventFields := map[string]any{}
+	if redirectResult != nil {
+		if redirectResult.RedirectTo != "" {
+			eventFields["redirect_to"] = redirectResult.RedirectTo
+		}
+		if redirectResult.RedirectToUnix != "" {
+			eventFields["redirect_to_unix"] = redirectResult.RedirectToUnix
+		}
+		eventFields["redirect_tls"] = redirectResult.TLSMode
+		if redirectResult.SNI != "" {
+			eventFields["redirect_sni"] = redirectResult.SNI
+		}
+	}
+	connectEv := t.netEvent("net_connect", commandID, domain, remote, dstPort, dec, eventFields)
 	_ = t.emit.AppendEvent(context.Background(), connectEv)
 	t.emit.Publish(connectEv)
 
@@ -117,7 +142,12 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 
 	emitMCPConnectionIfMatched(context.Background(), t.sess, t.emit, t.sessionID, commandID, domain, remote, dstPort)
 
-	up, err := net.DialTimeout("tcp", remote, 20*time.Second)
+	dialTarget := connectDialTarget(connectDialTargetInput{
+		OriginalHostPort: remote,
+		OriginalPort:     fmt.Sprintf("%d", dstPort),
+		Redirect:         redirectResult,
+	})
+	up, err := net.DialTimeout(dialTarget.Network, dialTarget.Address, 20*time.Second)
 	if err != nil {
 		return nil
 	}
@@ -149,6 +179,15 @@ func (t *TransparentTCP) policyDecision(domain string, ip net.IP, port int) poli
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
 	return t.policy.CheckNetworkIP(domain, ip, port)
+}
+
+func (t *TransparentTCP) checkConnectNetwork(ctx context.Context, commandID string, domain string, hostPort string, ip net.IP, port int, redirect *policy.ConnectRedirectResult) policy.Decision {
+	dec := t.policyDecision(domain, ip, port)
+	if allowUnixRedirectForDBUnavoidability(t.policy, dec, redirect) {
+		return allowConnectRedirectDecision(redirect)
+	}
+	dec = t.maybeApprove(ctx, commandID, dec, "network", hostPort)
+	return dec
 }
 
 func (t *TransparentTCP) maybeApprove(ctx context.Context, commandID string, dec policy.Decision, kind string, target string) policy.Decision {
