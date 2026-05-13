@@ -565,7 +565,7 @@ func TestSpine_ReplicationOptIn_BytePump_EmitsDVW(t *testing.T) {
 	}
 }
 
-func TestSpine_Cancel_AllowedForwardsUnmapped(t *testing.T) {
+func TestSpine_Cancel_UnmatchedClosesSilentlyAndEmitsLifecycle(t *testing.T) {
 	upAddr, ch := captureCancelListener(t)
 	rule := `  - name: allow-cancel
     db_service: appdb
@@ -585,22 +585,22 @@ func TestSpine_Cancel_AllowedForwardsUnmapped(t *testing.T) {
 	if _, err := c.Write(pkt); err != nil {
 		t.Fatalf("write cancel: %v", err)
 	}
-	var captured []byte
 	select {
-	case captured = <-ch:
-		if captured == nil {
-			t.Fatal("upstream did not capture cancel packet")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("upstream did not capture cancel packet")
+	case captured := <-ch:
+		t.Fatalf("upstream captured cancel packet for unmatched key: %x", captured)
+	case <-time.After(300 * time.Millisecond):
+		// Expected: lookup miss closes before policy allow can forward.
 	}
-	if len(captured) != 16 {
-		t.Fatalf("captured %d bytes upstream, want 16", len(captured))
+
+	evs := h.sink.DrainLifecycle()
+	if len(evs) != 1 {
+		t.Fatalf("lifecycle events = %d, want 1: %+v", len(evs), evs)
 	}
-	for i := range pkt {
-		if captured[i] != pkt[i] {
-			t.Errorf("byte %d: got %#x, want %#x", i, captured[i], pkt[i])
-		}
+	if evs[0].Kind != "db_cancel_unmatched" {
+		t.Errorf("Kind = %q, want db_cancel_unmatched", evs[0].Kind)
+	}
+	if evs[0].Reason != "unmatched_cancel_request" {
+		t.Errorf("Reason = %q, want unmatched_cancel_request", evs[0].Reason)
 	}
 }
 
