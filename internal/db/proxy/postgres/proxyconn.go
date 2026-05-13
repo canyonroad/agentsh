@@ -46,6 +46,7 @@ type connState struct {
 		PID       uint32
 		SecretKey []byte
 	}
+	cancelRegistration *cancelRegistration
 
 	// degradedReason is set when the proxy enters a passthrough-equivalent
 	// state via an explicit opt-in (replication_passthrough in 04b₂;
@@ -56,9 +57,9 @@ type connState struct {
 	// smState carries the Extended Query state machine's per-connection
 	// state (Plan 05a). LastUpstreamRFQ replaces the 04c byte field; the
 	// dispatcher and authforward write it directly.
-	smState        *statemachine.ConnState
-	redactionTier  policy.RedactionTier // resolved at handshake end
-	tlsMode        string               // svc.TLSMode at handshake end, for EventTLS.Mode
+	smState       *statemachine.ConnState
+	redactionTier policy.RedactionTier // resolved at handshake end
+	tlsMode       string               // svc.TLSMode at handshake end, for EventTLS.Mode
 }
 
 // logger narrows *slog.Logger to just the methods we use, so tests can
@@ -128,6 +129,10 @@ func (pc *proxyConn) run(ctx context.Context) error {
 // closeUpstream closes the upstream conn if it was opened. Safe to call
 // multiple times.
 func (pc *proxyConn) closeUpstream() {
+	if pc.state.cancelRegistration != nil {
+		pc.state.cancelRegistration.Release()
+		pc.state.cancelRegistration = nil
+	}
 	if pc.state.upstream != nil {
 		_ = pc.state.upstream.Close()
 		pc.state.upstream = nil

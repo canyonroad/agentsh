@@ -294,6 +294,43 @@ func TestServer_New_HonorsMaxQueryBytesOverride(t *testing.T) {
 	}
 }
 
+func TestNew_DefaultsCancelMapConfig(t *testing.T) {
+	sink := &events.SyncSink{}
+	srv, err := New(Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           sink,
+		Policy: loadRuleSet(t, `version: 1
+name: test
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: "127.0.0.1:5432", tls_mode: terminate_plaintext_upstream, trusted_network: true}
+database_connection_rules:
+  - {name: allow, db_service: appdb, decision: allow}
+`),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: "127.0.0.1:5432",
+			TLSMode:  "terminate_plaintext_upstream",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "db.sock")},
+			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if srv.cancelMap == nil {
+		t.Fatal("cancelMap is nil")
+	}
+	if srv.cfg.CancelMappingMax != defaultCancelMappingMax {
+		t.Fatalf("CancelMappingMax = %d, want %d", srv.cfg.CancelMappingMax, defaultCancelMappingMax)
+	}
+	if srv.cfg.CancelGraceWindow != defaultCancelGraceWindow {
+		t.Fatalf("CancelGraceWindow = %s, want %s", srv.cfg.CancelGraceWindow, defaultCancelGraceWindow)
+	}
+}
+
 func TestServer_SetPolicy_AtomicSwap(t *testing.T) {
 	cfg := Config{
 		Unavoidability: service.UnavoidabilityObserve,
