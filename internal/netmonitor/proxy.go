@@ -433,16 +433,36 @@ func (p *Proxy) checkNetwork(ctx context.Context, domain string, port int) polic
 
 func (p *Proxy) checkConnectNetwork(ctx context.Context, commandID string, host string, hostPort string, port int, redirect *policy.ConnectRedirectResult) policy.Decision {
 	dec := p.checkNetwork(ctx, host, port)
+	if redirect != nil && redirect.RedirectToUnix != "" && dec.EffectiveDecision == types.DecisionDeny && p.isDBUnavoidabilityTCPDirectRule(dec.Rule) {
+		return allowConnectRedirectDecision(redirect)
+	}
 	dec = p.maybeApprove(ctx, commandID, dec, "network", hostPort)
-	if redirect != nil && redirect.RedirectToUnix != "" && dec.EffectiveDecision == types.DecisionDeny {
-		return policy.Decision{
-			PolicyDecision:    types.DecisionAllow,
-			EffectiveDecision: types.DecisionAllow,
-			Rule:              redirect.Rule,
-			Message:           redirect.Message,
+	return dec
+}
+
+func (p *Proxy) isDBUnavoidabilityTCPDirectRule(ruleName string) bool {
+	if p == nil || p.policy == nil || ruleName == "" {
+		return false
+	}
+	pol := p.policy.Policy()
+	if pol == nil {
+		return false
+	}
+	for _, m := range pol.Metadata {
+		if m.RuleName == ruleName && m.Source == "db_unavoidability" && m.BypassMode == "tcp_direct" {
+			return true
 		}
 	}
-	return dec
+	return false
+}
+
+func allowConnectRedirectDecision(redirect *policy.ConnectRedirectResult) policy.Decision {
+	return policy.Decision{
+		PolicyDecision:    types.DecisionAllow,
+		EffectiveDecision: types.DecisionAllow,
+		Rule:              redirect.Rule,
+		Message:           redirect.Message,
+	}
 }
 
 func (p *Proxy) maybeApprove(ctx context.Context, commandID string, dec policy.Decision, kind string, target string) policy.Decision {
