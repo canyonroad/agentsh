@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	dbevents "github.com/agentsh/agentsh/internal/db/events"
+	dbservice "github.com/agentsh/agentsh/internal/db/service"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
@@ -26,6 +28,51 @@ func (s *stubEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
 }
 func (s *stubEmitter) Publish(ev types.Event) {
 	s.events = append(s.events, ev)
+}
+
+type captureDBBypassEmitter struct {
+	events    []types.Event
+	published []types.Event
+}
+
+func (c *captureDBBypassEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
+	c.events = append(c.events, ev)
+	return nil
+}
+
+func (c *captureDBBypassEmitter) Publish(ev types.Event) {
+	c.published = append(c.published, ev)
+}
+
+func newNetmonitorDBUnavoidabilityEngine(t *testing.T) *policy.Engine {
+	t.Helper()
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "test-db-unavoidability",
+		Metadata: []policy.RuleMetadata{
+			{
+				RuleName:    "db-appdb-deny-direct",
+				Source:      dbservice.RuleSourceDBUnavoidability,
+				DBService:   "appdb",
+				BypassMode:  dbservice.BypassModeTCPDirect,
+				Destination: "db.internal:5432",
+			},
+		},
+		NetworkRules: []policy.NetworkRule{
+			{
+				Name:     "db-appdb-deny-direct",
+				Domains:  []string{"db.internal"},
+				Ports:    []int{5432},
+				Decision: "deny",
+				Message:  "Direct database egress is blocked; use the AgentSH DB proxy",
+			},
+		},
+	}
+	engine, err := policy.NewEngine(p, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	return engine
 }
 
 func TestMustAtoi(t *testing.T) {
@@ -45,6 +92,86 @@ func TestResolveAndEmitDNSIPBypassesLookup(t *testing.T) {
 	ip := p.resolveAndEmitDNS(context.Background(), "cmd", "127.0.0.1")
 	if ip != "127.0.0.1" {
 		t.Fatalf("expected ip passthrough, got %q", ip)
+	}
+}
+
+func TestProxyEmitDBBypassAttempt(t *testing.T) {
+	capture := &captureDBBypassEmitter{}
+	p := &Proxy{
+		sessionID: "session-db",
+		policy:    newNetmonitorDBUnavoidabilityEngine(t),
+	}
+	p.SetDBBypassEmitter(dbevents.NewBypassEmitter(capture))
+
+	p.emitDBBypassAttempt(context.Background(), "cmd-123", 0, "db-appdb-deny-direct", "blocked by policy")
+
+	if len(capture.events) != 1 {
+		t.Fatalf("db bypass events = %d, want 1", len(capture.events))
+	}
+	if len(capture.published) != 1 {
+		t.Fatalf("published db bypass events = %d, want 1", len(capture.published))
+	}
+	ev := capture.events[0]
+	if ev.Type != "db_bypass_attempt" {
+		t.Fatalf("event type = %q, want db_bypass_attempt", ev.Type)
+	}
+	if ev.SessionID != "session-db" || ev.CommandID != "cmd-123" || ev.PID != 0 {
+		t.Fatalf("event identity = session %q command %q pid %d", ev.SessionID, ev.CommandID, ev.PID)
+	}
+	if ev.Fields["process_identity"] != "command:cmd-123" {
+		t.Fatalf("process_identity = %v, want command:cmd-123", ev.Fields["process_identity"])
+	}
+	if ev.Fields["rule_name"] != "db-appdb-deny-direct" || ev.Fields["bypass_mode"] != dbservice.BypassModeTCPDirect {
+		t.Fatalf("db metadata fields = %+v", ev.Fields)
+	}
+	if ev.Fields["reason"] != "blocked by policy" {
+		t.Fatalf("reason = %v", ev.Fields["reason"])
+	}
+}
+
+func TestStartProxyInstallsInitialDBBypassEmitter(t *testing.T) {
+	capture := &captureDBBypassEmitter{}
+	p, _, err := StartProxy("127.0.0.1:0", "session-db", nil, newNetmonitorDBUnavoidabilityEngine(t), nil, &stubEmitter{}, dbevents.NewBypassEmitter(capture))
+	if err != nil {
+		t.Fatalf("StartProxy: %v", err)
+	}
+	defer p.Close()
+
+	p.emitDBBypassAttempt(context.Background(), "", 0, "db-appdb-deny-direct", "blocked before publish")
+
+	if len(capture.events) != 1 {
+		t.Fatalf("db bypass events = %d, want 1", len(capture.events))
+	}
+}
+
+func TestProxyUsesSessionPolicyEngineForNetworkChecks(t *testing.T) {
+	basePolicy := &policy.Policy{
+		Version: 1,
+		Name:    "base-allow",
+		NetworkRules: []policy.NetworkRule{
+			{
+				Name:     "allow-db",
+				Domains:  []string{"db.internal"},
+				Ports:    []int{5432},
+				Decision: "allow",
+			},
+		},
+	}
+	baseEngine, err := policy.NewEngine(basePolicy, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine(base): %v", err)
+	}
+	mgr := session.NewManager(1)
+	sess, err := mgr.CreateWithID("session-db-policy", t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("CreateWithID: %v", err)
+	}
+	sess.SetPolicyEngine(newNetmonitorDBUnavoidabilityEngine(t))
+
+	p := &Proxy{sessionID: sess.ID, sess: sess, policy: baseEngine}
+	got := p.checkNetwork(context.Background(), "db.internal", 5432)
+	if got.EffectiveDecision != types.DecisionDeny || got.Rule != "db-appdb-deny-direct" {
+		t.Fatalf("checkNetwork = %+v, want session-local DB deny", got)
 	}
 }
 

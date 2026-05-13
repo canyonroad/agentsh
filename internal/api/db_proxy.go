@@ -27,21 +27,25 @@ type dbProxyService struct {
 }
 
 type dbProxyDeps struct {
-	Unavoidability dbservice.Unavoidability
-	Services       []dbProxyService
-	StateDir       string
-	Sink           events.Sink
-	Policy         *dbpolicy.RuleSet // live rule set for connect-rule eval
+	Unavoidability  dbservice.Unavoidability
+	Services        []dbProxyService
+	StateDir        string
+	Sink            events.Sink
+	Policy          *dbpolicy.RuleSet // live rule set for connect-rule eval
+	AgentSessionID  string
+	SessionResolver postgres.SessionResolver
 }
 
 // buildDBProxyConfig assembles a postgres.Config from deps and ensures
 // listener parent directories exist for unix listeners.
 func buildDBProxyConfig(deps dbProxyDeps) (postgres.Config, error) {
 	cfg := postgres.Config{
-		Unavoidability: deps.Unavoidability,
-		StateDir:       deps.StateDir,
-		Sink:           deps.Sink,
-		Policy:         deps.Policy,
+		Unavoidability:  deps.Unavoidability,
+		StateDir:        deps.StateDir,
+		Sink:            deps.Sink,
+		Policy:          deps.Policy,
+		AgentSessionID:  deps.AgentSessionID,
+		SessionResolver: deps.SessionResolver,
 	}
 	for _, s := range deps.Services {
 		if s.ListenKind == "unix" && s.ListenPath != "" {
@@ -76,21 +80,25 @@ func buildDBProxyConfig(deps dbProxyDeps) (postgres.Config, error) {
 // For unix listeners, the parent directory of each ListenPath is created
 // (mkdir -p style) before bind so a fresh StateDir works on first boot.
 func startDBProxy(ctx context.Context, deps dbProxyDeps) (*postgres.Server, error) {
+	srv, _, err := startDBProxyWithStartError(ctx, deps)
+	return srv, err
+}
+
+func startDBProxyWithStartError(ctx context.Context, deps dbProxyDeps) (*postgres.Server, <-chan error, error) {
 	cfg, err := buildDBProxyConfig(deps)
 	if err != nil {
-		return nil, fmt.Errorf("startDBProxy: %w", err)
+		return nil, nil, fmt.Errorf("startDBProxy: %w", err)
 	}
 	srv, err := postgres.New(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("startDBProxy: new server: %w", err)
+		return nil, nil, fmt.Errorf("startDBProxy: new server: %w", err)
 	}
+	errCh := make(chan error, 1)
 	go func() {
-		// Start runs for the lifetime of ctx. Errors are absorbed here
-		// because Shutdown is the merge point; a fatal Start error would
-		// also be visible via the slog handler the caller configured.
-		_ = srv.Start(ctx)
+		errCh <- srv.Start(ctx)
+		close(errCh)
 	}()
-	return srv, nil
+	return srv, errCh, nil
 }
 
 // loadDBRuleSet decodes the supervisor's loaded policy into a *dbpolicy.RuleSet.
@@ -129,28 +137,4 @@ func collectDBProxyServices(rs *dbpolicy.RuleSet, stateDir string) []dbProxyServ
 		})
 	}
 	return out
-}
-
-// NewDBProxy builds a *postgres.Server from the loaded policy without starting
-// it. The caller is responsible for calling Start(ctx) and eventually Shutdown.
-// This is the supervisor-facing constructor when the lifetime ctx is not yet
-// available at construction time (e.g., inside server.New before server.Run is
-// called).
-func NewDBProxy(p *rootpolicy.Policy, stateDir string, sink events.Sink) (*postgres.Server, error) {
-	rs, err := loadDBRuleSet(p)
-	if err != nil {
-		return nil, err
-	}
-	deps := dbProxyDeps{
-		Unavoidability: rs.Unavoidability(),
-		StateDir:       stateDir,
-		Sink:           sink,
-		Services:       collectDBProxyServices(rs, stateDir),
-		Policy:         rs,
-	}
-	cfg, err := buildDBProxyConfig(deps)
-	if err != nil {
-		return nil, fmt.Errorf("NewDBProxy: %w", err)
-	}
-	return postgres.New(cfg)
 }

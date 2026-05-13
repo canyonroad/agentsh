@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,13 +19,17 @@ import (
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
-// errMapper is a compact.Mapper that always returns an error. Used by the
-// mapper_failure subtest to trigger compact.ErrMapperFailure → MAPPER_FAILURE
-// TransportLoss. The error message is deterministic so test output is stable.
-type errMapper struct{}
+// armedErrMapper maps warmup events successfully, then returns a deterministic
+// error after the mapper_failure subtest arms it.
+type armedErrMapper struct {
+	fail atomic.Bool
+}
 
-func (errMapper) Map(_ types.Event) (compact.MappedEvent, error) {
-	return compact.MappedEvent{}, fmt.Errorf("simulated mapper error")
+func (m *armedErrMapper) Map(ev types.Event) (compact.MappedEvent, error) {
+	if m.fail.Load() {
+		return compact.MappedEvent{}, fmt.Errorf("simulated mapper error")
+	}
+	return compact.StubMapper{}.Map(ev)
 }
 
 // newInflightTestStore builds a watchtower Store wired to the given dialer
@@ -59,6 +64,38 @@ func newInflightTestStore(t *testing.T, router transport.Dialer, mapper compact.
 	return s
 }
 
+func waitForLiveWarmupBatch(ctx context.Context, t *testing.T, s *watchtower.Store, srv *testserver.Server, startSeq uint64) uint64 {
+	t.Helper()
+	baseline := len(srv.Batches())
+	deadline := time.Now().Add(10 * time.Second)
+	seq := startSeq
+	for time.Now().Before(deadline) {
+		if err := s.AppendEvent(ctx, types.Event{
+			Type:      "exec",
+			SessionID: "s",
+			Timestamp: time.Now(),
+			Chain:     &types.ChainState{Sequence: seq, Generation: 0},
+		}); err != nil {
+			t.Fatalf("AppendEvent warmup seq %d: %v", seq, err)
+		}
+
+		pollUntil := time.Now().Add(250 * time.Millisecond)
+		for time.Now().Before(pollUntil) {
+			if len(srv.Batches()) > baseline {
+				return seq + 1
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("waiting for warmup batch: %v", ctx.Err())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		seq++
+	}
+	t.Fatalf("WaitForFirstBatch warmup: no EventBatch recorded within 10s")
+	return 0
+}
+
 // TestStore_InFlightDrop_EmitsTransportLossOnWire verifies that each
 // triggerable in-flight drop reason produces a matching TransportLoss frame
 // on the wire when EmitExtendedLossReasons is true.
@@ -73,7 +110,7 @@ func newInflightTestStore(t *testing.T, router transport.Dialer, mapper compact.
 // Reasons covered:
 //   - sequence_overflow: ev.Chain.Sequence > math.MaxInt64
 //   - invalid_timestamp: ev.Timestamp = zero value
-//   - mapper_failure:    custom errMapper that returns an error
+//   - mapper_failure:    custom mapper returns an error after warmup
 //   - invalid_utf8:      skipped (unreachable via public API without
 //     bypassing construction-time validation — context_digest,
 //     event_hash, key_fingerprint, and prev_hash are all SHA-256
@@ -97,6 +134,7 @@ func TestStore_InFlightDrop_EmitsTransportLossOnWire(t *testing.T) {
 		mapper     compact.Mapper
 		allowStub  bool
 		skip       string
+		armMapper  bool
 	}{
 		{
 			name:       "sequence_overflow",
@@ -142,9 +180,9 @@ func TestStore_InFlightDrop_EmitsTransportLossOnWire(t *testing.T) {
 					Chain: &types.ChainState{Sequence: seq, Generation: 0},
 				}
 			},
-			// errMapper causes compact.Encode to return compact.ErrMapperFailure.
-			mapper:    errMapper{},
-			allowStub: false,
+			mapper:    compact.StubMapper{},
+			allowStub: true,
+			armMapper: true,
 		},
 		{
 			name: "invalid_utf8",
@@ -169,28 +207,37 @@ func TestStore_InFlightDrop_EmitsTransportLossOnWire(t *testing.T) {
 			if tc.skip != "" {
 				t.Skip(tc.skip)
 			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
 
 			srv := testserver.New(testserver.Options{})
 			defer srv.Close()
 			router := testserver.NewRoutingDialer(srv)
 
-			s := newInflightTestStore(t, router, tc.mapper, tc.allowStub, true)
+			mapper := tc.mapper
+			armDrop := func() {}
+			if tc.armMapper {
+				armed := &armedErrMapper{}
+				mapper = armed
+				armDrop = func() { armed.fail.Store(true) }
+			}
+
+			s := newInflightTestStore(t, router, mapper, tc.allowStub, true)
 			defer s.Close()
 
-			// Wait for SessionInit to land — this confirms the transport has
-			// completed the handshake and is either in Replaying or Live
-			// state. Without this, AppendEvent could race the dial and the
-			// resulting loss marker might be written before the Live reader
-			// is registered, causing it to miss the notification.
 			if _, err := srv.WaitForFirstSessionInit(10 * time.Second); err != nil {
 				t.Fatalf("WaitForFirstSessionInit: %v", err)
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+			// Wait for a real EventBatch, not just SessionInit. SessionInit
+			// is captured before the client receives SessionAck; a loss marker
+			// appended in that gap can be missed by the Live reader. A warmup
+			// batch proves the client has entered Live and consumed from WAL.
+			nextSeq := waitForLiveWarmupBatch(ctx, t, s, srv, 1)
+			armDrop()
 
 			// Emit the drop-triggering event.
-			_ = s.AppendEvent(ctx, tc.makeEvent(1))
+			_ = s.AppendEvent(ctx, tc.makeEvent(nextSeq))
 
 			loss, err := srv.WaitForTransportLoss(60 * time.Second)
 			if err != nil {

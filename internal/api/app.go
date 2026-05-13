@@ -17,6 +17,7 @@ import (
 	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/config"
+	dbevents "github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/limits"
 	"github.com/agentsh/agentsh/internal/mcpinspect"
@@ -25,9 +26,9 @@ import (
 	"github.com/agentsh/agentsh/internal/netmonitor"
 	ebpftrace "github.com/agentsh/agentsh/internal/netmonitor/ebpf"
 	"github.com/agentsh/agentsh/internal/netmonitor/redirect"
+	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
-	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/policy/signing"
 	"github.com/agentsh/agentsh/internal/proxy"
 	"github.com/agentsh/agentsh/internal/session"
@@ -50,6 +51,7 @@ type App struct {
 	store    *composite.Store
 	policy   *policy.Engine
 	broker   *events.Broker
+	dbBypass *dbevents.BypassEmitter
 
 	cgroupMgr *limits.CgroupManager // issue #197: per-process cgroup manager, nil on non-Linux
 
@@ -71,8 +73,11 @@ type App struct {
 
 	// ptraceTracer holds the ptrace.Tracer on Linux (nil on other platforms or when disabled).
 	// Type is any because ptrace package is Linux-only.
-	ptraceTracer any
-	ptraceCancel context.CancelFunc
+	ptraceTracer                  any
+	ptraceCancel                  context.CancelFunc
+	dbProxySessionResolverForTest interface {
+		ResolveSessionID(pid int32) (string, bool)
+	}
 	// ptraceFailed is set when the tracer exits unexpectedly while ptrace mode
 	// is configured. When true, command execution is blocked to prevent running
 	// without syscall enforcement (fail-closed).
@@ -123,6 +128,7 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		store:        store,
 		policy:       engine,
 		broker:       broker,
+		dbBypass:     dbevents.NewBypassEmitter(storeEmitter{store: store, broker: broker}),
 		cgroupMgr:    cgroupMgr,
 		apiKeyAuth:   apiKeyAuth,
 		oidcAuth:     oidcAuth,
@@ -435,7 +441,7 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) startExplicitProxy(ctx context.Context, s *session.Session) {
 	em := storeEmitter{store: a.store, broker: a.broker}
-	pr, proxyURL, err := netmonitor.StartProxy(a.cfg.Sandbox.Network.ProxyListenAddr, s.ID, s, a.policy, a.approvals, em)
+	pr, proxyURL, err := netmonitor.StartProxy(a.cfg.Sandbox.Network.ProxyListenAddr, s.ID, s, a.policy, a.approvals, em, a.dbBypass)
 	if err != nil {
 		fail := types.Event{
 			ID:        uuid.NewString(),
@@ -450,7 +456,6 @@ func (a *App) startExplicitProxy(ctx context.Context, s *session.Session) {
 		a.broker.Publish(fail)
 		return
 	}
-
 	s.SetProxy(proxyURL, pr.Close)
 	okEv := types.Event{
 		ID:        uuid.NewString(),
@@ -606,7 +611,7 @@ func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session
 	dnsCache := netmonitor.NewDNSCache(5 * time.Minute)
 	// Create correlation map for DNS-to-IP mapping (used by connect redirect)
 	correlationMap := redirect.NewCorrelationMap(5 * time.Minute)
-	tcp, tcpPort, err := netmonitor.StartTransparentTCP("0.0.0.0:0", s.ID, s, dnsCache, a.policy, a.approvals, em)
+	tcp, tcpPort, err := netmonitor.StartTransparentTCP("0.0.0.0:0", s.ID, s, dnsCache, a.policy, a.approvals, em, a.dbBypass)
 	if err != nil {
 		return err
 	}
@@ -713,6 +718,7 @@ func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
 		return
 	}
+	_ = s.CloseDBProxy()
 	_ = s.CloseNetNS()
 	_ = s.CloseProxy()
 	_ = s.UnmountWorkspace()
@@ -1480,10 +1486,10 @@ func (a *App) policyTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := map[string]any{
-		"decision":           string(decision.EffectiveDecision),
-		"policy_decision":    string(decision.PolicyDecision),
-		"rule":               decision.Rule,
-		"reason":             decision.Message,
+		"decision":        string(decision.EffectiveDecision),
+		"policy_decision": string(decision.PolicyDecision),
+		"rule":            decision.Rule,
+		"reason":          decision.Message,
 	}
 
 	if decision.Redirect != nil {

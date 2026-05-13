@@ -25,8 +25,6 @@ import (
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
-	dbevents "github.com/agentsh/agentsh/internal/db/events"
-	dbproxy "github.com/agentsh/agentsh/internal/db/proxy/postgres"
 	"github.com/agentsh/agentsh/internal/events"
 	limitspkg "github.com/agentsh/agentsh/internal/limits"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
@@ -82,8 +80,6 @@ type Server struct {
 	skillcheckDaemon *skillcheck.Daemon // nil when skillcheck.enabled=false
 
 	app *api.App // for lifecycle management (ptrace tracer shutdown)
-
-	dbSrv *dbproxy.Server // DB proxy; always non-nil after New (sentinel in off-mode)
 
 	kmsProvider io.Closer // audit/kms.Provider for HMAC key lifecycle
 
@@ -516,26 +512,9 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 	}()
 
-	// DB proxy (Phase 1, Plan 04a). Bound only when policies.db.unavoidability != off.
-	// The proxy is constructed here; Start is called from Run using the server
-	// lifetime context. Shutdown is wired into appCloser for error-path cleanup.
-	// srv is not yet initialised here so dbSrv is assigned to srv after srv :=.
-	var dbSrv *dbproxy.Server
-	{
-		dbStateDir := filepath.Join(config.GetUserStateDir(), "db-proxy")
-		var err error
-		dbSrv, err = api.NewDBProxy(engine.Policy(), dbStateDir, dbevents.NopSink{})
-		if err != nil {
-			return nil, fmt.Errorf("new db proxy: %w", err)
-		}
-		prevAppCloser := appCloser
-		appCloser = func() {
-			if prevAppCloser != nil {
-				prevAppCloser()
-			}
-			_ = dbSrv.Shutdown(context.Background())
-		}
-	}
+	// DB proxies are session-scoped as of DB plan 07b because listener
+	// authorization requires the owning session ID. Session creation starts
+	// the proxy after compiling the session-local DB unavoidability bundle.
 
 	// Initialize package checker (optional).
 	if cfg.PackageChecks.Enabled {
@@ -750,7 +729,6 @@ func New(cfg *config.Config) (*Server, error) {
 		skillcheckDaemon: skillcheckDaemon,
 		app:              app,
 		kmsProvider:      kmsProvider,
-		dbSrv:            dbSrv,
 	}
 
 	// Start the policy socket server (macOS only; no-op on other platforms).
@@ -1022,9 +1000,6 @@ func (s *Server) Run(ctx context.Context) error {
 		go func() { _ = pprofServer.Serve(pprofLn) }()
 	}
 
-	// Start the DB proxy listener goroutine for the server lifetime.
-	go func() { _ = s.dbSrv.Start(ctx) }()
-
 	if s.sessionTimeout > 0 || s.idleTimeout > 0 {
 		ticker := time.NewTicker(s.reapInterval)
 		defer ticker.Stop()
@@ -1114,7 +1089,6 @@ func (s *Server) Run(ctx context.Context) error {
 		if app != nil {
 			app.Close()
 		}
-		_ = s.dbSrv.Shutdown(shutdownCtx)
 		if syncerDone != nil {
 			<-syncerDone
 		}
@@ -1174,9 +1148,9 @@ func (s *Server) Close() error {
 	if s.app != nil {
 		s.app.Close()
 	}
-	_ = s.dbSrv.Shutdown(context.Background())
 	if s.sessions != nil {
 		for _, sess := range s.sessions.List() {
+			_ = sess.CloseDBProxy()
 			_ = sess.CloseNetNS()
 			_ = sess.CloseProxy()
 			_ = sess.UnmountWorkspace()
@@ -1215,6 +1189,7 @@ func (s *Server) GRPCAddr() string {
 func (s *Server) reapOnce(now time.Time) {
 	reaped := s.sessions.ReapExpired(now, s.sessionTimeout, s.idleTimeout)
 	for _, sess := range reaped {
+		_ = sess.CloseDBProxy()
 		_ = sess.CloseNetNS()
 		_ = sess.CloseProxy()
 		_ = sess.UnmountWorkspace()

@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,17 +20,19 @@ func TestProxyConn_StubReturnsClean(t *testing.T) {
 	defer a.Close()
 	defer b.Close()
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
 			Dialect:  "postgres",
 			Upstream: "db.internal:5432",
 			TLSMode:  "terminate_reissue",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "_unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_reissue"},
 		}},
 	})

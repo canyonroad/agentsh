@@ -39,33 +39,36 @@ type Session struct {
 
 	Cwd         string
 	VirtualRoot string // "/workspace" or real workspace path when real_paths enabled
-	Env     map[string]string
-	History []string
+	Env         map[string]string
+	History     []string
 
 	// Lifecycle fields
 	stats   types.SessionStats
 	endedAt *time.Time
 
-	currentCommandID string
-	currentProcPID   int
+	currentCommandID  string
+	currentProcPID    int
 	currentTraceID    string // W3C trace context: trace ID (32 hex chars)
 	currentSpanID     string // W3C trace context: parent span ID (16 hex chars)
 	currentTraceFlags string // W3C trace context: trace flags (2 hex chars, e.g. "01")
-	execMu           sync.Mutex
+	execMu            sync.Mutex
 
 	workspaceUnmount func() error
 
-	proxyURL   string      // Network proxy URL (for HTTP_PROXY env vars)
+	proxyURL   string // Network proxy URL (for HTTP_PROXY env vars)
 	proxyClose func() error
 
-	llmProxyURL   string        // LLM proxy URL (for ANTHROPIC_BASE_URL, OPENAI_BASE_URL)
+	llmProxyURL   string // LLM proxy URL (for ANTHROPIC_BASE_URL, OPENAI_BASE_URL)
 	llmProxyClose func() error
-	llmProxy      interface{}   // *proxy.Proxy - stored as interface to avoid import cycle
+	llmProxy      interface{} // *proxy.Proxy - stored as interface to avoid import cycle
 
 	mcpRegistry interface{} // *mcpregistry.Registry — stored as interface to avoid import cycle
 
 	netnsName  string
 	netnsClose func() error
+
+	dbProxySocketDir string
+	dbProxyClose     func() error
 
 	// Multi-mount support
 	Profile string          // Profile name if using multi-mount
@@ -600,6 +603,31 @@ func (s *Session) CloseNetNS() error {
 	return nil
 }
 
+func (s *Session) SetDBProxy(socketDir string, closeFn func() error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dbProxySocketDir = socketDir
+	s.dbProxyClose = closeFn
+}
+
+func (s *Session) DBProxySocketDir() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dbProxySocketDir
+}
+
+func (s *Session) CloseDBProxy() error {
+	s.mu.Lock()
+	fn := s.dbProxyClose
+	s.dbProxyClose = nil
+	s.dbProxySocketDir = ""
+	s.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
 // IsUnderRoot checks if path is equal to or a child of root using
 // path-boundary-aware logic. Delegates to pathutil.IsUnderRoot.
 func IsUnderRoot(path, root string) bool {
@@ -1071,6 +1099,9 @@ func (s *Session) EndedAt() *time.Time {
 func (s *Session) cleanup() {
 	// Close network namespace
 	s.CloseNetNS()
+
+	// Close DB proxy
+	s.CloseDBProxy()
 
 	// Close network proxy
 	s.CloseProxy()

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -82,11 +83,13 @@ database_connection_rules:
 	defer b.Close()
 
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
-		Policy:         rs,
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Policy:          rs,
 		UpstreamTLSConfigForTest: &tls.Config{
 			RootCAs:    pool,
 			ServerName: "localhost",
@@ -98,7 +101,7 @@ database_connection_rules:
 			Dialect:  "postgres",
 			Upstream: upAddr,
 			TLSMode:  "terminate_reissue",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "_unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_reissue"},
 		}},
 	})

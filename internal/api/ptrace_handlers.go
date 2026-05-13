@@ -5,10 +5,13 @@ package api
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"syscall"
 	"time"
 
+	dbevents "github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/ptrace"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
@@ -22,6 +25,7 @@ type ptraceHandlerRouter struct {
 	sessions           *session.Manager
 	store              *composite.Store
 	broker             *events.Broker
+	dbBypass           *dbevents.BypassEmitter
 	staticAllowFile    bool
 	staticAllowNetwork bool
 	trashPath          string // raw trash path from config (may be relative)
@@ -45,6 +49,21 @@ func (r *ptraceHandlerRouter) StaticAllowSyscalls() []int {
 		syscalls = append(syscalls, ptrace.AllNetworkSyscalls()...)
 	}
 	return syscalls
+}
+
+func (r *ptraceHandlerRouter) emitDBBypassAttempt(ctx context.Context, engine *policy.Engine, sessionID, commandID string, pid int, ruleName, reason string) {
+	if r.dbBypass == nil {
+		return
+	}
+	r.dbBypass.EmitIfDBUnavoidabilityDeny(ctx, dbevents.BypassAttempt{
+		Engine:          engine,
+		SessionID:       sessionID,
+		CommandID:       commandID,
+		ProcessID:       pid,
+		ProcessIdentity: "pid:" + strconv.Itoa(pid),
+		RuleName:        ruleName,
+		Reason:          reason,
+	})
 }
 
 func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecContext) ptrace.ExecResult {
@@ -87,6 +106,7 @@ func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecCo
 
 	switch decision.EffectiveDecision {
 	case types.DecisionDeny:
+		r.emitDBBypassAttempt(ctx, pe, ec.SessionID, "", ec.PID, decision.Rule, decision.Message)
 		return ptrace.ExecResult{
 			Action: "deny",
 			Allow:  false,
@@ -276,6 +296,7 @@ func (r *ptraceHandlerRouter) HandleNetwork(ctx context.Context, nc ptrace.Netwo
 
 	switch decision.EffectiveDecision {
 	case types.DecisionDeny:
+		r.emitDBBypassAttempt(ctx, pe, nc.SessionID, "", nc.PID, decision.Rule, decision.Message)
 		return ptrace.NetworkResult{
 			Allow:  false,
 			Action: "deny",

@@ -412,6 +412,47 @@ func (a *App) logMountFailure(ctx context.Context, sessionID, path, mountPoint s
 	a.broker.Publish(ev)
 }
 
+func (a *App) loadOptionalProfileBasePolicy(policyName string) (*policy.Policy, int, error) {
+	if a.cfg.Policies.Dir == "" {
+		return nil, 0, nil
+	}
+	policyPath, err := policy.ResolvePolicyPath(a.cfg.Policies.Dir, policyName)
+	if err != nil {
+		return nil, 0, nil
+	}
+	policyData, err := os.ReadFile(policyPath)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("read policy: %w", err)
+	}
+	sigMode := a.cfg.Policies.Signing.SigningMode()
+	if sigMode != "off" {
+		if a.cfg.Policies.Signing.TrustStore == "" {
+			if sigMode == "enforce" {
+				return nil, http.StatusInternalServerError, fmt.Errorf("signing mode is enforce but trust_store not configured")
+			}
+			fmt.Fprintf(os.Stderr, "WARNING: signing mode is %q but trust_store not configured\n", sigMode)
+		} else {
+			ts, tsErr := signing.LoadTrustStore(a.cfg.Policies.Signing.TrustStore, sigMode == "enforce")
+			if tsErr != nil {
+				if sigMode == "enforce" {
+					return nil, http.StatusInternalServerError, fmt.Errorf("load trust store: %w", tsErr)
+				}
+				fmt.Fprintf(os.Stderr, "WARNING: failed to load trust store: %v\n", tsErr)
+			} else if _, vErr := signing.VerifyPolicyBytes(policyData, policyPath+".sig", ts); vErr != nil {
+				if sigMode == "enforce" {
+					return nil, http.StatusForbidden, fmt.Errorf("policy signing: %w", vErr)
+				}
+				fmt.Fprintf(os.Stderr, "WARNING: policy signing verification failed: %v\n", vErr)
+			}
+		}
+	}
+	pol, err := policy.LoadFromBytes(policyData)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("load policy: %w", err)
+	}
+	return pol, 0, nil
+}
+
 // createSessionWithProfile creates a session using a mount profile.
 func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSessionRequest) (types.Session, int, error) {
 	profile, err := a.resolveProfile(req.Profile)
@@ -422,6 +463,10 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 	basePolicy := profile.BasePolicy
 	if basePolicy == "" {
 		basePolicy = a.cfg.Policies.Default
+	}
+	basePolicyDoc, code, err := a.loadOptionalProfileBasePolicy(basePolicy)
+	if err != nil {
+		return types.Session{}, code, err
 	}
 
 	// Build initial mounts from profile specs (without FUSE yet)
@@ -465,11 +510,40 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 	// Apply real-paths mode if requested
 	a.applyRealPaths(s, req.RealPaths)
 
+	policyVars := map[string]string{}
+	if req.ProjectRoot != "" {
+		policyVars["PROJECT_ROOT"] = req.ProjectRoot
+		policyVars["GIT_ROOT"] = req.ProjectRoot
+	} else {
+		policyVars["PROJECT_ROOT"] = s.Workspace
+		policyVars["GIT_ROOT"] = s.Workspace
+	}
+	if req.Home != "" {
+		policyVars["HOME"] = req.Home
+	} else if home := os.Getenv("HOME"); home != "" {
+		policyVars["HOME"] = home
+	}
+	if basePolicyDoc != nil {
+		enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
+		engine, dbRuleSet, dbStateDir, err := a.compileDBPolicyForSession(ctx, s, basePolicyDoc, policyVars, enforceApprovals)
+		if err != nil {
+			a.cleanupCreatedSession(s)
+			return types.Session{}, http.StatusBadRequest, fmt.Errorf("compile policy: %w", err)
+		}
+		s.ProjectRoot = policyVars["PROJECT_ROOT"]
+		s.GitRoot = policyVars["GIT_ROOT"]
+		s.SetPolicyEngine(engine)
+		if err := a.startSessionDBProxy(ctx, s, dbRuleSet, dbStateDir); err != nil {
+			a.cleanupCreatedSession(s)
+			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("start DB proxy: %w", err)
+		}
+	}
+
 	// Generate TOTP secret if TOTP approval mode is enabled
 	if a.cfg.Approvals.Mode == "totp" {
 		secret, err := approvals.GenerateTOTPSecret()
 		if err != nil {
-			_ = a.sessions.Destroy(s.ID)
+			a.cleanupCreatedSession(s)
 			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("generate TOTP secret: %w", err)
 		}
 		s.TOTPSecret = secret
@@ -501,7 +575,7 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 		mounts, err := a.setupProfileMounts(ctx, s, profile)
 		if err != nil {
 			// Cleanup session on mount failure
-			_ = a.sessions.Destroy(s.ID)
+			a.cleanupCreatedSession(s)
 			return types.Session{}, http.StatusInternalServerError, err
 		}
 		// Update session with resolved mounts
@@ -573,8 +647,11 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		policyVars["HOME"] = home
 	}
 
-	// Load and expand policy (or use global policy if no policy dir configured)
-	var engine *policy.Engine
+	// Load policy from configured policy files. Policy compilation is deferred
+	// until after session creation so generated DB unavoidability rules can
+	// include the real session ID. When no policy dir is configured, leave
+	// basePolicy nil so compileDBPolicyForSession preserves a.policy exactly.
+	var basePolicy *policy.Policy
 	if a.cfg.Policies.Dir != "" {
 		policyPath, err := policy.ResolvePolicyPath(a.cfg.Policies.Dir, policyName)
 		if err != nil {
@@ -617,15 +694,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		if err != nil {
 			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("load policy: %w", err)
 		}
-
-		enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
-		engine, err = policy.NewEngineWithVariables(pol, enforceApprovals, true, policyVars)
-		if err != nil {
-			return types.Session{}, http.StatusBadRequest, fmt.Errorf("compile policy: %w", err)
-		}
-	} else {
-		// Fall back to global policy (e.g., in tests or when policies dir not configured)
-		engine = a.policy
+		basePolicy = pol
 	}
 
 	var s *session.Session
@@ -643,6 +712,13 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		return types.Session{}, code, sessionErr
 	}
 
+	enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
+	engine, dbRuleSet, dbStateDir, err := a.compileDBPolicyForSession(ctx, s, basePolicy, policyVars, enforceApprovals)
+	if err != nil {
+		a.cleanupCreatedSession(s)
+		return types.Session{}, http.StatusBadRequest, fmt.Errorf("compile policy: %w", err)
+	}
+
 	// Store roots and session-specific policy engine
 	s.ProjectRoot = policyVars["PROJECT_ROOT"]
 	s.GitRoot = policyVars["GIT_ROOT"]
@@ -655,7 +731,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	if a.cfg.Approvals.Mode == "totp" {
 		secret, err := approvals.GenerateTOTPSecret()
 		if err != nil {
-			_ = a.sessions.Destroy(s.ID)
+			a.cleanupCreatedSession(s)
 			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("generate TOTP secret: %w", err)
 		}
 		s.TOTPSecret = secret
@@ -665,6 +741,11 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 			_ = approvals.DisplayTOTPSetup(tty, s.ID, s.TOTPSecret)
 			tty.Close()
 		}
+	}
+
+	if err := a.startSessionDBProxy(ctx, s, dbRuleSet, dbStateDir); err != nil {
+		a.cleanupCreatedSession(s)
+		return types.Session{}, http.StatusInternalServerError, fmt.Errorf("start DB proxy: %w", err)
 	}
 
 	ev := types.Event{
@@ -911,6 +992,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	}
 
 	if pre.EffectiveDecision == types.DecisionDeny {
+		a.emitCommandDBBypassAttempt(ctx, s, id, cmdID, pre)
 		code := "E_POLICY_DENIED"
 		if pre.PolicyDecision == types.DecisionApprove || pkgApprovalDenied {
 			code = "E_APPROVAL_DENIED"

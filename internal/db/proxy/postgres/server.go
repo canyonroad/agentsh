@@ -18,7 +18,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -56,18 +55,24 @@ type ServiceListener struct {
 	Port int    // when Kind == "tcp"
 }
 
+type SessionResolver interface {
+	ResolveSessionID(pid int32) (string, bool)
+}
+
 // Config captures the supervisor-supplied parameters for a Server.
 // StateDir is always required. Services and Sink are required only when
 // Unavoidability != UnavoidabilityOff. Logger defaults to slog.Default
 // when nil.
 type Config struct {
-	Unavoidability service.Unavoidability
-	Services       []Service
-	StateDir       string
-	Sink           events.Sink
-	Logger         *slog.Logger
-	Policy         *policy.RuleSet // current rule set; nil means "no rules" (implicit deny). Hot-swappable in a later plan.
-	Approver       policy.Approver // defaults to policy.NopApprover{} when nil.
+	Unavoidability  service.Unavoidability
+	Services        []Service
+	StateDir        string
+	Sink            events.Sink
+	Logger          *slog.Logger
+	Policy          *policy.RuleSet // current rule set; nil means "no rules" (implicit deny). Hot-swappable in a later plan.
+	Approver        policy.Approver // defaults to policy.NopApprover{} when nil.
+	AgentSessionID  string
+	SessionResolver SessionResolver
 
 	// MaxQueryBytes caps the 'Q' frame body. Default 1 MiB when zero.
 	// Statements above the cap get a synthetic ErrorResponse(54000) + close.
@@ -113,10 +118,6 @@ type Server struct {
 	// accept loops without calling eg.Wait directly.
 	done chan struct{}
 
-	// uidAllowed reports whether a peer uid is permitted to connect.
-	// Default: equality with os.Getuid(). Overrideable in tests.
-	uidAllowed func(uint32) bool
-
 	caMu  sync.Mutex
 	caRef *tlsleaf.CA
 
@@ -158,7 +159,6 @@ func New(cfg Config) (*Server, error) {
 				GraceWindow: cfg.CancelGraceWindow,
 			}),
 		}
-		srv.uidAllowed = func(uid uint32) bool { return uid == uint32(os.Getuid()) }
 		srv.policyPtr.Store(cfg.Policy)
 		return srv, nil
 	}
@@ -167,6 +167,12 @@ func New(cfg Config) (*Server, error) {
 	}
 	if len(cfg.Services) == 0 {
 		return nil, errors.New("postgres.New: at least one Service is required when Unavoidability != off")
+	}
+	if cfg.AgentSessionID == "" {
+		return nil, errors.New("postgres.New: AgentSessionID is required when Unavoidability != off")
+	}
+	if cfg.SessionResolver == nil {
+		return nil, errors.New("postgres.New: SessionResolver is required when Unavoidability != off")
 	}
 	for i, svc := range cfg.Services {
 		if svc.Name == "" {
@@ -196,7 +202,6 @@ func New(cfg Config) (*Server, error) {
 		cfg:         cfg,
 		logger:      cfg.Logger,
 		done:        make(chan struct{}),
-		uidAllowed:  func(uid uint32) bool { return uid == uint32(os.Getuid()) },
 		classifiers: classifiers,
 		cancelMap: newCancelMap(cancelMapConfig{
 			Max:         cfg.CancelMappingMax,
@@ -363,19 +368,27 @@ func (s *Server) acceptLoop(ctx context.Context, svc Service, ln *unixListener) 
 }
 
 // handleConn is the per-connection handler. Reads SO_PEERCRED from the peer,
-// compares the peer uid to the proxy's own uid, and on mismatch silently
-// closes the conn while emitting a db_listener_auth_fail lifecycle event.
+// resolves the peer PID to an AgentSH session, and on resolver miss/mismatch
+// silently closes the conn while emitting a db_listener_auth_fail lifecycle event.
 // Plan 04a: successful peercred is a no-op (conn closed by deferred Close in
 // acceptLoop). Plan 04b plugs in the real handshake.
 func (s *Server) handleConn(ctx context.Context, svc Service, conn net.Conn) {
 	uid, pid, err := readPeerCred(conn)
 	if err != nil {
 		s.logger.Warn("postgres.Server: peercred read failed; closing", "service", svc.Name, "err", err)
-		s.emitListenerAuthFail(ctx, svc, 0, 0, "peercred_read_failed")
+		s.emitListenerAuthFail(ctx, svc, 0, 0, "", "peercred_read_failed")
 		return
 	}
-	if !s.uidAllowed(uid) {
-		s.emitListenerAuthFail(ctx, svc, uid, pid, "uid_mismatch")
+	peerSessionID, ok := "", false
+	if s.cfg.SessionResolver != nil {
+		peerSessionID, ok = s.cfg.SessionResolver.ResolveSessionID(pid)
+	}
+	if !ok || peerSessionID == "" {
+		s.emitListenerAuthFail(ctx, svc, uid, pid, "", "session_unknown")
+		return
+	}
+	if peerSessionID != s.cfg.AgentSessionID {
+		s.emitListenerAuthFail(ctx, svc, uid, pid, peerSessionID, "session_mismatch")
 		return
 	}
 	pc := newProxyConn(s, svc, conn, uid)
@@ -394,18 +407,20 @@ func (s *Server) handleConn(ctx context.Context, svc Service, conn net.Conn) {
 // returns context.Canceled and we log warn). Acceptable for Plan 04a; Plan
 // 04b's real sink may want a background ctx with a short timeout to ensure
 // shutdown-race events still survive.
-func (s *Server) emitListenerAuthFail(ctx context.Context, svc Service, uid uint32, pid int32, reason string) {
+func (s *Server) emitListenerAuthFail(ctx context.Context, svc Service, uid uint32, pid int32, peerSessionID, reason string) {
 	if s.cfg.Sink == nil {
 		return
 	}
 	ev := events.LifecycleEvent{
-		EventID:   newEventID(),
-		Timestamp: timeNow(),
-		DBService: svc.Name,
-		Kind:      "db_listener_auth_fail",
-		Reason:    reason,
-		PeerUID:   uid,
-		PeerPID:   pid,
+		EventID:       newEventID(),
+		Timestamp:     timeNow(),
+		DBService:     svc.Name,
+		Kind:          "db_listener_auth_fail",
+		SessionID:     s.cfg.AgentSessionID,
+		Reason:        reason,
+		PeerUID:       uid,
+		PeerPID:       pid,
+		PeerSessionID: peerSessionID,
 	}
 	if err := s.cfg.Sink.EmitLifecycle(ctx, ev); err != nil {
 		s.logger.Warn("postgres.Server: sink emit failed", "kind", ev.Kind, "err", err)

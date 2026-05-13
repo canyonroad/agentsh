@@ -150,6 +150,7 @@ func (pc *proxyConn) emitHandshakeFail(ctx context.Context, errorCode string) {
 	ev := events.LifecycleEvent{
 		EventID:        newEventID(),
 		Timestamp:      timeNow(),
+		SessionID:      pc.srv.cfg.AgentSessionID,
 		DBService:      pc.svc.Name,
 		ClientIdentity: pc.state.clientIdentity,
 		Kind:           "db_handshake_fail",
@@ -178,6 +179,7 @@ func (pc *proxyConn) emitCancelMappingFail(ctx context.Context, err error) {
 	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, events.LifecycleEvent{
 		EventID:        newEventID(),
 		Timestamp:      timeNow(),
+		SessionID:      pc.srv.cfg.AgentSessionID,
 		DBService:      pc.svc.Name,
 		ClientIdentity: pc.state.clientIdentity,
 		Kind:           "db_cancel_mapping_fail",
@@ -199,6 +201,7 @@ func (pc *proxyConn) emitDegradedVisibility(ctx context.Context, degradedReason,
 	ev := events.LifecycleEvent{
 		EventID:        newEventID(),
 		Timestamp:      timeNow(),
+		SessionID:      pc.srv.cfg.AgentSessionID,
 		DBService:      pc.svc.Name,
 		ClientIdentity: pc.state.clientIdentity,
 		Kind:           "degraded_visibility_warning",
@@ -219,6 +222,7 @@ func (pc *proxyConn) emitFrameTooLarge(ctx context.Context, size int) {
 	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, events.LifecycleEvent{
 		EventID:        newEventID(),
 		Timestamp:      timeNow(),
+		SessionID:      pc.srv.cfg.AgentSessionID,
 		DBService:      pc.svc.Name,
 		ClientIdentity: pc.state.clientIdentity,
 		Kind:           "db_handshake_fail",
@@ -239,6 +243,7 @@ func (pc *proxyConn) emitUnsupportedFrame(ctx context.Context, errorCode, frameT
 	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, events.LifecycleEvent{
 		EventID:        newEventID(),
 		Timestamp:      timeNow(),
+		SessionID:      pc.srv.cfg.AgentSessionID,
 		DBService:      pc.svc.Name,
 		ClientIdentity: pc.state.clientIdentity,
 		Kind:           "db_handshake_fail",

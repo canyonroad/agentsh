@@ -77,11 +77,15 @@ func TestStore_TransportLossInflightSlot_RetiredByBatchAck(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Wait for the handshake before triggering the drop, so the Live reader
-	// is registered and will see the WAL notification from AppendLoss.
 	if _, err := srvHeld.WaitForFirstSessionInit(10 * time.Second); err != nil {
 		t.Fatalf("WaitForFirstSessionInit: %v", err)
 	}
+	// Wait for a normal EventBatch before triggering the drop. SessionInit is
+	// recorded before the client receives SessionAck; a loss marker appended in
+	// that gap can miss the Live reader and surface only after the test's
+	// timeout. The warmup batch is acked immediately, so MaxInflight=1 is free
+	// again before the loss frame occupies it.
+	validSeq := waitForLiveWarmupBatch(ctx, t, s, srvHeld, 1)
 
 	// Trigger a sequence_overflow drop. Generation=0 matches the Live reader's
 	// fresh-WAL HighGeneration()=0 so the loss marker is visible to the reader.
@@ -121,7 +125,6 @@ func TestStore_TransportLossInflightSlot_RetiredByBatchAck(t *testing.T) {
 	// srvFree. Generation=0 keeps the event in the same WAL generation
 	// as the loss record, so the replay/live reader sees it without a
 	// generation boundary issue.
-	const validSeq = uint64(1)
 	if err := s.AppendEvent(ctx, types.Event{
 		Type:      "exec",
 		SessionID: "s",

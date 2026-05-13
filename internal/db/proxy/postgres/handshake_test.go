@@ -22,10 +22,12 @@ import (
 func newTestProxyConn(t *testing.T, conn net.Conn) *proxyConn {
 	t.Helper()
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -111,6 +113,9 @@ func TestDispatch_CancelRequest_NoMatch_ClosesSilentlyAndEmitsLifecycle(t *testi
 	if lifecycle[0].Kind != "db_cancel_unmatched" {
 		t.Errorf("Kind = %q, want db_cancel_unmatched", lifecycle[0].Kind)
 	}
+	if lifecycle[0].SessionID != testAgentSessionID {
+		t.Errorf("SessionID = %q, want %q", lifecycle[0].SessionID, testAgentSessionID)
+	}
 	if lifecycle[0].Reason != "unmatched_cancel_request" {
 		t.Errorf("Reason = %q, want unmatched_cancel_request", lifecycle[0].Reason)
 	}
@@ -169,10 +174,12 @@ func TestDispatch_Passthrough_BytePumpAfterS(t *testing.T) {
 	defer b.Close()
 
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -279,11 +286,13 @@ database_connection_rules:
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -363,6 +372,9 @@ database_connection_rules:
 	if found.DegradedReason != "replication_passthrough" {
 		t.Errorf("DegradedReason = %q, want replication_passthrough", found.DegradedReason)
 	}
+	if found.SessionID != testAgentSessionID {
+		t.Errorf("SessionID = %q, want %q", found.SessionID, testAgentSessionID)
+	}
 }
 
 func TestDispatch_CancelRequest_AllowedForwardsRealMappedPacket(t *testing.T) {
@@ -390,11 +402,13 @@ database_connection_rules:
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -504,11 +518,13 @@ database_connection_rules:
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -579,10 +595,12 @@ func TestDispatch_CancelRequest_ExpiredEmitsLifecycle(t *testing.T) {
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -637,6 +655,9 @@ func TestDispatch_CancelRequest_ExpiredEmitsLifecycle(t *testing.T) {
 	if lifecycle[0].Kind != "db_cancel_after_disconnect" {
 		t.Errorf("Kind = %q, want db_cancel_after_disconnect", lifecycle[0].Kind)
 	}
+	if lifecycle[0].SessionID != testAgentSessionID {
+		t.Errorf("SessionID = %q, want %q", lifecycle[0].SessionID, testAgentSessionID)
+	}
 	if lifecycle[0].Reason != "cancel_after_disconnect" {
 		t.Errorf("Reason = %q, want cancel_after_disconnect", lifecycle[0].Reason)
 	}
@@ -667,11 +688,13 @@ database_connection_rules:
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -770,11 +793,13 @@ database_connection_rules:
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -839,6 +864,9 @@ database_connection_rules:
 	if lifecycle[0].Kind != "db_cancel_forward_failed" {
 		t.Errorf("Kind = %q, want db_cancel_forward_failed", lifecycle[0].Kind)
 	}
+	if lifecycle[0].SessionID != testAgentSessionID {
+		t.Errorf("SessionID = %q, want %q", lifecycle[0].SessionID, testAgentSessionID)
+	}
 	if lifecycle[0].Reason != "forward_failed" {
 		t.Errorf("Reason = %q, want forward_failed", lifecycle[0].Reason)
 	}
@@ -882,11 +910,13 @@ database_connection_rules:
 `)
 
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",

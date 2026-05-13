@@ -176,6 +176,11 @@ func TestStore_CRCCorruptionEmitsTransportLossOnWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("watchtower.New(s1): %v", err)
 	}
+	if got, err := srv.WaitForSessionInits(1, 10*time.Second); err != nil {
+		t.Fatalf("WaitForSessionInits(s1): %v", err)
+	} else if got != 1 {
+		t.Fatalf("SessionInits after s1 = %d; want 1", got)
+	}
 	for i := uint64(1); i <= 5; i++ {
 		ev := types.Event{
 			Type:      "exec",

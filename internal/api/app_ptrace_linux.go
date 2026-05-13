@@ -50,6 +50,7 @@ func (a *App) initPtraceTracer() {
 		sessions:           a.sessions,
 		store:              a.store,
 		broker:             a.broker,
+		dbBypass:           a.dbBypass,
 		staticAllowFile:    cfg.Performance.StaticAllowFile,
 		staticAllowNetwork: cfg.Performance.StaticAllowNetwork,
 		trashPath:          a.cfg.Sandbox.FUSE.Audit.TrashPath,
@@ -219,6 +220,19 @@ func (a *App) closePtraceTracer() {
 		a.ptraceCancel()
 		a.ptraceCancel = nil
 	}
+}
+
+func (a *App) dbProxySessionResolver() interface {
+	ResolveSessionID(pid int32) (string, bool)
+} {
+	if a.dbProxySessionResolverForTest != nil {
+		return a.dbProxySessionResolverForTest
+	}
+	tr, _ := a.ptraceTracer.(*ptrace.Tracer)
+	if tr == nil {
+		return nil
+	}
+	return tr
 }
 
 // warnIfFamiliesOrphan emits a warning when socket-family blocking is

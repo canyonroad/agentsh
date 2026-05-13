@@ -28,9 +28,11 @@ func newSimpleQueryFixture(t *testing.T) (*proxyConn, *pgproto3.Frontend, *event
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
 		Services: []Service{{
 			Name:     "test",
 			Family:   "postgres",
@@ -114,6 +116,9 @@ func TestSimpleQueryLoop_RejectsFunctionCall(t *testing.T) {
 	if len(evs) != 1 || evs[0].ErrorCode != "FUNCTION_CALL_PROTOCOL_DENIED" {
 		t.Fatalf("lifecycle events = %+v", evs)
 	}
+	if evs[0].SessionID != testAgentSessionID {
+		t.Fatalf("SessionID = %q, want %q", evs[0].SessionID, testAgentSessionID)
+	}
 }
 
 func TestSimpleQueryLoop_TerminateForwarded(t *testing.T) {
@@ -163,6 +168,9 @@ func TestHandleQuery_FrameTooLarge(t *testing.T) {
 	ev := sink.DrainLifecycle()
 	if len(ev) != 1 || ev[0].ErrorCode != "FRAME_TOO_LARGE" {
 		t.Fatalf("lifecycle = %+v", ev)
+	}
+	if ev[0].SessionID != testAgentSessionID {
+		t.Fatalf("SessionID = %q, want %q", ev[0].SessionID, testAgentSessionID)
 	}
 }
 

@@ -10,10 +10,12 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	dbevents "github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -28,13 +30,14 @@ type TransparentTCP struct {
 	policy    *policy.Engine
 	approvals *approvals.Manager
 	emit      Emitter
+	dbBypass  atomic.Pointer[dbevents.BypassEmitter]
 
 	ln   net.Listener
 	wg   sync.WaitGroup
 	done chan struct{}
 }
 
-func StartTransparentTCP(listenAddr string, sessionID string, sess *session.Session, dnsCache *DNSCache, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter) (*TransparentTCP, int, error) {
+func StartTransparentTCP(listenAddr string, sessionID string, sess *session.Session, dnsCache *DNSCache, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter, dbBypass ...*dbevents.BypassEmitter) (*TransparentTCP, int, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, 0, err
@@ -49,9 +52,19 @@ func StartTransparentTCP(listenAddr string, sessionID string, sess *session.Sess
 		ln:        ln,
 		done:      make(chan struct{}),
 	}
+	if len(dbBypass) > 0 {
+		t.SetDBBypassEmitter(dbBypass[0])
+	}
 	t.wg.Add(1)
 	go t.acceptLoop()
 	return t, ln.Addr().(*net.TCPAddr).Port, nil
+}
+
+func (t *TransparentTCP) SetDBBypassEmitter(em *dbevents.BypassEmitter) {
+	if t == nil {
+		return
+	}
+	t.dbBypass.Store(em)
 }
 
 func (t *TransparentTCP) Close() error {
@@ -98,6 +111,7 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 	if t.sess != nil {
 		commandID = t.sess.CurrentCommandID()
 	}
+	engine := t.policyEngine()
 
 	domain := dstIP.String()
 	if t.dnsCache != nil {
@@ -108,8 +122,8 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 
 	redirectHostPort := net.JoinHostPort(domain, fmt.Sprintf("%d", dstPort))
 	var redirectResult *policy.ConnectRedirectResult
-	if t.policy != nil {
-		result := t.policy.EvaluateConnectRedirect(redirectHostPort)
+	if engine != nil {
+		result := engine.EvaluateConnectRedirect(redirectHostPort)
 		if result.Matched {
 			redirectResult = result
 			if result.Visibility != "silent" {
@@ -137,6 +151,7 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 	t.emit.Publish(connectEv)
 
 	if dec.EffectiveDecision == types.DecisionDeny {
+		t.emitDBBypassAttempt(context.Background(), commandID, 0, dec.Rule, dec.Message)
 		return nil
 	}
 
@@ -175,19 +190,51 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 }
 
 func (t *TransparentTCP) policyDecision(domain string, ip net.IP, port int) policy.Decision {
-	if t.policy == nil {
+	engine := t.policyEngine()
+	if engine == nil {
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
-	return t.policy.CheckNetworkIP(domain, ip, port)
+	return engine.CheckNetworkIP(domain, ip, port)
 }
 
 func (t *TransparentTCP) checkConnectNetwork(ctx context.Context, commandID string, domain string, hostPort string, ip net.IP, port int, redirect *policy.ConnectRedirectResult) policy.Decision {
 	dec := t.policyDecision(domain, ip, port)
-	if allowUnixRedirectForDBUnavoidability(t.policy, dec, redirect) {
+	if allowUnixRedirectForDBUnavoidability(t.policyEngine(), dec, redirect) {
 		return allowConnectRedirectDecision(redirect)
 	}
 	dec = t.maybeApprove(ctx, commandID, dec, "network", hostPort)
 	return dec
+}
+
+func (t *TransparentTCP) policyEngine() *policy.Engine {
+	if t == nil {
+		return nil
+	}
+	if t.sess != nil {
+		if engine := t.sess.PolicyEngine(); engine != nil {
+			return engine
+		}
+	}
+	return t.policy
+}
+
+func (t *TransparentTCP) emitDBBypassAttempt(ctx context.Context, commandID string, pid int, ruleName string, reason string) {
+	if t == nil {
+		return
+	}
+	em := t.dbBypass.Load()
+	if em == nil {
+		return
+	}
+	em.EmitIfDBUnavoidabilityDeny(ctx, dbevents.BypassAttempt{
+		Engine:          t.policyEngine(),
+		SessionID:       t.sessionID,
+		CommandID:       commandID,
+		ProcessID:       pid,
+		ProcessIdentity: dbBypassProcessIdentity(t.sessionID, commandID),
+		RuleName:        ruleName,
+		Reason:          reason,
+	})
 }
 
 func (t *TransparentTCP) maybeApprove(ctx context.Context, commandID string, dec policy.Decision, kind string, target string) policy.Decision {

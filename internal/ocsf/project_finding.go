@@ -51,6 +51,7 @@ func findingProjector(activity uint32, findingType string) Projector {
 func init() {
 	findingTypes := map[string]string{
 		"command_policy":                "policy_decision",
+		"db_bypass_attempt":             "policy_decision",
 		"seccomp_blocked":               "policy_decision",
 		"seccomp_socket_family_blocked": "policy_decision",
 		"seccomp_socket_rule_blocked":   "policy_decision",

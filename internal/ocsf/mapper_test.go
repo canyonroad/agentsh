@@ -81,6 +81,58 @@ func TestMap_seccomp_socket_rule_blockedFinding(t *testing.T) {
 	}
 }
 
+func TestMap_db_bypass_attemptFinding(t *testing.T) {
+	m := New()
+	ev := types.Event{
+		ID:        "ev-db-bypass-1",
+		Type:      "db_bypass_attempt",
+		Timestamp: time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC),
+		PID:       602,
+		Fields: map[string]any{
+			"db_service":       "postgres",
+			"rule_name":        "db-unavoidability-postgres",
+			"bypass_mode":      "network_direct",
+			"destination":      "db.internal:5432",
+			"reason":           "direct connection denied",
+			"suppressed_count": 2,
+		},
+		Policy: &types.PolicyInfo{
+			Decision:          "deny",
+			EffectiveDecision: "deny",
+			Rule:              "db-unavoidability-postgres",
+		},
+	}
+
+	mapped, err := m.Map(ev)
+	if err != nil {
+		t.Fatalf("Map(%q): %v", ev.Type, err)
+	}
+	if mapped.OCSFClassUID != ClassDetectionFinding {
+		t.Fatalf("class uid = %d, want %d", mapped.OCSFClassUID, ClassDetectionFinding)
+	}
+	if mapped.OCSFActivityID != FindingActivityCreate {
+		t.Fatalf("activity id = %d, want %d", mapped.OCSFActivityID, FindingActivityCreate)
+	}
+
+	msg, err := decodePayloadForGolden(mapped.OCSFClassUID, mapped.Payload)
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	finding, ok := msg.(*ocsfpb.DetectionFinding)
+	if !ok {
+		t.Fatalf("mapped payload type = %T, want *DetectionFinding", msg)
+	}
+	if got := finding.GetFindingInfo().GetTypes(); got != "policy_decision" {
+		t.Fatalf("finding type = %q, want policy_decision", got)
+	}
+	if got := finding.GetPolicyDecision(); got != "deny" {
+		t.Fatalf("policy decision = %q, want deny", got)
+	}
+	if got := finding.GetPolicyRule(); got != "db-unavoidability-postgres" {
+		t.Fatalf("policy rule = %q, want db-unavoidability-postgres", got)
+	}
+}
+
 // TestMapDeterministic asserts that for any registered event, mapping
 // 1000 times produces byte-identical Payload. Run on a sample of
 // events covering every class. New event Types added in per-class
@@ -301,6 +353,11 @@ func goldenSampleEvents() []types.Event {
 		// Detection Finding (2004) — Task 21
 		{ID: "ev-cmd-policy-1", Type: "command_policy", Timestamp: t0, PID: 600,
 			Policy: &types.PolicyInfo{Decision: "deny", Rule: "no-curl", Message: "curl is blocked"}},
+		{ID: "ev-db-bypass-1", Type: "db_bypass_attempt", Timestamp: t0, PID: 608,
+			Fields: map[string]any{"db_service": "postgres", "rule_name": "db-unavoidability-postgres",
+				"bypass_mode": "network_direct", "destination": "db.internal:5432",
+				"reason": "direct connection denied", "suppressed_count": 2},
+			Policy: &types.PolicyInfo{Decision: "deny", EffectiveDecision: "deny", Rule: "db-unavoidability-postgres"}},
 		{ID: "ev-seccomp-1", Type: "seccomp_blocked", Timestamp: t0, PID: 601,
 			Policy: &types.PolicyInfo{Decision: "deny", Rule: "syscall-block"}},
 		{ID: "ev-seccomp-socket-rule-1", Type: "seccomp_socket_rule_blocked", Timestamp: t0, PID: 601,
