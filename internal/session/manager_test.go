@@ -589,8 +589,8 @@ func TestIsRealPathUnder(t *testing.T) {
 			{`C:\Users\project2`, `C:\Users\project`, false},
 			{`c:\users\project\sub`, `C:\Users\project`, true}, // case-insensitive
 			{`D:\other`, `C:\Users\project`, false},
-			{`C:\`, `C:\`, true},      // volume root
-			{`C:\foo`, `C:\`, true},    // under volume root
+			{`C:\`, `C:\`, true},    // volume root
+			{`C:\foo`, `C:\`, true}, // under volume root
 		}
 		for _, tt := range winTests {
 			got := IsRealPathUnder(tt.path, tt.root)
@@ -598,5 +598,39 @@ func TestIsRealPathUnder(t *testing.T) {
 				t.Errorf("IsRealPathUnder(%q, %q) = %v, want %v", tt.path, tt.root, got, tt.want)
 			}
 		}
+	}
+}
+
+func TestSession_DBProxyLifecycle(t *testing.T) {
+	mgr := NewManager(5)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	socketDir := filepath.Join(os.TempDir(), "agentsh-db-test")
+	var closed int
+	s.SetDBProxy(socketDir, func() error {
+		closed++
+		return nil
+	})
+
+	if got := s.DBProxySocketDir(); got != socketDir {
+		t.Fatalf("DBProxySocketDir = %q, want %q", got, socketDir)
+	}
+	if err := s.CloseDBProxy(); err != nil {
+		t.Fatalf("CloseDBProxy: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+	if got := s.DBProxySocketDir(); got != "" {
+		t.Fatalf("DBProxySocketDir after close = %q, want empty", got)
+	}
+	if err := s.CloseDBProxy(); err != nil {
+		t.Fatalf("second CloseDBProxy: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed after second close = %d, want 1", closed)
 	}
 }
