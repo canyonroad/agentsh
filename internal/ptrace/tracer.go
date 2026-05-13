@@ -293,6 +293,27 @@ func (t *Tracer) TraceeCount() int {
 	return len(t.tracees)
 }
 
+// ResolveSessionID returns the session associated with pid. The pid may be
+// either a traced thread ID or a process TGID.
+func (t *Tracer) ResolveSessionID(pid int32) (string, bool) {
+	if t == nil || pid <= 0 {
+		return "", false
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if state := t.tracees[int(pid)]; state != nil && state.SessionID != "" {
+		return state.SessionID, true
+	}
+	for _, state := range t.tracees {
+		if state != nil && state.TGID == int(pid) && state.SessionID != "" {
+			return state.SessionID, true
+		}
+	}
+	return "", false
+}
+
 // writeReadyFile writes the sentinel file if configured and not yet written.
 // Retries up to 3 times on failure before giving up.
 func (t *Tracer) writeReadyFile() {

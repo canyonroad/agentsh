@@ -27,21 +27,25 @@ type dbProxyService struct {
 }
 
 type dbProxyDeps struct {
-	Unavoidability dbservice.Unavoidability
-	Services       []dbProxyService
-	StateDir       string
-	Sink           events.Sink
-	Policy         *dbpolicy.RuleSet // live rule set for connect-rule eval
+	Unavoidability  dbservice.Unavoidability
+	Services        []dbProxyService
+	StateDir        string
+	Sink            events.Sink
+	Policy          *dbpolicy.RuleSet // live rule set for connect-rule eval
+	AgentSessionID  string
+	SessionResolver postgres.SessionResolver
 }
 
 // buildDBProxyConfig assembles a postgres.Config from deps and ensures
 // listener parent directories exist for unix listeners.
 func buildDBProxyConfig(deps dbProxyDeps) (postgres.Config, error) {
 	cfg := postgres.Config{
-		Unavoidability: deps.Unavoidability,
-		StateDir:       deps.StateDir,
-		Sink:           deps.Sink,
-		Policy:         deps.Policy,
+		Unavoidability:  deps.Unavoidability,
+		StateDir:        deps.StateDir,
+		Sink:            deps.Sink,
+		Policy:          deps.Policy,
+		AgentSessionID:  deps.AgentSessionID,
+		SessionResolver: deps.SessionResolver,
 	}
 	for _, s := range deps.Services {
 		if s.ListenKind == "unix" && s.ListenPath != "" {

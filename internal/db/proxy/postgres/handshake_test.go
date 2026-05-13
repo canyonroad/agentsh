@@ -22,10 +22,12 @@ import (
 func newTestProxyConn(t *testing.T, conn net.Conn) *proxyConn {
 	t.Helper()
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -169,10 +171,12 @@ func TestDispatch_Passthrough_BytePumpAfterS(t *testing.T) {
 	defer b.Close()
 
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -279,11 +283,13 @@ database_connection_rules:
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -390,11 +396,13 @@ database_connection_rules:
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -504,11 +512,13 @@ database_connection_rules:
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -579,10 +589,12 @@ func TestDispatch_CancelRequest_ExpiredEmitsLifecycle(t *testing.T) {
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -667,11 +679,13 @@ database_connection_rules:
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -770,11 +784,13 @@ database_connection_rules:
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
@@ -882,11 +898,13 @@ database_connection_rules:
 `)
 
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
-		Policy:         rs,
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Policy:          rs,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",

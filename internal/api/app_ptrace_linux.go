@@ -221,6 +221,16 @@ func (a *App) closePtraceTracer() {
 	}
 }
 
+func (a *App) dbProxySessionResolver() interface {
+	ResolveSessionID(pid int32) (string, bool)
+} {
+	if a.dbProxySessionResolverForTest != nil {
+		return a.dbProxySessionResolverForTest
+	}
+	tr, _ := a.ptraceTracer.(*ptrace.Tracer)
+	return tr
+}
+
 // warnIfFamiliesOrphan emits a warning when socket-family blocking is
 // configured but neither seccomp nor ptrace is available/enabled.
 // Called from initPtraceTracer when ptrace is disabled, to cover the

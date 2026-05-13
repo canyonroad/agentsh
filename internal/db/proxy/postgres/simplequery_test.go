@@ -28,9 +28,11 @@ func newSimpleQueryFixture(t *testing.T) (*proxyConn, *pgproto3.Frontend, *event
 
 	sink := &events.SyncSink{}
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           sink,
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            sink,
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
 		Services: []Service{{
 			Name:     "test",
 			Family:   "postgres",

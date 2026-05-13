@@ -62,6 +62,51 @@ func TestTracerConfig_HandlerFields(t *testing.T) {
 	}
 }
 
+func TestTracerResolveSessionID_ExactTID(t *testing.T) {
+	tr := NewTracer(TracerConfig{})
+	tr.tracees[101] = &TraceeState{TID: 101, TGID: 201, SessionID: "sess-tid"}
+
+	got, ok := tr.ResolveSessionID(101)
+	if !ok || got != "sess-tid" {
+		t.Fatalf("ResolveSessionID exact = %q, %v; want sess-tid, true", got, ok)
+	}
+}
+
+func TestTracerResolveSessionID_TGIDScan(t *testing.T) {
+	tr := NewTracer(TracerConfig{})
+	tr.tracees[102] = &TraceeState{TID: 102, TGID: 202, SessionID: "sess-tgid"}
+
+	got, ok := tr.ResolveSessionID(202)
+	if !ok || got != "sess-tgid" {
+		t.Fatalf("ResolveSessionID tgid = %q, %v; want sess-tgid, true", got, ok)
+	}
+}
+
+func TestTracerResolveSessionID_UnknownPID(t *testing.T) {
+	tr := NewTracer(TracerConfig{})
+	tr.tracees[103] = &TraceeState{TID: 103, TGID: 203, SessionID: "sess-known"}
+
+	if got, ok := tr.ResolveSessionID(999); ok || got != "" {
+		t.Fatalf("ResolveSessionID unknown = %q, %v; want empty, false", got, ok)
+	}
+}
+
+func TestTracerResolveSessionID_NilTracer(t *testing.T) {
+	var tr *Tracer
+	if got, ok := tr.ResolveSessionID(101); ok || got != "" {
+		t.Fatalf("ResolveSessionID nil = %q, %v; want empty, false", got, ok)
+	}
+}
+
+func TestTracerResolveSessionID_NonpositivePID(t *testing.T) {
+	tr := NewTracer(TracerConfig{})
+	for _, pid := range []int32{0, -1} {
+		if got, ok := tr.ResolveSessionID(pid); ok || got != "" {
+			t.Fatalf("ResolveSessionID(%d) = %q, %v; want empty, false", pid, got, ok)
+		}
+	}
+}
+
 func TestIsVforkFastPathSkipsNonExec(t *testing.T) {
 	// Verify the fast-path condition: IsVforkChild && !isExecveSyscall && isVforkSafeSyscall
 	tests := []struct {

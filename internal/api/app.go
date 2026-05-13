@@ -71,8 +71,11 @@ type App struct {
 
 	// ptraceTracer holds the ptrace.Tracer on Linux (nil on other platforms or when disabled).
 	// Type is any because ptrace package is Linux-only.
-	ptraceTracer any
-	ptraceCancel context.CancelFunc
+	ptraceTracer                  any
+	ptraceCancel                  context.CancelFunc
+	dbProxySessionResolverForTest interface {
+		ResolveSessionID(pid int32) (string, bool)
+	}
 	// ptraceFailed is set when the tracer exits unexpectedly while ptrace mode
 	// is configured. When true, command execution is blocked to prevent running
 	// without syscall enforcement (fail-closed).

@@ -42,10 +42,12 @@ func pairedConns(t *testing.T) (clientFE, proxyClientBE, proxyUpstreamFE, upstre
 func newTestProxyConnForAuth(t *testing.T, clientSide, upstreamSide net.Conn) *proxyConn {
 	t.Helper()
 	srv, err := New(Config{
-		Unavoidability: service.UnavoidabilityObserve,
-		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
-		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Unavoidability:  service.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  testAgentSessionID,
+		SessionResolver: staticResolver{sessionID: testAgentSessionID, ok: true},
+		Logger:          slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",

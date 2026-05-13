@@ -59,9 +59,53 @@ func TestServer_ObserveMode_RequiresAtLeastOneService(t *testing.T) {
 		Sink:           &events.SyncSink{},
 		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 	}
+	cfg = withRequiredSessionAuth(cfg)
 	_, err := New(cfg)
 	if err == nil {
 		t.Fatal("New (observe, no services): want error, got nil")
+	}
+}
+
+func TestServer_New_ObserveRequiresAgentSessionID(t *testing.T) {
+	cfg := withRequiredSessionAuth(validServerConfig(t))
+	cfg.AgentSessionID = ""
+	_, err := New(cfg)
+	if err == nil || !strings.Contains(err.Error(), "AgentSessionID") {
+		t.Fatalf("New (observe, no AgentSessionID): err = %v, want AgentSessionID error", err)
+	}
+}
+
+func TestServer_New_ObserveRequiresSessionResolver(t *testing.T) {
+	cfg := withRequiredSessionAuth(validServerConfig(t))
+	cfg.SessionResolver = nil
+	_, err := New(cfg)
+	if err == nil || !strings.Contains(err.Error(), "SessionResolver") {
+		t.Fatalf("New (observe, no SessionResolver): err = %v, want SessionResolver error", err)
+	}
+}
+
+func TestServer_New_EnforceRequiresSessionAuth(t *testing.T) {
+	cfg := validServerConfig(t)
+	cfg.Unavoidability = service.UnavoidabilityEnforce
+	_, err := New(cfg)
+	if err == nil || !strings.Contains(err.Error(), "AgentSessionID") {
+		t.Fatalf("New (enforce, missing auth): err = %v, want AgentSessionID error", err)
+	}
+
+	cfg.AgentSessionID = testAgentSessionID
+	_, err = New(cfg)
+	if err == nil || !strings.Contains(err.Error(), "SessionResolver") {
+		t.Fatalf("New (enforce, missing resolver): err = %v, want SessionResolver error", err)
+	}
+}
+
+func TestServer_New_OffModeDoesNotRequireSessionAuth(t *testing.T) {
+	cfg := Config{
+		Unavoidability: service.UnavoidabilityOff,
+		StateDir:       t.TempDir(),
+	}
+	if _, err := New(cfg); err != nil {
+		t.Fatalf("New (off, no session auth): %v", err)
 	}
 }
 
@@ -75,7 +119,7 @@ func TestServer_New_MissingSink(t *testing.T) {
 			Dialect:  "postgres",
 			Upstream: "db.internal:5432",
 			TLSMode:  "terminate_reissue",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/test-appdb.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "test-appdb.sock")},
 			Service:  policy.DBService{Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "db.internal:5432", TLSMode: "terminate_reissue"},
 		}},
 	}
@@ -108,6 +152,7 @@ func TestServer_StartShutdown_BindsAndUnlinksUnixSocket(t *testing.T) {
 			Service:  policy.DBService{Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "127.0.0.1:5432", TLSMode: "terminate_reissue"},
 		}},
 	}
+	cfg = withRequiredSessionAuth(cfg)
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -171,6 +216,7 @@ func TestServer_StartTwice_ReturnsError(t *testing.T) {
 			TLSMode: "terminate_reissue",
 		}},
 	}
+	cfg = withRequiredSessionAuth(cfg)
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -199,6 +245,7 @@ func TestServer_New_AllowsPassthroughService(t *testing.T) {
 			Service:  policy.DBService{Name: "appdb", TLSMode: "passthrough"},
 		}},
 	}
+	cfg = withRequiredSessionAuth(cfg)
 	if _, err := New(cfg); err != nil {
 		t.Fatalf("New (passthrough): want nil error, got %v", err)
 	}
@@ -220,6 +267,7 @@ func TestServer_LazyCALoad(t *testing.T) {
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_reissue"},
 		}},
 	}
+	cfg = withRequiredSessionAuth(cfg)
 	srv, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -259,6 +307,7 @@ func TestServer_New_AppliesMaxQueryBytesDefault(t *testing.T) {
 			Service:  policy.DBService{Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "127.0.0.1:5432", TLSMode: "terminate_reissue"},
 		}},
 	}
+	cfg = withRequiredSessionAuth(cfg)
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -285,6 +334,7 @@ func TestServer_New_HonorsMaxQueryBytesOverride(t *testing.T) {
 			Service:  policy.DBService{Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "127.0.0.1:5432", TLSMode: "terminate_reissue"},
 		}},
 	}
+	cfg = withRequiredSessionAuth(cfg)
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -300,6 +350,11 @@ func TestNew_DefaultsCancelMapConfig(t *testing.T) {
 		Unavoidability: service.UnavoidabilityObserve,
 		StateDir:       t.TempDir(),
 		Sink:           sink,
+		AgentSessionID: testAgentSessionID,
+		SessionResolver: staticResolver{
+			sessionID: testAgentSessionID,
+			ok:        true,
+		},
 		Policy: loadRuleSet(t, `version: 1
 name: test
 db_services:
@@ -347,6 +402,7 @@ func TestServer_SetPolicy_AtomicSwap(t *testing.T) {
 			Service:  policy.DBService{Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "127.0.0.1:5432", TLSMode: "terminate_reissue"},
 		}},
 	}
+	cfg = withRequiredSessionAuth(cfg)
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -377,8 +433,45 @@ func TestServer_New_RejectsUnknownDialect(t *testing.T) {
 			Service:  policy.DBService{Name: "appdb", Family: "postgres", Dialect: "rabbitql", Upstream: "127.0.0.1:5432", TLSMode: "terminate_reissue"},
 		}},
 	}
+	cfg = withRequiredSessionAuth(cfg)
 	_, err := New(cfg)
 	if err == nil || !strings.Contains(err.Error(), "rabbitql") {
 		t.Fatalf("New on unknown dialect: err = %v", err)
+	}
+}
+
+const testAgentSessionID = "agent-session"
+
+type staticResolver struct {
+	sessionID string
+	ok        bool
+}
+
+func (r staticResolver) ResolveSessionID(int32) (string, bool) {
+	return r.sessionID, r.ok
+}
+
+func withRequiredSessionAuth(cfg Config) Config {
+	cfg.AgentSessionID = testAgentSessionID
+	cfg.SessionResolver = staticResolver{sessionID: testAgentSessionID, ok: true}
+	return cfg
+}
+
+func validServerConfig(t *testing.T) Config {
+	t.Helper()
+	return Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           &events.SyncSink{},
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: "127.0.0.1:5432",
+			TLSMode:  "terminate_reissue",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "appdb.sock")},
+			Service:  policy.DBService{Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "127.0.0.1:5432", TLSMode: "terminate_reissue"},
+		}},
 	}
 }

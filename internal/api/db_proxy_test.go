@@ -14,6 +14,13 @@ import (
 	dbservice "github.com/agentsh/agentsh/internal/db/service"
 )
 
+type testDBSessionResolver map[int32]string
+
+func (r testDBSessionResolver) ResolveSessionID(pid int32) (string, bool) {
+	v, ok := r[pid]
+	return v, ok
+}
+
 func TestStartDBProxy_Off_NoListener(t *testing.T) {
 	dir := t.TempDir()
 	deps := dbProxyDeps{
@@ -47,8 +54,10 @@ func TestStartDBProxy_Observe_BindsListener(t *testing.T) {
 			ListenKind: "unix",
 			ListenPath: sockPath,
 		}},
-		StateDir: dir,
-		Sink:     &events.SyncSink{},
+		StateDir:        dir,
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  "agent-session",
+		SessionResolver: testDBSessionResolver{},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -68,12 +77,46 @@ func TestStartDBProxy_Observe_BindsListener(t *testing.T) {
 	t.Fatalf("listener never bound at %q", sockPath)
 }
 
+func TestBuildDBProxyConfig_CarriesSessionAuth(t *testing.T) {
+	resolver := testDBSessionResolver{123: "agent-session"}
+	deps := dbProxyDeps{
+		Unavoidability:  dbservice.UnavoidabilityObserve,
+		StateDir:        t.TempDir(),
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  "agent-session",
+		SessionResolver: resolver,
+		Services: []dbProxyService{{
+			Name:       "appdb",
+			DBService:  dbpolicy.DBService{Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "127.0.0.1:5432", TLSMode: "terminate_reissue"},
+			ListenKind: "unix",
+			ListenPath: filepath.Join(t.TempDir(), "appdb.sock"),
+		}},
+	}
+
+	cfg, err := buildDBProxyConfig(deps)
+	if err != nil {
+		t.Fatalf("buildDBProxyConfig: %v", err)
+	}
+	if cfg.AgentSessionID != "agent-session" {
+		t.Fatalf("AgentSessionID = %q, want agent-session", cfg.AgentSessionID)
+	}
+	if cfg.SessionResolver == nil {
+		t.Fatal("SessionResolver is nil")
+	}
+	got, ok := cfg.SessionResolver.ResolveSessionID(123)
+	if !ok || got != "agent-session" {
+		t.Fatalf("SessionResolver.ResolveSessionID(123) = %q, %v; want agent-session, true", got, ok)
+	}
+}
+
 func TestStartDBProxy_Observe_NoServices_Errors(t *testing.T) {
 	deps := dbProxyDeps{
-		Unavoidability: dbservice.UnavoidabilityObserve,
-		Services:       nil,
-		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
+		Unavoidability:  dbservice.UnavoidabilityObserve,
+		Services:        nil,
+		StateDir:        t.TempDir(),
+		Sink:            &events.SyncSink{},
+		AgentSessionID:  "agent-session",
+		SessionResolver: testDBSessionResolver{},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

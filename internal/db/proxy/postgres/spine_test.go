@@ -94,6 +94,8 @@ database_connection_rules:
 		Unavoidability:           service.UnavoidabilityObserve,
 		StateDir:                 stateDir,
 		Sink:                     sink,
+		AgentSessionID:           testAgentSessionID,
+		SessionResolver:          staticResolver{sessionID: testAgentSessionID, ok: true},
 		Policy:                   rs,
 		Logger:                   slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		UpstreamTLSConfigForTest: upTLSCfg,

@@ -33,14 +33,20 @@ type ServiceListener struct {
 	Port int
 }
 
+type SessionResolver interface {
+	ResolveSessionID(pid int32) (string, bool)
+}
+
 type Config struct {
-	Unavoidability service.Unavoidability
-	Services       []Service
-	StateDir       string
-	Sink           events.Sink
-	Logger         *slog.Logger
-	Policy         *policy.RuleSet // current rule set; nil means "no rules" (implicit deny). Hot-swappable in a later plan.
-	Approver       policy.Approver
+	Unavoidability  service.Unavoidability
+	Services        []Service
+	StateDir        string
+	Sink            events.Sink
+	Logger          *slog.Logger
+	Policy          *policy.RuleSet // current rule set; nil means "no rules" (implicit deny). Hot-swappable in a later plan.
+	Approver        policy.Approver
+	AgentSessionID  string
+	SessionResolver SessionResolver
 
 	MaxQueryBytes     int
 	CancelMappingMax  int
@@ -51,9 +57,17 @@ type Server struct {
 	sentinel bool
 }
 
-// New on non-Linux always succeeds and returns a sentinel that refuses to
-// start unless Unavoidability == off (in which case Start is a no-op too).
+// New on non-Linux validates shared config and returns a sentinel that refuses
+// to start unless Unavoidability == off (in which case Start is a no-op too).
 func New(cfg Config) (*Server, error) {
+	if cfg.Unavoidability != service.UnavoidabilityOff {
+		if cfg.AgentSessionID == "" {
+			return nil, errors.New("postgres.New: AgentSessionID is required when Unavoidability != off")
+		}
+		if cfg.SessionResolver == nil {
+			return nil, errors.New("postgres.New: SessionResolver is required when Unavoidability != off")
+		}
+	}
 	return &Server{sentinel: cfg.Unavoidability == service.UnavoidabilityOff}, nil
 }
 

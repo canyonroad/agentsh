@@ -24,8 +24,16 @@ type LifecycleEvent struct {
 	Reason string `json:"reason,omitempty"`
 
 	// Listener-auth specific (Plan 04a). Zero when not applicable.
-	PeerUID uint32 `json:"peer_uid,omitempty"`
-	PeerPID int32  `json:"peer_pid,omitempty"`
+	PeerUID       uint32 `json:"peer_uid,omitempty"`
+	PeerPID       int32  `json:"peer_pid,omitempty"`
+	PeerSessionID string `json:"peer_session_id,omitempty"`
+
+	RuleName        string `json:"rule_name,omitempty"`
+	BypassMode      string `json:"bypass_mode,omitempty"`
+	Destination     string `json:"destination,omitempty"`
+	ProcessID       int    `json:"process_id,omitempty"`
+	ProcessIdentity string `json:"process_identity,omitempty"`
+	SuppressedCount int    `json:"suppressed_count,omitempty"`
 
 	// Handshake/error specific (Plan 04b). Zero when not applicable.
 	ErrorCode string `json:"error_code,omitempty"`
