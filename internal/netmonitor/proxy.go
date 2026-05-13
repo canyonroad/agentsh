@@ -10,9 +10,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	dbevents "github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -36,13 +38,14 @@ type Proxy struct {
 	policy    *policy.Engine
 	approvals *approvals.Manager
 	emit      Emitter
+	dbBypass  atomic.Pointer[dbevents.BypassEmitter]
 
 	ln   net.Listener
 	wg   sync.WaitGroup
 	done chan struct{}
 }
 
-func StartProxy(listenAddr string, sessionID string, sess *session.Session, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter) (*Proxy, string, error) {
+func StartProxy(listenAddr string, sessionID string, sess *session.Session, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter, dbBypass ...*dbevents.BypassEmitter) (*Proxy, string, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, "", err
@@ -57,12 +60,22 @@ func StartProxy(listenAddr string, sessionID string, sess *session.Session, engi
 		ln:        ln,
 		done:      make(chan struct{}),
 	}
+	if len(dbBypass) > 0 {
+		p.SetDBBypassEmitter(dbBypass[0])
+	}
 
 	p.wg.Add(1)
 	go p.acceptLoop()
 
 	u := url.URL{Scheme: "http", Host: ln.Addr().String()}
 	return p, u.String(), nil
+}
+
+func (p *Proxy) SetDBBypassEmitter(em *dbevents.BypassEmitter) {
+	if p == nil {
+		return
+	}
+	p.dbBypass.Store(em)
 }
 
 func (p *Proxy) Close() error {
@@ -148,6 +161,7 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	if p.sess != nil {
 		commandID = p.sess.CurrentCommandID()
 	}
+	engine := p.policyEngine()
 
 	// Fail-closed check: if the target host is declared as an http_services
 	// upstream, deny direct HTTPS regardless of the CheckNetworkCtx decision.
@@ -157,8 +171,8 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	// Runs BEFORE resolveAndEmitDNS and BEFORE EvaluateConnectRedirect so
 	// that blocked requests do not trigger DNS lookups, DNS approval
 	// prompts, or redirect side effects.
-	if p.policy != nil {
-		if svcName, envVar, ok := p.policy.DeclaredHTTPServiceHost(host); ok && !p.policy.DeclaredHTTPServiceAllowsDirect(host) {
+	if engine != nil {
+		if svcName, envVar, ok := engine.DeclaredHTTPServiceHost(host); ok && !engine.DeclaredHTTPServiceAllowsDirect(host) {
 			msg := "direct HTTPS to " + host + " is blocked; use " + envVar + " to route through the gateway"
 			_, _ = io.WriteString(client, "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: "+strconv.Itoa(len(msg))+"\r\n\r\n"+msg)
 			failClosedDec := policy.Decision{
@@ -176,6 +190,7 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 			netConnectEv := p.emitNetEvent(context.Background(), "net_connect", commandID, host, hostPort, port, failClosedDec, failClosedFields)
 			_ = p.emit.AppendEvent(context.Background(), netConnectEv)
 			p.emit.Publish(netConnectEv)
+			p.emitDBBypassAttempt(context.Background(), commandID, 0, failClosedDec.Rule, failClosedDec.Message)
 			p.emitHTTPServiceDeniedDirect(context.Background(), commandID, svcName, envVar, host, "", "CONNECT")
 			return nil
 		}
@@ -186,8 +201,8 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	// Check for connect redirect rules
 	var redirectResult *policy.ConnectRedirectResult
 	var redirectTLS, redirectSNI string
-	if p.policy != nil {
-		result := p.policy.EvaluateConnectRedirect(hostPort)
+	if engine != nil {
+		result := engine.EvaluateConnectRedirect(hostPort)
 		if result.Matched {
 			redirectResult = result
 			redirectTLS = result.TLSMode
@@ -222,6 +237,7 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 		_, _ = io.WriteString(client, "HTTP/1.1 403 Forbidden\r\n\r\n")
 		_ = p.emit.AppendEvent(context.Background(), connectEv)
 		p.emit.Publish(connectEv)
+		p.emitDBBypassAttempt(context.Background(), commandID, 0, dec.Rule, dec.Message)
 		return nil
 	}
 	_ = p.emit.AppendEvent(context.Background(), connectEv)
@@ -312,6 +328,7 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 	if p.sess != nil {
 		commandID = p.sess.CurrentCommandID()
 	}
+	engine := p.policyEngine()
 
 	// Fail-closed check: if the target host is declared as an http_services
 	// upstream, deny direct HTTP regardless of the CheckNetworkCtx decision.
@@ -321,8 +338,8 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 	// Runs BEFORE resolveAndEmitDNS and BEFORE net_http_request emission so
 	// that blocked requests do not trigger DNS lookups, DNS approval
 	// prompts, or observable request-tracking side effects.
-	if p.policy != nil {
-		if svcName, envVar, ok := p.policy.DeclaredHTTPServiceHost(host); ok && !p.policy.DeclaredHTTPServiceAllowsDirect(host) {
+	if engine != nil {
+		if svcName, envVar, ok := engine.DeclaredHTTPServiceHost(host); ok && !engine.DeclaredHTTPServiceAllowsDirect(host) {
 			msg := "direct HTTP to " + host + " is blocked; use " + envVar + " to route through the gateway"
 			_, _ = io.WriteString(client, "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: "+strconv.Itoa(len(msg))+"\r\n\r\n"+msg)
 			failClosedDec := policy.Decision{
@@ -340,6 +357,7 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 			netConnectEv := p.emitNetEvent(context.Background(), "net_connect", commandID, host, host, port, failClosedDec, failClosedFields)
 			_ = p.emit.AppendEvent(context.Background(), netConnectEv)
 			p.emit.Publish(netConnectEv)
+			p.emitDBBypassAttempt(context.Background(), commandID, 0, failClosedDec.Rule, failClosedDec.Message)
 			p.emitHTTPServiceDeniedDirect(context.Background(), commandID, svcName, envVar, host, "", req.Method)
 			return nil
 		}
@@ -379,6 +397,7 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 		_, _ = io.WriteString(client, resp)
 		_ = p.emit.AppendEvent(context.Background(), connectEv)
 		p.emit.Publish(connectEv)
+		p.emitDBBypassAttempt(context.Background(), commandID, 0, dec.Rule, dec.Message)
 		return nil
 	}
 	_ = p.emit.AppendEvent(context.Background(), connectEv)
@@ -425,15 +444,16 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 }
 
 func (p *Proxy) checkNetwork(ctx context.Context, domain string, port int) policy.Decision {
-	if p.policy == nil {
+	engine := p.policyEngine()
+	if engine == nil {
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
-	return p.policy.CheckNetworkCtx(ctx, domain, port)
+	return engine.CheckNetworkCtx(ctx, domain, port)
 }
 
 func (p *Proxy) checkConnectNetwork(ctx context.Context, commandID string, host string, hostPort string, port int, redirect *policy.ConnectRedirectResult) policy.Decision {
 	dec := p.checkNetwork(ctx, host, port)
-	if allowUnixRedirectForDBUnavoidability(p.policy, dec, redirect) {
+	if allowUnixRedirectForDBUnavoidability(p.policyEngine(), dec, redirect) {
 		return allowConnectRedirectDecision(redirect)
 	}
 	dec = p.maybeApprove(ctx, commandID, dec, "network", hostPort)
@@ -444,7 +464,45 @@ func (p *Proxy) isDBUnavoidabilityTCPDirectRule(ruleName string) bool {
 	if p == nil {
 		return false
 	}
-	return isDBUnavoidabilityTCPDirectRule(p.policy, ruleName)
+	return isDBUnavoidabilityTCPDirectRule(p.policyEngine(), ruleName)
+}
+
+func (p *Proxy) policyEngine() *policy.Engine {
+	if p == nil {
+		return nil
+	}
+	if p.sess != nil {
+		if engine := p.sess.PolicyEngine(); engine != nil {
+			return engine
+		}
+	}
+	return p.policy
+}
+
+func (p *Proxy) emitDBBypassAttempt(ctx context.Context, commandID string, pid int, ruleName string, reason string) {
+	if p == nil {
+		return
+	}
+	em := p.dbBypass.Load()
+	if em == nil {
+		return
+	}
+	em.EmitIfDBUnavoidabilityDeny(ctx, dbevents.BypassAttempt{
+		Engine:          p.policyEngine(),
+		SessionID:       p.sessionID,
+		CommandID:       commandID,
+		ProcessID:       pid,
+		ProcessIdentity: dbBypassProcessIdentity(p.sessionID, commandID),
+		RuleName:        ruleName,
+		Reason:          reason,
+	})
+}
+
+func dbBypassProcessIdentity(sessionID string, commandID string) string {
+	if commandID != "" {
+		return "command:" + commandID
+	}
+	return "session:" + sessionID
 }
 
 func allowUnixRedirectForDBUnavoidability(engine *policy.Engine, dec policy.Decision, redirect *policy.ConnectRedirectResult) bool {

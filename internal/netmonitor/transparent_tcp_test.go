@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	dbevents "github.com/agentsh/agentsh/internal/db/events"
+	dbservice "github.com/agentsh/agentsh/internal/db/service"
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -106,6 +109,80 @@ func TestTransparentTCPNetEventNoThreatMetadata(t *testing.T) {
 	}
 	if ev.Policy.ThreatAction != "" {
 		t.Errorf("expected empty ThreatAction, got %q", ev.Policy.ThreatAction)
+	}
+}
+
+func TestTransparentTCPEmitDBBypassAttempt(t *testing.T) {
+	capture := &captureDBBypassEmitter{}
+	tcp := &TransparentTCP{
+		sessionID: "session-db",
+		policy:    newNetmonitorDBUnavoidabilityEngine(t),
+	}
+	tcp.SetDBBypassEmitter(dbevents.NewBypassEmitter(capture))
+
+	tcp.emitDBBypassAttempt(context.Background(), "", 0, "db-appdb-deny-direct", "blocked by transparent policy")
+
+	if len(capture.events) != 1 {
+		t.Fatalf("db bypass events = %d, want 1", len(capture.events))
+	}
+	ev := capture.events[0]
+	if ev.Type != "db_bypass_attempt" {
+		t.Fatalf("event type = %q, want db_bypass_attempt", ev.Type)
+	}
+	if ev.Fields["process_identity"] != "session:session-db" {
+		t.Fatalf("process_identity = %v, want session:session-db", ev.Fields["process_identity"])
+	}
+	if ev.Fields["rule_name"] != "db-appdb-deny-direct" || ev.Fields["bypass_mode"] != dbservice.BypassModeTCPDirect {
+		t.Fatalf("db metadata fields = %+v", ev.Fields)
+	}
+	if ev.Fields["reason"] != "blocked by transparent policy" {
+		t.Fatalf("reason = %v", ev.Fields["reason"])
+	}
+}
+
+func TestStartTransparentTCPInstallsInitialDBBypassEmitter(t *testing.T) {
+	capture := &captureDBBypassEmitter{}
+	tcp, _, err := StartTransparentTCP("127.0.0.1:0", "session-db", nil, nil, newNetmonitorDBUnavoidabilityEngine(t), nil, &stubEmitter{}, dbevents.NewBypassEmitter(capture))
+	if err != nil {
+		t.Fatalf("StartTransparentTCP: %v", err)
+	}
+	defer tcp.Close()
+
+	tcp.emitDBBypassAttempt(context.Background(), "", 0, "db-appdb-deny-direct", "blocked before publish")
+
+	if len(capture.events) != 1 {
+		t.Fatalf("db bypass events = %d, want 1", len(capture.events))
+	}
+}
+
+func TestTransparentTCPUsesSessionPolicyEngineForNetworkChecks(t *testing.T) {
+	basePolicy := &policy.Policy{
+		Version: 1,
+		Name:    "base-allow",
+		NetworkRules: []policy.NetworkRule{
+			{
+				Name:     "allow-db",
+				Domains:  []string{"db.internal"},
+				Ports:    []int{5432},
+				Decision: "allow",
+			},
+		},
+	}
+	baseEngine, err := policy.NewEngine(basePolicy, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine(base): %v", err)
+	}
+	mgr := session.NewManager(1)
+	sess, err := mgr.CreateWithID("session-db-policy", t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("CreateWithID: %v", err)
+	}
+	sess.SetPolicyEngine(newNetmonitorDBUnavoidabilityEngine(t))
+
+	tcp := &TransparentTCP{sessionID: sess.ID, sess: sess, policy: baseEngine}
+	got := tcp.policyDecision("db.internal", nil, 5432)
+	if got.EffectiveDecision != types.DecisionDeny || got.Rule != "db-appdb-deny-direct" {
+		t.Fatalf("policyDecision = %+v, want session-local DB deny", got)
 	}
 }
 
