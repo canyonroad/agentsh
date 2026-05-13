@@ -573,9 +573,10 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		policyVars["HOME"] = home
 	}
 
-	// Load policy (or use global policy if no policy dir configured). Policy
-	// compilation is deferred until after session creation so generated DB
-	// unavoidability rules can include the real session ID.
+	// Load policy from configured policy files. Policy compilation is deferred
+	// until after session creation so generated DB unavoidability rules can
+	// include the real session ID. When no policy dir is configured, leave
+	// basePolicy nil so compileDBPolicyForSession preserves a.policy exactly.
 	var basePolicy *policy.Policy
 	if a.cfg.Policies.Dir != "" {
 		policyPath, err := policy.ResolvePolicyPath(a.cfg.Policies.Dir, policyName)
@@ -620,11 +621,6 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("load policy: %w", err)
 		}
 		basePolicy = pol
-	} else {
-		// Fall back to global policy (e.g., in tests or when policies dir not configured)
-		if a.policy != nil {
-			basePolicy = a.policy.Policy()
-		}
 	}
 
 	var s *session.Session

@@ -163,6 +163,93 @@ func TestCreateSessionCore_DBUnavoidabilityMissingResolverFailsClosed(t *testing
 	}
 }
 
+func TestCreateSessionCore_DBUnavoidabilityRegularFileListenerFailsClosed(t *testing.T) {
+	app, mgr := newDBUnavoidabilityTestApp(t, dbObservePolicyYAML())
+	app.dbProxySessionResolverForTest = fixedDBSessionResolver{sessionID: "sess-db-regular-file"}
+
+	listenPath := filepath.Join(app.cfg.Sessions.BaseDir, "sess-db-regular-file", "db-proxy", "db-services", "appdb.sock")
+	if err := os.MkdirAll(filepath.Dir(listenPath), 0o700); err != nil {
+		t.Fatalf("mkdir listener parent: %v", err)
+	}
+	if err := os.WriteFile(listenPath, []byte("not a socket"), 0o600); err != nil {
+		t.Fatalf("write listener placeholder: %v", err)
+	}
+
+	_, code, err := app.createSessionCore(context.Background(), types.CreateSessionRequest{
+		ID:        "sess-db-regular-file",
+		Workspace: t.TempDir(),
+		Policy:    "default",
+	})
+	if err == nil {
+		t.Fatal("createSessionCore: want error, got nil")
+	}
+	if code != http.StatusInternalServerError {
+		t.Fatalf("code = %d, want %d", code, http.StatusInternalServerError)
+	}
+	if !strings.Contains(err.Error(), "not a socket") {
+		t.Fatalf("error = %v, want non-socket listener error", err)
+	}
+	if _, ok := mgr.Get("sess-db-regular-file"); ok {
+		t.Fatal("failed session remained in manager")
+	}
+}
+
+func TestCreateSessionCore_NoPolicyDirUsesGlobalEngine(t *testing.T) {
+	globalEngine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "global",
+		CommandRules: []policy.CommandRule{{
+			Name:     "allow-all",
+			Commands: []string{"*"},
+			Decision: "allow",
+		}},
+		FileRules: []policy.FileRule{{
+			Name:       "allow-all",
+			Paths:      []string{"/**"},
+			Operations: []string{"*"},
+			Decision:   "allow",
+		}},
+		NetworkRules: []policy.NetworkRule{{
+			Name:     "allow-all",
+			Domains:  []string{"**"},
+			Decision: "allow",
+		}},
+	}, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Development.DisableAuth = true
+	cfg.Metrics.Enabled = false
+	cfg.Sandbox.FUSE.Enabled = false
+	cfg.Sandbox.Network.Enabled = false
+	cfg.Sandbox.Network.Transparent.Enabled = false
+	cfg.Sessions.BaseDir = t.TempDir()
+	mgr := session.NewManager(10)
+	store := composite.New(mockEventStore{}, nil)
+	app := NewApp(cfg, mgr, store, globalEngine, appevents.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
+
+	snap, code, err := app.createSessionCore(context.Background(), types.CreateSessionRequest{
+		ID:        "sess-global-engine",
+		Workspace: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("createSessionCore: code=%d err=%v", code, err)
+	}
+	if code != http.StatusCreated {
+		t.Fatalf("code = %d, want %d", code, http.StatusCreated)
+	}
+	s, ok := mgr.Get(snap.ID)
+	if !ok {
+		t.Fatalf("session %q not found", snap.ID)
+	}
+	defer app.cleanupCreatedSession(s)
+	if got := s.PolicyEngine(); got != globalEngine {
+		t.Fatalf("session policy engine = %p, want global engine %p", got, globalEngine)
+	}
+}
+
 type fixedDBSessionResolver struct {
 	sessionID string
 }

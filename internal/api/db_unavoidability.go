@@ -171,9 +171,13 @@ func waitForDBProxyListeners(ctx context.Context, services []dbProxyService, tim
 			if svc.ListenKind != "unix" || svc.ListenPath == "" {
 				continue
 			}
-			if _, err := os.Stat(svc.ListenPath); err != nil {
+			fi, err := os.Stat(svc.ListenPath)
+			if err != nil {
 				missing = svc.ListenPath
 				break
+			}
+			if fi.Mode()&os.ModeSocket == 0 {
+				return fmt.Errorf("DB proxy listener path %q is not a socket", svc.ListenPath)
 			}
 		}
 		if missing == "" {
