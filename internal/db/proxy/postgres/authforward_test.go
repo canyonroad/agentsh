@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -138,7 +139,7 @@ func TestForwardAuth_AuthOK_ForwardsToRFQ(t *testing.T) {
 	}
 }
 
-func TestForwardAuth_BackendKeyMappingCommittedBeforeClientReceivesSyntheticKey(t *testing.T) {
+func TestForwardAuth_BackendKeyMappingAvailableWhenClientReceivesSyntheticKey(t *testing.T) {
 	clientFE, proxyClientBE, proxyUpstreamFE, upstreamBE := pairedConns(t)
 	pc := newTestProxyConnForAuth(t, proxyClientBE, proxyUpstreamFE)
 	syntheticSecret := []byte{0, 0, 1, 77}
@@ -161,6 +162,11 @@ func TestForwardAuth_BackendKeyMappingCommittedBeforeClientReceivesSyntheticKey(
 
 	clientBKD := make(chan *pgproto3.BackendKeyData, 1)
 	continueRead := make(chan struct{})
+	var releaseRead sync.Once
+	releaseClientReader := func() {
+		releaseRead.Do(func() { close(continueRead) })
+	}
+	defer releaseClientReader()
 	doneClient := make(chan error, 1)
 	go func() {
 		for {
@@ -204,7 +210,7 @@ func TestForwardAuth_BackendKeyMappingCommittedBeforeClientReceivesSyntheticKey(
 	if entry.RealPID != 777 || !bytes.Equal(entry.RealSecret, realSecret) {
 		t.Fatalf("mapped real key = (%d,%x), want (777,%x)", entry.RealPID, entry.RealSecret, realSecret)
 	}
-	close(continueRead)
+	releaseClientReader()
 
 	select {
 	case err := <-doneClient:

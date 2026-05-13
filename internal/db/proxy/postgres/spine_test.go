@@ -387,7 +387,13 @@ func TestSpine_CancelRequest_UsesSyntheticKeyAndForwardsRealKey(t *testing.T) {
 	tlsConn := handRolledTerminateReissueHandshake(t, h.sock, h.ca)
 	defer tlsConn.Close()
 
+	if err := tlsConn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set RFQ read deadline: %v", err)
+	}
 	bkd := readUntilRFQ(t, tlsConn)
+	if err := tlsConn.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear RFQ read deadline: %v", err)
+	}
 	if bkd == nil {
 		t.Fatal("never received BackendKeyData")
 	}
@@ -429,23 +435,28 @@ func TestSpine_CancelRequest_UsesSyntheticKeyAndForwardsRealKey(t *testing.T) {
 		t.Fatal("timed out waiting for upstream script")
 	}
 
-	var evs []events.DBEvent
+	var (
+		evs         []events.DBEvent
+		cancelEvent events.DBEvent
+		foundCancel bool
+	)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		evs = h.sink.DrainStatements()
-		if len(evs) > 0 {
+		drained := h.sink.DrainStatements()
+		evs = append(evs, drained...)
+		for _, ev := range drained {
+			if ev.Decision.RuleKind == "cancel" {
+				cancelEvent = ev
+				foundCancel = true
+				break
+			}
+		}
+		if foundCancel {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	var cancelEvent *events.DBEvent
-	for i := range evs {
-		if evs[i].Decision.RuleKind == "cancel" {
-			cancelEvent = &evs[i]
-			break
-		}
-	}
-	if cancelEvent == nil {
+	if !foundCancel {
 		t.Fatalf("no cancel statement event among %+v", evs)
 	}
 	if cancelEvent.Decision.Verb != "allow" {
