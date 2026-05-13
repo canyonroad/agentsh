@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -51,7 +52,7 @@ func newTestProxyConnForAuth(t *testing.T, clientSide, upstreamSide net.Conn) *p
 			Dialect:  "postgres",
 			Upstream: "db.internal:5432",
 			TLSMode:  "terminate_reissue",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_test.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "test.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_reissue"},
 		}},
 	})

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func newTestProxyConn(t *testing.T, conn net.Conn) *proxyConn {
 			Dialect:  "postgres",
 			Upstream: "db.internal:5432",
 			TLSMode:  "terminate_reissue",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_test.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "test.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_reissue"},
 		}},
 	})
@@ -178,7 +179,7 @@ func TestDispatch_Passthrough_BytePumpAfterS(t *testing.T) {
 			Dialect:  "postgres",
 			Upstream: upLn.Addr().String(),
 			TLSMode:  "passthrough",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "passthrough"},
 		}},
 	})
@@ -289,7 +290,7 @@ database_connection_rules:
 			Dialect:  "postgres",
 			Upstream: upLn.Addr().String(),
 			TLSMode:  "terminate_plaintext_upstream",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
 		}},
 	})
@@ -400,7 +401,7 @@ database_connection_rules:
 			Dialect:  "postgres",
 			Upstream: upAddr,
 			TLSMode:  "terminate_plaintext_upstream",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
 		}},
 	})
@@ -514,7 +515,7 @@ database_connection_rules:
 			Dialect:  "postgres",
 			Upstream: upLn.Addr().String(),
 			TLSMode:  "terminate_plaintext_upstream",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
 		}},
 	})
@@ -588,7 +589,7 @@ func TestDispatch_CancelRequest_ExpiredEmitsLifecycle(t *testing.T) {
 			Dialect:  "postgres",
 			Upstream: "127.0.0.1:1",
 			TLSMode:  "terminate_plaintext_upstream",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
 		}},
 	})
@@ -677,7 +678,7 @@ database_connection_rules:
 			Dialect:  "postgres",
 			Upstream: upAddr,
 			TLSMode:  "terminate_plaintext_upstream",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
 		}},
 	})
@@ -780,7 +781,7 @@ database_connection_rules:
 			Dialect:  "postgres",
 			Upstream: upAddr,
 			TLSMode:  "terminate_plaintext_upstream",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
 		}},
 	})
@@ -892,7 +893,7 @@ database_connection_rules:
 			Dialect:  "postgres",
 			Upstream: upLn.Addr().String(),
 			TLSMode:  "terminate_plaintext_upstream",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
 		}},
 	})
