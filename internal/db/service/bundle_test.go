@@ -64,7 +64,7 @@ func TestGenerateBundle_SingleServiceCoreRules(t *testing.T) {
 		t.Fatalf("network rules = %d, want 1", len(b.Policy.NetworkRules))
 	}
 	netRule := b.Policy.NetworkRules[0]
-	if netRule.Name != "db-appdb-deny-direct" {
+	if netRule.Name != "db-appdb-allow-redirect" {
 		t.Fatalf("network rule name = %q", netRule.Name)
 	}
 	if len(netRule.Domains) != 1 || netRule.Domains[0] != "db.internal" {
@@ -73,7 +73,7 @@ func TestGenerateBundle_SingleServiceCoreRules(t *testing.T) {
 	if len(netRule.Ports) != 1 || netRule.Ports[0] != 5432 {
 		t.Fatalf("network ports = %+v", netRule.Ports)
 	}
-	if netRule.Decision != "deny" {
+	if netRule.Decision != "allow" {
 		t.Fatalf("network decision = %q", netRule.Decision)
 	}
 
@@ -88,7 +88,7 @@ func TestGenerateBundle_SingleServiceCoreRules(t *testing.T) {
 		t.Fatalf("Bundle.Metadata length = %d, Policy.Metadata length = %d", len(b.Metadata), len(b.Policy.Metadata))
 	}
 	assertMetadata(t, b.Metadata, "db-appdb-redirect", "appdb", BypassModeTCPDirect, "db.internal:5432")
-	assertMetadata(t, b.Metadata, "db-appdb-deny-direct", "appdb", BypassModeTCPDirect, "db.internal:5432")
+	assertMetadata(t, b.Metadata, "db-appdb-allow-redirect", "appdb", BypassModeTCPDirect, "db.internal:5432")
 	assertMetadata(t, b.Metadata, "db-appdb-deny-local-postgres-sockets", "appdb", BypassModeUnixSocket, "postgres-local-sockets")
 }
 
@@ -119,12 +119,70 @@ func TestGenerateBundle_MultipleServicesHaveStableNames(t *testing.T) {
 	for _, name := range []string{
 		"db-appdb-redirect",
 		"db-warehouse-db-redirect",
-		"db-appdb-deny-direct",
-		"db-warehouse-db-deny-direct",
+		"db-appdb-allow-redirect",
+		"db-warehouse-db-allow-redirect",
 	} {
 		if !seen[name] {
 			t.Fatalf("missing metadata for %q in %+v", name, b.Metadata)
 		}
+	}
+}
+
+func TestGenerateBundle_RedirectTargetAllowedByNetworkPolicy(t *testing.T) {
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+	engine, err := policy.NewEngine(&b.Policy, false, true)
+	if err != nil {
+		t.Fatalf("policy.NewEngine: %v", err)
+	}
+
+	redirect := engine.EvaluateConnectRedirect("db.internal:5432")
+	if !redirect.Matched || redirect.RedirectToUnix == "" {
+		t.Fatalf("EvaluateConnectRedirect = %+v", redirect)
+	}
+	network := engine.CheckNetwork("db.internal", 5432)
+	if string(network.EffectiveDecision) != "allow" {
+		t.Fatalf("CheckNetwork decision = %+v, want allow so CONNECT can dial redirected unix target", network)
+	}
+}
+
+func TestGenerateBundle_CollidingSanitizedServiceNamesAreUnique(t *testing.T) {
+	services := []Service{
+		validBundleService(t, "app_db"),
+		validBundleService(t, "app-db"),
+		validBundleService(t, "app/db"),
+	}
+	for i := range services {
+		services[i].Listen.Path = filepath.Join(t.TempDir(), "db", services[i].Name+".sock")
+		services[i].Upstream.Port = 5432 + i
+	}
+
+	b, err := GenerateBundle(Config{Services: services}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, m := range b.Metadata {
+		if seen[m.RuleName] {
+			t.Fatalf("duplicate metadata rule name %q in %+v", m.RuleName, b.Metadata)
+		}
+		seen[m.RuleName] = true
+	}
+	if len(seen) != len(b.Metadata) {
+		t.Fatalf("unique metadata names = %d, metadata = %d", len(seen), len(b.Metadata))
 	}
 }
 

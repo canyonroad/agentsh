@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -61,18 +63,18 @@ func GenerateBundle(cfg Config, opts BundleOptions) (Bundle, error) {
 			Description: "Generated DB unavoidability bundle for AgentSH session " + opts.SessionID,
 		},
 	}
-	for _, svc := range cfg.Services {
-		addCoreServiceRules(&b, svc)
+	serviceParts := serviceRuleParts(cfg.Services)
+	for i, svc := range cfg.Services {
+		addCoreServiceRules(&b, svc, serviceParts[i])
 	}
 	b.Policy.Metadata = append([]policy.RuleMetadata(nil), b.Metadata...)
 	return b, nil
 }
 
-func addCoreServiceRules(b *Bundle, svc Service) {
-	servicePart := sanitizeRulePart(svc.Name)
+func addCoreServiceRules(b *Bundle, svc Service, servicePart string) {
 	destination := serviceDestination(svc)
 	redirectName := "db-" + servicePart + "-redirect"
-	networkName := "db-" + servicePart + "-deny-direct"
+	networkName := "db-" + servicePart + "-allow-redirect"
 	unixName := "db-" + servicePart + "-deny-local-postgres-sockets"
 
 	b.Policy.ConnectRedirectRules = append(b.Policy.ConnectRedirectRules, policy.ConnectRedirectRule{
@@ -87,11 +89,11 @@ func addCoreServiceRules(b *Bundle, svc Service) {
 
 	b.Policy.NetworkRules = append(b.Policy.NetworkRules, policy.NetworkRule{
 		Name:        networkName,
-		Description: "Deny direct DB egress; traffic must use AgentSH DB proxy",
+		Description: "Allow DB destination precheck so connect redirect can reach AgentSH DB proxy",
 		Domains:     []string{strings.ToLower(svc.Upstream.Host)},
 		Ports:       []int{svc.Upstream.Port},
-		Decision:    "deny",
-		Message:     "Direct database egress is blocked; use the AgentSH DB proxy",
+		Decision:    "allow",
+		Message:     "Database traffic is routed through the AgentSH DB proxy",
 	})
 	addMetadata(b, networkName, svc.Name, BypassModeTCPDirect, destination)
 
@@ -121,6 +123,31 @@ func addMetadata(b *Bundle, ruleName, serviceName, bypassMode, destination strin
 
 func serviceDestination(svc Service) string {
 	return net.JoinHostPort(strings.ToLower(svc.Upstream.Host), strconv.Itoa(svc.Upstream.Port))
+}
+
+func serviceRuleParts(services []Service) []string {
+	bases := make([]string, len(services))
+	counts := make(map[string]int, len(services))
+	for i, svc := range services {
+		base := sanitizeRulePart(svc.Name)
+		bases[i] = base
+		counts[base]++
+	}
+
+	parts := make([]string, len(services))
+	for i, svc := range services {
+		part := bases[i]
+		if counts[part] > 1 {
+			part += "-" + ruleNameHash(svc.Name)
+		}
+		parts[i] = part
+	}
+	return parts
+}
+
+func ruleNameHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])[:8]
 }
 
 func validateBundleOptions(cfg Config, opts BundleOptions) error {
