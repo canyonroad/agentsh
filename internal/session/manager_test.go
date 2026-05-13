@@ -635,6 +635,22 @@ func TestSession_DBProxyLifecycle(t *testing.T) {
 	}
 }
 
+func TestSessionSnapshotIncludesDBProxySocketDir(t *testing.T) {
+	mgr := NewManager(5)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	socketDir := filepath.Join(t.TempDir(), "db-services")
+	s.SetDBProxy(socketDir, func() error { return nil })
+
+	snap := s.Snapshot()
+	if snap.DBProxySocketDir != socketDir {
+		t.Fatalf("Snapshot().DBProxySocketDir = %q, want %q", snap.DBProxySocketDir, socketDir)
+	}
+}
+
 func TestSessionCleanup_ClosesDBProxy(t *testing.T) {
 	mgr := NewManager(5)
 	s, err := mgr.Create(t.TempDir(), "default")
