@@ -1,6 +1,6 @@
 # DB Plan 07c Integration Suite Design
 
-**Status:** Approved for implementation planning.
+**Status:** Implemented.
 **Date:** 2026-05-13
 **Source roadmap:** `docs/superpowers/specs/2026-05-13-db-plan-07-split-unavoidability-design.md`
 **Source spec:** `docs/agentsh-db-access-spec.md` v0.8, sections 11-14 and 23.4.
