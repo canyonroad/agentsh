@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	dbevents "github.com/agentsh/agentsh/internal/db/events"
@@ -15,11 +16,70 @@ type dbAuditSink struct {
 	broker *appevents.Broker
 }
 
-func (s dbAuditSink) EmitStatement(context.Context, dbevents.DBEvent) error {
-	// Plan 07b wires runtime lifecycle publication only. Statement and
-	// cancel DBEvent publication stay in the proxy-local sink path until a
-	// later slice promotes them to API/store/broker events.
+func (s dbAuditSink) EmitStatement(ctx context.Context, ev dbevents.DBEvent) error {
+	typesEv := dbStatementToEvent(ev)
+	if s.store != nil {
+		if err := s.store.AppendEvent(ctx, typesEv); err != nil {
+			return err
+		}
+	}
+	if s.broker != nil {
+		s.broker.Publish(typesEv)
+	}
 	return nil
+}
+
+func dbStatementToEvent(ev dbevents.DBEvent) types.Event {
+	fields := map[string]any{
+		"db_service":          ev.DBService,
+		"db_family":           ev.DBFamily,
+		"db_dialect":          ev.DBDialect,
+		"db_user":             ev.DBUser,
+		"database":            ev.Database,
+		"application_name":    ev.ApplicationName,
+		"client_identity":     ev.ClientIdentity,
+		"operation_group":     ev.OperationGroup,
+		"operation_group_id":  ev.OperationGroupID,
+		"operation_subtype":   ev.OperationSubtype,
+		"raw_verb":            ev.RawVerb,
+		"object_resolution":   ev.ObjectResolution,
+		"statement_digest":    ev.StatementDigest,
+		"statement_text":      ev.StatementText,
+		"parser_backend":      ev.ParserBackend.String(),
+		"statement_redaction": dbEventField(ev.StatementRedaction),
+		"tls":                 dbEventField(ev.TLS),
+		"decision":            dbEventField(ev.Decision),
+		"result":              dbEventField(ev.Result),
+		"tx_context":          dbEventField(ev.TxContext),
+	}
+	if len(ev.Effects) > 0 {
+		fields["effects"] = dbEventField(ev.Effects)
+	}
+	if ev.Predicates != (dbevents.EventPredicates{}) {
+		fields["predicates"] = dbEventField(ev.Predicates)
+	}
+
+	return types.Event{
+		ID:        ev.EventID,
+		Timestamp: ev.Timestamp,
+		Type:      "db_statement",
+		SessionID: ev.SessionID,
+		CommandID: ev.CommandID,
+		Operation: ev.OperationGroup,
+		Fields:    fields,
+	}
+}
+
+func dbEventField(v any) any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var out any
+	if err := json.Unmarshal(b, &out); err != nil {
+		return v
+	}
+	return out
 }
 
 func (s dbAuditSink) EmitLifecycle(ctx context.Context, ev dbevents.LifecycleEvent) error {
