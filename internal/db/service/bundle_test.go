@@ -406,6 +406,199 @@ func TestGenerateBundle_ResolvedIPRuleNamesUseCollisionResistantServiceParts(t *
 	assertUniqueMetadataRuleNames(t, b.Metadata)
 }
 
+func TestGenerateBundle_BypassToolRules(t *testing.T) {
+	services := []Service{
+		validBundleService(t, "analytics"),
+		validBundleService(t, "appdb"),
+		validBundleService(t, "replica"),
+	}
+	services[0].Upstream.Host = "analytics.internal"
+	services[0].Upstream.Port = 15432
+	services[1].Upstream.Port = 5432
+	services[2].Upstream.Host = "replica.internal"
+	services[2].Upstream.Port = 5432
+
+	b, err := GenerateBundle(Config{Services: services}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: true,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+
+	wantCommands := map[string]string{
+		"ssh":             "db-bypass-ssh-forward",
+		"socat":           "db-bypass-socat",
+		"kubectl":         "db-bypass-kubectl-port-forward",
+		"cloud-sql-proxy": "db-bypass-cloud-sql-proxy",
+		"gcloud":          "db-bypass-gcloud-sql-connect",
+		"aws":             "db-bypass-aws-rds-connect",
+		"chisel":          "db-bypass-chisel",
+		"gost":            "db-bypass-gost",
+		"frpc":            "db-bypass-frpc",
+		"nc":              "db-bypass-netcat",
+		"ncat":            "db-bypass-netcat",
+		"netcat":          "db-bypass-netcat",
+		"docker":          "db-bypass-container-net-host",
+		"podman":          "db-bypass-container-net-host",
+		"nerdctl":         "db-bypass-container-net-host",
+	}
+
+	seen := map[string]string{}
+	for _, r := range b.Policy.CommandRules {
+		if r.Decision != "deny" {
+			t.Fatalf("command rule %q decision = %q, want deny", r.Name, r.Decision)
+		}
+		if r.Description != "Convenience detection for DB proxy bypass attempts; destination egress deny is the security boundary" {
+			t.Fatalf("command rule %q description = %q", r.Name, r.Description)
+		}
+		for _, cmd := range r.Commands {
+			seen[cmd] = r.Name
+		}
+		assertMetadata(t, b.Metadata, r.Name, "*", BypassModePortForwardTool, "db-service-ports")
+		assertMetadata(t, b.Policy.Metadata, r.Name, "*", BypassModePortForwardTool, "db-service-ports")
+	}
+	for cmd, ruleName := range wantCommands {
+		if seen[cmd] != ruleName {
+			t.Fatalf("command %q mapped to rule %q, want %q; all seen=%+v", cmd, seen[cmd], ruleName, seen)
+		}
+	}
+	assertUniqueMetadataRuleNames(t, b.Metadata)
+}
+
+func TestGenerateBundle_BypassToolRulesOptional(t *testing.T) {
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+	if len(b.Policy.CommandRules) != 0 {
+		t.Fatalf("command rules = %+v, want none", b.Policy.CommandRules)
+	}
+}
+
+func TestGenerateBundle_BypassToolPortPatternsAreDeterministic(t *testing.T) {
+	services := []Service{
+		validBundleService(t, "analytics"),
+		validBundleService(t, "appdb"),
+		validBundleService(t, "replica"),
+	}
+	services[0].Upstream.Port = 15432
+	services[1].Upstream.Port = 5432
+	services[2].Upstream.Port = 5432
+
+	reversed := []Service{services[2], services[1], services[0]}
+
+	first, err := GenerateBundle(Config{Services: services}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: true,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle first: %v", err)
+	}
+	second, err := GenerateBundle(Config{Services: reversed}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: true,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle second: %v", err)
+	}
+
+	wantPatterns := map[string]string{
+		"db-bypass-ssh-forward":          "(^|\\s)-L(\\s|[^\\s]*:).*:(5432|15432)(\\s|$)",
+		"db-bypass-socat":                "(?i)(tcp-listen|listen|tcp:).*(5432|15432)",
+		"db-bypass-kubectl-port-forward": "(^|\\s)port-forward(\\s|$).*(:(5432|15432)|\\s(5432|15432):)",
+		"db-bypass-netcat":               "(?i)(-l|--listen|(5432|15432))",
+	}
+	for ruleName, wantPattern := range wantPatterns {
+		firstRule := commandRuleByName(t, first.Policy.CommandRules, ruleName)
+		secondRule := commandRuleByName(t, second.Policy.CommandRules, ruleName)
+		if strings.Join(firstRule.ArgsPatterns, "\n") != strings.Join(secondRule.ArgsPatterns, "\n") {
+			t.Fatalf("command rule %q patterns differ by service order: %+v vs %+v", ruleName, firstRule.ArgsPatterns, secondRule.ArgsPatterns)
+		}
+		if len(firstRule.ArgsPatterns) != 1 || firstRule.ArgsPatterns[0] != wantPattern {
+			t.Fatalf("command rule %q patterns = %+v, want [%q]", ruleName, firstRule.ArgsPatterns, wantPattern)
+		}
+	}
+}
+
+func TestGenerateBundle_BypassToolRulesCompileAndMatch(t *testing.T) {
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: true,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+	engine, err := policy.NewEngine(&b.Policy, false, true)
+	if err != nil {
+		t.Fatalf("policy.NewEngine: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		command  string
+		args     []string
+		wantRule string
+	}{
+		{
+			name:     "ssh forward",
+			command:  "ssh",
+			args:     []string{"-L", "15432:db.internal:5432", "bastion"},
+			wantRule: "db-bypass-ssh-forward",
+		},
+		{
+			name:     "kubectl port forward",
+			command:  "kubectl",
+			args:     []string{"port-forward", "svc/postgres", "15432:5432"},
+			wantRule: "db-bypass-kubectl-port-forward",
+		},
+		{
+			name:     "cloud sql proxy",
+			command:  "cloud-sql-proxy",
+			args:     []string{"project:region:instance"},
+			wantRule: "db-bypass-cloud-sql-proxy",
+		},
+		{
+			name:     "gcloud sql connect",
+			command:  "gcloud",
+			args:     []string{"sql", "connect", "appdb"},
+			wantRule: "db-bypass-gcloud-sql-connect",
+		},
+		{
+			name:     "aws rds connect",
+			command:  "aws",
+			args:     []string{"rds", "connect", "--db-instance-identifier", "appdb"},
+			wantRule: "db-bypass-aws-rds-connect",
+		},
+		{
+			name:     "host network container",
+			command:  "docker",
+			args:     []string{"run", "--network=host", "postgres"},
+			wantRule: "db-bypass-container-net-host",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dec := engine.CheckCommand(tc.command, tc.args)
+			if string(dec.EffectiveDecision) != "deny" || dec.Rule != tc.wantRule {
+				t.Fatalf("CheckCommand(%q, %+v) = decision %q rule %q, want deny %q", tc.command, tc.args, dec.EffectiveDecision, dec.Rule, tc.wantRule)
+			}
+		})
+	}
+}
+
 func TestGenerateBundle_PolicyCompiles(t *testing.T) {
 	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
 		SessionID:        "sess-1",
@@ -461,6 +654,17 @@ func assertUniqueMetadataRuleNames(t *testing.T, got []policy.RuleMetadata) {
 		}
 		seen[m.RuleName] = true
 	}
+}
+
+func commandRuleByName(t *testing.T, got []policy.CommandRule, name string) policy.CommandRule {
+	t.Helper()
+	for _, rule := range got {
+		if rule.Name == name {
+			return rule
+		}
+	}
+	t.Fatalf("missing command rule %q in %+v", name, got)
+	return policy.CommandRule{}
 }
 
 func countDNSAliasMetadata(got []policy.RuleMetadata) int {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -72,6 +73,9 @@ func GenerateBundle(cfg Config, opts BundleOptions) (Bundle, error) {
 		if err := addResolvedIPRules(context.Background(), &b, svc, serviceParts[i], opts); err != nil {
 			return Bundle{}, err
 		}
+	}
+	if opts.IncludeToolRules {
+		addBypassToolRules(&b, cfg.Services)
 	}
 	b.Policy.Metadata = append([]policy.RuleMetadata(nil), b.Metadata...)
 	return b, nil
@@ -178,6 +182,113 @@ func addDNSExpansionFailure(b *Bundle, svc Service, opts BundleOptions, message 
 		return fmt.Errorf("%w: %s", ErrBundleInvalidOptions, warning.Message)
 	}
 	return nil
+}
+
+func addBypassToolRules(b *Bundle, services []Service) {
+	portPattern := dbPortPattern(services)
+	rules := []policy.CommandRule{
+		{
+			Name:         "db-bypass-ssh-forward",
+			Commands:     []string{"ssh"},
+			ArgsPatterns: []string{"(^|\\s)-L(\\s|[^\\s]*:).*:(" + portPattern + ")(\\s|$)"},
+			Decision:     "deny",
+			Message:      "DB port forwarding is blocked by AgentSH DB unavoidability",
+		},
+		{
+			Name:         "db-bypass-socat",
+			Commands:     []string{"socat"},
+			ArgsPatterns: []string{"(?i)(tcp-listen|listen|tcp:).*(" + portPattern + ")"},
+			Decision:     "deny",
+			Message:      "DB socket forwarding is blocked by AgentSH DB unavoidability",
+		},
+		{
+			Name:         "db-bypass-kubectl-port-forward",
+			Commands:     []string{"kubectl"},
+			ArgsPatterns: []string{"(^|\\s)port-forward(\\s|$).*(:(" + portPattern + ")|\\s(" + portPattern + "):)"},
+			Decision:     "deny",
+			Message:      "DB port forwarding is blocked by AgentSH DB unavoidability",
+		},
+		{
+			Name:         "db-bypass-cloud-sql-proxy",
+			Commands:     []string{"cloud-sql-proxy"},
+			ArgsPatterns: []string{".*"},
+			Decision:     "deny",
+			Message:      "Cloud SQL proxy is blocked by AgentSH DB unavoidability",
+		},
+		{
+			Name:         "db-bypass-gcloud-sql-connect",
+			Commands:     []string{"gcloud"},
+			ArgsPatterns: []string{"(^|\\s)sql\\s+connect(\\s|$)"},
+			Decision:     "deny",
+			Message:      "gcloud SQL connect is blocked by AgentSH DB unavoidability",
+		},
+		{
+			Name:         "db-bypass-aws-rds-connect",
+			Commands:     []string{"aws"},
+			ArgsPatterns: []string{"(^|\\s)rds\\s+connect(\\s|$)"},
+			Decision:     "deny",
+			Message:      "AWS RDS connect is blocked by AgentSH DB unavoidability",
+		},
+		{
+			Name:         "db-bypass-chisel",
+			Commands:     []string{"chisel"},
+			ArgsPatterns: []string{".*"},
+			Decision:     "deny",
+			Message:      "Tunnel tool is blocked by AgentSH DB unavoidability",
+		},
+		{
+			Name:         "db-bypass-gost",
+			Commands:     []string{"gost"},
+			ArgsPatterns: []string{".*"},
+			Decision:     "deny",
+			Message:      "Tunnel tool is blocked by AgentSH DB unavoidability",
+		},
+		{
+			Name:         "db-bypass-frpc",
+			Commands:     []string{"frpc"},
+			ArgsPatterns: []string{".*"},
+			Decision:     "deny",
+			Message:      "Tunnel tool is blocked by AgentSH DB unavoidability",
+		},
+		{
+			Name:         "db-bypass-netcat",
+			Commands:     []string{"nc", "ncat", "netcat"},
+			ArgsPatterns: []string{"(?i)(-l|--listen|(" + portPattern + "))"},
+			Decision:     "deny",
+			Message:      "Raw TCP forwarding is blocked by AgentSH DB unavoidability",
+		},
+		{
+			Name:         "db-bypass-container-net-host",
+			Commands:     []string{"docker", "podman", "nerdctl"},
+			ArgsPatterns: []string{"(^|\\s)(run|create)(\\s|$).*(--net=host|--network=host)"},
+			Decision:     "deny",
+			Message:      "Host-network containers are blocked by AgentSH DB unavoidability",
+		},
+	}
+	for _, r := range rules {
+		r.Description = "Convenience detection for DB proxy bypass attempts; destination egress deny is the security boundary"
+		b.Policy.CommandRules = append(b.Policy.CommandRules, r)
+		addMetadata(b, r.Name, "*", BypassModePortForwardTool, "db-service-ports")
+	}
+}
+
+func dbPortPattern(services []Service) string {
+	seen := map[int]bool{}
+	ports := make([]int, 0, len(services))
+	for _, svc := range services {
+		if seen[svc.Upstream.Port] {
+			continue
+		}
+		seen[svc.Upstream.Port] = true
+		ports = append(ports, svc.Upstream.Port)
+	}
+	sort.Ints(ports)
+
+	parts := make([]string, 0, len(ports))
+	for _, port := range ports {
+		parts = append(parts, strconv.Itoa(port))
+	}
+	return strings.Join(parts, "|")
 }
 
 func normalizedIP(ip net.IP) (net.IP, string, bool) {
