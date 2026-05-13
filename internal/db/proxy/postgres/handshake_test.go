@@ -558,6 +558,9 @@ database_connection_rules:
 	if events[0].Decision.RuleKind != "cancel" {
 		t.Errorf("Decision.RuleKind = %q, want cancel", events[0].Decision.RuleKind)
 	}
+	if events[0].Decision.RuleName != "deny-cancel" {
+		t.Errorf("Decision.RuleName = %q, want deny-cancel", events[0].Decision.RuleName)
+	}
 }
 
 func TestDispatch_CancelRequest_ExpiredEmitsLifecycle(t *testing.T) {
