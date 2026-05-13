@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/db/policy"
 )
 
@@ -198,32 +199,105 @@ func (pc *proxyConn) forwardReplicationStartupAndPump(ctx context.Context, m *pg
 	return nil
 }
 
-// handleCancelRequest evaluates match_kind=cancel and either forwards the
-// raw 16-byte packet via forwardCancel or silently closes. Plan 04b₂ runs
-// un-mapped — Plan 06 will add the mapping table.
+// handleCancelRequest resolves synthetic BackendKeyData first, evaluates
+// match_kind=cancel against the mapped connection metadata, and either
+// forwards a real upstream CancelRequest or silently closes.
 func (pc *proxyConn) handleCancelRequest(ctx context.Context, m *pgproto3.CancelRequest) error {
-	d := pc.evaluateCancel(ctx)
+	entry, status := pc.srv.cancelMap.Lookup(m.ProcessID, m.SecretKey)
 	pc.logger.Debug("CancelRequest received",
 		"service", pc.svc.Name,
 		"syn_pid", m.ProcessID,
-		"syn_secret", m.SecretKey,
-		"verb", d.Verb,
-		"rule", d.RuleName)
-	if d.Verb == policy.VerbDeny {
-		// Silent close per spec §15: cancel has no error response.
+		"lookup_status", status)
+
+	switch status {
+	case cancelLookupMiss:
+		pc.emitCancelLifecycle(ctx, "db_cancel_unmatched", "unmatched_cancel_request", "")
+		return nil
+	case cancelLookupExpired:
+		pc.emitCancelLifecycleForEntry(ctx, entry, "db_cancel_after_disconnect", "cancel_after_disconnect", "")
+		return nil
+	case cancelLookupFound:
+		// Continue below.
+	default:
+		pc.emitCancelLifecycle(ctx, "db_cancel_unmatched", "unknown_cancel_lookup_status", "")
 		return nil
 	}
-	// Rebuild the on-wire packet from the parsed CancelRequest because
-	// pgproto3's ReceiveStartupMessage consumes the bytes.
-	pkt := buildCancelPacketBytes(m.ProcessID, m.SecretKey)
-	if err := forwardCancel(ctx, pc.svc, pkt); err != nil {
-		pc.logger.Warn("forwardCancel failed", "service", pc.svc.Name, "err", err)
+
+	d := pc.evaluateMappedCancel(ctx, entry)
+	if d.Verb == policy.VerbDeny {
+		// Silent close per spec §15: cancel has no error response.
+		pc.emitCancelEvent(ctx, entry, d, "")
+		return nil
 	}
+
+	pkt := buildCancelPacketBytes(entry.RealPID, entry.RealSecret)
+	resultErr := ""
+	if err := forwardCancel(ctx, Service{Upstream: entry.UpstreamAddr}, pkt); err != nil {
+		pc.logger.Warn("forwardCancel failed",
+			"service", entry.ServiceName,
+			"syn_pid", entry.SyntheticPID,
+			"err", err)
+		resultErr = "CANCEL_FORWARD_FAILED"
+		pc.emitCancelLifecycleForEntry(ctx, entry, "db_cancel_forward_failed", "forward_failed", resultErr)
+	}
+	pc.emitCancelEvent(ctx, entry, d, resultErr)
 	return nil
 }
 
-// buildCancelPacketBytes serializes a CancelRequest payload for un-mapped
-// forwarding. Wire layout: 4-byte length + 4-byte magic + 4-byte process ID +
+func (pc *proxyConn) evaluateMappedCancel(_ context.Context, entry cancelEntry) policy.Decision {
+	return policy.EvaluateConnection(policy.ConnectionInfo{
+		Service:         policy.ServiceID(entry.ServiceName),
+		MatchKind:       policy.MatchCancel,
+		DBUser:          entry.DBUser,
+		Database:        entry.Database,
+		ApplicationName: entry.ApplicationName,
+		ClientIdentity:  entry.ClientIdentity,
+	}, pc.srv.cfg.Policy)
+}
+
+func (pc *proxyConn) emitCancelEvent(ctx context.Context, entry cancelEntry, d policy.Decision, resultErr string) {
+	if pc.srv.cfg.Sink == nil {
+		return
+	}
+	_ = pc.srv.cfg.Sink.EmitStatement(ctx, buildCancelEvent(entry, d, resultErr))
+}
+
+func (pc *proxyConn) emitCancelLifecycle(ctx context.Context, kind, reason, code string) {
+	if pc.srv.cfg.Sink == nil {
+		return
+	}
+	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, events.LifecycleEvent{
+		EventID:        newEventID(),
+		Timestamp:      timeNow(),
+		DBService:      pc.svc.Name,
+		ClientIdentity: pc.state.clientIdentity,
+		Kind:           kind,
+		Reason:         reason,
+		ErrorCode:      code,
+		PeerUID:        pc.state.peerUID,
+		SNIHostname:    pc.state.sniHostname,
+	})
+}
+
+func (pc *proxyConn) emitCancelLifecycleForEntry(ctx context.Context, entry cancelEntry, kind, reason, code string) {
+	if pc.srv.cfg.Sink == nil {
+		return
+	}
+	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, events.LifecycleEvent{
+		EventID:        newEventID(),
+		SessionID:      entry.ClientIdentity,
+		Timestamp:      timeNow(),
+		DBService:      entry.ServiceName,
+		ClientIdentity: entry.ClientIdentity,
+		Kind:           kind,
+		Reason:         reason,
+		ErrorCode:      code,
+		PeerUID:        entry.PeerUID,
+	})
+}
+
+// buildCancelPacketBytes serializes a CancelRequest payload. Wire layout:
+// 4-byte length + 4-byte magic + 4-byte process ID +
 // N-byte secret key (typically 4 bytes for vanilla Postgres; longer for
 // CockroachDB extended-secret format).
 func buildCancelPacketBytes(pid uint32, secret []byte) []byte {

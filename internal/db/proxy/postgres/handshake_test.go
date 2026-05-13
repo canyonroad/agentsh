@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func newTestProxyConn(t *testing.T, conn net.Conn) *proxyConn {
 			Dialect:  "postgres",
 			Upstream: "db.internal:5432",
 			TLSMode:  "terminate_reissue",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_test.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "test.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_reissue"},
 		}},
 	})
@@ -81,7 +82,7 @@ func TestDispatch_GSSENCRequest_RespondsN(t *testing.T) {
 	}
 }
 
-func TestDispatch_CancelRequest_ClosesSilently(t *testing.T) {
+func TestDispatch_CancelRequest_NoMatch_ClosesSilentlyAndEmitsLifecycle(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()
 	defer b.Close()
@@ -100,6 +101,18 @@ func TestDispatch_CancelRequest_ClosesSilently(t *testing.T) {
 	err := pc.run(ctx)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
 		t.Errorf("run on CancelRequest returned %v; want clean exit", err)
+	}
+
+	sink := pc.srv.cfg.Sink.(*events.SyncSink)
+	lifecycle := sink.DrainLifecycle()
+	if len(lifecycle) != 1 {
+		t.Fatalf("lifecycle events = %d, want 1: %#v", len(lifecycle), lifecycle)
+	}
+	if lifecycle[0].Kind != "db_cancel_unmatched" {
+		t.Errorf("Kind = %q, want db_cancel_unmatched", lifecycle[0].Kind)
+	}
+	if lifecycle[0].Reason != "unmatched_cancel_request" {
+		t.Errorf("Reason = %q, want unmatched_cancel_request", lifecycle[0].Reason)
 	}
 }
 
@@ -166,7 +179,7 @@ func TestDispatch_Passthrough_BytePumpAfterS(t *testing.T) {
 			Dialect:  "postgres",
 			Upstream: upLn.Addr().String(),
 			TLSMode:  "passthrough",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "passthrough"},
 		}},
 	})
@@ -277,7 +290,7 @@ database_connection_rules:
 			Dialect:  "postgres",
 			Upstream: upLn.Addr().String(),
 			TLSMode:  "terminate_plaintext_upstream",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
 		}},
 	})
@@ -352,7 +365,7 @@ database_connection_rules:
 	}
 }
 
-func TestDispatch_CancelRequest_AllowedForwardsPacket(t *testing.T) {
+func TestDispatch_CancelRequest_AllowedForwardsRealMappedPacket(t *testing.T) {
 	upAddr, ch := captureCancelListener(t)
 
 	a, b := net.Pipe()
@@ -375,10 +388,11 @@ database_connection_rules:
     decision: allow
 `)
 
+	sink := &events.SyncSink{}
 	srv, err := New(Config{
 		Unavoidability: service.UnavoidabilityObserve,
 		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
+		Sink:           sink,
 		Policy:         rs,
 		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
@@ -387,7 +401,7 @@ database_connection_rules:
 			Dialect:  "postgres",
 			Upstream: upAddr,
 			TLSMode:  "terminate_plaintext_upstream",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
 		}},
 	})
@@ -395,12 +409,25 @@ database_connection_rules:
 		t.Fatalf("New: %v", err)
 	}
 	pc := newProxyConn(srv, srv.cfg.Services[0], a, 1000)
+	reg, err := srv.cancelMap.Register(cancelMeta{
+		ServiceName:     "appdb",
+		UpstreamAddr:    upAddr,
+		ClientIdentity:  "uid:1000",
+		DBUser:          "alice",
+		Database:        "app",
+		ApplicationName: "psql",
+		PeerUID:         1000,
+	}, 11111, []byte{0, 0, 86, 206})
+	if err != nil {
+		t.Fatalf("Register cancel mapping: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	go func() { _ = pc.run(ctx) }()
+	done := make(chan error, 1)
+	go func() { done <- pc.run(ctx) }()
 
-	pkt := buildCancelPacket(11111, 22222)
+	pkt := buildCancelPacketBytes(reg.SyntheticPID, reg.SyntheticSecret)
 	if _, err := b.Write(pkt); err != nil {
 		t.Fatalf("write CancelRequest: %v", err)
 	}
@@ -413,13 +440,410 @@ database_connection_rules:
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream did not capture cancel packet")
 	}
-	if len(captured) != 16 {
-		t.Fatalf("captured %d bytes upstream, want 16", len(captured))
+	want := buildCancelPacketBytes(11111, []byte{0, 0, 86, 206})
+	if len(captured) != len(want) {
+		t.Fatalf("captured %d bytes upstream, want %d", len(captured), len(want))
 	}
-	for i := range pkt {
-		if captured[i] != pkt[i] {
-			t.Errorf("byte %d: got %#x, want %#x", i, captured[i], pkt[i])
+	for i := range want {
+		if captured[i] != want[i] {
+			t.Errorf("byte %d: got %#x, want %#x", i, captured[i], want[i])
 		}
+	}
+
+	if err := <-done; err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("run on CancelRequest returned %v; want clean exit", err)
+	}
+	events := sink.DrainStatements()
+	if len(events) != 1 {
+		t.Fatalf("statement events = %d, want 1: %#v", len(events), events)
+	}
+	if events[0].Decision.RuleKind != "cancel" {
+		t.Errorf("Decision.RuleKind = %q, want cancel", events[0].Decision.RuleKind)
+	}
+	if events[0].Decision.Verb != "allow" {
+		t.Errorf("Decision.Verb = %q, want allow", events[0].Decision.Verb)
+	}
+	if events[0].Database != "app" {
+		t.Errorf("Database = %q, want app", events[0].Database)
+	}
+}
+
+func TestDispatch_CancelRequest_DenyDoesNotDialAndEmitsDBEvent(t *testing.T) {
+	upLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer upLn.Close()
+	dialed := make(chan struct{}, 1)
+	go func() {
+		if c, err := upLn.Accept(); err == nil {
+			dialed <- struct{}{}
+			c.Close()
+		}
+	}()
+
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	rs := loadRuleSet(t, `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: `+upLn.Addr().String()+`
+    tls_mode: terminate_plaintext_upstream
+    trusted_network: true
+database_connection_rules:
+  - name: deny-cancel
+    db_service: appdb
+    match_kind: cancel
+    decision: deny
+`)
+
+	sink := &events.SyncSink{}
+	srv, err := New(Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           sink,
+		Policy:         rs,
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: upLn.Addr().String(),
+			TLSMode:  "terminate_plaintext_upstream",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
+			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pc := newProxyConn(srv, srv.cfg.Services[0], a, 1000)
+	reg, err := srv.cancelMap.Register(cancelMeta{
+		ServiceName:    "appdb",
+		UpstreamAddr:   upLn.Addr().String(),
+		ClientIdentity: "uid:1000",
+		Database:       "app",
+		PeerUID:        1000,
+	}, 11111, []byte{0, 0, 86, 206})
+	if err != nil {
+		t.Fatalf("Register cancel mapping: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- pc.run(ctx) }()
+
+	pkt := buildCancelPacketBytes(reg.SyntheticPID, reg.SyntheticSecret)
+	if _, err := b.Write(pkt); err != nil {
+		t.Fatalf("write CancelRequest: %v", err)
+	}
+
+	if err := <-done; err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("run on CancelRequest returned %v; want clean exit", err)
+	}
+	select {
+	case <-dialed:
+		t.Fatal("upstream was dialed despite mapped deny rule")
+	case <-time.After(300 * time.Millisecond):
+		// Expected: no dial.
+	}
+	events := sink.DrainStatements()
+	if len(events) != 1 {
+		t.Fatalf("statement events = %d, want 1: %#v", len(events), events)
+	}
+	if events[0].Decision.Verb != "deny" {
+		t.Errorf("Decision.Verb = %q, want deny", events[0].Decision.Verb)
+	}
+	if events[0].Decision.RuleKind != "cancel" {
+		t.Errorf("Decision.RuleKind = %q, want cancel", events[0].Decision.RuleKind)
+	}
+	if events[0].Decision.RuleName != "deny-cancel" {
+		t.Errorf("Decision.RuleName = %q, want deny-cancel", events[0].Decision.RuleName)
+	}
+	if events[0].Database != "app" {
+		t.Errorf("Database = %q, want app", events[0].Database)
+	}
+}
+
+func TestDispatch_CancelRequest_ExpiredEmitsLifecycle(t *testing.T) {
+	now := time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC)
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	sink := &events.SyncSink{}
+	srv, err := New(Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           sink,
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: "127.0.0.1:1",
+			TLSMode:  "terminate_plaintext_upstream",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
+			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.cancelMap = newCancelMap(cancelMapConfig{
+		Max:         10,
+		GraceWindow: time.Second,
+		Now:         func() time.Time { return now },
+		Generate: fixedCancelKeyGenerator([]generatedCancelKey{
+			{pid: 1001, secret: []byte{0, 0, 0, 7}},
+		}),
+	})
+	pc := newProxyConn(srv, srv.cfg.Services[0], a, 1000)
+	reg, err := srv.cancelMap.Register(cancelMeta{
+		ServiceName:    "appdb",
+		UpstreamAddr:   "127.0.0.1:1",
+		ClientIdentity: "uid:1000",
+		PeerUID:        1000,
+	}, 11111, []byte{0, 0, 86, 206})
+	if err != nil {
+		t.Fatalf("Register cancel mapping: %v", err)
+	}
+	reg.Release()
+	now = now.Add(2 * time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- pc.run(ctx) }()
+
+	pkt := buildCancelPacketBytes(reg.SyntheticPID, reg.SyntheticSecret)
+	if _, err := b.Write(pkt); err != nil {
+		t.Fatalf("write CancelRequest: %v", err)
+	}
+	if err := <-done; err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("run on CancelRequest returned %v; want clean exit", err)
+	}
+
+	lifecycle := sink.DrainLifecycle()
+	if len(lifecycle) != 1 {
+		t.Fatalf("lifecycle events = %d, want 1: %#v", len(lifecycle), lifecycle)
+	}
+	if lifecycle[0].Kind != "db_cancel_after_disconnect" {
+		t.Errorf("Kind = %q, want db_cancel_after_disconnect", lifecycle[0].Kind)
+	}
+	if lifecycle[0].Reason != "cancel_after_disconnect" {
+		t.Errorf("Reason = %q, want cancel_after_disconnect", lifecycle[0].Reason)
+	}
+}
+
+func TestDispatch_CancelRequest_AuditForwardsRealMappedPacketAndEmitsDBEvent(t *testing.T) {
+	upAddr, ch := captureCancelListener(t)
+
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	rs := loadRuleSet(t, `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: `+upAddr+`
+    tls_mode: terminate_plaintext_upstream
+    trusted_network: true
+database_connection_rules:
+  - name: audit-cancel
+    db_service: appdb
+    match_kind: cancel
+    decision: audit
+`)
+
+	sink := &events.SyncSink{}
+	srv, err := New(Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           sink,
+		Policy:         rs,
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: upAddr,
+			TLSMode:  "terminate_plaintext_upstream",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
+			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pc := newProxyConn(srv, srv.cfg.Services[0], a, 1000)
+	reg, err := srv.cancelMap.Register(cancelMeta{
+		ServiceName:     "appdb",
+		UpstreamAddr:    upAddr,
+		ClientIdentity:  "uid:1000",
+		DBUser:          "alice",
+		Database:        "app",
+		ApplicationName: "psql",
+		PeerUID:         1000,
+	}, 22222, []byte{0, 0, 212, 49})
+	if err != nil {
+		t.Fatalf("Register cancel mapping: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- pc.run(ctx) }()
+
+	pkt := buildCancelPacketBytes(reg.SyntheticPID, reg.SyntheticSecret)
+	if _, err := b.Write(pkt); err != nil {
+		t.Fatalf("write CancelRequest: %v", err)
+	}
+	var captured []byte
+	select {
+	case captured = <-ch:
+		if captured == nil {
+			t.Fatal("upstream did not capture cancel packet")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not capture cancel packet")
+	}
+	want := buildCancelPacketBytes(22222, []byte{0, 0, 212, 49})
+	if len(captured) != len(want) {
+		t.Fatalf("captured %d bytes upstream, want %d", len(captured), len(want))
+	}
+	for i := range want {
+		if captured[i] != want[i] {
+			t.Errorf("byte %d: got %#x, want %#x", i, captured[i], want[i])
+		}
+	}
+
+	if err := <-done; err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("run on CancelRequest returned %v; want clean exit", err)
+	}
+	events := sink.DrainStatements()
+	if len(events) != 1 {
+		t.Fatalf("statement events = %d, want 1: %#v", len(events), events)
+	}
+	if events[0].Decision.Verb != "audit" {
+		t.Errorf("Decision.Verb = %q, want audit", events[0].Decision.Verb)
+	}
+	if events[0].Decision.RuleKind != "cancel" {
+		t.Errorf("Decision.RuleKind = %q, want cancel", events[0].Decision.RuleKind)
+	}
+	if events[0].Database != "app" {
+		t.Errorf("Database = %q, want app", events[0].Database)
+	}
+}
+
+func TestDispatch_CancelRequest_ForwardFailureEmitsLifecycleAndDBEventError(t *testing.T) {
+	upAddr := "127.0.0.1:1"
+
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	rs := loadRuleSet(t, `version: 1
+name: test
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: `+upAddr+`
+    tls_mode: terminate_plaintext_upstream
+    trusted_network: true
+database_connection_rules:
+  - name: allow-cancel
+    db_service: appdb
+    match_kind: cancel
+    decision: allow
+`)
+
+	sink := &events.SyncSink{}
+	srv, err := New(Config{
+		Unavoidability: service.UnavoidabilityObserve,
+		StateDir:       t.TempDir(),
+		Sink:           sink,
+		Policy:         rs,
+		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		Services: []Service{{
+			Name:     "appdb",
+			Family:   "postgres",
+			Dialect:  "postgres",
+			Upstream: upAddr,
+			TLSMode:  "terminate_plaintext_upstream",
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
+			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pc := newProxyConn(srv, srv.cfg.Services[0], a, 1000)
+	reg, err := srv.cancelMap.Register(cancelMeta{
+		ServiceName:     "appdb",
+		UpstreamAddr:    upAddr,
+		ClientIdentity:  "uid:1000",
+		DBUser:          "alice",
+		Database:        "app",
+		ApplicationName: "psql",
+		PeerUID:         1000,
+	}, 11111, []byte{0, 0, 86, 206})
+	if err != nil {
+		t.Fatalf("Register cancel mapping: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- pc.run(ctx) }()
+
+	pkt := buildCancelPacketBytes(reg.SyntheticPID, reg.SyntheticSecret)
+	if _, err := b.Write(pkt); err != nil {
+		t.Fatalf("write CancelRequest: %v", err)
+	}
+	if err := <-done; err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("run on CancelRequest returned %v; want clean exit", err)
+	}
+
+	events := sink.DrainStatements()
+	if len(events) != 1 {
+		t.Fatalf("statement events = %d, want 1: %#v", len(events), events)
+	}
+	if events[0].Decision.Verb != "allow" {
+		t.Errorf("Decision.Verb = %q, want allow", events[0].Decision.Verb)
+	}
+	if events[0].Decision.RuleKind != "cancel" {
+		t.Errorf("Decision.RuleKind = %q, want cancel", events[0].Decision.RuleKind)
+	}
+	if events[0].Result.ErrorCode != "CANCEL_FORWARD_FAILED" {
+		t.Errorf("Result.ErrorCode = %q, want CANCEL_FORWARD_FAILED", events[0].Result.ErrorCode)
+	}
+	if events[0].Database != "app" {
+		t.Errorf("Database = %q, want app", events[0].Database)
+	}
+
+	lifecycle := sink.DrainLifecycle()
+	if len(lifecycle) != 1 {
+		t.Fatalf("lifecycle events = %d, want 1: %#v", len(lifecycle), lifecycle)
+	}
+	if lifecycle[0].Kind != "db_cancel_forward_failed" {
+		t.Errorf("Kind = %q, want db_cancel_forward_failed", lifecycle[0].Kind)
+	}
+	if lifecycle[0].Reason != "forward_failed" {
+		t.Errorf("Reason = %q, want forward_failed", lifecycle[0].Reason)
+	}
+	if lifecycle[0].ErrorCode != "CANCEL_FORWARD_FAILED" {
+		t.Errorf("ErrorCode = %q, want CANCEL_FORWARD_FAILED", lifecycle[0].ErrorCode)
 	}
 }
 
@@ -469,7 +893,7 @@ database_connection_rules:
 			Dialect:  "postgres",
 			Upstream: upLn.Addr().String(),
 			TLSMode:  "terminate_plaintext_upstream",
-			Listen:   ServiceListener{Kind: "unix", Path: "/tmp/_unused.sock"},
+			Listen:   ServiceListener{Kind: "unix", Path: filepath.Join(t.TempDir(), "unused.sock")},
 			Service:  policy.DBService{Name: "appdb", TLSMode: "terminate_plaintext_upstream", TrustedNetwork: true},
 		}},
 	})

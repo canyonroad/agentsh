@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -72,6 +73,14 @@ type Config struct {
 	// Statements above the cap get a synthetic ErrorResponse(54000) + close.
 	MaxQueryBytes int
 
+	// CancelMappingMax caps the proxy-wide BackendKeyData translation table.
+	// Default 100k when zero.
+	CancelMappingMax int
+
+	// CancelGraceWindow retains disconnected cancel mappings for late
+	// side-channel CancelRequests. Default 5 minutes when zero.
+	CancelGraceWindow time.Duration
+
 	// UpstreamTLSConfigForTest, when non-nil, overrides the production
 	// upstream-TLS config (system roots, verify-full, MinVersion=TLS12,
 	// ServerName from svc.Upstream). Test-only — production callsites must
@@ -113,6 +122,7 @@ type Server struct {
 
 	policyPtr   atomic.Pointer[policy.RuleSet]
 	classifiers map[string]classify_pg.Parser
+	cancelMap   *cancelMap
 }
 
 // New validates cfg and returns a *Server. When cfg.Unavoidability ==
@@ -132,7 +142,22 @@ func New(cfg Config) (*Server, error) {
 		if cfg.MaxQueryBytes == 0 {
 			cfg.MaxQueryBytes = 1 << 20
 		}
-		srv := &Server{cfg: cfg, logger: cfg.Logger, sentinel: true, done: make(chan struct{})}
+		if cfg.CancelMappingMax == 0 {
+			cfg.CancelMappingMax = defaultCancelMappingMax
+		}
+		if cfg.CancelGraceWindow == 0 {
+			cfg.CancelGraceWindow = defaultCancelGraceWindow
+		}
+		srv := &Server{
+			cfg:      cfg,
+			logger:   cfg.Logger,
+			sentinel: true,
+			done:     make(chan struct{}),
+			cancelMap: newCancelMap(cancelMapConfig{
+				Max:         cfg.CancelMappingMax,
+				GraceWindow: cfg.CancelGraceWindow,
+			}),
+		}
 		srv.uidAllowed = func(uid uint32) bool { return uid == uint32(os.Getuid()) }
 		srv.policyPtr.Store(cfg.Policy)
 		return srv, nil
@@ -157,6 +182,12 @@ func New(cfg Config) (*Server, error) {
 	if cfg.MaxQueryBytes == 0 {
 		cfg.MaxQueryBytes = 1 << 20
 	}
+	if cfg.CancelMappingMax == 0 {
+		cfg.CancelMappingMax = defaultCancelMappingMax
+	}
+	if cfg.CancelGraceWindow == 0 {
+		cfg.CancelGraceWindow = defaultCancelGraceWindow
+	}
 	classifiers, err := buildClassifierMap(cfg.Services)
 	if err != nil {
 		return nil, err
@@ -167,6 +198,10 @@ func New(cfg Config) (*Server, error) {
 		done:        make(chan struct{}),
 		uidAllowed:  func(uid uint32) bool { return uid == uint32(os.Getuid()) },
 		classifiers: classifiers,
+		cancelMap: newCancelMap(cancelMapConfig{
+			Max:         cfg.CancelMappingMax,
+			GraceWindow: cfg.CancelGraceWindow,
+		}),
 	}
 	srv.policyPtr.Store(cfg.Policy)
 	return srv, nil

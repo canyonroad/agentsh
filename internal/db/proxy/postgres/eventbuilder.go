@@ -101,6 +101,7 @@ func buildStatementEvent(a buildArgs) events.DBEvent {
 		DBFamily:           "postgres",
 		DBDialect:          "postgres",
 		DBUser:             a.Conn.dbUser,
+		Database:           a.Conn.database,
 		ApplicationName:    a.Conn.appName,
 		ClientIdentity:     a.Conn.clientIdentity,
 		Effects:            a.Stmt.Effects,
@@ -109,11 +110,33 @@ func buildStatementEvent(a buildArgs) events.DBEvent {
 		StatementText:      stmtText,
 		StatementDigest:    digest,
 		StatementRedaction: redaction,
-		TLS:        events.EventTLS{Mode: a.Conn.tlsMode, ClientSNI: a.Conn.sniHostname},
-		Decision:   dec,
-		Result:     result,
-		TxContext:  tx,
-		Predicates: predicates,
+		TLS:                events.EventTLS{Mode: a.Conn.tlsMode, ClientSNI: a.Conn.sniHostname},
+		Decision:           dec,
+		Result:             result,
+		TxContext:          tx,
+		Predicates:         predicates,
+	}
+}
+
+func buildCancelEvent(entry cancelEntry, d policy.Decision, resultErr string) events.DBEvent {
+	return events.DBEvent{
+		EventID:            newEventID(),
+		SessionID:          entry.ClientIdentity,
+		Timestamp:          timeNow(),
+		DBService:          entry.ServiceName,
+		DBFamily:           "postgres",
+		DBDialect:          "postgres",
+		DBUser:             entry.DBUser,
+		Database:           entry.Database,
+		ApplicationName:    entry.ApplicationName,
+		ClientIdentity:     entry.ClientIdentity,
+		Effects:            []effects.Effect{{Group: effects.GroupSession, Subtype: effects.SubtypeCancelRequest}},
+		OperationGroup:     "session",
+		OperationSubtype:   "cancel_request",
+		StatementRedaction: events.RedactionNone,
+		Decision:           buildDecision(d, false),
+		Result:             events.EventResult{ErrorCode: resultErr},
+		TxContext:          events.EventTxContext{DenyAction: "none"},
 	}
 }
 

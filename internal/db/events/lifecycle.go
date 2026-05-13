@@ -3,12 +3,16 @@ package events
 import "time"
 
 // LifecycleEvent is a non-statement DB-proxy event: listener-auth failures,
-// handshake failures (Plan 04b), degraded-visibility warnings (Plan 04b).
+// handshake failures (Plan 04b), degraded-visibility warnings (Plan 04b),
+// and cancel side-channel lifecycle outcomes.
 // Carries less data than DBEvent because there is no statement to redact.
 //
-// Kind is a small enumerated string ("db_listener_auth_fail",
-// "db_handshake_fail", "degraded_visibility_warning"); each plan that emits
-// a new kind is responsible for documenting the value in plan release notes.
+// Kind is a small enumerated string:
+// "db_listener_auth_fail", "db_handshake_fail",
+// "degraded_visibility_warning", "db_cancel_unmatched",
+// "db_cancel_after_disconnect", "db_cancel_forward_failed",
+// "db_cancel_mapping_fail". Each plan that emits a new kind is responsible
+// for documenting the value in plan release notes.
 type LifecycleEvent struct {
 	EventID        string    `json:"event_id"`
 	SessionID      string    `json:"session_id,omitempty"`

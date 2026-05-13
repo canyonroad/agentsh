@@ -36,8 +36,8 @@ var errScramPlusFailClosed = errors.New("postgres.forwardAuth: SCRAM-SHA-256-PLU
 //     SASLContinue}: forward to client, then block-read one client frame and
 //     forward it to upstream. AuthenticationOk/SASLFinal are non-challenge
 //     and just pass through.
-//   - *BackendKeyData: record PID/SecretKey into connState.upstreamBKD for
-//     Plan 06 mapping; forward verbatim to client.
+//   - *BackendKeyData: record the real PID/SecretKey into connState.upstreamBKD,
+//     register it in the cancel map, and send only the synthetic key to client.
 //   - *ReadyForQuery: forward to client, return nil (end-of-auth-loop).
 //   - everything else: forward to client.
 func forwardAuth(ctx context.Context, pc *proxyConn) error {
@@ -99,7 +99,31 @@ func forwardAuth(ctx context.Context, pc *proxyConn) error {
 			// (Decode allocates fresh, but be defensive: subsequent frames
 			// could reuse the slice in some impls).
 			pc.state.upstreamBKD.SecretKey = append(pc.state.upstreamBKD.SecretKey[:0], m.SecretKey...)
-			pc.backend.Send(m)
+			reg, err := pc.srv.cancelMap.Register(cancelMeta{
+				ServiceName:     pc.svc.Name,
+				UpstreamAddr:    pc.svc.Upstream,
+				ClientIdentity:  pc.state.clientIdentity,
+				DBUser:          pc.state.dbUser,
+				Database:        pc.state.database,
+				ApplicationName: pc.state.appName,
+				PeerUID:         pc.state.peerUID,
+			}, m.ProcessID, m.SecretKey)
+			if err != nil {
+				pc.emitCancelMappingFail(ctx, err)
+				pc.backend.Send(&pgproto3.ErrorResponse{
+					Severity:            "FATAL",
+					SeverityUnlocalized: "FATAL",
+					Code:                "53300",
+					Message:             cancelMappingErrorCode(err),
+				})
+				_ = pc.backend.Flush()
+				return err
+			}
+			pc.state.cancelRegistration = &reg
+			pc.backend.Send(&pgproto3.BackendKeyData{
+				ProcessID: reg.SyntheticPID,
+				SecretKey: append([]byte(nil), reg.SyntheticSecret...),
+			})
 			if err := pc.backend.Flush(); err != nil {
 				return fmt.Errorf("flush after BKD: %w", err)
 			}

@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -35,8 +36,8 @@ type connState struct {
 	upstreamFE *pgproto3.Frontend
 
 	// upstreamBKD captures the real upstream BackendKeyData (PID, Secret)
-	// for Plan 06's mapping table. 04b₂ forwards verbatim to client — the
-	// values are recorded but not used.
+	// for diagnostics/tests. Plan 06 registers it into the cancel map so
+	// clients receive synthetic BackendKeyData.
 	//
 	// SecretKey is a byte slice (not uint32) because pgx v5's
 	// pgproto3.BackendKeyData.SecretKey is []byte: standard PostgreSQL uses
@@ -46,6 +47,7 @@ type connState struct {
 		PID       uint32
 		SecretKey []byte
 	}
+	cancelRegistration *cancelRegistration
 
 	// degradedReason is set when the proxy enters a passthrough-equivalent
 	// state via an explicit opt-in (replication_passthrough in 04b₂;
@@ -56,9 +58,9 @@ type connState struct {
 	// smState carries the Extended Query state machine's per-connection
 	// state (Plan 05a). LastUpstreamRFQ replaces the 04c byte field; the
 	// dispatcher and authforward write it directly.
-	smState        *statemachine.ConnState
-	redactionTier  policy.RedactionTier // resolved at handshake end
-	tlsMode        string               // svc.TLSMode at handshake end, for EventTLS.Mode
+	smState       *statemachine.ConnState
+	redactionTier policy.RedactionTier // resolved at handshake end
+	tlsMode       string               // svc.TLSMode at handshake end, for EventTLS.Mode
 }
 
 // logger narrows *slog.Logger to just the methods we use, so tests can
@@ -128,6 +130,10 @@ func (pc *proxyConn) run(ctx context.Context) error {
 // closeUpstream closes the upstream conn if it was opened. Safe to call
 // multiple times.
 func (pc *proxyConn) closeUpstream() {
+	if pc.state.cancelRegistration != nil {
+		pc.state.cancelRegistration.Release()
+		pc.state.cancelRegistration = nil
+	}
 	if pc.state.upstream != nil {
 		_ = pc.state.upstream.Close()
 		pc.state.upstream = nil
@@ -152,6 +158,34 @@ func (pc *proxyConn) emitHandshakeFail(ctx context.Context, errorCode string) {
 		SNIHostname:    pc.state.sniHostname,
 	}
 	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, ev)
+}
+
+func cancelMappingErrorCode(err error) string {
+	switch {
+	case errors.Is(err, errBackendKeyGenerationFailed):
+		return "BACKEND_KEY_GENERATION_FAILED"
+	case errors.Is(err, errBackendKeyTableFull):
+		return "BACKEND_KEY_TABLE_FULL"
+	default:
+		return "BACKEND_KEY_MAPPING_FAILED"
+	}
+}
+
+func (pc *proxyConn) emitCancelMappingFail(ctx context.Context, err error) {
+	if pc.srv.cfg.Sink == nil {
+		return
+	}
+	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, events.LifecycleEvent{
+		EventID:        newEventID(),
+		Timestamp:      timeNow(),
+		DBService:      pc.svc.Name,
+		ClientIdentity: pc.state.clientIdentity,
+		Kind:           "db_cancel_mapping_fail",
+		ErrorCode:      cancelMappingErrorCode(err),
+		Reason:         err.Error(),
+		PeerUID:        pc.state.peerUID,
+		SNIHostname:    pc.state.sniHostname,
+	})
 }
 
 // emitDegradedVisibility emits a degraded_visibility_warning LifecycleEvent
