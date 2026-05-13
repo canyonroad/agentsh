@@ -416,6 +416,7 @@ func (s *Server) emitListenerAuthFail(ctx context.Context, svc Service, uid uint
 		Timestamp:     timeNow(),
 		DBService:     svc.Name,
 		Kind:          "db_listener_auth_fail",
+		SessionID:     s.cfg.AgentSessionID,
 		Reason:        reason,
 		PeerUID:       uid,
 		PeerPID:       pid,

@@ -269,6 +269,7 @@ func (pc *proxyConn) emitCancelLifecycle(ctx context.Context, kind, reason, code
 	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, events.LifecycleEvent{
 		EventID:        newEventID(),
 		Timestamp:      timeNow(),
+		SessionID:      pc.srv.cfg.AgentSessionID,
 		DBService:      pc.svc.Name,
 		ClientIdentity: pc.state.clientIdentity,
 		Kind:           kind,
@@ -285,7 +286,7 @@ func (pc *proxyConn) emitCancelLifecycleForEntry(ctx context.Context, entry canc
 	}
 	_ = pc.srv.cfg.Sink.EmitLifecycle(ctx, events.LifecycleEvent{
 		EventID:        newEventID(),
-		SessionID:      entry.ClientIdentity,
+		SessionID:      pc.srv.cfg.AgentSessionID,
 		Timestamp:      timeNow(),
 		DBService:      entry.ServiceName,
 		ClientIdentity: entry.ClientIdentity,

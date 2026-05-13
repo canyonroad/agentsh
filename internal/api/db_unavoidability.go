@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -66,11 +67,11 @@ func mergeDBUnavoidabilityBundle(base *policy.Policy, bundle dbservice.Bundle) *
 		base = &policy.Policy{}
 	}
 	merged := clonePolicy(base)
-	merged.NetworkRules = append(merged.NetworkRules, bundle.Policy.NetworkRules...)
-	merged.CommandRules = append(merged.CommandRules, bundle.Policy.CommandRules...)
-	merged.UnixRules = append(merged.UnixRules, bundle.Policy.UnixRules...)
-	merged.DnsRedirectRules = append(merged.DnsRedirectRules, bundle.Policy.DnsRedirectRules...)
-	merged.ConnectRedirectRules = append(merged.ConnectRedirectRules, bundle.Policy.ConnectRedirectRules...)
+	merged.NetworkRules = append(append([]policy.NetworkRule(nil), bundle.Policy.NetworkRules...), merged.NetworkRules...)
+	merged.CommandRules = append(append([]policy.CommandRule(nil), bundle.Policy.CommandRules...), merged.CommandRules...)
+	merged.UnixRules = append(append([]policy.UnixSocketRule(nil), bundle.Policy.UnixRules...), merged.UnixRules...)
+	merged.DnsRedirectRules = append(append([]policy.DnsRedirectRule(nil), bundle.Policy.DnsRedirectRules...), merged.DnsRedirectRules...)
+	merged.ConnectRedirectRules = append(append([]policy.ConnectRedirectRule(nil), bundle.Policy.ConnectRedirectRules...), merged.ConnectRedirectRules...)
 	merged.Metadata = append(merged.Metadata, bundle.Metadata...)
 	return merged
 }
@@ -134,7 +135,7 @@ func (a *App) startSessionDBProxy(ctx context.Context, s *session.Session, rs *d
 
 	proxyCtx, cancel := context.WithCancel(context.Background())
 	services := collectSortedDBProxyServices(rs, stateDir)
-	srv, err := startDBProxy(proxyCtx, dbProxyDeps{
+	srv, startErrCh, err := startDBProxyWithStartError(proxyCtx, dbProxyDeps{
 		Unavoidability:  rs.Unavoidability(),
 		Services:        services,
 		StateDir:        stateDir,
@@ -147,7 +148,7 @@ func (a *App) startSessionDBProxy(ctx context.Context, s *session.Session, rs *d
 		cancel()
 		return err
 	}
-	if err := waitForDBProxyListeners(ctx, services, 2*time.Second); err != nil {
+	if err := waitForDBProxyListenersOrStartError(ctx, services, 2*time.Second, startErrCh); err != nil {
 		cancel()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer shutdownCancel()
@@ -160,12 +161,23 @@ func (a *App) startSessionDBProxy(ctx context.Context, s *session.Session, rs *d
 		defer shutdownCancel()
 		return srv.Shutdown(shutdownCtx)
 	})
+	monitorSessionDBProxyStart(s, proxyCtx, startErrCh)
 	return nil
 }
 
 func waitForDBProxyListeners(ctx context.Context, services []dbProxyService, timeout time.Duration) error {
+	return waitForDBProxyListenersOrStartError(ctx, services, timeout, nil)
+}
+
+func waitForDBProxyListenersOrStartError(ctx context.Context, services []dbProxyService, timeout time.Duration, startErrCh <-chan error) error {
 	deadline := time.Now().Add(timeout)
 	for {
+		select {
+		case err := <-startErrCh:
+			return dbProxyStartupError(err)
+		default:
+		}
+
 		missing := ""
 		for _, svc := range services {
 			if svc.ListenKind != "unix" || svc.ListenPath == "" {
@@ -181,6 +193,11 @@ func waitForDBProxyListeners(ctx context.Context, services []dbProxyService, tim
 			}
 		}
 		if missing == "" {
+			select {
+			case err := <-startErrCh:
+				return dbProxyStartupError(err)
+			default:
+			}
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -189,9 +206,29 @@ func waitForDBProxyListeners(ctx context.Context, services []dbProxyService, tim
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-startErrCh:
+			return dbProxyStartupError(err)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+}
+
+func dbProxyStartupError(err error) error {
+	if err == nil {
+		return fmt.Errorf("DB proxy exited during startup")
+	}
+	return fmt.Errorf("DB proxy failed during startup: %w", err)
+}
+
+func monitorSessionDBProxyStart(s *session.Session, proxyCtx context.Context, startErrCh <-chan error) {
+	go func() {
+		err, ok := <-startErrCh
+		if !ok || proxyCtx.Err() != nil {
+			return
+		}
+		slog.Error("DB proxy exited unexpectedly", "session_id", s.ID, "error", err)
+		_ = s.CloseDBProxy()
+	}()
 }
 
 func (a *App) cleanupCreatedSession(s *session.Session) {

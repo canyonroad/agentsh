@@ -4,6 +4,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -103,6 +105,119 @@ func TestMergeDBUnavoidabilityBundle_SessionLocalCopy(t *testing.T) {
 	}
 }
 
+func TestMergeDBUnavoidabilityBundle_GeneratedRulesTakePrecedenceOverBroadAllows(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "appdb.sock")
+	base := &policy.Policy{
+		Version: 1,
+		Name:    "base",
+		NetworkRules: []policy.NetworkRule{{
+			Name:     "allow-all-network",
+			Domains:  []string{"**"},
+			Decision: "allow",
+		}},
+		CommandRules: []policy.CommandRule{{
+			Name:     "allow-all-commands",
+			Commands: []string{"*"},
+			Decision: "allow",
+		}},
+		UnixRules: []policy.UnixSocketRule{{
+			Name:       "allow-all-unix",
+			Paths:      []string{"**"},
+			Operations: []string{"connect"},
+			Decision:   "allow",
+		}},
+		ConnectRedirectRules: []policy.ConnectRedirectRule{{
+			Name:       "base-connect-redirect",
+			Match:      ".*",
+			RedirectTo: "base-proxy:5432",
+		}},
+	}
+	bundle, err := dbservice.GenerateBundle(dbservice.Config{
+		Services: []dbservice.Service{{
+			Name:    "appdb",
+			Family:  "postgres",
+			Dialect: "postgres",
+			Upstream: dbservice.Endpoint{
+				Host: "db.example.com",
+				Port: 5432,
+			},
+			Listen: dbservice.Listener{
+				Kind: "unix",
+				Path: socketPath,
+			},
+			TLSMode: "terminate_reissue",
+		}},
+	}, dbservice.BundleOptions{
+		SessionID:        "sess-db",
+		ProxySessionID:   dbProxySessionIdentity,
+		SocketBaseDir:    filepath.Dir(socketPath),
+		IncludeToolRules: true,
+		Mode:             dbservice.UnavoidabilityObserve,
+		Resolver:         staticDBResolver{ips: []net.IP{net.ParseIP("10.0.0.15")}},
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+
+	merged := mergeDBUnavoidabilityBundle(base, bundle)
+	engine, err := policy.NewEngine(merged, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	netDecision := engine.CheckNetworkIP("db.example.com", nil, 5432)
+	if netDecision.PolicyDecision != types.DecisionDeny || netDecision.Rule != "db-appdb-deny-direct" {
+		t.Fatalf("network decision = %+v, want generated deny before broad allow", netDecision)
+	}
+
+	cmdDecision := engine.CheckCommand("ssh", []string{"-L", "15432:db.example.com:5432", "bastion"})
+	if cmdDecision.PolicyDecision != types.DecisionDeny || cmdDecision.Rule != "db-bypass-ssh-forward" {
+		t.Fatalf("command decision = %+v, want generated deny before broad allow", cmdDecision)
+	}
+
+	unixDecision := engine.CheckUnixSocket("/var/run/postgresql/.s.PGSQL.5432", "connect")
+	if unixDecision.PolicyDecision != types.DecisionDeny || unixDecision.Rule != "db-appdb-deny-local-postgres-sockets" {
+		t.Fatalf("unix decision = %+v, want generated deny before broad allow", unixDecision)
+	}
+
+	redirectDecision := engine.EvaluateConnectRedirect("db.example.com:5432")
+	if !redirectDecision.Matched || redirectDecision.Rule != "db-appdb-redirect" || redirectDecision.RedirectToUnix != socketPath {
+		t.Fatalf("connect redirect decision = %+v, want generated Unix redirect before broad redirect", redirectDecision)
+	}
+}
+
+func TestMergeDBUnavoidabilityBundle_PrecedenceForDNSRedirectRules(t *testing.T) {
+	base := &policy.Policy{
+		Version: 1,
+		Name:    "base",
+		DnsRedirectRules: []policy.DnsRedirectRule{{
+			Name:      "base-dns-redirect",
+			Match:     ".*",
+			ResolveTo: "192.0.2.10",
+		}},
+	}
+	bundle := dbservice.Bundle{
+		Policy: policy.Policy{
+			DnsRedirectRules: []policy.DnsRedirectRule{{
+				Name:      "db-generated-dns-redirect",
+				Match:     "^db\\.example\\.com$",
+				ResolveTo: "127.0.0.1",
+			}},
+		},
+	}
+
+	merged := mergeDBUnavoidabilityBundle(base, bundle)
+	engine, err := policy.NewEngine(merged, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	decision := engine.EvaluateDnsRedirect("db.example.com")
+	if !decision.Matched || decision.Rule != "db-generated-dns-redirect" || decision.ResolveTo != "127.0.0.1" {
+		t.Fatalf("dns redirect decision = %+v, want bundle rule before broad base redirect", decision)
+	}
+}
+
 func TestCreateSessionCore_DBUnavoidabilityAddsGeneratedMetadataAndStartsProxy(t *testing.T) {
 	app, mgr := newDBUnavoidabilityTestApp(t, dbObservePolicyYAML())
 	app.dbProxySessionResolverForTest = fixedDBSessionResolver{sessionID: "sess-db"}
@@ -194,6 +309,58 @@ func TestCreateSessionCore_DBUnavoidabilityRegularFileListenerFailsClosed(t *tes
 	}
 }
 
+func TestCreateSessionCore_DBUnavoidabilityStartErrorDuringReadinessFailsClosed(t *testing.T) {
+	app, mgr := newDBUnavoidabilityTestApp(t, dbObservePolicyYAML())
+	sessionID := "s" + strings.Repeat("x", 127)
+	app.dbProxySessionResolverForTest = fixedDBSessionResolver{sessionID: sessionID}
+
+	_, code, err := app.createSessionCore(context.Background(), types.CreateSessionRequest{
+		ID:        sessionID,
+		Workspace: t.TempDir(),
+		Policy:    "default",
+	})
+	if err == nil {
+		t.Fatal("createSessionCore: want error, got nil")
+	}
+	if code != http.StatusInternalServerError {
+		t.Fatalf("code = %d, want %d", code, http.StatusInternalServerError)
+	}
+	if !strings.Contains(err.Error(), "bind listener") {
+		t.Fatalf("error = %v, want proxy start bind error", err)
+	}
+	if _, ok := mgr.Get(sessionID); ok {
+		t.Fatal("failed session remained in manager")
+	}
+}
+
+func TestMonitorSessionDBProxyStartClosesProxyOnUnexpectedExit(t *testing.T) {
+	mgr := session.NewManager(5)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	closed := make(chan struct{})
+	s.SetDBProxy(filepath.Join(t.TempDir(), "db-services"), func() error {
+		close(closed)
+		return nil
+	})
+
+	proxyCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startErrCh := make(chan error, 1)
+	monitorSessionDBProxyStart(s, proxyCtx, startErrCh)
+	startErrCh <- errors.New("accept loop failed")
+
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DB proxy close function was not called")
+	}
+	if got := s.DBProxySocketDir(); got != "" {
+		t.Fatalf("DBProxySocketDir after unexpected exit = %q, want empty", got)
+	}
+}
+
 func TestCreateSessionCore_NoPolicyDirUsesGlobalEngine(t *testing.T) {
 	globalEngine, err := policy.NewEngine(&policy.Policy{
 		Version: 1,
@@ -256,6 +423,14 @@ type fixedDBSessionResolver struct {
 
 func (r fixedDBSessionResolver) ResolveSessionID(pid int32) (string, bool) {
 	return r.sessionID, true
+}
+
+type staticDBResolver struct {
+	ips []net.IP
+}
+
+func (r staticDBResolver) LookupIP(context.Context, string) ([]net.IP, error) {
+	return append([]net.IP(nil), r.ips...), nil
 }
 
 func newDBUnavoidabilityTestApp(t *testing.T, policyYAML string) (*App, *session.Manager) {

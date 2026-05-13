@@ -113,6 +113,9 @@ func TestDispatch_CancelRequest_NoMatch_ClosesSilentlyAndEmitsLifecycle(t *testi
 	if lifecycle[0].Kind != "db_cancel_unmatched" {
 		t.Errorf("Kind = %q, want db_cancel_unmatched", lifecycle[0].Kind)
 	}
+	if lifecycle[0].SessionID != testAgentSessionID {
+		t.Errorf("SessionID = %q, want %q", lifecycle[0].SessionID, testAgentSessionID)
+	}
 	if lifecycle[0].Reason != "unmatched_cancel_request" {
 		t.Errorf("Reason = %q, want unmatched_cancel_request", lifecycle[0].Reason)
 	}
@@ -368,6 +371,9 @@ database_connection_rules:
 	}
 	if found.DegradedReason != "replication_passthrough" {
 		t.Errorf("DegradedReason = %q, want replication_passthrough", found.DegradedReason)
+	}
+	if found.SessionID != testAgentSessionID {
+		t.Errorf("SessionID = %q, want %q", found.SessionID, testAgentSessionID)
 	}
 }
 
@@ -649,6 +655,9 @@ func TestDispatch_CancelRequest_ExpiredEmitsLifecycle(t *testing.T) {
 	if lifecycle[0].Kind != "db_cancel_after_disconnect" {
 		t.Errorf("Kind = %q, want db_cancel_after_disconnect", lifecycle[0].Kind)
 	}
+	if lifecycle[0].SessionID != testAgentSessionID {
+		t.Errorf("SessionID = %q, want %q", lifecycle[0].SessionID, testAgentSessionID)
+	}
 	if lifecycle[0].Reason != "cancel_after_disconnect" {
 		t.Errorf("Reason = %q, want cancel_after_disconnect", lifecycle[0].Reason)
 	}
@@ -854,6 +863,9 @@ database_connection_rules:
 	}
 	if lifecycle[0].Kind != "db_cancel_forward_failed" {
 		t.Errorf("Kind = %q, want db_cancel_forward_failed", lifecycle[0].Kind)
+	}
+	if lifecycle[0].SessionID != testAgentSessionID {
+		t.Errorf("SessionID = %q, want %q", lifecycle[0].SessionID, testAgentSessionID)
 	}
 	if lifecycle[0].Reason != "forward_failed" {
 		t.Errorf("Reason = %q, want forward_failed", lifecycle[0].Reason)

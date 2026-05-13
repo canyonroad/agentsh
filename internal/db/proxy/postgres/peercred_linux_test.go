@@ -124,6 +124,9 @@ func TestServer_SessionResolverMiss_ClosesAndEmitsLifecycle(t *testing.T) {
 	if lcs[0].DBService != "appdb" {
 		t.Errorf("DBService = %q, want appdb", lcs[0].DBService)
 	}
+	if lcs[0].SessionID != testAgentSessionID {
+		t.Errorf("SessionID = %q, want %q", lcs[0].SessionID, testAgentSessionID)
+	}
 	if lcs[0].PeerUID != uint32(os.Getuid()) {
 		t.Errorf("PeerUID = %d, want %d", lcs[0].PeerUID, os.Getuid())
 	}
@@ -151,6 +154,9 @@ func TestServer_SessionResolverMismatch_ClosesAndEmitsLifecycle(t *testing.T) {
 	}
 	if lcs[0].PeerSessionID != "other-session" {
 		t.Errorf("PeerSessionID = %q, want other-session", lcs[0].PeerSessionID)
+	}
+	if lcs[0].SessionID != testAgentSessionID {
+		t.Errorf("SessionID = %q, want %q", lcs[0].SessionID, testAgentSessionID)
 	}
 	if lcs[0].PeerUID != uint32(os.Getuid()) {
 		t.Errorf("PeerUID = %d, want %d", lcs[0].PeerUID, os.Getuid())
