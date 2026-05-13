@@ -135,6 +135,7 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 	}
 
 	if pre.EffectiveDecision == types.DecisionDeny {
+		a.emitCommandDBBypassAttempt(ctx, sess, sessionID, cmdID, pre)
 		defer unlock()
 		msg := "command denied by policy"
 		if pre.PolicyDecision == types.DecisionApprove {

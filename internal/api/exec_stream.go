@@ -136,6 +136,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if pre.EffectiveDecision == types.DecisionDeny {
+		a.emitCommandDBBypassAttempt(r.Context(), s, id, cmdID, pre)
 		code := "E_POLICY_DENIED"
 		if pre.PolicyDecision == types.DecisionApprove {
 			code = "E_APPROVAL_DENIED"
@@ -369,10 +370,18 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	}
 
 	if tracer != nil && ctx.Err() != nil {
-		if stdoutPipeR != nil { stdoutPipeR.Close() }
-		if stderrPipeR != nil { stderrPipeR.Close() }
-		if stdoutPipeW != nil { stdoutPipeW.Close() }
-		if stderrPipeW != nil { stderrPipeW.Close() }
+		if stdoutPipeR != nil {
+			stdoutPipeR.Close()
+		}
+		if stderrPipeR != nil {
+			stderrPipeR.Close()
+		}
+		if stdoutPipeW != nil {
+			stdoutPipeW.Close()
+		}
+		if stderrPipeW != nil {
+			stderrPipeW.Close()
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return 124, nil, nil, 0, 0, false, false, types.ExecResources{}, ctx.Err()
 		}
@@ -380,10 +389,18 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	}
 
 	if err := cmd.Start(); err != nil {
-		if stdoutPipeR != nil { stdoutPipeR.Close() }
-		if stderrPipeR != nil { stderrPipeR.Close() }
-		if stdoutPipeW != nil { stdoutPipeW.Close() }
-		if stderrPipeW != nil { stderrPipeW.Close() }
+		if stdoutPipeR != nil {
+			stdoutPipeR.Close()
+		}
+		if stderrPipeR != nil {
+			stderrPipeR.Close()
+		}
+		if stdoutPipeW != nil {
+			stdoutPipeW.Close()
+		}
+		if stderrPipeW != nil {
+			stderrPipeW.Close()
+		}
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
 	}
 
@@ -392,8 +409,20 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		stdoutPipeW.Close()
 		stderrPipeW.Close()
 		pipeWG.Add(2)
-		go func() { defer pipeWG.Done(); if _, err := io.Copy(stdoutW, stdoutPipeR); err != nil { slog.Debug("ptrace stdout drain error", "error", err) }; stdoutPipeR.Close() }()
-		go func() { defer pipeWG.Done(); if _, err := io.Copy(stderrW, stderrPipeR); err != nil { slog.Debug("ptrace stderr drain error", "error", err) }; stderrPipeR.Close() }()
+		go func() {
+			defer pipeWG.Done()
+			if _, err := io.Copy(stdoutW, stdoutPipeR); err != nil {
+				slog.Debug("ptrace stdout drain error", "error", err)
+			}
+			stdoutPipeR.Close()
+		}()
+		go func() {
+			defer pipeWG.Done()
+			if _, err := io.Copy(stderrW, stderrPipeR); err != nil {
+				slog.Debug("ptrace stderr drain error", "error", err)
+			}
+			stderrPipeR.Close()
+		}()
 	}
 
 	pgid := 0

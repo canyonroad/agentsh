@@ -11,11 +11,13 @@ import (
 	"strconv"
 	"time"
 
+	dbevents "github.com/agentsh/agentsh/internal/db/events"
 	dbpolicy "github.com/agentsh/agentsh/internal/db/policy"
 	"github.com/agentsh/agentsh/internal/db/proxy/postgres"
 	dbservice "github.com/agentsh/agentsh/internal/db/service"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/pkg/types"
 	"gopkg.in/yaml.v3"
 )
 
@@ -163,6 +165,24 @@ func (a *App) startSessionDBProxy(ctx context.Context, s *session.Session, rs *d
 	})
 	monitorSessionDBProxyStart(s, proxyCtx, startErrCh)
 	return nil
+}
+
+func (a *App) emitCommandDBBypassAttempt(ctx context.Context, s *session.Session, sessionID string, commandID string, dec policy.Decision) {
+	if a == nil || a.dbBypass == nil || dec.EffectiveDecision != types.DecisionDeny {
+		return
+	}
+	processIdentity := "session:" + sessionID
+	if commandID != "" {
+		processIdentity = "command:" + commandID
+	}
+	a.dbBypass.EmitIfDBUnavoidabilityDeny(ctx, dbevents.BypassAttempt{
+		Engine:          a.policyEngineFor(s),
+		SessionID:       sessionID,
+		CommandID:       commandID,
+		ProcessIdentity: processIdentity,
+		RuleName:        dec.Rule,
+		Reason:          dec.Message,
+	})
 }
 
 func waitForDBProxyListeners(ctx context.Context, services []dbProxyService, timeout time.Duration) error {

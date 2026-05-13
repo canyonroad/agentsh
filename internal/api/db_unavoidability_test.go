@@ -3,10 +3,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +25,8 @@ import (
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/go-chi/chi/v5"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func TestDBServiceConfigFromProxyServices(t *testing.T) {
@@ -256,6 +261,44 @@ func TestCreateSessionCore_DBUnavoidabilityAddsGeneratedMetadataAndStartsProxy(t
 	waitForPath(t, filepath.Join(s.DBProxySocketDir(), "appdb.sock"), 2*time.Second)
 }
 
+func TestCreateSessionWithProfile_DBUnavoidabilityAddsGeneratedMetadataAndStartsProxy(t *testing.T) {
+	app, mgr := newDBUnavoidabilityTestApp(t, dbObservePolicyYAML())
+	app.dbProxySessionResolverForTest = fixedDBSessionResolver{sessionID: "sess-profile-db"}
+	workspace := t.TempDir()
+	app.cfg.MountProfiles = map[string]config.MountProfile{
+		"db-profile": {
+			BasePolicy: "default",
+			Mounts: []config.MountSpec{
+				{Path: workspace, Policy: "default"},
+			},
+		},
+	}
+
+	snap, code, err := app.createSessionCore(context.Background(), types.CreateSessionRequest{
+		ID:      "sess-profile-db",
+		Profile: "db-profile",
+	})
+	if err != nil {
+		t.Fatalf("createSessionCore(profile): code=%d err=%v", code, err)
+	}
+	if code != http.StatusCreated {
+		t.Fatalf("code = %d, want %d", code, http.StatusCreated)
+	}
+	s, ok := mgr.Get(snap.ID)
+	if !ok {
+		t.Fatalf("session %q not found", snap.ID)
+	}
+	defer app.cleanupCreatedSession(s)
+
+	if s.PolicyEngine() == nil {
+		t.Fatal("profile session policy engine is nil")
+	}
+	if s.DBProxySocketDir() == "" {
+		t.Fatal("profile session DBProxySocketDir is empty")
+	}
+	waitForPath(t, filepath.Join(s.DBProxySocketDir(), "appdb.sock"), 2*time.Second)
+}
+
 func TestCreateSessionCore_DBUnavoidabilityMissingResolverFailsClosed(t *testing.T) {
 	app, mgr := newDBUnavoidabilityTestApp(t, dbObservePolicyYAML())
 
@@ -361,6 +404,78 @@ func TestMonitorSessionDBProxyStartClosesProxyOnUnexpectedExit(t *testing.T) {
 	}
 }
 
+func TestExecInSessionCore_DBCommandDenyEmitsBypassAttempt(t *testing.T) {
+	f := newDBCommandBypassFixture(t)
+
+	_, code, err := f.app.execInSessionCore(context.Background(), f.session.ID, dbCommandBypassExecRequest())
+	if err != nil {
+		t.Fatalf("execInSessionCore: %v", err)
+	}
+	if code != http.StatusForbidden {
+		t.Fatalf("code = %d, want %d", code, http.StatusForbidden)
+	}
+
+	f.assertDBCommandBypassAttempt(t)
+}
+
+func TestExecInSessionStream_DBCommandDenyEmitsBypassAttempt(t *testing.T) {
+	f := newDBCommandBypassFixture(t)
+	body, err := json.Marshal(dbCommandBypassExecRequest())
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+f.session.ID+"/exec/stream", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", f.session.ID)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	rr := httptest.NewRecorder()
+	f.app.execInSessionStream(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("code = %d, want %d body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+	}
+
+	f.assertDBCommandBypassAttempt(t)
+}
+
+func TestStartPTY_DBCommandDenyEmitsBypassAttempt(t *testing.T) {
+	f := newDBCommandBypassFixture(t)
+
+	_, code, err := f.app.startPTY(context.Background(), f.session.ID, ptyStartParams{
+		Command: "ssh",
+		Args:    []string{"-L", "15432:db.internal:5432", "bastion"},
+	})
+	if err == nil {
+		t.Fatal("startPTY: want deny error, got nil")
+	}
+	if code != http.StatusForbidden {
+		t.Fatalf("code = %d, want %d", code, http.StatusForbidden)
+	}
+
+	f.assertDBCommandBypassAttempt(t)
+}
+
+func TestGRPCExecStream_DBCommandDenyEmitsBypassAttempt(t *testing.T) {
+	f := newDBCommandBypassFixture(t)
+	in, err := structpb.NewStruct(map[string]any{
+		"session_id": f.session.ID,
+		"command":    "ssh",
+		"args":       []any{"-L", "15432:db.internal:5432", "bastion"},
+	})
+	if err != nil {
+		t.Fatalf("NewStruct: %v", err)
+	}
+	stream := &captureServerStream{ctx: context.Background()}
+
+	err = (&grpcServer{app: f.app}).ExecStream(in, stream)
+	if err == nil {
+		t.Fatal("ExecStream: want deny error, got nil")
+	}
+
+	f.assertDBCommandBypassAttempt(t)
+}
+
 func TestCreateSessionCore_NoPolicyDirUsesGlobalEngine(t *testing.T) {
 	globalEngine, err := policy.NewEngine(&policy.Policy{
 		Version: 1,
@@ -461,6 +576,66 @@ func newDBUnavoidabilityTestApp(t *testing.T, policyYAML string) (*App, *session
 	store := composite.New(st, st)
 	app := NewApp(cfg, mgr, store, nil, appevents.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
 	return app, mgr
+}
+
+type dbCommandBypassFixture struct {
+	app      *App
+	session  *session.Session
+	captured *capturingEventStore
+}
+
+func newDBCommandBypassFixture(t *testing.T) *dbCommandBypassFixture {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.Development.DisableAuth = true
+	cfg.Metrics.Enabled = false
+	cfg.Sandbox.FUSE.Enabled = false
+	cfg.Sandbox.Network.Enabled = false
+	cfg.Sandbox.Network.Transparent.Enabled = false
+
+	mgr := session.NewManager(5)
+	captured := &capturingEventStore{}
+	store := composite.New(captured, nil)
+	app := NewApp(cfg, mgr, store, nil, appevents.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	s.SetPolicyEngine(newDBUnavoidabilityEngine(t))
+	return &dbCommandBypassFixture{app: app, session: s, captured: captured}
+}
+
+func dbCommandBypassExecRequest() types.ExecRequest {
+	return types.ExecRequest{
+		Command: "ssh",
+		Args:    []string{"-L", "15432:db.internal:5432", "bastion"},
+	}
+}
+
+func (f *dbCommandBypassFixture) assertDBCommandBypassAttempt(t *testing.T) {
+	t.Helper()
+	var bypassEvents []types.Event
+	for _, ev := range f.captured.events {
+		if ev.Type == "db_bypass_attempt" {
+			bypassEvents = append(bypassEvents, ev)
+		}
+	}
+	if len(bypassEvents) != 1 {
+		t.Fatalf("db_bypass_attempt events = %d, want 1; all events = %+v", len(bypassEvents), f.captured.events)
+	}
+	ev := bypassEvents[0]
+	if ev.SessionID != f.session.ID || ev.CommandID == "" || ev.PID != 0 {
+		t.Fatalf("unexpected bypass event identity: %+v", ev)
+	}
+	if ev.Fields["process_identity"] != "command:"+ev.CommandID {
+		t.Fatalf("process_identity = %v, want command:%s", ev.Fields["process_identity"], ev.CommandID)
+	}
+	if ev.Fields["rule_name"] != "db-bypass-ssh-forward" || ev.Fields["bypass_mode"] != dbservice.BypassModePortForwardTool {
+		t.Fatalf("unexpected bypass rule fields: %+v", ev.Fields)
+	}
+	if ev.Fields["db_service"] != "*" || ev.Fields["destination"] != "db-service-ports" {
+		t.Fatalf("unexpected bypass service fields: %+v", ev.Fields)
+	}
 }
 
 func dbObservePolicyYAML() string {

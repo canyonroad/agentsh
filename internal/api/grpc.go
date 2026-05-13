@@ -24,23 +24,23 @@ import (
 )
 
 const (
-	grpcServiceName             = "agentsh.v1.Agentsh"
-	grpcMethodCreateSession     = "/agentsh.v1.Agentsh/CreateSession"
-	grpcMethodListSessions      = "/agentsh.v1.Agentsh/ListSessions"
-	grpcMethodGetSession        = "/agentsh.v1.Agentsh/GetSession"
-	grpcMethodDestroySession    = "/agentsh.v1.Agentsh/DestroySession"
-	grpcMethodPatchSession      = "/agentsh.v1.Agentsh/PatchSession"
-	grpcMethodExec              = "/agentsh.v1.Agentsh/Exec"
-	grpcMethodExecStream        = "/agentsh.v1.Agentsh/ExecStream"
-	grpcMethodKillCommand       = "/agentsh.v1.Agentsh/KillCommand"
-	grpcMethodEventsTail        = "/agentsh.v1.Agentsh/EventsTail"
-	grpcMethodQueryEvents       = "/agentsh.v1.Agentsh/QueryEvents"
-	grpcMethodSearchEvents      = "/agentsh.v1.Agentsh/SearchEvents"
-	grpcMethodOutputChunk       = "/agentsh.v1.Agentsh/OutputChunk"
-	grpcMethodListApprovals     = "/agentsh.v1.Agentsh/ListApprovals"
-	grpcMethodResolveApproval   = "/agentsh.v1.Agentsh/ResolveApproval"
-	grpcMethodPolicyTest        = "/agentsh.v1.Agentsh/PolicyTest"
-	defaultGRPCAPIKeyMetadata   = "x-api-key"
+	grpcServiceName           = "agentsh.v1.Agentsh"
+	grpcMethodCreateSession   = "/agentsh.v1.Agentsh/CreateSession"
+	grpcMethodListSessions    = "/agentsh.v1.Agentsh/ListSessions"
+	grpcMethodGetSession      = "/agentsh.v1.Agentsh/GetSession"
+	grpcMethodDestroySession  = "/agentsh.v1.Agentsh/DestroySession"
+	grpcMethodPatchSession    = "/agentsh.v1.Agentsh/PatchSession"
+	grpcMethodExec            = "/agentsh.v1.Agentsh/Exec"
+	grpcMethodExecStream      = "/agentsh.v1.Agentsh/ExecStream"
+	grpcMethodKillCommand     = "/agentsh.v1.Agentsh/KillCommand"
+	grpcMethodEventsTail      = "/agentsh.v1.Agentsh/EventsTail"
+	grpcMethodQueryEvents     = "/agentsh.v1.Agentsh/QueryEvents"
+	grpcMethodSearchEvents    = "/agentsh.v1.Agentsh/SearchEvents"
+	grpcMethodOutputChunk     = "/agentsh.v1.Agentsh/OutputChunk"
+	grpcMethodListApprovals   = "/agentsh.v1.Agentsh/ListApprovals"
+	grpcMethodResolveApproval = "/agentsh.v1.Agentsh/ResolveApproval"
+	grpcMethodPolicyTest      = "/agentsh.v1.Agentsh/PolicyTest"
+	defaultGRPCAPIKeyMetadata = "x-api-key"
 )
 
 type grpcServer struct {
@@ -369,6 +369,7 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 	}
 
 	if pre.EffectiveDecision == types.DecisionDeny {
+		s.app.emitCommandDBBypassAttempt(stream.Context(), sess, req.SessionID, cmdID, pre)
 		code := "E_POLICY_DENIED"
 		if pre.PolicyDecision == types.DecisionApprove {
 			code = "E_APPROVAL_DENIED"
