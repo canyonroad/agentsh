@@ -105,6 +105,70 @@ func TestDB07CRejectsListenerAccessOutsideOwningSession(t *testing.T) {
 	}, "db_listener_auth_fail")
 }
 
+func TestDB07CRealPostgresCancelRequest(t *testing.T) {
+	ctx := context.Background()
+	env := startDB07CEnvironment(t, ctx)
+	defer env.cleanup()
+
+	seedDB07C(t, ctx, env.hostDSN)
+	sess := createDB07CSession(t, ctx, env.client)
+	socket := filepath.Join(sess.DBProxySocketDir, "appdb.sock")
+
+	warm := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "scalar", "-sql", "select note from db07c_guard where id = 1")
+	if warm.Scalar != "seed" {
+		t.Fatalf("07c warmup query returned %+v", warm)
+	}
+	cancel := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "cancel", "-sql", "select pg_sleep(10) from db07c_guard where id = 1", "-timeout", "5s")
+	if cancel.SQLState != "57014" && !strings.Contains(strings.ToLower(cancel.Error), "cancel") {
+		t.Fatalf("07c cancel request did not cancel pg_sleep: %+v", cancel)
+	}
+
+	waitForSessionEvent07C(t, ctx, env.client, sess.ID, func(ev types.Event) bool {
+		if ev.Type != "db_statement" {
+			return false
+		}
+		decision, _ := ev.Fields["decision"].(map[string]any)
+		return ev.Fields["operation_subtype"] == "cancel_request" || decision["rule_kind"] == "cancel"
+	}, "db_statement cancel_request")
+}
+
+func TestDB07CRealPostgresCopyEvents(t *testing.T) {
+	ctx := context.Background()
+	env := startDB07CEnvironment(t, ctx)
+	defer env.cleanup()
+
+	seedDB07C(t, ctx, env.hostDSN)
+	sess := createDB07CSession(t, ctx, env.client)
+	socket := filepath.Join(sess.DBProxySocketDir, "appdb.sock")
+
+	copyTo := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "copy-to", "-sql", "COPY db07c_copy(note) TO STDOUT WITH CSV")
+	if copyTo.BytesOut == 0 {
+		t.Fatalf("07c COPY TO returned no bytes: %+v", copyTo)
+	}
+	waitForSessionEvent07C(t, ctx, env.client, sess.ID, func(ev types.Event) bool {
+		if ev.Type != "db_statement" || ev.Operation != "bulk_export" {
+			return false
+		}
+		result, _ := ev.Fields["result"].(map[string]any)
+		bytesOut, _ := result["bytes_out"].(float64)
+		return bytesOut > 0
+	}, "db_statement bulk_export")
+
+	copyFrom := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "copy-from", "-sql", "COPY db07c_copy(note) FROM STDIN WITH CSV", "-data", "from-copy\n")
+	if copyFrom.BytesIn == 0 {
+		t.Fatalf("07c COPY FROM sent no bytes: %+v", copyFrom)
+	}
+	assertCopyRow07C(t, ctx, env.hostDSN, "from-copy")
+	waitForSessionEvent07C(t, ctx, env.client, sess.ID, func(ev types.Event) bool {
+		if ev.Type != "db_statement" || ev.Operation != "bulk_load" {
+			return false
+		}
+		result, _ := ev.Fields["result"].(map[string]any)
+		bytesIn, _ := result["bytes_in"].(float64)
+		return bytesIn > 0
+	}, "db_statement bulk_load")
+}
+
 func startDB07CEnvironment(t *testing.T, ctx context.Context) db07cEnv {
 	t.Helper()
 
@@ -481,6 +545,22 @@ func assertGuardCount07C(t *testing.T, ctx context.Context, dsn string, want int
 	}
 	if got != want {
 		t.Fatalf("07c deny reached upstream: marker table count = %d, want %d", got, want)
+	}
+}
+
+func assertCopyRow07C(t *testing.T, ctx context.Context, dsn, note string) {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("07c connect host Postgres: %v", err)
+	}
+	defer conn.Close(ctx)
+	var count int
+	if err := conn.QueryRow(ctx, "select count(*) from db07c_copy where note = $1", note).Scan(&count); err != nil {
+		t.Fatalf("07c query copy row: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("07c COPY FROM row count for %q = %d, want 1", note, count)
 	}
 }
 
