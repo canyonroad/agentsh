@@ -276,11 +276,18 @@ func TestSpine_TerminateReissue_AuthOK_CloseAtRFQ(t *testing.T) {
 	if bkd == nil {
 		t.Fatal("never received BackendKeyData")
 	}
-	if bkd.ProcessID != 42 {
-		t.Errorf("BKD.ProcessID = %d, want 42", bkd.ProcessID)
+	if bkd.ProcessID == 42 {
+		t.Errorf("BKD.ProcessID = %d, want synthetic PID", bkd.ProcessID)
 	}
-	if !bytes.Equal(bkd.SecretKey, wantSecret) {
-		t.Errorf("BKD.SecretKey = %x, want %x", bkd.SecretKey, wantSecret)
+	if bytes.Equal(bkd.SecretKey, wantSecret) {
+		t.Errorf("BKD.SecretKey = %x, want synthetic secret", bkd.SecretKey)
+	}
+	entry, status := h.srv.cancelMap.Lookup(bkd.ProcessID, bkd.SecretKey)
+	if status != cancelLookupFound {
+		t.Fatalf("cancelMap.Lookup status = %v, want %v", status, cancelLookupFound)
+	}
+	if entry.RealPID != 42 || !bytes.Equal(entry.RealSecret, wantSecret) {
+		t.Fatalf("cancel map entry = (%d,%x), want (42,%x)", entry.RealPID, entry.RealSecret, wantSecret)
 	}
 	if up.AcceptedConns() == 0 {
 		t.Fatal("upstream never received a connection")
@@ -304,8 +311,18 @@ func TestSpine_TerminatePlaintextUpstream_AuthOK_CloseAtRFQ(t *testing.T) {
 	if bkd == nil {
 		t.Fatal("never received BackendKeyData")
 	}
-	if bkd.ProcessID != 42 {
-		t.Errorf("BKD.ProcessID = %d, want 42", bkd.ProcessID)
+	if bkd.ProcessID == 42 {
+		t.Errorf("BKD.ProcessID = %d, want synthetic PID", bkd.ProcessID)
+	}
+	if bytes.Equal(bkd.SecretKey, wantSecret) {
+		t.Errorf("BKD.SecretKey = %x, want synthetic secret", bkd.SecretKey)
+	}
+	entry, status := h.srv.cancelMap.Lookup(bkd.ProcessID, bkd.SecretKey)
+	if status != cancelLookupFound {
+		t.Fatalf("cancelMap.Lookup status = %v, want %v", status, cancelLookupFound)
+	}
+	if entry.RealPID != 42 || !bytes.Equal(entry.RealSecret, wantSecret) {
+		t.Fatalf("cancel map entry = (%d,%x), want (42,%x)", entry.RealPID, entry.RealSecret, wantSecret)
 	}
 	if up.AcceptedConns() == 0 {
 		t.Fatal("upstream never received a connection")

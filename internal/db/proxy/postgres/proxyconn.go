@@ -36,8 +36,8 @@ type connState struct {
 	upstreamFE *pgproto3.Frontend
 
 	// upstreamBKD captures the real upstream BackendKeyData (PID, Secret)
-	// for Plan 06's mapping table. 04b₂ forwards verbatim to client — the
-	// values are recorded but not used.
+	// for diagnostics/tests. Plan 06 registers it into the cancel map so
+	// clients receive synthetic BackendKeyData.
 	//
 	// SecretKey is a byte slice (not uint32) because pgx v5's
 	// pgproto3.BackendKeyData.SecretKey is []byte: standard PostgreSQL uses
