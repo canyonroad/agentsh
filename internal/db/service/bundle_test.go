@@ -64,7 +64,7 @@ func TestGenerateBundle_SingleServiceCoreRules(t *testing.T) {
 		t.Fatalf("network rules = %d, want 1", len(b.Policy.NetworkRules))
 	}
 	netRule := b.Policy.NetworkRules[0]
-	if netRule.Name != "db-appdb-allow-redirect" {
+	if netRule.Name != "db-appdb-deny-direct" {
 		t.Fatalf("network rule name = %q", netRule.Name)
 	}
 	if len(netRule.Domains) != 1 || netRule.Domains[0] != "db.internal" {
@@ -73,7 +73,7 @@ func TestGenerateBundle_SingleServiceCoreRules(t *testing.T) {
 	if len(netRule.Ports) != 1 || netRule.Ports[0] != 5432 {
 		t.Fatalf("network ports = %+v", netRule.Ports)
 	}
-	if netRule.Decision != "allow" {
+	if netRule.Decision != "deny" {
 		t.Fatalf("network decision = %q", netRule.Decision)
 	}
 
@@ -88,7 +88,7 @@ func TestGenerateBundle_SingleServiceCoreRules(t *testing.T) {
 		t.Fatalf("Bundle.Metadata length = %d, Policy.Metadata length = %d", len(b.Metadata), len(b.Policy.Metadata))
 	}
 	assertMetadata(t, b.Metadata, "db-appdb-redirect", "appdb", BypassModeTCPDirect, "db.internal:5432")
-	assertMetadata(t, b.Metadata, "db-appdb-allow-redirect", "appdb", BypassModeTCPDirect, "db.internal:5432")
+	assertMetadata(t, b.Metadata, "db-appdb-deny-direct", "appdb", BypassModeTCPDirect, "db.internal:5432")
 	assertMetadata(t, b.Metadata, "db-appdb-deny-local-postgres-sockets", "appdb", BypassModeUnixSocket, "postgres-local-sockets")
 }
 
@@ -119,8 +119,8 @@ func TestGenerateBundle_MultipleServicesHaveStableNames(t *testing.T) {
 	for _, name := range []string{
 		"db-appdb-redirect",
 		"db-warehouse-db-redirect",
-		"db-appdb-allow-redirect",
-		"db-warehouse-db-allow-redirect",
+		"db-appdb-deny-direct",
+		"db-warehouse-db-deny-direct",
 	} {
 		if !seen[name] {
 			t.Fatalf("missing metadata for %q in %+v", name, b.Metadata)
@@ -128,7 +128,7 @@ func TestGenerateBundle_MultipleServicesHaveStableNames(t *testing.T) {
 	}
 }
 
-func TestGenerateBundle_RedirectTargetAllowedByNetworkPolicy(t *testing.T) {
+func TestGenerateBundle_RedirectTargetDeniedByNetworkPolicy(t *testing.T) {
 	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
 		SessionID:        "sess-1",
 		ProxySessionID:   "db-proxy-sess",
@@ -148,8 +148,8 @@ func TestGenerateBundle_RedirectTargetAllowedByNetworkPolicy(t *testing.T) {
 		t.Fatalf("EvaluateConnectRedirect = %+v", redirect)
 	}
 	network := engine.CheckNetwork("db.internal", 5432)
-	if string(network.EffectiveDecision) != "allow" {
-		t.Fatalf("CheckNetwork decision = %+v, want allow so CONNECT can dial redirected unix target", network)
+	if string(network.EffectiveDecision) != "deny" {
+		t.Fatalf("CheckNetwork decision = %+v, want deny for direct DB egress", network)
 	}
 }
 

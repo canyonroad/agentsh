@@ -74,7 +74,7 @@ func GenerateBundle(cfg Config, opts BundleOptions) (Bundle, error) {
 func addCoreServiceRules(b *Bundle, svc Service, servicePart string) {
 	destination := serviceDestination(svc)
 	redirectName := "db-" + servicePart + "-redirect"
-	networkName := "db-" + servicePart + "-allow-redirect"
+	networkName := "db-" + servicePart + "-deny-direct"
 	unixName := "db-" + servicePart + "-deny-local-postgres-sockets"
 
 	b.Policy.ConnectRedirectRules = append(b.Policy.ConnectRedirectRules, policy.ConnectRedirectRule{
@@ -89,11 +89,11 @@ func addCoreServiceRules(b *Bundle, svc Service, servicePart string) {
 
 	b.Policy.NetworkRules = append(b.Policy.NetworkRules, policy.NetworkRule{
 		Name:        networkName,
-		Description: "Allow DB destination precheck so connect redirect can reach AgentSH DB proxy",
+		Description: "Deny direct DB egress; traffic must use AgentSH DB proxy",
 		Domains:     []string{strings.ToLower(svc.Upstream.Host)},
 		Ports:       []int{svc.Upstream.Port},
-		Decision:    "allow",
-		Message:     "Database traffic is routed through the AgentSH DB proxy",
+		Decision:    "deny",
+		Message:     "Direct database egress is blocked; use the AgentSH DB proxy",
 	})
 	addMetadata(b, networkName, svc.Name, BypassModeTCPDirect, destination)
 

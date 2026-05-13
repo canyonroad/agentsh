@@ -274,6 +274,83 @@ func TestHandleConnect_UnixRedirectNetConnectFields(t *testing.T) {
 	t.Fatalf("expected net_connect event, got %+v", em.events)
 }
 
+func TestHandleConnect_UnixRedirectBypassesOriginalNetworkDeny(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "db", "appdb.sock")
+	pol := &policy.Policy{
+		Version: 1,
+		NetworkRules: []policy.NetworkRule{
+			{Name: "deny-db-direct", Decision: "deny", Domains: []string{"db.internal"}, Ports: []int{5432}},
+		},
+		ConnectRedirectRules: []policy.ConnectRedirectRule{
+			{
+				Name:           "db-unix-redirect",
+				Match:          `^db\.internal:5432$`,
+				RedirectToUnix: socketPath,
+				Visibility:     "audit_only",
+			},
+		},
+	}
+	engine, err := policy.NewEngine(pol, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	em := &stubEmitter{}
+	p := &Proxy{sessionID: "s", policy: engine, emit: em}
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	done := make(chan struct{})
+	go func() {
+		_ = p.handleConn(server)
+		close(done)
+	}()
+
+	_, _ = client.Write([]byte("CONNECT db.internal:5432 HTTP/1.1\r\nHost: db.internal:5432\r\n\r\n"))
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 128)
+	n, _ := client.Read(buf)
+	if !strings.Contains(string(buf[:n]), "502 Bad Gateway") {
+		t.Fatalf("expected 502 response for missing unix socket, got %q", string(buf[:n]))
+	}
+	client.Close()
+	<-done
+}
+
+func TestHandleConnect_NonRedirectedNetworkDenyReturnsForbidden(t *testing.T) {
+	pol := &policy.Policy{
+		Version: 1,
+		NetworkRules: []policy.NetworkRule{
+			{Name: "deny-db-direct", Decision: "deny", Domains: []string{"127.0.0.1"}, Ports: []int{5432}},
+		},
+	}
+	engine, err := policy.NewEngine(pol, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	em := &stubEmitter{}
+	p := &Proxy{sessionID: "s", policy: engine, emit: em}
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	done := make(chan struct{})
+	go func() {
+		_ = p.handleConn(server)
+		close(done)
+	}()
+
+	_, _ = client.Write([]byte("CONNECT 127.0.0.1:5432 HTTP/1.1\r\nHost: 127.0.0.1:5432\r\n\r\n"))
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 128)
+	n, _ := client.Read(buf)
+	if !strings.Contains(string(buf[:n]), "403 Forbidden") {
+		t.Fatalf("expected 403 response for denied non-redirected CONNECT, got %q", string(buf[:n]))
+	}
+	client.Close()
+	<-done
+}
+
 func TestConnectDialTarget_TCPRedirectWinsOverResolvedIP(t *testing.T) {
 	got := connectDialTarget(connectDialTargetInput{
 		OriginalHostPort: "api.example.com:443",

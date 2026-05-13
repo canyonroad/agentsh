@@ -200,8 +200,7 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	}
 
 	ctx := req.Context()
-	dec := p.checkNetwork(ctx, host, port)
-	dec = p.maybeApprove(ctx, commandID, dec, "network", hostPort)
+	dec := p.checkConnectNetwork(ctx, commandID, host, hostPort, port, redirectResult)
 	eventFields := map[string]any{
 		"method":      "CONNECT",
 		"resolved_ip": resolvedIP,
@@ -430,6 +429,20 @@ func (p *Proxy) checkNetwork(ctx context.Context, domain string, port int) polic
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
 	return p.policy.CheckNetworkCtx(ctx, domain, port)
+}
+
+func (p *Proxy) checkConnectNetwork(ctx context.Context, commandID string, host string, hostPort string, port int, redirect *policy.ConnectRedirectResult) policy.Decision {
+	dec := p.checkNetwork(ctx, host, port)
+	dec = p.maybeApprove(ctx, commandID, dec, "network", hostPort)
+	if redirect != nil && redirect.RedirectToUnix != "" && dec.EffectiveDecision == types.DecisionDeny {
+		return policy.Decision{
+			PolicyDecision:    types.DecisionAllow,
+			EffectiveDecision: types.DecisionAllow,
+			Rule:              redirect.Rule,
+			Message:           redirect.Message,
+		}
+	}
+	return dec
 }
 
 func (p *Proxy) maybeApprove(ctx context.Context, commandID string, dec policy.Decision, kind string, target string) policy.Decision {
