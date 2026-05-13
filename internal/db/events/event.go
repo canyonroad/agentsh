@@ -12,7 +12,8 @@ import (
 // schema; additional sub-structs (decision, result, tx_context) ship in Plan 04.
 // Cancel governance events also use DBEvent with decision.rule_kind="cancel",
 // operation_group="session", and operation_subtype="cancel_request"; they
-// intentionally carry no statement text or digest.
+// include mapped database metadata when available and intentionally carry no
+// statement text or digest.
 type DBEvent struct {
 	EventID   string    `json:"event_id"`
 	SessionID string    `json:"session_id"`
@@ -23,6 +24,7 @@ type DBEvent struct {
 	DBFamily        string `json:"db_family"`
 	DBDialect       string `json:"db_dialect"`
 	DBUser          string `json:"db_user,omitempty"`
+	Database        string `json:"database,omitempty"`
 	ApplicationName string `json:"application_name,omitempty"`
 	ClientIdentity  string `json:"client_identity,omitempty"`
 

@@ -462,6 +462,9 @@ database_connection_rules:
 	if events[0].Decision.Verb != "allow" {
 		t.Errorf("Decision.Verb = %q, want allow", events[0].Decision.Verb)
 	}
+	if events[0].Database != "app" {
+		t.Errorf("Database = %q, want app", events[0].Database)
+	}
 }
 
 func TestDispatch_CancelRequest_DenyDoesNotDialAndEmitsDBEvent(t *testing.T) {
@@ -523,6 +526,7 @@ database_connection_rules:
 		ServiceName:    "appdb",
 		UpstreamAddr:   upLn.Addr().String(),
 		ClientIdentity: "uid:1000",
+		Database:       "app",
 		PeerUID:        1000,
 	}, 11111, []byte{0, 0, 86, 206})
 	if err != nil {
@@ -560,6 +564,9 @@ database_connection_rules:
 	}
 	if events[0].Decision.RuleName != "deny-cancel" {
 		t.Errorf("Decision.RuleName = %q, want deny-cancel", events[0].Decision.RuleName)
+	}
+	if events[0].Database != "app" {
+		t.Errorf("Database = %q, want app", events[0].Database)
 	}
 }
 
@@ -732,6 +739,9 @@ database_connection_rules:
 	if events[0].Decision.RuleKind != "cancel" {
 		t.Errorf("Decision.RuleKind = %q, want cancel", events[0].Decision.RuleKind)
 	}
+	if events[0].Database != "app" {
+		t.Errorf("Database = %q, want app", events[0].Database)
+	}
 }
 
 func TestDispatch_CancelRequest_ForwardFailureEmitsLifecycleAndDBEventError(t *testing.T) {
@@ -816,6 +826,9 @@ database_connection_rules:
 	}
 	if events[0].Result.ErrorCode != "CANCEL_FORWARD_FAILED" {
 		t.Errorf("Result.ErrorCode = %q, want CANCEL_FORWARD_FAILED", events[0].Result.ErrorCode)
+	}
+	if events[0].Database != "app" {
+		t.Errorf("Database = %q, want app", events[0].Database)
 	}
 
 	lifecycle := sink.DrainLifecycle()

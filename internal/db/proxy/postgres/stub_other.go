@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/db/policy"
@@ -40,6 +41,10 @@ type Config struct {
 	Logger         *slog.Logger
 	Policy         *policy.RuleSet // current rule set; nil means "no rules" (implicit deny). Hot-swappable in a later plan.
 	Approver       policy.Approver
+
+	MaxQueryBytes     int
+	CancelMappingMax  int
+	CancelGraceWindow time.Duration
 }
 
 type Server struct {

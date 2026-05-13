@@ -45,13 +45,14 @@ func TestParseRedaction(t *testing.T) {
 
 func TestDBEvent_JSONRoundTrip(t *testing.T) {
 	in := DBEvent{
-		EventID:    "01HQ-fake",
-		SessionID:  "sess-1",
-		Timestamp:  time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC),
-		DBService:  "appdb",
-		DBFamily:   "postgres",
-		DBDialect:  "postgres",
-		Effects: []effects.Effect{{Group: effects.GroupRead, Resolution: effects.ResolutionQualified}},
+		EventID:            "01HQ-fake",
+		SessionID:          "sess-1",
+		Timestamp:          time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC),
+		DBService:          "appdb",
+		DBFamily:           "postgres",
+		DBDialect:          "postgres",
+		Database:           "app",
+		Effects:            []effects.Effect{{Group: effects.GroupRead, Resolution: effects.ResolutionQualified}},
 		StatementRedaction: RedactionParametersRedacted,
 		ParserBackend:      effects.ParserBackendLibPgQuery,
 	}
@@ -65,6 +66,9 @@ func TestDBEvent_JSONRoundTrip(t *testing.T) {
 	}
 	if out.EventID != in.EventID || out.DBService != in.DBService {
 		t.Errorf("round-trip lost fields: %+v", out)
+	}
+	if out.Database != "app" {
+		t.Errorf("Database = %q, want app", out.Database)
 	}
 	if out.StatementRedaction != RedactionParametersRedacted {
 		t.Errorf("redaction lost: %v", out.StatementRedaction)
