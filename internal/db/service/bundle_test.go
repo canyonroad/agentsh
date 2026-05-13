@@ -1,8 +1,11 @@
 package service
 
 import (
+	"context"
 	"errors"
+	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -186,6 +189,133 @@ func TestGenerateBundle_CollidingSanitizedServiceNamesAreUnique(t *testing.T) {
 	}
 }
 
+func TestGenerateBundle_AddsResolvedIPDenies(t *testing.T) {
+	resolver := &fakeIPResolver{ips: []net.IP{
+		net.ParseIP("10.0.0.15"),
+		net.ParseIP("2001:db8::15"),
+	}}
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+		Resolver:         resolver,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+	if len(resolver.calls) != 1 || resolver.calls[0] != "db.internal" {
+		t.Fatalf("resolver calls = %+v, want [db.internal]", resolver.calls)
+	}
+	if !resolver.sawDeadline {
+		t.Fatal("resolver context had no deadline")
+	}
+
+	assertNetworkRule(t, b.Policy.NetworkRules, "db-appdb-deny-ip-10-0-0-15", "10.0.0.15/32", 5432)
+	assertNetworkRule(t, b.Policy.NetworkRules, "db-appdb-deny-ip-2001-db8-15", "2001:db8::15/128", 5432)
+	assertMetadata(t, b.Metadata, "db-appdb-deny-ip-10-0-0-15", "appdb", BypassModeDNSAlias, "10.0.0.15:5432")
+	assertMetadata(t, b.Metadata, "db-appdb-deny-ip-2001-db8-15", "appdb", BypassModeDNSAlias, "[2001:db8::15]:5432")
+}
+
+func TestGenerateBundle_SkipsDNSExpansionForIPLiteralUpstream(t *testing.T) {
+	resolver := &fakeIPResolver{ips: []net.IP{net.ParseIP("10.0.0.15")}}
+	svc := validBundleService(t, "appdb")
+	svc.Upstream.Host = "10.0.0.20"
+
+	b, err := GenerateBundle(Config{Services: []Service{svc}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+		Resolver:         resolver,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+	if len(resolver.calls) != 0 {
+		t.Fatalf("resolver calls = %+v, want none", resolver.calls)
+	}
+	if len(b.Policy.NetworkRules) != 1 {
+		t.Fatalf("network rules = %d, want only core direct deny", len(b.Policy.NetworkRules))
+	}
+}
+
+func TestGenerateBundle_DNSFailureObserveWarns(t *testing.T) {
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityObserve,
+		IncludeToolRules: false,
+		Resolver:         &fakeIPResolver{err: errors.New("dns unavailable")},
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+	assertDNSExpansionWarning(t, b.Warnings, "appdb", "db.internal")
+}
+
+func TestGenerateBundle_DNSFailureEnforceFailsUnlessAllowed(t *testing.T) {
+	_, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+		Resolver:         &fakeIPResolver{err: errors.New("dns unavailable")},
+	})
+	if err == nil {
+		t.Fatal("GenerateBundle returned nil error")
+	}
+
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           false,
+		AllowHostnameOnlyInEnforce: true,
+		Resolver:                   &fakeIPResolver{err: errors.New("dns unavailable")},
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle with hostname-only override: %v", err)
+	}
+	assertDNSExpansionWarning(t, b.Warnings, "appdb", "db.internal")
+}
+
+func TestGenerateBundle_ResolvedIPRuleNamesUseCollisionResistantServiceParts(t *testing.T) {
+	services := []Service{
+		validBundleService(t, "app_db"),
+		validBundleService(t, "app-db"),
+		validBundleService(t, "app/db"),
+	}
+	for i := range services {
+		services[i].Listen.Path = filepath.Join(t.TempDir(), "db", services[i].Name+".sock")
+		services[i].Upstream.Port = 5432 + i
+	}
+
+	b, err := GenerateBundle(Config{Services: services}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+		Resolver:         &fakeIPResolver{ips: []net.IP{net.ParseIP("10.0.0.15")}},
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+
+	for _, svc := range services {
+		ruleName := "db-app-db-" + ruleNameHash(svc.Name) + "-deny-ip-10-0-0-15"
+		destination := net.JoinHostPort("10.0.0.15", strconv.Itoa(svc.Upstream.Port))
+		assertMetadata(t, b.Metadata, ruleName, svc.Name, BypassModeDNSAlias, destination)
+	}
+	seen := map[string]bool{}
+	for _, m := range b.Metadata {
+		if seen[m.RuleName] {
+			t.Fatalf("duplicate metadata rule name %q in %+v", m.RuleName, b.Metadata)
+		}
+		seen[m.RuleName] = true
+	}
+}
+
 func TestGenerateBundle_PolicyCompiles(t *testing.T) {
 	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
 		SessionID:        "sess-1",
@@ -204,6 +334,21 @@ func TestGenerateBundle_PolicyCompiles(t *testing.T) {
 	}
 }
 
+type fakeIPResolver struct {
+	ips         []net.IP
+	err         error
+	calls       []string
+	sawDeadline bool
+}
+
+func (f *fakeIPResolver) LookupIP(ctx context.Context, host string) ([]net.IP, error) {
+	f.calls = append(f.calls, host)
+	if _, ok := ctx.Deadline(); ok {
+		f.sawDeadline = true
+	}
+	return f.ips, f.err
+}
+
 func assertMetadata(t *testing.T, got []policy.RuleMetadata, ruleName, service, mode, destination string) {
 	t.Helper()
 	for _, m := range got {
@@ -215,6 +360,42 @@ func assertMetadata(t *testing.T, got []policy.RuleMetadata, ruleName, service, 
 		}
 	}
 	t.Fatalf("missing metadata for rule %q in %+v", ruleName, got)
+}
+
+func assertNetworkRule(t *testing.T, got []policy.NetworkRule, name, cidr string, port int) {
+	t.Helper()
+	for _, rule := range got {
+		if rule.Name != name {
+			continue
+		}
+		if len(rule.CIDRs) != 1 || rule.CIDRs[0] != cidr {
+			t.Fatalf("network rule %q CIDRs = %+v, want [%s]", name, rule.CIDRs, cidr)
+		}
+		if len(rule.Ports) != 1 || rule.Ports[0] != port {
+			t.Fatalf("network rule %q ports = %+v, want [%d]", name, rule.Ports, port)
+		}
+		if rule.Decision != "deny" {
+			t.Fatalf("network rule %q decision = %q, want deny", name, rule.Decision)
+		}
+		return
+	}
+	t.Fatalf("missing network rule %q in %+v", name, got)
+}
+
+func assertDNSExpansionWarning(t *testing.T, got []BundleWarning, service, host string) {
+	t.Helper()
+	if len(got) != 1 {
+		t.Fatalf("warnings = %+v, want one warning", got)
+	}
+	if got[0].Code != "DNS_EXPANSION_FAILED" {
+		t.Fatalf("warning code = %q, want DNS_EXPANSION_FAILED", got[0].Code)
+	}
+	if got[0].Service != service {
+		t.Fatalf("warning service = %q, want %q", got[0].Service, service)
+	}
+	if !strings.Contains(got[0].Message, host) {
+		t.Fatalf("warning message = %q, want host %q", got[0].Message, host)
+	}
 }
 
 func validBundleService(t *testing.T, name string) Service {

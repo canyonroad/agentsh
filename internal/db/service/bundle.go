@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/policy"
 )
@@ -23,6 +24,8 @@ const (
 	BypassModeDNSAlias        = "dns_alias"
 	BypassModeCustomTunnel    = "custom_tunnel"
 )
+
+const dnsResolutionTimeout = 2 * time.Second
 
 var ErrBundleInvalidOptions = errors.New("db unavoidability bundle invalid options")
 
@@ -66,6 +69,9 @@ func GenerateBundle(cfg Config, opts BundleOptions) (Bundle, error) {
 	serviceParts := serviceRuleParts(cfg.Services)
 	for i, svc := range cfg.Services {
 		addCoreServiceRules(&b, svc, serviceParts[i])
+		if err := addResolvedIPRules(context.Background(), &b, svc, serviceParts[i], opts); err != nil {
+			return Bundle{}, err
+		}
 	}
 	b.Policy.Metadata = append([]policy.RuleMetadata(nil), b.Metadata...)
 	return b, nil
@@ -109,6 +115,65 @@ func addCoreServiceRules(b *Bundle, svc Service, servicePart string) {
 		Message:    "Direct local database socket access is blocked; use the AgentSH DB proxy",
 	})
 	addMetadata(b, unixName, svc.Name, BypassModeUnixSocket, "postgres-local-sockets")
+}
+
+func addResolvedIPRules(ctx context.Context, b *Bundle, svc Service, servicePart string, opts BundleOptions) error {
+	if opts.Resolver == nil {
+		return nil
+	}
+	if net.ParseIP(svc.Upstream.Host) != nil {
+		return nil
+	}
+
+	resolveCtx, cancel := context.WithTimeout(ctx, dnsResolutionTimeout)
+	defer cancel()
+
+	ips, err := opts.Resolver.LookupIP(resolveCtx, svc.Upstream.Host)
+	if err != nil {
+		warning := BundleWarning{
+			Code:    "DNS_EXPANSION_FAILED",
+			Service: svc.Name,
+			Message: "could not resolve " + svc.Upstream.Host + ": " + err.Error(),
+		}
+		b.Warnings = append(b.Warnings, warning)
+		if opts.Mode == UnavoidabilityEnforce && !opts.AllowHostnameOnlyInEnforce {
+			return fmt.Errorf("%w: %s", ErrBundleInvalidOptions, warning.Message)
+		}
+		return nil
+	}
+
+	for _, ip := range ips {
+		if ip == nil {
+			continue
+		}
+		ipString := canonicalIPString(ip)
+		name := "db-" + servicePart + "-deny-ip-" + sanitizeRulePart(ipString)
+		destination := net.JoinHostPort(ipString, strconv.Itoa(svc.Upstream.Port))
+		b.Policy.NetworkRules = append(b.Policy.NetworkRules, policy.NetworkRule{
+			Name:        name,
+			Description: "Deny direct DB egress to resolved upstream IP",
+			CIDRs:       []string{ipCIDR(ip)},
+			Ports:       []int{svc.Upstream.Port},
+			Decision:    "deny",
+			Message:     "Direct database egress is blocked; use the AgentSH DB proxy",
+		})
+		addMetadata(b, name, svc.Name, BypassModeDNSAlias, destination)
+	}
+	return nil
+}
+
+func canonicalIPString(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.String()
+}
+
+func ipCIDR(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String() + "/32"
+	}
+	return ip.String() + "/128"
 }
 
 func addMetadata(b *Bundle, ruleName, serviceName, bypassMode, destination string) {
