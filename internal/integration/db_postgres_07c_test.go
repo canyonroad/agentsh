@@ -68,11 +68,33 @@ func TestDB07CRealPostgresProxySQLAndUnavoidability(t *testing.T) {
 		t.Fatalf("07c extended query through appdb returned %+v", extended)
 	}
 
-	deny := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "tx-deny", "-sql", "insert into db07c_guard(id, note) values (2, 'denied')")
-	if deny.SQLState == "" && deny.Error == "" {
-		t.Fatalf("07c deny did not report SQLSTATE or error: %+v", deny)
+	simpleDeny := execDB07CClientAllowFailure(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "exec", "-sql", "insert into db07c_guard(id, note) values (2, 'simple-denied')", "-simple")
+	if simpleDeny.OK || (simpleDeny.SQLState == "" && simpleDeny.Error == "") {
+		t.Fatalf("07c simple query deny did not fail with SQLSTATE or error: %+v", simpleDeny)
 	}
 	assertGuardCount07C(t, ctx, env.hostDSN, 1)
+
+	extendedDeny := execDB07CClientAllowFailure(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "exec", "-sql", "insert into db07c_guard(id, note) values (3, 'extended-denied')")
+	if extendedDeny.OK || (extendedDeny.SQLState == "" && extendedDeny.Error == "") {
+		t.Fatalf("07c extended query deny did not fail with SQLSTATE or error: %+v", extendedDeny)
+	}
+	assertGuardCount07C(t, ctx, env.hostDSN, 1)
+
+	deny := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "tx-deny", "-sql", "insert into db07c_guard(id, note) values (4, 'tx-denied')")
+	if deny.SQLState == "" && deny.Error == "" {
+		t.Fatalf("07c in-transaction deny did not report SQLSTATE or error: %+v", deny)
+	}
+	assertGuardCount07C(t, ctx, env.hostDSN, 1)
+	waitForSessionEvent07C(t, ctx, env.client, sess.ID, func(ev types.Event) bool {
+		if ev.Type != "db_statement" || ev.Operation != "write" {
+			return false
+		}
+		decision, _ := ev.Fields["decision"].(map[string]any)
+		txContext, _ := ev.Fields["tx_context"].(map[string]any)
+		return decision["verb"] == "deny" &&
+			txContext["in_transaction"] == true &&
+			txContext["deny_action"] == "connection_terminated"
+	}, "db_statement in-transaction deny connection_terminated")
 
 	bypass := execDB07CClientAllowFailure(t, ctx, env.client, sess.ID, "-dsn", env.containerDSN, "-mode", "scalar", "-sql", "select 'bypass'")
 	if bypass.OK {
@@ -151,7 +173,10 @@ func TestDB07CRealPostgresCopyEvents(t *testing.T) {
 		}
 		result, _ := ev.Fields["result"].(map[string]any)
 		bytesOut, _ := result["bytes_out"].(float64)
-		return bytesOut > 0
+		statementText, _ := ev.Fields["statement_text"].(string)
+		return bytesOut > 0 &&
+			ev.Fields["statement_redaction"] == "parameters_redacted" &&
+			statementText != ""
 	}, "db_statement bulk_export")
 
 	copyFrom := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "copy-from", "-sql", "COPY db07c_copy(note) FROM STDIN WITH CSV", "-data", "from-copy\n")
@@ -165,7 +190,11 @@ func TestDB07CRealPostgresCopyEvents(t *testing.T) {
 		}
 		result, _ := ev.Fields["result"].(map[string]any)
 		bytesIn, _ := result["bytes_in"].(float64)
-		return bytesIn > 0
+		statementText, _ := ev.Fields["statement_text"].(string)
+		return bytesIn > 0 &&
+			ev.Fields["statement_redaction"] == "parameters_redacted" &&
+			statementText != "" &&
+			!strings.Contains(statementText, "from-copy")
 	}, "db_statement bulk_load")
 }
 
