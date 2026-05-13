@@ -50,6 +50,7 @@ func (a *App) initPtraceTracer() {
 		sessions:           a.sessions,
 		store:              a.store,
 		broker:             a.broker,
+		dbBypass:           a.dbBypass,
 		staticAllowFile:    cfg.Performance.StaticAllowFile,
 		staticAllowNetwork: cfg.Performance.StaticAllowNetwork,
 		trashPath:          a.cfg.Sandbox.FUSE.Audit.TrashPath,

@@ -8,12 +8,29 @@ import (
 	"syscall"
 	"testing"
 
+	dbevents "github.com/agentsh/agentsh/internal/db/events"
+	dbservice "github.com/agentsh/agentsh/internal/db/service"
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/ptrace"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
+	"github.com/agentsh/agentsh/pkg/types"
 )
+
+type captureBypassEmitter struct {
+	events    []types.Event
+	published []types.Event
+}
+
+func (c *captureBypassEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
+	c.events = append(c.events, ev)
+	return nil
+}
+
+func (c *captureBypassEmitter) Publish(ev types.Event) {
+	c.published = append(c.published, ev)
+}
 
 func newTestRouter(t *testing.T, trashPath string) (*ptraceHandlerRouter, *session.Manager) {
 	t.Helper()
@@ -49,6 +66,135 @@ func newSoftDeleteEngine(t *testing.T, workspace string) *policy.Engine {
 		t.Fatalf("NewEngine: %v", err)
 	}
 	return engine
+}
+
+func newDBUnavoidabilityEngine(t *testing.T) *policy.Engine {
+	t.Helper()
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "test-db-unavoidability",
+		Metadata: []policy.RuleMetadata{
+			{
+				RuleName:    "db-appdb-deny-direct",
+				Source:      dbservice.RuleSourceDBUnavoidability,
+				DBService:   "appdb",
+				BypassMode:  dbservice.BypassModeTCPDirect,
+				Destination: "db.internal:5432",
+			},
+			{
+				RuleName:    "db-bypass-ssh-forward",
+				Source:      dbservice.RuleSourceDBUnavoidability,
+				DBService:   "*",
+				BypassMode:  dbservice.BypassModePortForwardTool,
+				Destination: "db-service-ports",
+			},
+		},
+		NetworkRules: []policy.NetworkRule{
+			{
+				Name:     "db-appdb-deny-direct",
+				Domains:  []string{"db.internal"},
+				Ports:    []int{5432},
+				Decision: "deny",
+				Message:  "Direct database egress is blocked; use the AgentSH DB proxy",
+			},
+		},
+		CommandRules: []policy.CommandRule{
+			{
+				Name:         "db-bypass-ssh-forward",
+				Commands:     []string{"ssh"},
+				ArgsPatterns: []string{`(^|\s)-L(\s|[^\s]*:).*:(5432)(\s|$)`},
+				Decision:     "deny",
+				Message:      "DB port forwarding is blocked by AgentSH DB unavoidability",
+			},
+		},
+	}
+	engine, err := policy.NewEngine(p, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	return engine
+}
+
+func TestHandleNetwork_DBUnavoidabilityDenyEmitsBypassAttempt(t *testing.T) {
+	router, mgr := newTestRouter(t, "")
+	capture := &captureBypassEmitter{}
+	router.dbBypass = dbevents.NewBypassEmitter(capture)
+
+	sess, err := mgr.CreateWithID("test-db-network-deny", t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("CreateWithID: %v", err)
+	}
+	sess.SetPolicyEngine(newDBUnavoidabilityEngine(t))
+
+	result := router.HandleNetwork(context.Background(), ptrace.NetworkContext{
+		SessionID: sess.ID,
+		PID:       4321,
+		Operation: "connect",
+		Address:   "db.internal",
+		Port:      5432,
+	})
+
+	if result.Action != "deny" || result.Allow {
+		t.Fatalf("HandleNetwork result = %+v, want deny", result)
+	}
+	if len(capture.events) != 1 {
+		t.Fatalf("bypass events len = %d, want 1", len(capture.events))
+	}
+	if len(capture.published) != 1 {
+		t.Fatalf("published len = %d, want 1", len(capture.published))
+	}
+	ev := capture.events[0]
+	if ev.Type != "db_bypass_attempt" || ev.SessionID != sess.ID || ev.PID != 4321 {
+		t.Fatalf("unexpected bypass event identity: %+v", ev)
+	}
+	if ev.Fields["process_identity"] != "pid:4321" || ev.Fields["db_service"] != "appdb" {
+		t.Fatalf("unexpected bypass process/service fields: %+v", ev.Fields)
+	}
+	if ev.Fields["rule_name"] != "db-appdb-deny-direct" || ev.Fields["bypass_mode"] != dbservice.BypassModeTCPDirect {
+		t.Fatalf("unexpected bypass rule fields: %+v", ev.Fields)
+	}
+	if ev.Fields["destination"] != "db.internal:5432" || ev.Fields["reason"] != "Direct database egress is blocked; use the AgentSH DB proxy" {
+		t.Fatalf("unexpected bypass detail fields: %+v", ev.Fields)
+	}
+}
+
+func TestHandleExecve_DBUnavoidabilityDenyEmitsBypassAttempt(t *testing.T) {
+	router, mgr := newTestRouter(t, "")
+	capture := &captureBypassEmitter{}
+	router.dbBypass = dbevents.NewBypassEmitter(capture)
+
+	sess, err := mgr.CreateWithID("test-db-exec-deny", t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("CreateWithID: %v", err)
+	}
+	sess.SetPolicyEngine(newDBUnavoidabilityEngine(t))
+
+	result := router.HandleExecve(context.Background(), ptrace.ExecContext{
+		SessionID: sess.ID,
+		PID:       6789,
+		Filename:  "/usr/bin/ssh",
+		Argv:      []string{"ssh", "-L", "15432:db.internal:5432", "bastion"},
+	})
+
+	if result.Action != "deny" || result.Allow {
+		t.Fatalf("HandleExecve result = %+v, want deny", result)
+	}
+	if len(capture.events) != 1 {
+		t.Fatalf("bypass events len = %d, want 1", len(capture.events))
+	}
+	ev := capture.events[0]
+	if ev.Type != "db_bypass_attempt" || ev.SessionID != sess.ID || ev.PID != 6789 {
+		t.Fatalf("unexpected bypass event identity: %+v", ev)
+	}
+	if ev.Fields["process_identity"] != "pid:6789" || ev.Fields["db_service"] != "*" {
+		t.Fatalf("unexpected bypass process/service fields: %+v", ev.Fields)
+	}
+	if ev.Fields["rule_name"] != "db-bypass-ssh-forward" || ev.Fields["bypass_mode"] != dbservice.BypassModePortForwardTool {
+		t.Fatalf("unexpected bypass rule fields: %+v", ev.Fields)
+	}
+	if ev.Fields["destination"] != "db-service-ports" || ev.Fields["reason"] != "DB port forwarding is blocked by AgentSH DB unavoidability" {
+		t.Fatalf("unexpected bypass detail fields: %+v", ev.Fields)
+	}
 }
 
 func TestHandleFile_SoftDelete(t *testing.T) {

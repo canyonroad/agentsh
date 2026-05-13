@@ -17,6 +17,7 @@ import (
 	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/config"
+	dbevents "github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/limits"
 	"github.com/agentsh/agentsh/internal/mcpinspect"
@@ -50,6 +51,7 @@ type App struct {
 	store    *composite.Store
 	policy   *policy.Engine
 	broker   *events.Broker
+	dbBypass *dbevents.BypassEmitter
 
 	cgroupMgr *limits.CgroupManager // issue #197: per-process cgroup manager, nil on non-Linux
 
@@ -126,6 +128,7 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		store:        store,
 		policy:       engine,
 		broker:       broker,
+		dbBypass:     dbevents.NewBypassEmitter(storeEmitter{store: store, broker: broker}),
 		cgroupMgr:    cgroupMgr,
 		apiKeyAuth:   apiKeyAuth,
 		oidcAuth:     oidcAuth,
