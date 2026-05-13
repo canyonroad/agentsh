@@ -1219,14 +1219,15 @@ func (e *Engine) EvaluateDnsRedirect(hostname string) *DnsRedirectResult {
 
 // ConnectRedirectResult contains the result of connect redirect evaluation
 type ConnectRedirectResult struct {
-	Matched    bool
-	Rule       string
-	RedirectTo string
-	TLSMode    string
-	SNI        string
-	Visibility string
-	Message    string
-	OnFailure  string
+	Matched        bool
+	Rule           string
+	RedirectTo     string
+	RedirectToUnix string
+	TLSMode        string
+	SNI            string
+	Visibility     string
+	Message        string
+	OnFailure      string
 }
 
 // EvaluateConnectRedirect checks if a connection should be redirected.
@@ -1259,14 +1260,15 @@ func (e *Engine) EvaluateConnectRedirect(hostPort string) *ConnectRedirectResult
 				sni = r.rule.TLS.SNI
 			}
 			return &ConnectRedirectResult{
-				Matched:    true,
-				Rule:       r.rule.Name,
-				RedirectTo: r.rule.RedirectTo,
-				TLSMode:    tlsMode,
-				SNI:        sni,
-				Visibility: visibility,
-				Message:    r.rule.Message,
-				OnFailure:  onFailure,
+				Matched:        true,
+				Rule:           r.rule.Name,
+				RedirectTo:     r.rule.RedirectTo,
+				RedirectToUnix: r.rule.RedirectToUnix,
+				TLSMode:        tlsMode,
+				SNI:            sni,
+				Visibility:     visibility,
+				Message:        r.rule.Message,
+				OnFailure:      onFailure,
 			}
 		}
 	}

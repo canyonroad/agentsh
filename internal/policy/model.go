@@ -188,15 +188,19 @@ type DnsRedirectRule struct {
 	OnFailure  string `yaml:"on_failure,omitempty"` // fail_closed, fail_open, retry_original
 }
 
-// ConnectRedirectRule redirects TCP connections for matching host:port
+// ConnectRedirectRule redirects TCP connections for matching host:port.
+// Exactly one target must be set:
+//   - redirect_to for TCP host:port targets
+//   - redirect_to_unix for Unix-socket targets
 type ConnectRedirectRule struct {
-	Name       string                    `yaml:"name"`
-	Match      string                    `yaml:"match"`       // regex pattern for host:port
-	RedirectTo string                    `yaml:"redirect_to"` // new host:port destination
-	TLS        *ConnectRedirectTLSConfig `yaml:"tls,omitempty"`
-	Visibility string                    `yaml:"visibility,omitempty"` // silent, audit_only, warn
-	Message    string                    `yaml:"message,omitempty"`
-	OnFailure  string                    `yaml:"on_failure,omitempty"` // fail_closed, fail_open, retry_original
+	Name           string                    `yaml:"name"`
+	Match          string                    `yaml:"match"` // regex pattern for host:port
+	RedirectTo     string                    `yaml:"redirect_to,omitempty"`
+	RedirectToUnix string                    `yaml:"redirect_to_unix,omitempty"`
+	TLS            *ConnectRedirectTLSConfig `yaml:"tls,omitempty"`
+	Visibility     string                    `yaml:"visibility,omitempty"` // silent, audit_only, warn
+	Message        string                    `yaml:"message,omitempty"`
+	OnFailure      string                    `yaml:"on_failure,omitempty"` // fail_closed, fail_open, retry_original
 }
 
 // ConnectRedirectTLSConfig controls TLS handling for connect redirects
@@ -509,8 +513,15 @@ func (p Policy) Validate() error {
 		if _, err := regexp.Compile(r.Match); err != nil {
 			return fmt.Errorf("connect_redirects[%d]: invalid match regex: %w", i, err)
 		}
-		if r.RedirectTo == "" {
-			return fmt.Errorf("connect_redirects[%d]: redirect_to is required", i)
+		targets := 0
+		if r.RedirectTo != "" {
+			targets++
+		}
+		if r.RedirectToUnix != "" {
+			targets++
+		}
+		if targets != 1 {
+			return fmt.Errorf("connect_redirects[%d]: exactly one of redirect_to or redirect_to_unix is required", i)
 		}
 		if r.TLS != nil {
 			if r.TLS.Mode != "" && r.TLS.Mode != "passthrough" && r.TLS.Mode != "rewrite_sni" {

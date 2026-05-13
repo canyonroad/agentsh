@@ -707,6 +707,55 @@ func TestConnectRedirectRuleValidation(t *testing.T) {
 	}
 }
 
+func TestConnectRedirectRuleValidation_UnixTarget(t *testing.T) {
+	tests := []struct {
+		name    string
+		rule    ConnectRedirectRule
+		wantErr bool
+	}{
+		{
+			name: "valid unix target",
+			rule: ConnectRedirectRule{
+				Name:           "db-appdb-redirect",
+				Match:          "^db\\.internal:5432$",
+				RedirectToUnix: "/run/agentsh/sessions/sess-1/db/appdb.sock",
+			},
+		},
+		{
+			name: "both tcp and unix targets",
+			rule: ConnectRedirectRule{
+				Name:           "db-appdb-redirect",
+				Match:          "^db\\.internal:5432$",
+				RedirectTo:     "proxy.internal:15432",
+				RedirectToUnix: "/run/agentsh/sessions/sess-1/db/appdb.sock",
+			},
+			wantErr: true,
+		},
+		{
+			name: "no target",
+			rule: ConnectRedirectRule{
+				Name:  "db-appdb-redirect",
+				Match: "^db\\.internal:5432$",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Policy{
+				Version:              1,
+				Name:                 "test",
+				ConnectRedirectRules: []ConnectRedirectRule{tt.rule},
+			}
+			err := p.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestEvaluateDnsRedirect(t *testing.T) {
 	p := &Policy{
 		Version: 1,
@@ -885,6 +934,42 @@ func TestEvaluateConnectRedirect(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEvaluateConnectRedirect_UnixTarget(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "test",
+		ConnectRedirectRules: []ConnectRedirectRule{
+			{
+				Name:           "db-appdb-redirect",
+				Match:          "^db\\.internal:5432$",
+				RedirectToUnix: "/run/agentsh/sessions/sess-1/db/appdb.sock",
+				Message:        "Routed through AgentSH DB proxy",
+			},
+		},
+	}
+	engine, err := NewEngine(p, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	got := engine.EvaluateConnectRedirect("DB.Internal:5432")
+	if !got.Matched {
+		t.Fatal("EvaluateConnectRedirect did not match")
+	}
+	if got.RedirectTo != "" {
+		t.Fatalf("RedirectTo = %q, want empty tcp target", got.RedirectTo)
+	}
+	if got.RedirectToUnix != "/run/agentsh/sessions/sess-1/db/appdb.sock" {
+		t.Fatalf("RedirectToUnix = %q", got.RedirectToUnix)
+	}
+	if got.Rule != "db-appdb-redirect" {
+		t.Fatalf("Rule = %q", got.Rule)
+	}
+	if got.Message != "Routed through AgentSH DB proxy" {
+		t.Fatalf("Message = %q", got.Message)
 	}
 }
 
