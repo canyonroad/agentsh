@@ -2,6 +2,10 @@ package netmonitor
 
 import (
 	"context"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,11 +155,12 @@ func TestEmitConnectRedirectEventWithUnixRedirect(t *testing.T) {
 		sessionID: "test-session",
 		emit:      em,
 	}
+	socketPath := filepath.Join(t.TempDir(), "db", "appdb.sock")
 
 	result := &policy.ConnectRedirectResult{
 		Matched:        true,
 		Rule:           "db-unix-redirect",
-		RedirectToUnix: "/run/agentsh/sessions/sess-1/db/appdb.sock",
+		RedirectToUnix: socketPath,
 		TLSMode:        "passthrough",
 		Visibility:     "audit_only",
 		Message:        "Routed to local database socket",
@@ -168,7 +173,7 @@ func TestEmitConnectRedirectEventWithUnixRedirect(t *testing.T) {
 	}
 
 	ev := em.events[0]
-	if ev.Fields["redirect_to_unix"] != "/run/agentsh/sessions/sess-1/db/appdb.sock" {
+	if ev.Fields["redirect_to_unix"] != socketPath {
 		t.Errorf("expected redirect_to_unix socket path, got %v", ev.Fields["redirect_to_unix"])
 	}
 	if _, ok := ev.Fields["redirect_to"]; ok {
@@ -193,21 +198,80 @@ func TestEmitConnectRedirectEventNilEmitter(t *testing.T) {
 }
 
 func TestConnectDialTarget_UnixRedirect(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), "agentsh", "sessions", "sess-1", "db", "appdb.sock")
+
 	got := connectDialTarget(connectDialTargetInput{
 		OriginalHostPort: "db.internal:5432",
 		ResolvedIP:       "10.0.0.10",
 		OriginalPort:     "5432",
 		Redirect: &policy.ConnectRedirectResult{
 			Matched:        true,
-			RedirectToUnix: "/run/agentsh/sessions/sess-1/db/appdb.sock",
+			RedirectToUnix: socketPath,
 		},
 	})
 	if got.Network != "unix" {
 		t.Fatalf("Network = %q, want unix", got.Network)
 	}
-	if got.Address != "/run/agentsh/sessions/sess-1/db/appdb.sock" {
+	if got.Address != socketPath {
 		t.Fatalf("Address = %q", got.Address)
 	}
+}
+
+func TestHandleConnect_UnixRedirectNetConnectFields(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "db", "appdb.sock")
+	pol := &policy.Policy{
+		Version: 1,
+		NetworkRules: []policy.NetworkRule{
+			{Name: "allow-db", Decision: "allow", Domains: []string{"127.0.0.1"}, Ports: []int{5432}},
+		},
+		ConnectRedirectRules: []policy.ConnectRedirectRule{
+			{
+				Name:           "db-unix-redirect",
+				Match:          `^127\.0\.0\.1:5432$`,
+				RedirectToUnix: socketPath,
+				Visibility:     "audit_only",
+			},
+		},
+	}
+	engine, err := policy.NewEngine(pol, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	em := &stubEmitter{}
+	p := &Proxy{sessionID: "s", policy: engine, emit: em}
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	done := make(chan struct{})
+	go func() {
+		_ = p.handleConn(server)
+		close(done)
+	}()
+
+	_, _ = client.Write([]byte("CONNECT 127.0.0.1:5432 HTTP/1.1\r\nHost: 127.0.0.1:5432\r\n\r\n"))
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 128)
+	n, _ := client.Read(buf)
+	if !strings.Contains(string(buf[:n]), "502 Bad Gateway") {
+		t.Fatalf("expected 502 response for missing unix socket, got %q", string(buf[:n]))
+	}
+	client.Close()
+	<-done
+
+	for _, ev := range em.events {
+		if ev.Type != "net_connect" {
+			continue
+		}
+		if ev.Fields["redirect_to_unix"] != socketPath {
+			t.Fatalf("redirect_to_unix = %v, want %q in event %+v", ev.Fields["redirect_to_unix"], socketPath, ev)
+		}
+		if _, ok := ev.Fields["redirect_to"]; ok {
+			t.Fatalf("did not expect redirect_to for unix redirect, got %v in event %+v", ev.Fields["redirect_to"], ev)
+		}
+		return
+	}
+	t.Fatalf("expected net_connect event, got %+v", em.events)
 }
 
 func TestConnectDialTarget_TCPRedirectWinsOverResolvedIP(t *testing.T) {
