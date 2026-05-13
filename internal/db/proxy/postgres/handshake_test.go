@@ -81,7 +81,7 @@ func TestDispatch_GSSENCRequest_RespondsN(t *testing.T) {
 	}
 }
 
-func TestDispatch_CancelRequest_ClosesSilently(t *testing.T) {
+func TestDispatch_CancelRequest_NoMatch_ClosesSilentlyAndEmitsLifecycle(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()
 	defer b.Close()
@@ -100,6 +100,18 @@ func TestDispatch_CancelRequest_ClosesSilently(t *testing.T) {
 	err := pc.run(ctx)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
 		t.Errorf("run on CancelRequest returned %v; want clean exit", err)
+	}
+
+	sink := pc.srv.cfg.Sink.(*events.SyncSink)
+	lifecycle := sink.DrainLifecycle()
+	if len(lifecycle) != 1 {
+		t.Fatalf("lifecycle events = %d, want 1: %#v", len(lifecycle), lifecycle)
+	}
+	if lifecycle[0].Kind != "db_cancel_unmatched" {
+		t.Errorf("Kind = %q, want db_cancel_unmatched", lifecycle[0].Kind)
+	}
+	if lifecycle[0].Reason != "unmatched_cancel_request" {
+		t.Errorf("Reason = %q, want unmatched_cancel_request", lifecycle[0].Reason)
 	}
 }
 
@@ -352,7 +364,7 @@ database_connection_rules:
 	}
 }
 
-func TestDispatch_CancelRequest_AllowedForwardsPacket(t *testing.T) {
+func TestDispatch_CancelRequest_AllowedForwardsRealMappedPacket(t *testing.T) {
 	upAddr, ch := captureCancelListener(t)
 
 	a, b := net.Pipe()
@@ -375,10 +387,11 @@ database_connection_rules:
     decision: allow
 `)
 
+	sink := &events.SyncSink{}
 	srv, err := New(Config{
 		Unavoidability: service.UnavoidabilityObserve,
 		StateDir:       t.TempDir(),
-		Sink:           &events.SyncSink{},
+		Sink:           sink,
 		Policy:         rs,
 		Logger:         slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		Services: []Service{{
@@ -395,12 +408,25 @@ database_connection_rules:
 		t.Fatalf("New: %v", err)
 	}
 	pc := newProxyConn(srv, srv.cfg.Services[0], a, 1000)
+	reg, err := srv.cancelMap.Register(cancelMeta{
+		ServiceName:     "appdb",
+		UpstreamAddr:    upAddr,
+		ClientIdentity:  "uid:1000",
+		DBUser:          "alice",
+		Database:        "app",
+		ApplicationName: "psql",
+		PeerUID:         1000,
+	}, 11111, []byte{0, 0, 86, 206})
+	if err != nil {
+		t.Fatalf("Register cancel mapping: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	go func() { _ = pc.run(ctx) }()
+	done := make(chan error, 1)
+	go func() { done <- pc.run(ctx) }()
 
-	pkt := buildCancelPacket(11111, 22222)
+	pkt := buildCancelPacketBytes(reg.SyntheticPID, reg.SyntheticSecret)
 	if _, err := b.Write(pkt); err != nil {
 		t.Fatalf("write CancelRequest: %v", err)
 	}
@@ -413,13 +439,28 @@ database_connection_rules:
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream did not capture cancel packet")
 	}
-	if len(captured) != 16 {
-		t.Fatalf("captured %d bytes upstream, want 16", len(captured))
+	want := buildCancelPacketBytes(11111, []byte{0, 0, 86, 206})
+	if len(captured) != len(want) {
+		t.Fatalf("captured %d bytes upstream, want %d", len(captured), len(want))
 	}
-	for i := range pkt {
-		if captured[i] != pkt[i] {
-			t.Errorf("byte %d: got %#x, want %#x", i, captured[i], pkt[i])
+	for i := range want {
+		if captured[i] != want[i] {
+			t.Errorf("byte %d: got %#x, want %#x", i, captured[i], want[i])
 		}
+	}
+
+	if err := <-done; err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("run on CancelRequest returned %v; want clean exit", err)
+	}
+	events := sink.DrainStatements()
+	if len(events) != 1 {
+		t.Fatalf("statement events = %d, want 1: %#v", len(events), events)
+	}
+	if events[0].Decision.RuleKind != "cancel" {
+		t.Errorf("Decision.RuleKind = %q, want cancel", events[0].Decision.RuleKind)
+	}
+	if events[0].Decision.Verb != "allow" {
+		t.Errorf("Decision.Verb = %q, want allow", events[0].Decision.Verb)
 	}
 }
 

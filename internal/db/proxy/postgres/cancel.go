@@ -19,11 +19,6 @@ const cancelDialTimeout = 5 * time.Second
 // 4-byte magic + 4-byte PID + 4-byte secret), longer for CockroachDB's
 // extended secret. Floor of 12 bytes covers length+magic+PID; a valid
 // CancelRequest from pgproto3 always carries at least that much.
-//
-// In 04b₂ the (PID, Secret) values are forwarded un-mapped — Plan 06 adds
-// the mapping table. Until Plan 06 lands, the upstream's actual PID/Secret
-// were forwarded to the client as BackendKeyData in 04b₂'s forwardAuth, so
-// the cancel happens to work end-to-end (see design §7 risks).
 func forwardCancel(ctx context.Context, svc Service, packet []byte) error {
 	if len(packet) < 12 {
 		return fmt.Errorf("postgres.forwardCancel: packet is %d bytes; want >= 12", len(packet))
