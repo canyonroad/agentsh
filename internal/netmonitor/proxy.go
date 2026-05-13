@@ -497,12 +497,17 @@ func (p *Proxy) emitConnectRedirectEvent(ctx context.Context, commandID string, 
 		Domain:    strings.ToLower(domain),
 		Remote:    hostPort,
 		Fields: map[string]any{
-			"rule":        result.Rule,
-			"redirect_to": result.RedirectTo,
-			"tls_mode":    result.TLSMode,
-			"message":     result.Message,
-			"visibility":  result.Visibility,
+			"rule":       result.Rule,
+			"tls_mode":   result.TLSMode,
+			"message":    result.Message,
+			"visibility": result.Visibility,
 		},
+	}
+	if result.RedirectTo != "" {
+		ev.Fields["redirect_to"] = result.RedirectTo
+	}
+	if result.RedirectToUnix != "" {
+		ev.Fields["redirect_to_unix"] = result.RedirectToUnix
 	}
 	if result.SNI != "" {
 		ev.Fields["sni"] = result.SNI

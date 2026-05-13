@@ -145,6 +145,37 @@ func TestEmitConnectRedirectEventWithSNI(t *testing.T) {
 	}
 }
 
+func TestEmitConnectRedirectEventWithUnixRedirect(t *testing.T) {
+	em := &stubEmitter{}
+	p := &Proxy{
+		sessionID: "test-session",
+		emit:      em,
+	}
+
+	result := &policy.ConnectRedirectResult{
+		Matched:        true,
+		Rule:           "db-unix-redirect",
+		RedirectToUnix: "/run/agentsh/sessions/sess-1/db/appdb.sock",
+		TLSMode:        "passthrough",
+		Visibility:     "audit_only",
+		Message:        "Routed to local database socket",
+	}
+
+	p.emitConnectRedirectEvent(context.Background(), "cmd-789", "db.internal", "db.internal:5432", 5432, result)
+
+	if len(em.events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(em.events))
+	}
+
+	ev := em.events[0]
+	if ev.Fields["redirect_to_unix"] != "/run/agentsh/sessions/sess-1/db/appdb.sock" {
+		t.Errorf("expected redirect_to_unix socket path, got %v", ev.Fields["redirect_to_unix"])
+	}
+	if _, ok := ev.Fields["redirect_to"]; ok {
+		t.Errorf("did not expect redirect_to for unix redirect, got %v", ev.Fields["redirect_to"])
+	}
+}
+
 func TestEmitConnectRedirectEventNilEmitter(t *testing.T) {
 	p := &Proxy{
 		sessionID: "test-session",
