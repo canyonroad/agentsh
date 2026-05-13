@@ -1100,6 +1100,9 @@ func (s *Session) cleanup() {
 	// Close network namespace
 	s.CloseNetNS()
 
+	// Close DB proxy
+	s.CloseDBProxy()
+
 	// Close network proxy
 	s.CloseProxy()
 
