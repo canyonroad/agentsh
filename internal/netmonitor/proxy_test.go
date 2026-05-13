@@ -161,6 +161,56 @@ func TestEmitConnectRedirectEventNilEmitter(t *testing.T) {
 	p.emitConnectRedirectEvent(context.Background(), "cmd", "example.com", "example.com:443", 443, result)
 }
 
+func TestConnectDialTarget_UnixRedirect(t *testing.T) {
+	got := connectDialTarget(connectDialTargetInput{
+		OriginalHostPort: "db.internal:5432",
+		ResolvedIP:       "10.0.0.10",
+		OriginalPort:     "5432",
+		Redirect: &policy.ConnectRedirectResult{
+			Matched:        true,
+			RedirectToUnix: "/run/agentsh/sessions/sess-1/db/appdb.sock",
+		},
+	})
+	if got.Network != "unix" {
+		t.Fatalf("Network = %q, want unix", got.Network)
+	}
+	if got.Address != "/run/agentsh/sessions/sess-1/db/appdb.sock" {
+		t.Fatalf("Address = %q", got.Address)
+	}
+}
+
+func TestConnectDialTarget_TCPRedirectWinsOverResolvedIP(t *testing.T) {
+	got := connectDialTarget(connectDialTargetInput{
+		OriginalHostPort: "api.example.com:443",
+		ResolvedIP:       "10.0.0.10",
+		OriginalPort:     "443",
+		Redirect: &policy.ConnectRedirectResult{
+			Matched:    true,
+			RedirectTo: "proxy.internal:8443",
+		},
+	})
+	if got.Network != "tcp" {
+		t.Fatalf("Network = %q, want tcp", got.Network)
+	}
+	if got.Address != "proxy.internal:8443" {
+		t.Fatalf("Address = %q", got.Address)
+	}
+}
+
+func TestConnectDialTarget_ResolvedIPFallback(t *testing.T) {
+	got := connectDialTarget(connectDialTargetInput{
+		OriginalHostPort: "api.example.com:443",
+		ResolvedIP:       "10.0.0.10",
+		OriginalPort:     "443",
+	})
+	if got.Network != "tcp" {
+		t.Fatalf("Network = %q, want tcp", got.Network)
+	}
+	if got.Address != "10.0.0.10:443" {
+		t.Fatalf("Address = %q", got.Address)
+	}
+}
+
 func newSessionWithRegistry(addrs map[string]string) *session.Session {
 	sess := &session.Session{ID: "test-session"}
 	reg := mcpregistry.NewRegistry()

@@ -107,6 +107,34 @@ func (p *Proxy) handleConn(c net.Conn) error {
 	return p.handleHTTP(c, req)
 }
 
+type connectDialTargetInput struct {
+	OriginalHostPort string
+	ResolvedIP       string
+	OriginalPort     string
+	Redirect         *policy.ConnectRedirectResult
+}
+
+type resolvedConnectDialTarget struct {
+	Network string
+	Address string
+}
+
+func connectDialTarget(in connectDialTargetInput) resolvedConnectDialTarget {
+	if in.Redirect != nil && in.Redirect.RedirectToUnix != "" {
+		return resolvedConnectDialTarget{Network: "unix", Address: in.Redirect.RedirectToUnix}
+	}
+	if in.Redirect != nil && in.Redirect.RedirectTo != "" {
+		return resolvedConnectDialTarget{Network: "tcp", Address: in.Redirect.RedirectTo}
+	}
+	if in.ResolvedIP != "" {
+		return resolvedConnectDialTarget{
+			Network: "tcp",
+			Address: net.JoinHostPort(in.ResolvedIP, in.OriginalPort),
+		}
+	}
+	return resolvedConnectDialTarget{Network: "tcp", Address: in.OriginalHostPort}
+}
+
 func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	hostPort := req.Host
 	host, portStr, err := net.SplitHostPort(hostPort)
@@ -156,16 +184,17 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	resolvedIP := p.resolveAndEmitDNS(context.Background(), commandID, host)
 
 	// Check for connect redirect rules
-	var redirectTo, redirectTLS, redirectSNI string
+	var redirectResult *policy.ConnectRedirectResult
+	var redirectTLS, redirectSNI string
 	if p.policy != nil {
-		redirectResult := p.policy.EvaluateConnectRedirect(hostPort)
-		if redirectResult.Matched {
-			redirectTo = redirectResult.RedirectTo
-			redirectTLS = redirectResult.TLSMode
-			redirectSNI = redirectResult.SNI
+		result := p.policy.EvaluateConnectRedirect(hostPort)
+		if result.Matched {
+			redirectResult = result
+			redirectTLS = result.TLSMode
+			redirectSNI = result.SNI
 			// Emit redirect event if visibility is not silent
-			if redirectResult.Visibility != "silent" {
-				p.emitConnectRedirectEvent(context.Background(), commandID, host, hostPort, port, redirectResult)
+			if result.Visibility != "silent" {
+				p.emitConnectRedirectEvent(context.Background(), commandID, host, hostPort, port, result)
 			}
 		}
 	}
@@ -177,8 +206,13 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 		"method":      "CONNECT",
 		"resolved_ip": resolvedIP,
 	}
-	if redirectTo != "" {
-		eventFields["redirect_to"] = redirectTo
+	if redirectResult != nil {
+		if redirectResult.RedirectTo != "" {
+			eventFields["redirect_to"] = redirectResult.RedirectTo
+		}
+		if redirectResult.RedirectToUnix != "" {
+			eventFields["redirect_to_unix"] = redirectResult.RedirectToUnix
+		}
 		eventFields["redirect_tls"] = redirectTLS
 		if redirectSNI != "" {
 			eventFields["redirect_sni"] = redirectSNI
@@ -197,14 +231,14 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	emitMCPConnectionIfMatched(context.Background(), p.sess, p.emit, p.sessionID, commandID, host, hostPort, port)
 
 	// Determine dial target: redirect destination or original
-	dialTarget := hostPort
-	if redirectTo != "" {
-		dialTarget = redirectTo
-	} else if resolvedIP != "" {
-		dialTarget = net.JoinHostPort(resolvedIP, portStr)
-	}
+	dialTarget := connectDialTarget(connectDialTargetInput{
+		OriginalHostPort: hostPort,
+		ResolvedIP:       resolvedIP,
+		OriginalPort:     portStr,
+		Redirect:         redirectResult,
+	})
 
-	up, err := net.DialTimeout("tcp", dialTarget, 20*time.Second)
+	up, err := net.DialTimeout(dialTarget.Network, dialTarget.Address, 20*time.Second)
 	if err != nil {
 		_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return nil
