@@ -130,24 +130,29 @@ func addResolvedIPRules(ctx context.Context, b *Bundle, svc Service, servicePart
 
 	ips, err := opts.Resolver.LookupIP(resolveCtx, svc.Upstream.Host)
 	if err != nil {
-		warning := BundleWarning{
-			Code:    "DNS_EXPANSION_FAILED",
-			Service: svc.Name,
-			Message: "could not resolve " + svc.Upstream.Host + ": " + err.Error(),
-		}
-		b.Warnings = append(b.Warnings, warning)
-		if opts.Mode == UnavoidabilityEnforce && !opts.AllowHostnameOnlyInEnforce {
-			return fmt.Errorf("%w: %s", ErrBundleInvalidOptions, warning.Message)
-		}
-		return nil
+		return addDNSExpansionFailure(b, svc, opts, "could not resolve "+svc.Upstream.Host+": "+err.Error())
 	}
 
-	for _, ip := range ips {
-		if ip == nil {
+	usableIPs := make([]net.IP, 0, len(ips))
+	seenIPs := make(map[string]struct{}, len(ips))
+	for _, resolvedIP := range ips {
+		ip, ipString, ok := normalizedIP(resolvedIP)
+		if !ok {
 			continue
 		}
+		if _, exists := seenIPs[ipString]; exists {
+			continue
+		}
+		seenIPs[ipString] = struct{}{}
+		usableIPs = append(usableIPs, ip)
+	}
+	if len(usableIPs) == 0 {
+		return addDNSExpansionFailure(b, svc, opts, "could not resolve "+svc.Upstream.Host+": no usable IPs returned")
+	}
+
+	for _, ip := range usableIPs {
 		ipString := canonicalIPString(ip)
-		name := "db-" + servicePart + "-deny-ip-" + sanitizeRulePart(ipString)
+		name := "db-" + servicePart + "-deny-ip-" + ipRulePart(ip)
 		destination := net.JoinHostPort(ipString, strconv.Itoa(svc.Upstream.Port))
 		b.Policy.NetworkRules = append(b.Policy.NetworkRules, policy.NetworkRule{
 			Name:        name,
@@ -162,11 +167,44 @@ func addResolvedIPRules(ctx context.Context, b *Bundle, svc Service, servicePart
 	return nil
 }
 
+func addDNSExpansionFailure(b *Bundle, svc Service, opts BundleOptions, message string) error {
+	warning := BundleWarning{
+		Code:    "DNS_EXPANSION_FAILED",
+		Service: svc.Name,
+		Message: message,
+	}
+	b.Warnings = append(b.Warnings, warning)
+	if opts.Mode == UnavoidabilityEnforce && !opts.AllowHostnameOnlyInEnforce {
+		return fmt.Errorf("%w: %s", ErrBundleInvalidOptions, warning.Message)
+	}
+	return nil
+}
+
+func normalizedIP(ip net.IP) (net.IP, string, bool) {
+	if v4 := ip.To4(); v4 != nil {
+		return v4, v4.String(), true
+	}
+	if v16 := ip.To16(); v16 != nil {
+		return v16, v16.String(), true
+	}
+	return nil, "", false
+}
+
 func canonicalIPString(ip net.IP) string {
 	if v4 := ip.To4(); v4 != nil {
 		return v4.String()
 	}
 	return ip.String()
+}
+
+func ipRulePart(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return "v4-" + hex.EncodeToString(v4)
+	}
+	if v16 := ip.To16(); v16 != nil {
+		return "v6-" + hex.EncodeToString(v16)
+	}
+	return "invalid"
 }
 
 func ipCIDR(ip net.IP) string {

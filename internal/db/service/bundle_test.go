@@ -211,10 +211,53 @@ func TestGenerateBundle_AddsResolvedIPDenies(t *testing.T) {
 		t.Fatal("resolver context had no deadline")
 	}
 
-	assertNetworkRule(t, b.Policy.NetworkRules, "db-appdb-deny-ip-10-0-0-15", "10.0.0.15/32", 5432)
-	assertNetworkRule(t, b.Policy.NetworkRules, "db-appdb-deny-ip-2001-db8-15", "2001:db8::15/128", 5432)
-	assertMetadata(t, b.Metadata, "db-appdb-deny-ip-10-0-0-15", "appdb", BypassModeDNSAlias, "10.0.0.15:5432")
-	assertMetadata(t, b.Metadata, "db-appdb-deny-ip-2001-db8-15", "appdb", BypassModeDNSAlias, "[2001:db8::15]:5432")
+	assertNetworkRule(t, b.Policy.NetworkRules, "db-appdb-deny-ip-v4-0a00000f", "10.0.0.15/32", 5432)
+	assertNetworkRule(t, b.Policy.NetworkRules, "db-appdb-deny-ip-v6-20010db8000000000000000000000015", "2001:db8::15/128", 5432)
+	assertMetadata(t, b.Metadata, "db-appdb-deny-ip-v4-0a00000f", "appdb", BypassModeDNSAlias, "10.0.0.15:5432")
+	assertMetadata(t, b.Metadata, "db-appdb-deny-ip-v6-20010db8000000000000000000000015", "appdb", BypassModeDNSAlias, "[2001:db8::15]:5432")
+}
+
+func TestGenerateBundle_ResolvedIPRuleNamesDistinguishIPv6Collisions(t *testing.T) {
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+		Resolver: &fakeIPResolver{ips: []net.IP{
+			net.ParseIP("2001:db8::1:5"),
+			net.ParseIP("2001:db8:1::5"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+
+	assertNetworkRule(t, b.Policy.NetworkRules, "db-appdb-deny-ip-v6-20010db8000000000000000000010005", "2001:db8::1:5/128", 5432)
+	assertNetworkRule(t, b.Policy.NetworkRules, "db-appdb-deny-ip-v6-20010db8000100000000000000000005", "2001:db8:1::5/128", 5432)
+	assertUniqueMetadataRuleNames(t, b.Metadata)
+}
+
+func TestGenerateBundle_DedupesResolvedIPs(t *testing.T) {
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+		Resolver: &fakeIPResolver{ips: []net.IP{
+			net.ParseIP("10.0.0.15"),
+			net.ParseIP("10.0.0.15"),
+			net.ParseIP("::ffff:10.0.0.15"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+
+	assertNetworkRule(t, b.Policy.NetworkRules, "db-appdb-deny-ip-v4-0a00000f", "10.0.0.15/32", 5432)
+	if countDNSAliasMetadata(b.Metadata) != 1 {
+		t.Fatalf("dns alias metadata count = %d, want 1: %+v", countDNSAliasMetadata(b.Metadata), b.Metadata)
+	}
+	assertUniqueMetadataRuleNames(t, b.Metadata)
 }
 
 func TestGenerateBundle_SkipsDNSExpansionForIPLiteralUpstream(t *testing.T) {
@@ -280,6 +323,59 @@ func TestGenerateBundle_DNSFailureEnforceFailsUnlessAllowed(t *testing.T) {
 	assertDNSExpansionWarning(t, b.Warnings, "appdb", "db.internal")
 }
 
+func TestGenerateBundle_EmptyDNSResultsObserveWarns(t *testing.T) {
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityObserve,
+		IncludeToolRules: false,
+		Resolver:         &fakeIPResolver{},
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+	assertDNSExpansionWarning(t, b.Warnings, "appdb", "db.internal")
+}
+
+func TestGenerateBundle_EmptyDNSResultsEnforceFailsUnlessAllowed(t *testing.T) {
+	_, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+		Resolver:         &fakeIPResolver{},
+	})
+	if err == nil {
+		t.Fatal("GenerateBundle returned nil error")
+	}
+
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:                  "sess-1",
+		ProxySessionID:             "db-proxy-sess",
+		Mode:                       UnavoidabilityEnforce,
+		IncludeToolRules:           false,
+		AllowHostnameOnlyInEnforce: true,
+		Resolver:                   &fakeIPResolver{},
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle with hostname-only override: %v", err)
+	}
+	assertDNSExpansionWarning(t, b.Warnings, "appdb", "db.internal")
+}
+
+func TestGenerateBundle_NilOnlyDNSResultsAreUnusable(t *testing.T) {
+	_, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: false,
+		Resolver:         &fakeIPResolver{ips: []net.IP{nil}},
+	})
+	if err == nil {
+		t.Fatal("GenerateBundle returned nil error")
+	}
+}
+
 func TestGenerateBundle_ResolvedIPRuleNamesUseCollisionResistantServiceParts(t *testing.T) {
 	services := []Service{
 		validBundleService(t, "app_db"),
@@ -303,17 +399,11 @@ func TestGenerateBundle_ResolvedIPRuleNamesUseCollisionResistantServiceParts(t *
 	}
 
 	for _, svc := range services {
-		ruleName := "db-app-db-" + ruleNameHash(svc.Name) + "-deny-ip-10-0-0-15"
+		ruleName := "db-app-db-" + ruleNameHash(svc.Name) + "-deny-ip-v4-0a00000f"
 		destination := net.JoinHostPort("10.0.0.15", strconv.Itoa(svc.Upstream.Port))
 		assertMetadata(t, b.Metadata, ruleName, svc.Name, BypassModeDNSAlias, destination)
 	}
-	seen := map[string]bool{}
-	for _, m := range b.Metadata {
-		if seen[m.RuleName] {
-			t.Fatalf("duplicate metadata rule name %q in %+v", m.RuleName, b.Metadata)
-		}
-		seen[m.RuleName] = true
-	}
+	assertUniqueMetadataRuleNames(t, b.Metadata)
 }
 
 func TestGenerateBundle_PolicyCompiles(t *testing.T) {
@@ -360,6 +450,27 @@ func assertMetadata(t *testing.T, got []policy.RuleMetadata, ruleName, service, 
 		}
 	}
 	t.Fatalf("missing metadata for rule %q in %+v", ruleName, got)
+}
+
+func assertUniqueMetadataRuleNames(t *testing.T, got []policy.RuleMetadata) {
+	t.Helper()
+	seen := map[string]bool{}
+	for _, m := range got {
+		if seen[m.RuleName] {
+			t.Fatalf("duplicate metadata rule name %q in %+v", m.RuleName, got)
+		}
+		seen[m.RuleName] = true
+	}
+}
+
+func countDNSAliasMetadata(got []policy.RuleMetadata) int {
+	count := 0
+	for _, m := range got {
+		if m.BypassMode == BypassModeDNSAlias {
+			count++
+		}
+	}
+	return count
 }
 
 func assertNetworkRule(t *testing.T, got []policy.NetworkRule, name, cidr string, port int) {
