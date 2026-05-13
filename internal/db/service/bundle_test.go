@@ -483,6 +483,24 @@ func TestGenerateBundle_BypassToolRulesOptional(t *testing.T) {
 	}
 }
 
+func TestGenerateBundle_BypassToolRulesSkippedWithoutServices(t *testing.T) {
+	b, err := GenerateBundle(Config{}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: true,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+	if len(b.Policy.CommandRules) != 0 {
+		t.Fatalf("command rules = %+v, want none without DB service ports", b.Policy.CommandRules)
+	}
+	if len(b.Metadata) != 0 || len(b.Policy.Metadata) != 0 {
+		t.Fatalf("metadata = %+v policy metadata = %+v, want none without DB service ports", b.Metadata, b.Policy.Metadata)
+	}
+}
+
 func TestGenerateBundle_BypassToolPortPatternsAreDeterministic(t *testing.T) {
 	services := []Service{
 		validBundleService(t, "analytics"),
@@ -514,11 +532,12 @@ func TestGenerateBundle_BypassToolPortPatternsAreDeterministic(t *testing.T) {
 		t.Fatalf("GenerateBundle second: %v", err)
 	}
 
+	ports := "5432|15432"
 	wantPatterns := map[string]string{
-		"db-bypass-ssh-forward":          "(^|\\s)-L(\\s|[^\\s]*:).*:(5432|15432)(\\s|$)",
-		"db-bypass-socat":                "(?i)(tcp-listen|listen|tcp:).*(5432|15432)",
-		"db-bypass-kubectl-port-forward": "(^|\\s)port-forward(\\s|$).*(:(5432|15432)|\\s(5432|15432):)",
-		"db-bypass-netcat":               "(?i)(-l|--listen|(5432|15432))",
+		"db-bypass-ssh-forward":          "(^|\\s)-L(\\s|[^\\s]*:).*:(" + ports + ")(\\s|$)",
+		"db-bypass-socat":                "(?i)(tcp-listen|listen|tcp:).*(^|[^0-9])(" + ports + ")([^0-9]|$)",
+		"db-bypass-kubectl-port-forward": "(^|\\s)port-forward(\\s|$).*(:(" + ports + ")([^0-9]|$)|\\s(" + ports + "):)",
+		"db-bypass-netcat":               "(?i)(-l|--listen|(^|[^0-9])(" + ports + ")([^0-9]|$))",
 	}
 	for ruleName, wantPattern := range wantPatterns {
 		firstRule := commandRuleByName(t, first.Policy.CommandRules, ruleName)
@@ -529,6 +548,55 @@ func TestGenerateBundle_BypassToolPortPatternsAreDeterministic(t *testing.T) {
 		if len(firstRule.ArgsPatterns) != 1 || firstRule.ArgsPatterns[0] != wantPattern {
 			t.Fatalf("command rule %q patterns = %+v, want [%q]", ruleName, firstRule.ArgsPatterns, wantPattern)
 		}
+	}
+}
+
+func TestGenerateBundle_BypassToolRulesDoNotMatchAdjacentDigitPorts(t *testing.T) {
+	b, err := GenerateBundle(Config{Services: []Service{validBundleService(t, "appdb")}}, BundleOptions{
+		SessionID:        "sess-1",
+		ProxySessionID:   "db-proxy-sess",
+		Mode:             UnavoidabilityEnforce,
+		IncludeToolRules: true,
+	})
+	if err != nil {
+		t.Fatalf("GenerateBundle: %v", err)
+	}
+	engine, err := policy.NewEngine(&b.Policy, false, true)
+	if err != nil {
+		t.Fatalf("policy.NewEngine: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		command    string
+		args       []string
+		bypassRule string
+	}{
+		{
+			name:       "socat adjacent destination port",
+			command:    "socat",
+			args:       []string{"TCP-LISTEN:15432,fork", "TCP:db.internal:54320"},
+			bypassRule: "db-bypass-socat",
+		},
+		{
+			name:       "kubectl adjacent destination port",
+			command:    "kubectl",
+			args:       []string{"port-forward", "svc/postgres", "15432:54320"},
+			bypassRule: "db-bypass-kubectl-port-forward",
+		},
+		{
+			name:       "netcat adjacent destination port",
+			command:    "nc",
+			args:       []string{"db.internal", "54320"},
+			bypassRule: "db-bypass-netcat",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dec := engine.CheckCommand(tc.command, tc.args)
+			if dec.Rule == tc.bypassRule {
+				t.Fatalf("CheckCommand(%q, %+v) matched %q for adjacent digits", tc.command, tc.args, tc.bypassRule)
+			}
+		})
 	}
 }
 
@@ -560,6 +628,12 @@ func TestGenerateBundle_BypassToolRulesCompileAndMatch(t *testing.T) {
 			wantRule: "db-bypass-ssh-forward",
 		},
 		{
+			name:     "socat exact db port",
+			command:  "socat",
+			args:     []string{"TCP-LISTEN:15432,fork", "TCP:db.internal:5432"},
+			wantRule: "db-bypass-socat",
+		},
+		{
 			name:     "kubectl port forward",
 			command:  "kubectl",
 			args:     []string{"port-forward", "svc/postgres", "15432:5432"},
@@ -582,6 +656,12 @@ func TestGenerateBundle_BypassToolRulesCompileAndMatch(t *testing.T) {
 			command:  "aws",
 			args:     []string{"rds", "connect", "--db-instance-identifier", "appdb"},
 			wantRule: "db-bypass-aws-rds-connect",
+		},
+		{
+			name:     "netcat exact db port",
+			command:  "nc",
+			args:     []string{"db.internal", "5432"},
+			wantRule: "db-bypass-netcat",
 		},
 		{
 			name:     "host network container",

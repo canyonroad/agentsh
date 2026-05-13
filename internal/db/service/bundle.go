@@ -186,6 +186,10 @@ func addDNSExpansionFailure(b *Bundle, svc Service, opts BundleOptions, message 
 
 func addBypassToolRules(b *Bundle, services []Service) {
 	portPattern := dbPortPattern(services)
+	if portPattern == "" {
+		return
+	}
+	portTokenPattern := "(^|[^0-9])(" + portPattern + ")([^0-9]|$)"
 	rules := []policy.CommandRule{
 		{
 			Name:         "db-bypass-ssh-forward",
@@ -197,14 +201,14 @@ func addBypassToolRules(b *Bundle, services []Service) {
 		{
 			Name:         "db-bypass-socat",
 			Commands:     []string{"socat"},
-			ArgsPatterns: []string{"(?i)(tcp-listen|listen|tcp:).*(" + portPattern + ")"},
+			ArgsPatterns: []string{"(?i)(tcp-listen|listen|tcp:).*" + portTokenPattern},
 			Decision:     "deny",
 			Message:      "DB socket forwarding is blocked by AgentSH DB unavoidability",
 		},
 		{
 			Name:         "db-bypass-kubectl-port-forward",
 			Commands:     []string{"kubectl"},
-			ArgsPatterns: []string{"(^|\\s)port-forward(\\s|$).*(:(" + portPattern + ")|\\s(" + portPattern + "):)"},
+			ArgsPatterns: []string{"(^|\\s)port-forward(\\s|$).*(:(" + portPattern + ")([^0-9]|$)|\\s(" + portPattern + "):)"},
 			Decision:     "deny",
 			Message:      "DB port forwarding is blocked by AgentSH DB unavoidability",
 		},
@@ -253,7 +257,7 @@ func addBypassToolRules(b *Bundle, services []Service) {
 		{
 			Name:         "db-bypass-netcat",
 			Commands:     []string{"nc", "ncat", "netcat"},
-			ArgsPatterns: []string{"(?i)(-l|--listen|(" + portPattern + "))"},
+			ArgsPatterns: []string{"(?i)(-l|--listen|" + portTokenPattern + ")"},
 			Decision:     "deny",
 			Message:      "Raw TCP forwarding is blocked by AgentSH DB unavoidability",
 		},
