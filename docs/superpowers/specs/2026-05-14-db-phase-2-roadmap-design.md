@@ -76,7 +76,7 @@ Deliverables:
 - Safe failure modes: missing catalog row, duplicate candidate, unsupported relation kind, and query failure all return typed unresolved results.
 - Unit tests using fake query rows. No Docker or proxy integration in this plan.
 
-External behavior: none. Existing Phase 1 runtime remains unchanged.
+External behavior: none. Existing Phase 1 runtime remains unchanged. Plan 08 is implemented and ready for DB Plan 09 runtime integration.
 
 ### DB Plan 09 - Runtime Resolution Integration
 
