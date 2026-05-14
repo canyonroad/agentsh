@@ -18,6 +18,7 @@ build:
 	mkdir -p bin $(GOCACHE) $(GOMODCACHE) $(GOPATH)
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOPATH=$(GOPATH) go build $(LDFLAGS) -o bin/agentsh ./cmd/agentsh
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOPATH=$(GOPATH) go build $(LDFLAGS) -o bin/agentsh-shell-shim ./cmd/agentsh-shell-shim
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOPATH=$(GOPATH) go build $(LDFLAGS) -o bin/agentsh-unixwrap ./cmd/agentsh-unixwrap
 
 build-shim:
 	mkdir -p bin $(GOCACHE) $(GOMODCACHE) $(GOPATH)
