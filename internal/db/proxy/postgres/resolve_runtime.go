@@ -3,10 +3,14 @@
 package postgres
 
 import (
+	"strings"
+
 	"github.com/agentsh/agentsh/internal/db/catalog"
 	classify_pg "github.com/agentsh/agentsh/internal/db/classify/postgres"
 	"github.com/agentsh/agentsh/internal/db/effects"
 )
+
+const catalogSessionStateChangedReason = "session_state_changed"
 
 func resolveStatementCatalog(stmt effects.ClassifiedStatement, ctx catalogRuntimeContext) effects.ClassifiedStatement {
 	out := stmt
@@ -19,8 +23,13 @@ func resolveStatementCatalog(stmt effects.ClassifiedStatement, ctx catalogRuntim
 
 func resolveStatementsCatalog(stmts []effects.ClassifiedStatement, ctx catalogRuntimeContext) []effects.ClassifiedStatement {
 	out := make([]effects.ClassifiedStatement, len(stmts))
+	current := ctx
 	for i := range stmts {
-		out[i] = resolveStatementCatalog(stmts[i], ctx)
+		out[i] = resolveStatementCatalog(stmts[i], current)
+		if statementInvalidatesCatalogContext(stmts[i]) {
+			current.UnavailableReason = catalogSessionStateChangedReason
+			current.SearchPath = nil
+		}
 	}
 	return out
 }
@@ -165,6 +174,100 @@ func functionVolatilityString(v catalog.FunctionVolatility) string {
 	default:
 		return ""
 	}
+}
+
+func statementInvalidatesCatalogContext(stmt effects.ClassifiedStatement) bool {
+	for _, eff := range stmt.Effects {
+		if effectInvalidatesCatalogContext(eff, stmt.RawVerb) {
+			return true
+		}
+	}
+	return false
+}
+
+func statementsNeedCatalogRefresh(stmts []effects.ClassifiedStatement) (searchPath bool, snapshot bool) {
+	for _, stmt := range stmts {
+		for _, eff := range stmt.Effects {
+			needSearchPath, needSnapshot := effectCatalogRefreshNeeds(eff, stmt.RawVerb)
+			searchPath = searchPath || needSearchPath
+			snapshot = snapshot || needSnapshot
+		}
+	}
+	return searchPath, snapshot
+}
+
+func effectInvalidatesCatalogContext(eff effects.Effect, rawVerb string) bool {
+	searchPath, snapshot := effectCatalogRefreshNeeds(eff, rawVerb)
+	return searchPath || snapshot
+}
+
+func effectCatalogRefreshNeeds(eff effects.Effect, rawVerb string) (searchPath bool, snapshot bool) {
+	switch eff.Subtype {
+	case effects.SubtypeSetSearchPath,
+		effects.SubtypeResetAll,
+		effects.SubtypeDiscardAll,
+		effects.SubtypeSetRole,
+		effects.SubtypeSetSessionAuthorization:
+		return true, false
+	case effects.SubtypeSetLocal:
+		if effectHasAnyGUC(eff, "search_path", "role", "session_authorization") {
+			return true, false
+		}
+	case effects.SubtypeReset:
+		if effectHasAnyGUC(eff, "search_path", "role", "session_authorization") {
+			return true, false
+		}
+	case effects.SubtypeDiscardTemp:
+		return true, true
+	case effects.SubtypeCreateTable:
+		if strings.Contains(rawVerb, "TEMP") {
+			return true, true
+		}
+		return false, true
+	case effects.SubtypeCreateIndex,
+		effects.SubtypeCreateView,
+		effects.SubtypeCreateSchema,
+		effects.SubtypeCreateFunction,
+		effects.SubtypeCreateMaterializedView,
+		effects.SubtypeCreateExtension,
+		effects.SubtypeDropTable,
+		effects.SubtypeDropSchema,
+		effects.SubtypeDropIndex,
+		effects.SubtypeDropView,
+		effects.SubtypeDropFunction:
+		return false, true
+	}
+	if eff.Group == effects.GroupTransaction && transactionCanRestoreLocalSearchPath(rawVerb) {
+		return true, false
+	}
+	return false, false
+}
+
+func transactionCanRestoreLocalSearchPath(rawVerb string) bool {
+	switch rawVerb {
+	case "COMMIT", "ROLLBACK", "ROLLBACK_TO", "END":
+		return true
+	default:
+		return false
+	}
+}
+
+func effectHasGUC(eff effects.Effect, name string) bool {
+	for _, obj := range eff.Objects {
+		if obj.Kind == effects.ObjectGUC && strings.EqualFold(obj.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func effectHasAnyGUC(eff effects.Effect, names ...string) bool {
+	for _, name := range names {
+		if effectHasGUC(eff, name) {
+			return true
+		}
+	}
+	return false
 }
 
 type resolvingParser struct {

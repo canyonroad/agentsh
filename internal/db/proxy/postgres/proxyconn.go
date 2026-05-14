@@ -59,10 +59,12 @@ type connState struct {
 	// smState carries the Extended Query state machine's per-connection
 	// state (Plan 05a). LastUpstreamRFQ replaces the 04c byte field; the
 	// dispatcher and authforward write it directly.
-	smState       *statemachine.ConnState
-	redactionTier policy.RedactionTier // resolved at handshake end
-	tlsMode       string               // svc.TLSMode at handshake end, for EventTLS.Mode
-	catalog       catalogRuntimeContext
+	smState                       *statemachine.ConnState
+	redactionTier                 policy.RedactionTier // resolved at handshake end
+	tlsMode                       string               // svc.TLSMode at handshake end, for EventTLS.Mode
+	catalog                       catalogRuntimeContext
+	catalogRefreshPending         bool
+	catalogSnapshotRefreshPending bool
 }
 
 // logger narrows *slog.Logger to just the methods we use, so tests can

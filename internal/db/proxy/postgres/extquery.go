@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	classify_pg "github.com/agentsh/agentsh/internal/db/classify/postgres"
 	"github.com/agentsh/agentsh/internal/db/effects"
 	"github.com/agentsh/agentsh/internal/db/policy"
 	"github.com/agentsh/agentsh/internal/db/proxy/postgres/preparedcache"
@@ -28,6 +29,11 @@ func (pc *proxyConn) handleExtendedFrame(ctx context.Context, msg pgproto3.Front
 	parser := pc.resolvingParser(pc.svc.Dialect)
 	rs := pc.srv.policy()
 	opts := classifierOptionsFromPolicy(rs)
+	var parseStmts []effects.ClassifiedStatement
+	parse, isParse := msg.(*pgproto3.Parse)
+	if isParse {
+		parseStmts, _ = parser.Classify(parse.Query, classify_pg.SessionState{}, opts)
+	}
 	next, actions := statemachine.TransitionWithParser(
 		*pc.state.smState,
 		frame,
@@ -38,6 +44,17 @@ func (pc *proxyConn) handleExtendedFrame(ctx context.Context, msg pgproto3.Front
 		opts,
 	)
 	*pc.state.smState = next
+	if isParse && len(parseStmts) > 0 && actionsCanForward(actions) {
+		searchPath, snapshot := statementsNeedCatalogRefresh(parseStmts)
+		pc.wireCache.Put(parse.Name, preparedcache.Entry{
+			Classification:           parseStmts[0],
+			CatalogRefreshSearchPath: searchPath,
+			CatalogRefreshSnapshot:   snapshot,
+		})
+	}
+	if exec, ok := msg.(*pgproto3.Execute); ok {
+		pc.markCatalogRefreshPendingForExecute(exec, actions)
+	}
 	return pc.executeActions(ctx, msg, actions)
 }
 
@@ -91,6 +108,7 @@ func (pc *proxyConn) executeActions(ctx context.Context, origFrame pgproto3.Fron
 			if _, err := pc.forwardUpstreamUntilRFQ(ctx, timeNow(), 0); err != nil {
 				return fmt.Errorf("drain: %w", err)
 			}
+			pc.refreshPendingCatalogContext(ctx)
 		case *statemachine.ActionClose:
 			pc.closeUpstream()
 			return errInTxTerminate
@@ -105,6 +123,45 @@ func (pc *proxyConn) executeActions(ctx context.Context, origFrame pgproto3.Fron
 		}
 	}
 	return nil
+}
+
+func actionsCanForward(actions []statemachine.Action) bool {
+	for _, act := range actions {
+		if _, ok := act.(*statemachine.ActionForward); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (pc *proxyConn) markCatalogRefreshPendingForExecute(exec *pgproto3.Execute, actions []statemachine.Action) {
+	if exec == nil || pc.wireCache == nil || !actionsCanForward(actions) {
+		return
+	}
+	entry, ok := pc.wireCache.Get(wirePortalCacheKey(exec.Portal))
+	if !ok {
+		return
+	}
+	pc.markCatalogRefreshPendingForNeeds(entry.CatalogRefreshSearchPath, entry.CatalogRefreshSnapshot)
+}
+
+func (pc *proxyConn) cacheApprovedParse(parse *pgproto3.Parse, stmt effects.ClassifiedStatement) {
+	if parse == nil || pc.wireCache == nil {
+		return
+	}
+	searchPath, snapshot := statementsNeedCatalogRefresh([]effects.ClassifiedStatement{stmt})
+	pc.wireCache.Put(parse.Name, preparedcache.Entry{
+		Classification:           stmt,
+		CatalogRefreshSearchPath: searchPath,
+		CatalogRefreshSnapshot:   snapshot,
+	})
+	if pc.state != nil && pc.state.smState != nil {
+		pc.state.smState.UpstreamDirtySinceSync = true
+	}
+}
+
+func wirePortalCacheKey(name string) string {
+	return "\x00portal:" + name
 }
 
 // frameFromPgproto converts a pgproto3.FrontendMessage to a statemachine.Frame.
@@ -148,8 +205,10 @@ func (v wireCacheView) Get(name string) (statemachine.CacheValue, bool) {
 		return statemachine.CacheValue{}, false
 	}
 	return statemachine.CacheValue{
-		Verb:    e.Classification.RawVerb,
-		GroupID: groupIDFromClassification(e.Classification),
+		Verb:                     e.Classification.RawVerb,
+		GroupID:                  groupIDFromClassification(e.Classification),
+		CatalogRefreshSearchPath: e.CatalogRefreshSearchPath,
+		CatalogRefreshSnapshot:   e.CatalogRefreshSnapshot,
 	}, true
 }
 
@@ -158,7 +217,9 @@ func (v wireCacheView) Put(name string, val statemachine.CacheValue) {
 	// ClassifiedStatement. Reconstruct a partial Entry — the classifier
 	// re-evaluates at the dispatcher boundary if needed.
 	v.c.Put(name, preparedcache.Entry{
-		Classification: effects.ClassifiedStatement{RawVerb: val.Verb},
+		Classification:           effects.ClassifiedStatement{RawVerb: val.Verb},
+		CatalogRefreshSearchPath: val.CatalogRefreshSearchPath,
+		CatalogRefreshSnapshot:   val.CatalogRefreshSnapshot,
 	})
 }
 

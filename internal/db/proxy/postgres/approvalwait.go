@@ -72,6 +72,9 @@ func (pc *proxyConn) runApprovalWait(ctx context.Context, origFrame pgproto3.Fro
 	}
 	if out.approved {
 		pc.emitApprovalFrameEvent(ctx, origFrame, a, approvalApproveDecision(a.Rule), "none")
+		if parse, ok := origFrame.(*pgproto3.Parse); ok {
+			pc.cacheApprovedParse(parse, a.Stmt)
+		}
 		pc.state.upstreamFE.Send(origFrame)
 		return pc.state.upstreamFE.Flush()
 	}
@@ -108,6 +111,7 @@ func (pc *proxyConn) runSimpleQueryApproval(
 		}
 		result, ferr := pc.forwardUpstreamUntilRFQ(ctx, sentAt, len(q.String))
 		pc.emitAllowEvents(ctx, stmts, decisions, q.String, batchSHA, result)
+		pc.refreshCatalogAfterSuccessfulStatements(ctx, stmts, result)
 		return ferr
 	}
 

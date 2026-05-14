@@ -14,14 +14,10 @@ func ResolveRelation(snap Snapshot, name Name, searchPath []string) ResolvedRela
 		}
 	}
 	candidates := snap.RelationsByUnqualifiedName(name.Name)
-	switch len(candidates) {
-	case 0:
-		return ResolvedRelation{Reason: UnresolvedMissing}
-	case 1:
-		return ResolvedRelation{Relation: candidates[0]}
-	default:
+	if len(candidates) > 1 {
 		return ResolvedRelation{Reason: UnresolvedAmbiguous}
 	}
+	return ResolvedRelation{Reason: UnresolvedMissing}
 }
 
 func ResolveFunctionByOID(snap Snapshot, oid OID) ResolvedFunction {

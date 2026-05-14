@@ -185,6 +185,7 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 			ferr = cerr
 		}
 		pc.emitAllowEvents(ctx, stmts, decisions, q.String, batchSHA, result)
+		pc.refreshCatalogAfterSuccessfulStatements(ctx, stmts, result)
 		return ferr
 	}
 

@@ -170,6 +170,90 @@ func TestResolveStatementCatalog_FunctionOIDReplacesStaleResolvedObjects(t *test
 	}
 }
 
+func TestResolveStatementsCatalog_FailsClosedAfterSearchPathMutationInBatch(t *testing.T) {
+	ctx := testCatalogContext()
+	stmts := []effects.ClassifiedStatement{{
+		RawVerb: "SET_SEARCH_PATH=audit,public",
+		Effects: []effects.Effect{{
+			Group:   effects.GroupSession,
+			Subtype: effects.SubtypeSetSearchPath,
+			Objects: []effects.ObjectRef{{Kind: effects.ObjectGUC, Name: "search_path"}},
+		}},
+	}, {
+		RawVerb: "SELECT",
+		Effects: []effects.Effect{{
+			Group:      effects.GroupRead,
+			Resolution: effects.ResolutionUnqualified,
+			Objects:    []effects.ObjectRef{{Kind: effects.ObjectTable, Name: "users"}},
+		}},
+	}}
+
+	got := resolveStatementsCatalog(stmts, ctx)
+	eff := got[1].Effects[0]
+	if eff.Resolution != effects.ResolutionCatalogUnavailable {
+		t.Fatalf("second statement resolution = %v, want catalog_unavailable", eff.Resolution)
+	}
+	if len(eff.ResolvedObjects) != 1 || eff.ResolvedObjects[0].UnresolvedReason != "session_state_changed" {
+		t.Fatalf("second statement resolved objects = %+v", eff.ResolvedObjects)
+	}
+}
+
+func TestResolveStatementsCatalog_FailsClosedAfterSetLocalSearchPathInBatch(t *testing.T) {
+	ctx := testCatalogContext()
+	stmts := []effects.ClassifiedStatement{{
+		RawVerb: "SET_LOCAL=search_path:audit,public",
+		Effects: []effects.Effect{{
+			Group:   effects.GroupSession,
+			Subtype: effects.SubtypeSetLocal,
+			Objects: []effects.ObjectRef{{Kind: effects.ObjectGUC, Name: "search_path"}},
+		}},
+	}, {
+		RawVerb: "SELECT",
+		Effects: []effects.Effect{{
+			Group:      effects.GroupRead,
+			Resolution: effects.ResolutionUnqualified,
+			Objects:    []effects.ObjectRef{{Kind: effects.ObjectTable, Name: "users"}},
+		}},
+	}}
+
+	got := resolveStatementsCatalog(stmts, ctx)
+	eff := got[1].Effects[0]
+	if eff.Resolution != effects.ResolutionCatalogUnavailable {
+		t.Fatalf("second statement resolution = %v, want catalog_unavailable", eff.Resolution)
+	}
+	if len(eff.ResolvedObjects) != 1 || eff.ResolvedObjects[0].UnresolvedReason != "session_state_changed" {
+		t.Fatalf("second statement resolved objects = %+v", eff.ResolvedObjects)
+	}
+}
+
+func TestResolveStatementsCatalog_FailsClosedAfterResetSessionAuthorizationInBatch(t *testing.T) {
+	ctx := testCatalogContext()
+	stmts := []effects.ClassifiedStatement{{
+		RawVerb: "RESET=session_authorization",
+		Effects: []effects.Effect{{
+			Group:   effects.GroupSession,
+			Subtype: effects.SubtypeReset,
+			Objects: []effects.ObjectRef{{Kind: effects.ObjectGUC, Name: "session_authorization"}},
+		}},
+	}, {
+		RawVerb: "SELECT",
+		Effects: []effects.Effect{{
+			Group:      effects.GroupRead,
+			Resolution: effects.ResolutionUnqualified,
+			Objects:    []effects.ObjectRef{{Kind: effects.ObjectTable, Name: "users"}},
+		}},
+	}}
+
+	got := resolveStatementsCatalog(stmts, ctx)
+	eff := got[1].Effects[0]
+	if eff.Resolution != effects.ResolutionCatalogUnavailable {
+		t.Fatalf("second statement resolution = %v, want catalog_unavailable", eff.Resolution)
+	}
+	if len(eff.ResolvedObjects) != 1 || eff.ResolvedObjects[0].UnresolvedReason != "session_state_changed" {
+		t.Fatalf("second statement resolved objects = %+v", eff.ResolvedObjects)
+	}
+}
+
 func TestResolvingParser_ClassifyErrorReturnsBaseStatementsUnresolved(t *testing.T) {
 	classifyErr := errors.New("parse failed")
 	oid := int32(99)

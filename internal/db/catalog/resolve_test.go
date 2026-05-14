@@ -32,6 +32,16 @@ func TestResolveUnqualifiedRelationReportsAmbiguousWithoutSearchPathMatch(t *tes
 	}
 }
 
+func TestResolveUnqualifiedRelationReportsMissingWhenOnlyCandidateOutsideSearchPath(t *testing.T) {
+	snap := NewSnapshot([]Relation{
+		{OID: 10, Name: Name{Schema: "private", Name: "orders"}, Kind: RelationTable},
+	}, nil)
+	got := ResolveRelation(snap, Name{Name: "orders"}, []string{"public"})
+	if got.Reason != UnresolvedMissing {
+		t.Fatalf("reason = %s, want missing", got.Reason.String())
+	}
+}
+
 func TestResolveUnqualifiedRelationReportsMissing(t *testing.T) {
 	snap := NewSnapshot(nil, nil)
 	got := ResolveRelation(snap, Name{Name: "orders"}, []string{"public"})

@@ -22,8 +22,10 @@ const DefaultCapacity = 4096
 // tier captured at Parse time so a later Execute renders consistently even
 // if policy is hot-swapped between Parse and Execute.
 type Entry struct {
-	Classification effects.ClassifiedStatement
-	RedactionTier  policy.RedactionTier
+	Classification           effects.ClassifiedStatement
+	RedactionTier            policy.RedactionTier
+	CatalogRefreshSearchPath bool
+	CatalogRefreshSnapshot   bool
 }
 
 // Cache is a fixed-capacity LRU keyed by prepared-statement name. Empty name

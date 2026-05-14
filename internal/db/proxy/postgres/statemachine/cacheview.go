@@ -9,9 +9,11 @@ import "sync"
 // at the dispatcher boundary so the state-machine package stays decoupled
 // from the cache implementation.
 type CacheValue struct {
-	Verb     string // RawVerb from effects.ClassifiedStatement
-	GroupID  uint8  // primary effect group_id; used for re-evaluate at Execute
-	OpaqueID string // optional: spine-test correlation
+	Verb                     string // RawVerb from effects.ClassifiedStatement
+	GroupID                  uint8  // primary effect group_id; used for re-evaluate at Execute
+	OpaqueID                 string // optional: spine-test correlation
+	CatalogRefreshSearchPath bool
+	CatalogRefreshSnapshot   bool
 }
 
 // CacheView is the subset of preparedcache.Cache that Transition consumes.
