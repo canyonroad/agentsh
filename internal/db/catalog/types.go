@@ -114,3 +114,12 @@ type ResolvedRelation struct {
 func (r ResolvedRelation) OK() bool {
 	return r.Reason == UnresolvedNone
 }
+
+type ResolvedFunction struct {
+	Function Function
+	Reason   UnresolvedReason
+}
+
+func (r ResolvedFunction) OK() bool {
+	return r.Reason == UnresolvedNone
+}
