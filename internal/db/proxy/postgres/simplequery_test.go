@@ -482,3 +482,63 @@ func TestHandleQuery_DenyPath_MultiStmt_TagsSiblings(t *testing.T) {
 		t.Fatalf("evs[1] = %+v", evs[1])
 	}
 }
+
+func TestHandleQuery_CatalogResolvedPolicyAllow(t *testing.T) {
+	pc, clientFE, sink, script := allowPathFixture(t)
+	pc.state.smState.LastUpstreamRFQ = 'I'
+	pc.state.catalog = testCatalogContext()
+	pc.srv.SetPolicy(loadRuleSet(t, `version: 1
+name: test
+db_services:
+  test:
+    family: postgres
+    dialect: postgres
+    upstream: 127.0.0.1:5432
+    tls_mode: terminate_reissue
+database_rules:
+  - name: allow-catalog-read
+    db_service: test
+    operations: [read]
+    objects: [users]
+    match_object_resolution: catalog_resolved
+    decision: allow
+`))
+
+	script([]pgproto3.BackendMessage{
+		&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("id")}}},
+		&pgproto3.DataRow{Values: [][]byte{[]byte("1")}},
+		&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")},
+		&pgproto3.ReadyForQuery{TxStatus: 'I'},
+	})
+
+	loopErr := make(chan error, 1)
+	go func() { loopErr <- pc.simpleQueryLoop(context.Background()) }()
+
+	mustSendFromClient(t, clientFE, &pgproto3.Query{String: "SELECT * FROM users"})
+	frames := drainNFrames(t, clientFE, 4)
+	if _, ok := frames[3].(*pgproto3.ReadyForQuery); !ok {
+		t.Fatalf("last frame = %T want ReadyForQuery", frames[3])
+	}
+
+	var evs []events.DBEvent
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		evs = sink.DrainStatements()
+		if len(evs) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("events = %d", len(evs))
+	}
+	if evs[0].ObjectResolution != "catalog_resolved" {
+		t.Fatalf("ObjectResolution = %q", evs[0].ObjectResolution)
+	}
+
+	_ = pc.conn.Close()
+	select {
+	case <-loopErr:
+	case <-time.After(time.Second):
+	}
+}

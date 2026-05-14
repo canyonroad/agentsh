@@ -101,3 +101,25 @@ func TestCache_Concurrent(t *testing.T) {
 		t.Fatalf("Len=%d exceeded cap", c.Len())
 	}
 }
+
+func TestCachePreservesResolvedObjects(t *testing.T) {
+	c := New(2)
+	c.Put("s1", Entry{Classification: effects.ClassifiedStatement{Effects: []effects.Effect{{
+		Group:      effects.GroupRead,
+		Resolution: effects.ResolutionCatalogResolved,
+		ResolvedObjects: []effects.ResolvedObjectRef{{
+			Source: effects.ResolvedObjectSourceCatalog,
+			Kind:   effects.ResolvedObjectRelation,
+			OID:    10,
+			Schema: "public",
+			Name:   "users",
+		}},
+	}}}})
+	got, ok := c.Get("s1")
+	if !ok {
+		t.Fatal("cache miss")
+	}
+	if len(got.Classification.Effects[0].ResolvedObjects) != 1 {
+		t.Fatalf("ResolvedObjects lost: %+v", got.Classification)
+	}
+}

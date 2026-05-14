@@ -107,7 +107,7 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 	}
 
 	rs := pc.srv.policy()
-	parser := pc.srv.classifierFor(pc.svc.Dialect)
+	parser := pc.resolvingParser(pc.svc.Dialect)
 	opts := classifierOptionsFromPolicy(rs)
 	stmts, _ := parser.Classify(q.String, classify_pg.SessionState{}, opts)
 
