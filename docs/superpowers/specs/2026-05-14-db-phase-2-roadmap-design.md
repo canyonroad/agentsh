@@ -90,9 +90,9 @@ Deliverables:
 - Resolution tag upgrade from syntactic tags to catalog-backed tags when every object in an effect resolves cleanly.
 - DBEvent fields for canonical object identity and resolution source.
 - Fallback behavior: if catalog data cannot be obtained, keep Phase 1 syntactic objects and fail closed under `match_object_resolution` policies.
-- Real Postgres integration coverage for schema-qualified, unqualified, temp-shadowed, view, function, and missing-object cases.
+- Coverage split: real Postgres integration covers schema-qualified, unqualified, view, and missing-object catalog resolution; lower-level proxy/classifier coverage handles temp-shadowed and function-resolution cases.
 
-External behavior: operators can write stricter policies that require catalog-backed resolution, while existing syntactic policies keep working.
+External behavior: operators can write stricter policies that require catalog-backed resolution, while existing syntactic policies keep working. Plan 09 is implemented and ready for DB Plan 10 policy ergonomics.
 
 ### DB Plan 10 - Policy Ergonomics
 

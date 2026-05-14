@@ -198,6 +198,67 @@ func TestDB07CRealPostgresCopyEvents(t *testing.T) {
 	}, "db_statement bulk_load")
 }
 
+func TestDB09RealPostgresCatalogResolution(t *testing.T) {
+	ctx := context.Background()
+	env := startDB07CEnvironment(t, ctx)
+	defer env.cleanup()
+
+	seedDB07C(t, ctx, env.hostDSN)
+	sess := createDB07CSession(t, ctx, env.client)
+	socket := filepath.Join(sess.DBProxySocketDir, "appdb.sock")
+
+	qualified := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "scalar", "-sql", "select note from plan09.users where id = 1", "-simple")
+	if qualified.Scalar != "schema-qualified" {
+		t.Fatalf("qualified catalog query returned %+v", qualified)
+	}
+	waitForSessionEvent07C(t, ctx, env.client, sess.ID, func(ev types.Event) bool {
+		return isPlan09CatalogAllowEvent(ev, "users", "select note from plan09.users")
+	}, "catalog_resolved schema-qualified event")
+
+	view := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "scalar", "-sql", "select note from plan09.active_users where id = 1", "-simple")
+	if view.Scalar != "schema-qualified" {
+		t.Fatalf("view catalog query returned %+v", view)
+	}
+	waitForSessionEvent07C(t, ctx, env.client, sess.ID, func(ev types.Event) bool {
+		return isPlan09CatalogAllowEvent(ev, "active_users", "select note from plan09.active_users")
+	}, "catalog_resolved schema-qualified view event")
+
+	unqualified := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "scalar", "-sql", "select note from users where id = 1", "-simple")
+	if unqualified.Scalar != "schema-qualified" {
+		t.Fatalf("unqualified catalog query returned %+v", unqualified)
+	}
+	waitForSessionEvent07C(t, ctx, env.client, sess.ID, func(ev types.Event) bool {
+		return isPlan09CatalogAllowEvent(ev, "users", "select note from users")
+	}, "catalog_resolved unqualified event")
+
+	missing := execDB07CClientAllowFailure(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "scalar", "-sql", "select * from plan09.missing_relation", "-simple")
+	if missing.OK {
+		t.Fatalf("missing relation unexpectedly succeeded: %+v", missing)
+	}
+	waitForSessionEvent07C(t, ctx, env.client, sess.ID, func(ev types.Event) bool {
+		statementText, _ := ev.Fields["statement_text"].(string)
+		return ev.Type == "db_statement" &&
+			strings.Contains(statementText, "select * from plan09.missing_relation") &&
+			(ev.Fields["object_resolution"] == "catalog_unresolved" || ev.Fields["object_resolution_reason"] == "missing")
+	}, "catalog_unresolved missing-object event")
+}
+
+func isPlan09CatalogAllowEvent(ev types.Event, object, statementNeedle string) bool {
+	if ev.Type != "db_statement" || ev.Fields["object_resolution"] != "catalog_resolved" {
+		return false
+	}
+	statementText, _ := ev.Fields["statement_text"].(string)
+	if !strings.Contains(statementText, statementNeedle) {
+		return false
+	}
+	decision, _ := ev.Fields["decision"].(map[string]any)
+	if decision["rule_name"] != "allow-plan09-catalog-read" {
+		return false
+	}
+	effects := fmt.Sprint(ev.Fields["effects"])
+	return strings.Contains(effects, "plan09") && strings.Contains(effects, object)
+}
+
 func startDB07CEnvironment(t *testing.T, ctx context.Context) db07cEnv {
 	t.Helper()
 
@@ -466,6 +527,12 @@ database_rules:
     operations: [write, modify, delete]
     decision: deny
     deny_mode_in_tx: terminate
+  - name: allow-plan09-catalog-read
+    db_service: appdb
+    operations: [read]
+    objects: [users, active_users]
+    match_object_resolution: catalog_resolved
+    decision: allow
   - name: allow-read
     db_service: appdb
     operations: [read]
@@ -514,6 +581,16 @@ insert into db07c_guard(id, note) values (1, 'seed');
 drop table if exists db07c_copy;
 create table db07c_copy(id serial primary key, note text not null);
 insert into db07c_copy(note) values ('copy-seed');
+create schema if not exists plan09;
+drop view if exists plan09.active_users;
+drop function if exists plan09.identity_text(text);
+drop table if exists plan09.users;
+create table plan09.users(id int primary key, note text);
+insert into plan09.users(id, note) values (1, 'schema-qualified');
+create or replace view plan09.active_users as select id, note from plan09.users;
+create or replace function plan09.identity_text(v text) returns text
+language sql immutable strict as $$ select v $$;
+alter role app in database app set search_path = plan09, public;
 `)
 	if err != nil {
 		t.Fatalf("07c seed Postgres: %v", err)
