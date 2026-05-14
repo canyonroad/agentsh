@@ -1,7 +1,7 @@
 # AgentSH Database Access Control — v0.8
 
-**Status:** APPROVED FOR PHASE 1 IMPLEMENTATION. Supersedes v0.7.
-**Implementation target:** PostgreSQL only (Phase 1 of the roadmap in §18).
+**Status:** PHASE 1 IMPLEMENTED. Supersedes v0.7.
+**Implementation target:** PostgreSQL Phase 1 is complete; Phase 2 planning is tracked in `docs/superpowers/specs/2026-05-14-db-phase-2-roadmap-design.md`.
 **Owner:** Canyon Road
 **Scope:** AgentSH OSS, Watchtower commercial control plane
 
@@ -60,7 +60,7 @@ The thesis:
 
 Unavoidability rests on AgentSH's existing primitives: process interception, network rules, file rules over Unix sockets, and DNS interception. §12 spells out the threat model in full.
 
-**Spec revision:** v0.8. **Implementation target:** Phase 1 (PostgreSQL).
+**Spec revision:** v0.8. **Implementation target:** Phase 1 implemented; Phase 2 planned separately.
 
 ---
 
@@ -93,8 +93,8 @@ Unavoidability rests on AgentSH's existing primitives: process interception, net
 
 | Phase | Adds |
 |-------|------|
-| Phase 1 | This spec. |
-| Phase 2 | Object resolution via upstream catalog. Postgres `redirect` decision (statement rewriting). |
+| Phase 1 | PostgreSQL adapter: classifier, policy evaluation, proxy, CancelRequest mapping, unavoidability bundle, and real-Postgres CI integration. |
+| Phase 2 | Object resolution via upstream catalog. Postgres `redirect` decision (statement rewriting). Improved policy ergonomics. |
 | Phase 3 | MySQL adapter. |
 | Phase 4 | Credential broker. |
 | Phase 5 | MongoDB adapter. |
@@ -1364,8 +1364,8 @@ The default config bundle includes a sample `CREATE ROLE` script for Postgres th
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 0 | This spec, reviewed and approved. | done |
-| 1 | Postgres adapter. Operation taxonomy with subtypes. Per-effect evaluation with strict object coverage. Two rule families. Event emission. Unavoidability bundle. Transaction correctness. SQL PREPARE/EXECUTE. FunctionCall default-deny. CancelRequest translation. Startup-packet handling. Replication & GSSENC default-deny. | next |
-| 2 | Object resolution via upstream catalog. `redirect` decision (statement rewriting). Improved policy ergonomics. | |
+| 1 | Postgres adapter. Operation taxonomy with subtypes. Per-effect evaluation with strict object coverage. Two rule families. Event emission. Unavoidability bundle. Transaction correctness. SQL PREPARE/EXECUTE. FunctionCall default-deny. CancelRequest translation. Startup-packet handling. Replication & GSSENC default-deny. | done |
+| 2 | Object resolution via upstream catalog. `redirect` decision (statement rewriting). Improved policy ergonomics. | next |
 | 3 | MySQL adapter. | |
 | 4 | Credential broker (resolves SCRAM-SHA-256-PLUS channel binding). | |
 | 5 | MongoDB adapter. | |
