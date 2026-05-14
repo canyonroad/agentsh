@@ -20,7 +20,7 @@ type compiledStatementRule struct {
 	subtypes      map[effects.Subtype]struct{} // empty = all subtypes match
 	resolution    resolutionMatcher
 	schemas       []glob.Glob // empty = all schemas match
-	objects       []glob.Glob // syntactic objects; empty = all objects match
+	objects       []glob.Glob // syntactic object selectors
 	relations     []glob.Glob // resolved relation canonical names
 	functions     []glob.Glob // resolved function identity names
 	timeout       time.Duration
@@ -215,7 +215,8 @@ func (c *compiledStatementRule) matchesResolution(r effects.Resolution) bool {
 
 // objectMatches reports whether any of the rule's `objects` globs matches
 // the given ObjectRef per the kind→field table in this plan's File Structure
-// section. Returns true unconditionally when c.objects is empty.
+// section. Returns true unconditionally only when no object selector family is
+// constrained.
 func (c *compiledStatementRule) objectMatches(o effects.ObjectRef) bool {
 	if c.coversAllObjects() {
 		return true
@@ -229,18 +230,30 @@ func (c *compiledStatementRule) objectMatches(o effects.ObjectRef) bool {
 	return false
 }
 
-// schemaMatches reports whether the schemas: clause is absent or any glob in
-// it matches the object's schema. Non-relation objects (no schema) are treated
-// as covered when schemas: is absent and uncovered when it is present.
-func (c *compiledStatementRule) schemaMatches(o effects.ObjectRef) bool {
+func (c *compiledStatementRule) schemaMatchesObjectSlot(o effects.ObjectRef, resolved effects.ResolvedObjectRef, hasResolved bool) bool {
 	if len(c.schemas) == 0 {
 		return true
 	}
-	if o.Schema == "" {
+	for _, g := range c.schemas {
+		if o.Schema != "" && g.Match(o.Schema) {
+			return true
+		}
+		if hasResolved && resolved.Schema != "" && g.Match(resolved.Schema) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *compiledStatementRule) schemaMatchesResolvedObject(resolved effects.ResolvedObjectRef) bool {
+	if len(c.schemas) == 0 {
+		return true
+	}
+	if resolved.Schema == "" {
 		return false
 	}
 	for _, g := range c.schemas {
-		if g.Match(o.Schema) {
+		if g.Match(resolved.Schema) {
 			return true
 		}
 	}

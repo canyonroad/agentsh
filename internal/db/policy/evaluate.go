@@ -59,11 +59,11 @@ type effectDecision struct {
 type internalVerb uint8
 
 const (
-	verbAllow       internalVerb = iota
-	verbAudit                    // more restrictive than allow
-	verbApprove                  // more restrictive than audit
-	verbImplicitDeny             // more restrictive than approve; loses to explicit deny on tie
-	verbDeny                     // most restrictive
+	verbAllow        internalVerb = iota
+	verbAudit                     // more restrictive than allow
+	verbApprove                   // more restrictive than audit
+	verbImplicitDeny              // more restrictive than approve; loses to explicit deny on tie
+	verbDeny                      // most restrictive
 )
 
 // evaluateEffect runs the three-pass §10.2 algorithm for a single effect.
@@ -75,10 +75,13 @@ func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effec
 	//
 	// Exception: groups that *inherently* have no objects — Transaction,
 	// Session, Notify — would otherwise be unreachable through the §10.2
-	// coverage rules. Treat those as covered by any non-objects-constrained
-	// rule whose effect-meta matches. isObjectlessEffect also covers
-	// SubtypeFunctionCallProtocol (FunctionCall 'F' frames carry only an OID).
+	// coverage rules. Treat those as covered by any rule with no object selector
+	// family whose effect-meta matches. Resolved-only procedural function effects
+	// use canonical selector coverage below.
 	if len(e.Objects) == 0 {
+		if isResolvedOnlyFunctionEffect(e) {
+			return evaluateEffectResolvedOnly(e, applicable)
+		}
 		if isObjectlessEffect(e) {
 			return evaluateEffectObjectless(e, applicable)
 		}
@@ -96,11 +99,8 @@ func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effec
 			continue
 		}
 		// Find the first matching object (deterministic: object list order).
-		for _, o := range e.Objects {
-			if !r.schemaMatches(o) {
-				continue
-			}
-			if r.objectMatches(o) {
+		for i, o := range e.Objects {
+			if ok, _ := ruleMatchesObjectSlot(r, e, i); ok {
 				return effectDecision{verb: verbDeny, rule: r, denyMatchingObject: o}
 			}
 		}
@@ -109,7 +109,7 @@ func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effec
 	// Pass 2 — coverage. For each object, collect non-deny rules that cover it.
 	// coverage[i] holds the covering rules for e.Objects[i].
 	coverage := make(map[int][]*compiledStatementRule, len(e.Objects))
-	for i, o := range e.Objects {
+	for i := range e.Objects {
 		for _, r := range applicable {
 			if r.verb == VerbDeny {
 				continue
@@ -117,13 +117,9 @@ func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effec
 			if !ruleMatchesEffectMeta(r, e) {
 				continue
 			}
-			if !r.schemaMatches(o) {
-				continue
+			if ok, _ := ruleMatchesObjectSlot(r, e, i); ok {
+				coverage[i] = append(coverage[i], r)
 			}
-			if !r.objectMatches(o) {
-				continue
-			}
-			coverage[i] = append(coverage[i], r)
 		}
 	}
 
@@ -134,62 +130,89 @@ func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effec
 		}
 	}
 
-	// Pass 3 — most-restrictive verb across covering rules.
-	// Walk coverage in object order, preserving rule order within each bucket
-	// (rules stay in policy file order because `applicable` preserves that order).
-	// This guarantees R14 order-independence of OUTCOMES: the result depends on
-	// the rule set, not on evaluation path; only the RuleName tiebreak (D-OQ3)
-	// uses file order.
-	var (
-		best        internalVerb = verbAllow
-		primary     *compiledStatementRule
-		approveRules []*compiledStatementRule
-		auditRules   []*compiledStatementRule
-		approveSeen  = map[string]bool{}
-		auditSeen    = map[string]bool{}
-	)
-	for i := range e.Objects {
+	// Pass 3 — most-restrictive verb across covering rules. Fold in policy file
+	// order so same-verb primary RuleName ties are independent of object order.
+	return foldCoverageRules(coverageRulesInPolicyOrder(applicable, coverage, len(e.Objects)))
+}
+
+func resolvedObjectForSlot(e effects.Effect, idx int) (effects.ResolvedObjectRef, bool) {
+	if idx < 0 || idx >= len(e.Objects) {
+		return effects.ResolvedObjectRef{}, false
+	}
+	o := e.Objects[idx]
+	for _, resolved := range e.ResolvedObjects {
+		if resolvedObjectCompatibleWithSlot(o, resolved) {
+			return resolved, true
+		}
+	}
+	return effects.ResolvedObjectRef{}, false
+}
+
+func resolvedObjectCompatibleWithSlot(o effects.ObjectRef, resolved effects.ResolvedObjectRef) bool {
+	if o.Name == "" || resolved.Name == "" || o.Name != resolved.Name {
+		return false
+	}
+	if o.Schema != "" && o.Schema != resolved.Schema {
+		return false
+	}
+	switch resolved.Kind {
+	case effects.ResolvedObjectRelation:
+		return isRelationObjectKind(o.Kind)
+	case effects.ResolvedObjectFunction:
+		return o.Kind == effects.ObjectFunction
+	default:
+		return false
+	}
+}
+
+func isRelationObjectKind(kind effects.ObjectKind) bool {
+	switch kind {
+	case effects.ObjectTable, effects.ObjectView, effects.ObjectSequence:
+		return true
+	default:
+		return false
+	}
+}
+
+func ruleMatchesObjectSlot(r *compiledStatementRule, e effects.Effect, idx int) (bool, string) {
+	if idx < 0 || idx >= len(e.Objects) {
+		return false, ""
+	}
+	o := e.Objects[idx]
+	resolved, hasResolved := resolvedObjectForSlot(e, idx)
+	if !r.schemaMatchesObjectSlot(o, resolved, hasResolved) {
+		return false, ""
+	}
+	if !r.hasObjectSelectors() {
+		return true, "all"
+	}
+	if len(r.objects) > 0 && r.objectMatches(o) {
+		return true, "objects"
+	}
+	if hasResolved && r.relationMatches(resolved) {
+		return true, "relations"
+	}
+	if hasResolved && r.functionMatches(resolved) {
+		return true, "functions"
+	}
+	return false, ""
+}
+
+func coverageRulesInPolicyOrder(applicable []*compiledStatementRule, coverage map[int][]*compiledStatementRule, objectCount int) []*compiledStatementRule {
+	covered := map[*compiledStatementRule]bool{}
+	for i := 0; i < objectCount; i++ {
 		for _, r := range coverage[i] {
-			switch r.verb {
-			case VerbApprove:
-				if verbApprove > best {
-					best = verbApprove
-				}
-				if !approveSeen[r.src.Name] {
-					approveSeen[r.src.Name] = true
-					approveRules = append(approveRules, r)
-				}
-			case VerbAudit:
-				if verbAudit > best {
-					best = verbAudit
-				}
-				if !auditSeen[r.src.Name] {
-					auditSeen[r.src.Name] = true
-					auditRules = append(auditRules, r)
-				}
-			// VerbAllow contributes coverage but no verb escalation. The primary
-			// rule for an allow outcome is selected later (coverage[0][0]).
-			}
+			covered[r] = true
 		}
 	}
 
-	// Determine primary rule (D-OQ3: first by policy file order).
-	switch best {
-	case verbApprove:
-		primary = approveRules[0]
-	case verbAudit:
-		primary = auditRules[0]
-	default:
-		// Allow: pick the first covering rule for the first object.
-		primary = coverage[0][0]
+	out := make([]*compiledStatementRule, 0, len(covered))
+	for _, r := range applicable {
+		if covered[r] {
+			out = append(out, r)
+		}
 	}
-
-	return effectDecision{
-		verb:                best,
-		rule:                primary,
-		contributingApprove: approveRules,
-		contributingAudit:   auditRules,
-	}
+	return out
 }
 
 // isObjectlessGroup reports whether the group inherently has no objects
@@ -208,9 +231,9 @@ func isObjectlessGroup(g effects.Group) bool {
 // isObjectlessEffect reports whether the effect is inherently object-less and
 // should be evaluated using the degenerate per-group path rather than returning
 // verbImplicitDeny. This extends isObjectlessGroup for cases where the group
-// alone is insufficient: FunctionCall protocol effects (Subtype ==
-// SubtypeFunctionCallProtocol) carry only a function OID with no resolvable
-// object name, so they must be reachable through object-less coverage rules.
+// alone is insufficient: unresolved FunctionCall protocol effects (Subtype ==
+// SubtypeFunctionCallProtocol) carry only a function OID with no object name,
+// so they must be reachable through object-less coverage rules.
 // SQL-escalated unknown-function procedural effects (Group == GroupProcedural,
 // Subtype == 0) remain implicit-deny by design (fail-closed escalation).
 func isObjectlessEffect(e effects.Effect) bool {
@@ -218,22 +241,74 @@ func isObjectlessEffect(e effects.Effect) bool {
 		return true
 	}
 	// FunctionCall protocol: OID-only effect, no resolvable Objects.
-	return e.Subtype == effects.SubtypeFunctionCallProtocol
+	return e.Subtype == effects.SubtypeFunctionCallProtocol && len(e.ResolvedObjects) == 0
+}
+
+func isResolvedOnlyFunctionEffect(e effects.Effect) bool {
+	if len(e.Objects) != 0 || e.Group != effects.GroupProcedural {
+		return false
+	}
+	for _, resolved := range e.ResolvedObjects {
+		if resolved.Kind == effects.ResolvedObjectFunction {
+			return true
+		}
+	}
+	return false
+}
+
+func evaluateEffectResolvedOnly(e effects.Effect, applicable []*compiledStatementRule) effectDecision {
+	for _, r := range applicable {
+		if r.verb != VerbDeny || !ruleMatchesEffectMeta(r, e) {
+			continue
+		}
+		for _, resolved := range e.ResolvedObjects {
+			if !resolvedOnlyFunctionRuleMatches(r, resolved) {
+				continue
+			}
+			if !r.hasObjectSelectors() || r.functionMatches(resolved) {
+				return effectDecision{verb: verbDeny, rule: r}
+			}
+		}
+	}
+
+	var coverage []*compiledStatementRule
+	for _, r := range applicable {
+		if r.verb == VerbDeny || !ruleMatchesEffectMeta(r, e) {
+			continue
+		}
+		for _, resolved := range e.ResolvedObjects {
+			if !resolvedOnlyFunctionRuleMatches(r, resolved) {
+				continue
+			}
+			if !r.hasObjectSelectors() || r.functionMatches(resolved) {
+				coverage = append(coverage, r)
+				break
+			}
+		}
+	}
+	if len(coverage) == 0 {
+		return effectDecision{verb: verbImplicitDeny}
+	}
+	return foldCoverageRules(coverage)
+}
+
+func resolvedOnlyFunctionRuleMatches(r *compiledStatementRule, resolved effects.ResolvedObjectRef) bool {
+	return resolved.Kind == effects.ResolvedObjectFunction && r.schemaMatchesResolvedObject(resolved)
 }
 
 // evaluateEffectObjectless handles effects with no Objects (e.g. transaction
 // or session effects from BEGIN/COMMIT/SET). The §10.2 three-pass algorithm
 // is per-object; for object-less effects we apply a degenerate version:
 //
-//   - A deny rule whose effect-meta matches and whose `objects:` filter is
-//     empty (coversAllObjects) short-circuits to deny.
+//   - A deny rule whose effect-meta matches and has no object selector family
+//     short-circuits to deny.
 //   - Otherwise, the effect is covered by any non-deny rule whose effect-meta
-//     matches and whose `objects:` filter is empty. The most-restrictive verb
+//     matches and has no object selector family. The most-restrictive verb
 //     across covering rules wins.
 //   - If no rule covers the effect, fall back to implicit deny.
 //
-// A rule that constrains `objects:` (non-empty) cannot match an object-less
-// effect — there is no object to match against.
+// A rule that constrains any object selector family cannot match an object-less
+// effect.
 func evaluateEffectObjectless(e effects.Effect, applicable []*compiledStatementRule) effectDecision {
 	// Pass 1 — deny.
 	for _, r := range applicable {
@@ -249,8 +324,8 @@ func evaluateEffectObjectless(e effects.Effect, applicable []*compiledStatementR
 		return effectDecision{verb: verbDeny, rule: r}
 	}
 
-	// Pass 2 — coverage: any non-deny rule whose effect-meta matches and
-	// whose objects filter is empty.
+	// Pass 2 — coverage: any non-deny rule whose effect-meta matches and has no
+	// object selector family.
 	var (
 		coverage []*compiledStatementRule
 	)
@@ -271,6 +346,10 @@ func evaluateEffectObjectless(e effects.Effect, applicable []*compiledStatementR
 	}
 
 	// Pass 3 — most-restrictive verb across covering rules.
+	return foldCoverageRules(coverage)
+}
+
+func foldCoverageRules(coverage []*compiledStatementRule) effectDecision {
 	var (
 		best         internalVerb = verbAllow
 		primary      *compiledStatementRule
@@ -316,7 +395,7 @@ func evaluateEffectObjectless(e effects.Effect, applicable []*compiledStatementR
 }
 
 // ruleMatchesEffectMeta checks group/subtype/resolution for an effect.
-// Per-object matching (schema + object globs) is done by the caller.
+// Per-object selector matching is done by the caller.
 func ruleMatchesEffectMeta(r *compiledStatementRule, e effects.Effect) bool {
 	if _, ok := r.groups[e.Group]; !ok {
 		return false
