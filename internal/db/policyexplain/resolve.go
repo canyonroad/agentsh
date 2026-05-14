@@ -10,25 +10,34 @@ import (
 const catalogSessionStateChangedReason = "session_state_changed"
 
 type resolveContext struct {
-	fixture           CatalogFixture
-	unavailableReason string
+	fixture                     CatalogFixture
+	defaultSearchPath           []string
+	snapshotUnavailableReason   string
+	searchPathUnavailableReason string
+	localSearchPathActive       bool
+	localSearchPathBase         []string
+}
+
+func newResolveContext(fixture CatalogFixture) resolveContext {
+	fixture.SearchPath = append([]string(nil), fixture.SearchPath...)
+	return resolveContext{
+		fixture:           fixture,
+		defaultSearchPath: append([]string(nil), fixture.SearchPath...),
+	}
 }
 
 func resolveStatements(stmts []effects.ClassifiedStatement, fixture CatalogFixture) []effects.ClassifiedStatement {
 	out := make([]effects.ClassifiedStatement, len(stmts))
-	current := resolveContext{fixture: fixture}
+	current := newResolveContext(fixture)
 	for i := range stmts {
 		out[i] = resolveStatementWithContext(stmts[i], current)
-		if statementInvalidatesCatalogContext(stmts[i]) {
-			current.unavailableReason = catalogSessionStateChangedReason
-			current.fixture.SearchPath = nil
-		}
+		current = applyStatementCatalogContext(current, stmts[i])
 	}
 	return out
 }
 
 func resolveStatement(stmt effects.ClassifiedStatement, fixture CatalogFixture) effects.ClassifiedStatement {
-	return resolveStatementWithContext(stmt, resolveContext{fixture: fixture})
+	return resolveStatementWithContext(stmt, newResolveContext(fixture))
 }
 
 func resolveStatementWithContext(stmt effects.ClassifiedStatement, ctx resolveContext) effects.ClassifiedStatement {
@@ -41,7 +50,7 @@ func resolveStatementWithContext(stmt effects.ClassifiedStatement, ctx resolveCo
 }
 
 func resolveEffect(eff effects.Effect, fixture CatalogFixture) effects.Effect {
-	return resolveEffectWithContext(eff, resolveContext{fixture: fixture})
+	return resolveEffectWithContext(eff, newResolveContext(fixture))
 }
 
 func resolveEffectWithContext(eff effects.Effect, ctx resolveContext) effects.Effect {
@@ -49,6 +58,7 @@ func resolveEffectWithContext(eff effects.Effect, ctx resolveContext) effects.Ef
 	out.ResolvedObjects = nil
 	resolved := make([]effects.ResolvedObjectRef, 0, len(eff.Objects)+1)
 	allResolved := true
+	hasUnavailable := false
 	hasRelationObject := hasCatalogRelationObject(eff.Objects)
 	for _, obj := range eff.Objects {
 		if hasRelationObject && !isCatalogRelationObject(obj.Kind) {
@@ -57,6 +67,7 @@ func resolveEffectWithContext(eff effects.Effect, ctx resolveContext) effects.Ef
 		ref := resolveObjectWithContext(obj, ctx)
 		if ref.UnresolvedReason != "" {
 			allResolved = false
+			hasUnavailable = hasUnavailable || isCatalogUnavailableReason(ref.UnresolvedReason)
 		}
 		resolved = append(resolved, ref)
 	}
@@ -64,6 +75,7 @@ func resolveEffectWithContext(eff effects.Effect, ctx resolveContext) effects.Ef
 		ref := resolveFunctionOIDWithContext(*eff.FunctionOID, ctx)
 		if ref.UnresolvedReason != "" {
 			allResolved = false
+			hasUnavailable = hasUnavailable || isCatalogUnavailableReason(ref.UnresolvedReason)
 		}
 		resolved = append(resolved, ref)
 	}
@@ -71,7 +83,7 @@ func resolveEffectWithContext(eff effects.Effect, ctx resolveContext) effects.Ef
 		return out
 	}
 	out.ResolvedObjects = resolved
-	if ctx.unavailableReason != "" {
+	if hasUnavailable {
 		out.Resolution = effects.ResolutionCatalogUnavailable
 	} else if allResolved {
 		out.Resolution = effects.ResolutionCatalogResolved
@@ -95,13 +107,22 @@ func resolveObjectWithContext(obj effects.ObjectRef, ctx resolveContext) effects
 			UnresolvedReason: "unsupported",
 		}
 	}
-	if ctx.unavailableReason != "" {
+	if ctx.snapshotUnavailableReason != "" {
 		return effects.ResolvedObjectRef{
 			Source:           effects.ResolvedObjectSourceCatalog,
 			Kind:             effects.ResolvedObjectRelation,
 			Schema:           obj.Schema,
 			Name:             obj.Name,
-			UnresolvedReason: ctx.unavailableReason,
+			UnresolvedReason: ctx.snapshotUnavailableReason,
+		}
+	}
+	if obj.Schema == "" && ctx.searchPathUnavailableReason != "" {
+		return effects.ResolvedObjectRef{
+			Source:           effects.ResolvedObjectSourceCatalog,
+			Kind:             effects.ResolvedObjectRelation,
+			Schema:           obj.Schema,
+			Name:             obj.Name,
+			UnresolvedReason: ctx.searchPathUnavailableReason,
 		}
 	}
 	res := catalog.ResolveRelation(ctx.fixture.Snapshot, catalog.Name{Schema: obj.Schema, Name: obj.Name}, ctx.fixture.SearchPath)
@@ -144,16 +165,16 @@ func isCatalogRelationObject(kind effects.ObjectKind) bool {
 }
 
 func resolveFunctionOID(oid int32, fixture CatalogFixture) effects.ResolvedObjectRef {
-	return resolveFunctionOIDWithContext(oid, resolveContext{fixture: fixture})
+	return resolveFunctionOIDWithContext(oid, newResolveContext(fixture))
 }
 
 func resolveFunctionOIDWithContext(oid int32, ctx resolveContext) effects.ResolvedObjectRef {
-	if ctx.unavailableReason != "" {
+	if ctx.snapshotUnavailableReason != "" {
 		return effects.ResolvedObjectRef{
 			Source:           effects.ResolvedObjectSourceCatalog,
 			Kind:             effects.ResolvedObjectFunction,
 			OID:              uint32(oid),
-			UnresolvedReason: ctx.unavailableReason,
+			UnresolvedReason: ctx.snapshotUnavailableReason,
 		}
 	}
 	res := catalog.ResolveFunctionByOID(ctx.fixture.Snapshot, catalog.OID(uint32(oid)))
@@ -188,20 +209,6 @@ func functionVolatility(v catalog.FunctionVolatility) string {
 	default:
 		return ""
 	}
-}
-
-func statementInvalidatesCatalogContext(stmt effects.ClassifiedStatement) bool {
-	for _, eff := range stmt.Effects {
-		if effectInvalidatesCatalogContext(eff, stmt.RawVerb) {
-			return true
-		}
-	}
-	return false
-}
-
-func effectInvalidatesCatalogContext(eff effects.Effect, rawVerb string) bool {
-	searchPath, snapshot := effectCatalogRefreshNeeds(eff, rawVerb)
-	return searchPath || snapshot
 }
 
 func effectCatalogRefreshNeeds(eff effects.Effect, rawVerb string) (searchPath bool, snapshot bool) {
@@ -248,6 +255,117 @@ func effectCatalogRefreshNeeds(eff effects.Effect, rawVerb string) (searchPath b
 		return false, true
 	}
 	return false, false
+}
+
+func applyStatementCatalogContext(ctx resolveContext, stmt effects.ClassifiedStatement) resolveContext {
+	for _, eff := range stmt.Effects {
+		ctx = applyEffectCatalogContext(ctx, eff, stmt.RawVerb)
+	}
+	return ctx
+}
+
+func applyEffectCatalogContext(ctx resolveContext, eff effects.Effect, rawVerb string) resolveContext {
+	switch eff.Subtype {
+	case effects.SubtypeSetSearchPath:
+		if path, ok := parseSetSearchPathRawVerb(rawVerb); ok {
+			ctx.fixture.SearchPath = path
+			ctx.searchPathUnavailableReason = ""
+		} else {
+			ctx.searchPathUnavailableReason = catalogSessionStateChangedReason
+			ctx.fixture.SearchPath = nil
+		}
+		return ctx
+	case effects.SubtypeReset:
+		if effectHasAnyGUC(eff, "search_path") {
+			ctx.fixture.SearchPath = append([]string(nil), ctx.defaultSearchPath...)
+			ctx.searchPathUnavailableReason = ""
+		}
+		if effectHasAnyGUC(eff, "role", "session_authorization") {
+			ctx.searchPathUnavailableReason = catalogSessionStateChangedReason
+			ctx.fixture.SearchPath = nil
+		}
+		return ctx
+	case effects.SubtypeResetAll, effects.SubtypeDiscardAll:
+		ctx.fixture.SearchPath = append([]string(nil), ctx.defaultSearchPath...)
+		ctx.searchPathUnavailableReason = ""
+		ctx.localSearchPathActive = false
+		ctx.localSearchPathBase = nil
+		return ctx
+	case effects.SubtypeSetRole, effects.SubtypeSetSessionAuthorization:
+		ctx.searchPathUnavailableReason = catalogSessionStateChangedReason
+		ctx.fixture.SearchPath = nil
+		return ctx
+	case effects.SubtypeSetLocal:
+		if effectHasAnyGUC(eff, "search_path", "role", "session_authorization") && !ctx.localSearchPathActive {
+			ctx.localSearchPathActive = true
+			ctx.localSearchPathBase = append([]string(nil), ctx.fixture.SearchPath...)
+		}
+		if effectHasAnyGUC(eff, "search_path") {
+			if path, ok := parseSetLocalSearchPathRawVerb(rawVerb); ok {
+				ctx.fixture.SearchPath = path
+				ctx.searchPathUnavailableReason = ""
+			} else {
+				ctx.searchPathUnavailableReason = catalogSessionStateChangedReason
+				ctx.fixture.SearchPath = nil
+			}
+			return ctx
+		}
+		if effectHasAnyGUC(eff, "role", "session_authorization") {
+			ctx.searchPathUnavailableReason = catalogSessionStateChangedReason
+			ctx.fixture.SearchPath = nil
+			return ctx
+		}
+	}
+
+	if eff.Group == effects.GroupTransaction && transactionCanRestoreLocalSearchPath(rawVerb) {
+		if ctx.localSearchPathActive {
+			ctx.fixture.SearchPath = append([]string(nil), ctx.localSearchPathBase...)
+			ctx.searchPathUnavailableReason = ""
+			ctx.localSearchPathActive = false
+			ctx.localSearchPathBase = nil
+		}
+		return ctx
+	}
+
+	_, snapshot := effectCatalogRefreshNeeds(eff, rawVerb)
+	if snapshot {
+		ctx.snapshotUnavailableReason = catalogSessionStateChangedReason
+	}
+	return ctx
+}
+
+func parseSetSearchPathRawVerb(rawVerb string) ([]string, bool) {
+	const prefix = "SET_SEARCH_PATH="
+	if !strings.HasPrefix(rawVerb, prefix) {
+		return nil, false
+	}
+	return splitSearchPathRawVerb(rawVerb[len(prefix):]), true
+}
+
+func parseSetLocalSearchPathRawVerb(rawVerb string) ([]string, bool) {
+	const prefix = "SET_LOCAL=search_path:"
+	if !strings.HasPrefix(rawVerb, prefix) {
+		return nil, false
+	}
+	return splitSearchPathRawVerb(rawVerb[len(prefix):]), true
+}
+
+func splitSearchPathRawVerb(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		part = strings.Trim(part, `"`)
+		part = strings.ToLower(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func isCatalogUnavailableReason(reason string) bool {
+	return reason == catalogSessionStateChangedReason
 }
 
 func transactionCanRestoreLocalSearchPath(rawVerb string) bool {

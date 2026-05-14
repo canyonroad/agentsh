@@ -233,6 +233,20 @@ func (rs *RuleSet) AllStatementRules() []StatementRule {
 	return out
 }
 
+// UsesCanonicalSelectors reports whether any statement rule applicable to svc
+// constrains catalog-backed relation or function selectors.
+func (rs *RuleSet) UsesCanonicalSelectors(svc ServiceID) bool {
+	if rs == nil {
+		return false
+	}
+	for _, r := range rs.statementRulesFor(svc) {
+		if len(r.relations) > 0 || len(r.functions) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Unavoidability returns the policies.db.unavoidability mode. Returns
 // UnavoidabilityOff when rs is nil so startup code holding a not-yet-loaded
 // *RuleSet does not panic.

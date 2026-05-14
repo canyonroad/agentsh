@@ -126,6 +126,43 @@ database_rules:
 	}
 }
 
+func TestEvaluate_FunctionSelectorCoversMixedResolvedFunctionSlot(t *testing.T) {
+	rs := loadRules(t, `version: 1
+name: t
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: x:1, tls_mode: terminate_reissue}
+database_rules:
+  - {name: mixed-canonical, db_service: appdb, operations: [CREATE], relations: ["public.users"], functions: ["public.safe_fn(integer)"], match_object_resolution: catalog_resolved, decision: allow}
+`)
+	stmt := effects.ClassifiedStatement{Effects: []effects.Effect{{
+		Group:      effects.GroupSchemaCreate,
+		Resolution: effects.ResolutionCatalogResolved,
+		Objects: []effects.ObjectRef{
+			{Kind: effects.ObjectFunction, Name: "safe_fn"},
+			{Kind: effects.ObjectTable, Name: "users"},
+		},
+		ResolvedObjects: []effects.ResolvedObjectRef{{
+			Source: effects.ResolvedObjectSourceCatalog,
+			Kind:   effects.ResolvedObjectRelation,
+			OID:    16384,
+			Schema: "public",
+			Name:   "users",
+		}, {
+			Source:               effects.ResolvedObjectSourceCatalog,
+			Kind:                 effects.ResolvedObjectFunction,
+			OID:                  2200,
+			Schema:               "public",
+			Name:                 "safe_fn",
+			FunctionIdentityArgs: "integer",
+		}},
+	}}}
+
+	d := Evaluate(stmt, rs, "appdb")
+	if d.Verb != VerbAllow || d.RuleName != "mixed-canonical" {
+		t.Fatalf("decision = %+v, want allow by mixed-canonical", d)
+	}
+}
+
 func TestEvaluate_FunctionSelectorCoversResolvedFunction(t *testing.T) {
 	rs := loadRules(t, `version: 1
 name: t

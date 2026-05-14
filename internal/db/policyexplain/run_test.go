@@ -112,6 +112,33 @@ database_rules:
 	}
 }
 
+func TestRun_WithoutCatalogFixtureWarnsForCanonicalSelectors(t *testing.T) {
+	rs := loadRuleSetForExplain(t, `version: 1
+name: t
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: x:1, tls_mode: terminate_reissue}
+database_rules:
+  - {name: canonical-read, db_service: appdb, operations: [READ], relations: ["public.users"], match_object_resolution: catalog_resolved, decision: allow}
+`)
+	report, err := Run(rs, nil, Options{
+		SQL:        "SELECT * FROM users",
+		Service:    "appdb",
+		Dialect:    "postgres",
+		SearchPath: []string{"public"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.CatalogSource != "none" {
+		t.Fatalf("CatalogSource = %q, want none", report.CatalogSource)
+	}
+	dec := report.Statements[0].Decision
+	if dec.Verb != "deny" || dec.RuleName != "" {
+		t.Fatalf("decision = %+v, want implicit deny without fixture resolution", dec)
+	}
+	assertExplainWarning(t, report.Warnings, "catalog_fixture_missing_for_canonical_selector")
+}
+
 func TestResolveEffect_MixedRelationSkipsUnsupportedSlotsAndPolicyStillDenies(t *testing.T) {
 	fixture := catalogFixtureForUsers()
 	stmt := effects.ClassifiedStatement{Effects: []effects.Effect{{
@@ -181,13 +208,13 @@ database_rules:
 	}
 }
 
-func TestResolveStatements_InvalidatesFixtureAfterSessionStateChange(t *testing.T) {
+func TestResolveStatements_InvalidatesFixtureAfterRoleChange(t *testing.T) {
 	stmts := []effects.ClassifiedStatement{{
-		RawVerb: "SET_SEARCH_PATH=app",
+		RawVerb: "SET_ROLE=app",
 		Effects: []effects.Effect{{
 			Group:   effects.GroupSession,
-			Subtype: effects.SubtypeSetSearchPath,
-			Objects: []effects.ObjectRef{{Kind: effects.ObjectGUC, Name: "search_path"}},
+			Subtype: effects.SubtypeSetRole,
+			Objects: []effects.ObjectRef{{Kind: effects.ObjectRole, Name: "app"}},
 		}},
 	}, {
 		RawVerb: "SELECT",
@@ -217,6 +244,58 @@ database_rules:
 	ex := dbpolicy.ExplainStatement(got[1], rs, "appdb")
 	if ex.Decision.Verb != dbpolicy.VerbDeny || ex.Decision.RuleName != "" {
 		t.Fatalf("decision = %+v, want canonical rule not to allow stale fixture resolution", ex.Decision)
+	}
+}
+
+func TestResolveStatements_SetSearchPathUpdatesFixtureSearchPath(t *testing.T) {
+	stmts := []effects.ClassifiedStatement{{
+		RawVerb: "SET_SEARCH_PATH=audit,public",
+		Effects: []effects.Effect{{
+			Group:   effects.GroupSession,
+			Subtype: effects.SubtypeSetSearchPath,
+			Objects: []effects.ObjectRef{{Kind: effects.ObjectGUC, Name: "search_path"}},
+		}},
+	}, {
+		RawVerb: "SELECT",
+		Effects: []effects.Effect{{
+			Group:      effects.GroupRead,
+			Resolution: effects.ResolutionUnqualified,
+			Objects:    []effects.ObjectRef{{Kind: effects.ObjectTable, Name: "users"}},
+		}},
+	}}
+
+	got := resolveStatements(stmts, catalogFixtureForDuplicateUsers())
+	eff := got[1].Effects[0]
+	if eff.Resolution != effects.ResolutionCatalogResolved {
+		t.Fatalf("second statement resolution = %v, want catalog_resolved", eff.Resolution)
+	}
+	if len(eff.ResolvedObjects) != 1 || eff.ResolvedObjects[0].CanonicalName() != "audit.users" {
+		t.Fatalf("second statement resolved objects = %+v, want audit.users", eff.ResolvedObjects)
+	}
+}
+
+func TestResolveStatements_TransactionBoundaryWithoutLocalSearchPathKeepsFixture(t *testing.T) {
+	stmts := []effects.ClassifiedStatement{{
+		RawVerb: "COMMIT",
+		Effects: []effects.Effect{{
+			Group: effects.GroupTransaction,
+		}},
+	}, {
+		RawVerb: "SELECT",
+		Effects: []effects.Effect{{
+			Group:      effects.GroupRead,
+			Resolution: effects.ResolutionUnqualified,
+			Objects:    []effects.ObjectRef{{Kind: effects.ObjectTable, Name: "users"}},
+		}},
+	}}
+
+	got := resolveStatements(stmts, catalogFixtureForUsers())
+	eff := got[1].Effects[0]
+	if eff.Resolution != effects.ResolutionCatalogResolved {
+		t.Fatalf("second statement resolution = %v, want catalog_resolved", eff.Resolution)
+	}
+	if len(eff.ResolvedObjects) != 1 || eff.ResolvedObjects[0].CanonicalName() != "public.users" {
+		t.Fatalf("second statement resolved objects = %+v, want public.users", eff.ResolvedObjects)
 	}
 }
 
@@ -258,6 +337,16 @@ func loadRuleSetForExplain(t *testing.T, src string) *dbpolicy.RuleSet {
 		t.Fatalf("Decode: %v", err)
 	}
 	return rs
+}
+
+func assertExplainWarning(t *testing.T, warns []WarningReport, code string) {
+	t.Helper()
+	for _, w := range warns {
+		if w.Code == code {
+			return
+		}
+	}
+	t.Fatalf("warnings = %+v, want code %q", warns, code)
 }
 
 func writeUsersFixture(t *testing.T) string {

@@ -44,6 +44,12 @@ func Run(rs *dbpolicy.RuleSet, warns []dbpolicy.Warning, opts Options) (Report, 
 		CatalogSource: catalogSource,
 		Warnings:      warningReports(warns),
 	}
+	if catalogSource == "none" && rs.UsesCanonicalSelectors(opts.Service) {
+		report.Warnings = append(report.Warnings, WarningReport{
+			Code:    "catalog_fixture_missing_for_canonical_selector",
+			Message: "catalog fixture not supplied; canonical relation and function selectors cannot match offline classification",
+		})
+	}
 	for i, stmt := range stmts {
 		report.Statements = append(report.Statements, statementReport(i, stmt, dbpolicy.ExplainStatement(stmt, rs, opts.Service)))
 	}
