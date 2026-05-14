@@ -25,7 +25,7 @@ func (pc *proxyConn) handleExtendedFrame(ctx context.Context, msg pgproto3.Front
 		return pc.handleUnsupportedFrame(ctx, msg)
 	}
 	wireView := wireCacheView{c: pc.wireCache}
-	parser := pc.srv.classifierFor(pc.svc.Dialect)
+	parser := pc.resolvingParser(pc.svc.Dialect)
 	rs := pc.srv.policy()
 	opts := classifierOptionsFromPolicy(rs)
 	next, actions := statemachine.TransitionWithParser(

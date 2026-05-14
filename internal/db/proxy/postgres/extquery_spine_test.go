@@ -300,3 +300,48 @@ func TestExtquery_Spine_Query_InTx_RollbackThenContinue(t *testing.T) {
 	case <-time.After(time.Second):
 	}
 }
+
+func TestExtquery_Parse_CatalogResolvedPolicyAllow(t *testing.T) {
+	pc, clientFE, _, _ := extqueryFixture(t, `version: 1
+name: test
+db_services:
+  test:
+    family: postgres
+    dialect: postgres
+    upstream: 127.0.0.1:5432
+    tls_mode: terminate_reissue
+database_rules:
+  - name: allow-catalog-read
+    db_service: test
+    operations: [read]
+    objects: [users]
+    match_object_resolution: catalog_resolved
+    decision: allow
+`)
+	pc.state.catalog = testCatalogContext()
+
+	loopErr := make(chan error, 1)
+	go func() { loopErr <- pc.simpleQueryLoop(context.Background()) }()
+
+	clientFE.Send(&pgproto3.Parse{Name: "s1", Query: "SELECT * FROM users"})
+	if err := clientFE.Flush(); err != nil {
+		t.Fatalf("client Flush: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, ok := pc.wireCache.Get("s1"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("wire cache missing s1 after catalog-resolved allow")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	_ = pc.conn.Close()
+	select {
+	case <-loopErr:
+	case <-time.After(time.Second):
+	}
+}

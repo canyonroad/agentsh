@@ -321,3 +321,79 @@ func TestFunctionCall_OptIn_Deny(t *testing.T) {
 	}
 	_ = policy.VerbDeny // verify import used
 }
+
+func TestFunctionCall_EventIncludesResolvedFunction(t *testing.T) {
+	pc, clientFE, sink := newSimpleQueryFixture(t)
+	pc.state.smState.LastUpstreamRFQ = 'I'
+	pc.srv.SetPolicy(loadRuleSet(t, funcCallPolicyYAML(true)))
+	pc.state.catalog = testCatalogContext()
+
+	upClient, upServer := net.Pipe()
+	t.Cleanup(func() { _ = upClient.Close(); _ = upServer.Close() })
+	pc.state.upstream = upServer
+	pc.state.upstreamFE = pgproto3.NewFrontend(upServer, upServer)
+	go func() {
+		be := pgproto3.NewBackend(upClient, upClient)
+		if _, err := be.Receive(); err != nil {
+			return
+		}
+		be.Send(&pgproto3.FunctionCallResponse{Result: []byte{0x01}})
+		be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		_ = be.Flush()
+	}()
+
+	oid := uint32(99)
+	result := make(chan error, 1)
+	go func() {
+		result <- pc.handleFunctionCall(context.Background(), &pgproto3.FunctionCall{Function: oid})
+	}()
+
+	first := receiveFunctionCallClientFrame(t, clientFE)
+	if _, ok := first.(*pgproto3.FunctionCallResponse); !ok {
+		t.Fatalf("first client frame = %T want *pgproto3.FunctionCallResponse", first)
+	}
+	second := receiveFunctionCallClientFrame(t, clientFE)
+	if _, ok := second.(*pgproto3.ReadyForQuery); !ok {
+		t.Fatalf("second client frame = %T want *pgproto3.ReadyForQuery", second)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("handleFunctionCall: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleFunctionCall did not return")
+	}
+
+	evs := sink.DrainStatements()
+	if len(evs) != 1 {
+		t.Fatalf("events = %d", len(evs))
+	}
+	resolved := evs[0].Effects[0].ResolvedObjects
+	if len(resolved) != 1 || resolved[0].Name != "normalize_email" {
+		t.Fatalf("resolved function = %+v", resolved)
+	}
+}
+
+func receiveFunctionCallClientFrame(t *testing.T, fe *pgproto3.Frontend) pgproto3.BackendMessage {
+	t.Helper()
+	type receiveResult struct {
+		msg pgproto3.BackendMessage
+		err error
+	}
+	got := make(chan receiveResult, 1)
+	go func() {
+		msg, err := fe.Receive()
+		got <- receiveResult{msg: msg, err: err}
+	}()
+	select {
+	case r := <-got:
+		if r.err != nil {
+			t.Fatalf("client recv: %v", r.err)
+		}
+		return r.msg
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for client frame")
+		return nil
+	}
+}

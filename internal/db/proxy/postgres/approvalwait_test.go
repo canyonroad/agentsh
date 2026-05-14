@@ -13,6 +13,7 @@ import (
 	"github.com/agentsh/agentsh/internal/db/effects"
 	"github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/db/policy"
+	"github.com/agentsh/agentsh/internal/db/proxy/postgres/statemachine"
 	"github.com/agentsh/agentsh/internal/db/service"
 )
 
@@ -183,4 +184,29 @@ func waitStatementEvents(t *testing.T, sink *events.SyncSink, want int) []events
 	}
 	t.Fatalf("timed out waiting for %d statement events", want)
 	return nil
+}
+
+func TestEmitApprovalFrameEventIncludesResolvedMetadata(t *testing.T) {
+	pc, _, sink := newSimpleQueryFixture(t)
+	pc.state.catalog = testCatalogContext()
+	stmt := effects.ClassifiedStatement{Effects: []effects.Effect{{
+		Group:      effects.GroupRead,
+		Resolution: effects.ResolutionCatalogResolved,
+		Objects:    []effects.ObjectRef{{Kind: effects.ObjectTable, Name: "users"}},
+		ResolvedObjects: []effects.ResolvedObjectRef{{
+			Source: effects.ResolvedObjectSourceCatalog,
+			Kind:   effects.ResolvedObjectRelation,
+			OID:    10,
+			Schema: "public",
+			Name:   "users",
+		}},
+	}}}
+	pc.emitApprovalFrameEvent(context.Background(), &pgproto3.Parse{Query: "SELECT * FROM users"}, statemachine.ActionApproverWait{
+		Stmt: stmt,
+		Rule: policy.StatementRule{Name: "approve-read"},
+	}, policy.Decision{Verb: policy.VerbApprove, RuleKind: policy.RuleKindStatement, RuleName: "approve-read"}, "none")
+	evs := sink.DrainStatements()
+	if len(evs) != 1 || evs[0].ObjectResolution != "catalog_resolved" {
+		t.Fatalf("events = %+v", evs)
+	}
 }

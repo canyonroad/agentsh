@@ -40,6 +40,7 @@ func (pc *proxyConn) handleFunctionCall(ctx context.Context, msg *pgproto3.Funct
 			FunctionOID: &oid,
 		}},
 	}
+	cs = resolveStatementCatalog(cs, pc.state.catalog)
 	d := policy.Evaluate(cs, rs, policy.ServiceID(pc.svc.Name))
 	if d.Verb == policy.VerbApprove {
 		rule := lookupStatementRuleByName(rs, d.RuleName)
