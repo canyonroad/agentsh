@@ -695,8 +695,10 @@ database_rules:
 | `db_service` | no | If omitted, matches across all services. |
 | `db_family` | no | |
 | `db_dialect` | no | |
-| `schemas` | no | Glob. Matches `objects[].schema` of any object in the effect. |
+| `schemas` | no | Glob. Matches `objects[].schema` for syntactic refs and successful `resolved_objects[].schema` for catalog-resolved refs. |
 | `objects` | no | Glob list. Matches `objects[].name` (or kind-specific structured field per §6.4) of any object in the effect. A rule with `objects: ["a", "b"]` covers an object whose name globs against `a` or `b`. Coverage is per-object: with effect objects `{a, c}`, this rule covers `a` only. **Syntactic match only**. For `session` operations, matches GUC name (lowercased). |
+| `relations` | no | Glob list. Matches catalog-resolved relation canonical names formatted as `schema.name`. A selector only matches when the effect contains a successful catalog `resolved_objects[]` relation. Recommended with `match_object_resolution: catalog_resolved`. |
+| `functions` | no | Glob list. Matches catalog-resolved function identities formatted as `schema.name(identity_args)`. Use `schema.name(*)` to match all overloads for a function name. Recommended with `match_object_resolution: catalog_resolved`. |
 | `operations` | yes | Group names or aliases. Rule matches an effect whose `group` is in the list. |
 | `subtypes` | no | If specified, rule matches only effects whose `operation_subtype` is in the list. |
 | `match_object_resolution` | no | One of the resolution tags or `*`. Matches against the effect's per-effect resolution tag. |
@@ -704,6 +706,18 @@ database_rules:
 | `message` | no | Template with `{{.Operation}}, {{.Subtype}}, {{.Schema}}, {{.Object}}, {{.Verb}}, {{.StatementPreview}}`. |
 | `timeout` | only for `approve` | Default 60 seconds. Sized to be safe inside open transactions (§14.5). Operators with long-form approval workflows opt up explicitly per rule. |
 | `acknowledge_audit_on_dangerous` | no | Required `true` to silence the load-time warning emitted when `decision: audit` is paired with operations of risk tier ≥ high (§9.4, R13). |
+
+`objects` remains syntactic-only. `relations` and `functions` are catalog selectors and do not match unresolved or unavailable catalog metadata. Strict object coverage still applies: every object slot in an effect must be covered by an allow/audit/approve rule, and any matching deny rule still wins.
+
+### DB policy explain
+
+Operators can inspect DB policy behavior offline:
+
+```bash
+agentsh policy db explain ./policy.yaml --service appdb --sql 'SELECT * FROM users'
+```
+
+The command reports classifier effects, syntactic objects, catalog-resolved objects when a fixture is supplied, per-object coverage, policy warnings, and the final decision. Catalog fixtures are YAML snapshots used for local debugging; they are not live DB connections and are not used by the proxy runtime.
 
 ### 9.3 Connection rules (`database_connection_rules`)
 

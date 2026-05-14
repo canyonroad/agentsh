@@ -98,6 +98,8 @@ type StatementRule struct {
 	DBDialect                   string        `yaml:"db_dialect,omitempty"`
 	Schemas                     []string      `yaml:"schemas,omitempty"`
 	Objects                     []string      `yaml:"objects,omitempty"`
+	Relations                   []string      `yaml:"relations,omitempty"`
+	Functions                   []string      `yaml:"functions,omitempty"`
 	Operations                  []string      `yaml:"operations"`
 	Subtypes                    []string      `yaml:"subtypes,omitempty"`
 	MatchObjectResolution       string        `yaml:"match_object_resolution,omitempty"`
@@ -229,6 +231,20 @@ func (rs *RuleSet) AllStatementRules() []StatementRule {
 		}
 	}
 	return out
+}
+
+// UsesCanonicalSelectors reports whether any statement rule applicable to svc
+// constrains catalog-backed relation or function selectors.
+func (rs *RuleSet) UsesCanonicalSelectors(svc ServiceID) bool {
+	if rs == nil {
+		return false
+	}
+	for _, r := range rs.statementRulesFor(svc) {
+		if len(r.relations) > 0 || len(r.functions) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Unavoidability returns the policies.db.unavoidability mode. Returns

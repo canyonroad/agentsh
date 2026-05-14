@@ -100,8 +100,8 @@ func TestValidate_ConnPassthroughFieldUnavailable(t *testing.T) {
 func TestValidate_RuleDecisionRedirect(t *testing.T) {
 	stmt := []*StatementRule{{Name: "r", Operations: []string{"READ"}, Decision: "redirect"}}
 	_, err := helperValidate(t, nil, stmt, nil)
-	if err == nil || !strings.Contains(err.Error(), "rule_decision_redirect") {
-		t.Fatalf("want rule_decision_redirect, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "redirect_not_supported_until_plan_11") {
+		t.Fatalf("want redirect_not_supported_until_plan_11, got %v", err)
 	}
 }
 
@@ -191,6 +191,84 @@ func TestValidate_WarnAuditOnDangerous_SilencedByAcknowledgement(t *testing.T) {
 			t.Errorf("acknowledge_audit_on_dangerous: true should silence the warning, got %+v", w)
 		}
 	}
+}
+
+func TestValidate_CanonicalSelectorWarnings(t *testing.T) {
+	src := `version: 1
+name: t
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+database_rules:
+  - name: canonical-without-resolution
+    db_service: appdb
+    operations: [READ]
+    relations: ["public.users"]
+    decision: allow
+  - name: selector-on-transaction
+    db_service: appdb
+    operations: [transaction]
+    relations: ["public.users"]
+    decision: allow
+`
+	_, warns, err := loadDB(t, src)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	assertWarningCode(t, warns, "canonical_selector_without_resolution_guard")
+	assertWarningCode(t, warns, "selector_on_objectless_operation")
+}
+
+func TestValidate_CanonicalSelectorWithoutCatalogServiceWarning(t *testing.T) {
+	src := `version: 1
+name: t
+db_services:
+  legacy:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: passthrough
+database_rules:
+  - name: canonical-relation-wide
+    operations: [READ]
+    relations: ["public.users"]
+    match_object_resolution: catalog_resolved
+    decision: allow
+  - name: canonical-function-wide
+    operations: [READ]
+    functions: ["public.safe_fn(integer)"]
+    match_object_resolution: catalog_resolved
+    decision: allow
+`
+	_, warns, err := loadDB(t, src)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	assertWarning(t, warns, "canonical_selector_without_catalog_service", "canonical-relation-wide", "relations")
+	assertWarning(t, warns, "canonical_selector_without_catalog_service", "canonical-function-wide", "functions")
+}
+
+func assertWarningCode(t *testing.T, warns []Warning, code string) {
+	t.Helper()
+	for _, w := range warns {
+		if w.Code == code {
+			return
+		}
+	}
+	t.Fatalf("warning %q not found in %+v", code, warns)
+}
+
+func assertWarning(t *testing.T, warns []Warning, code, rule, field string) {
+	t.Helper()
+	for _, w := range warns {
+		if w.Code == code && w.Rule == rule && w.Field == field {
+			return
+		}
+	}
+	t.Fatalf("warning code=%q rule=%q field=%q not found in %+v", code, rule, field, warns)
 }
 
 func TestValidate_WarnApproveOnReplication(t *testing.T) {

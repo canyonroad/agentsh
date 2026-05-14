@@ -20,7 +20,9 @@ type compiledStatementRule struct {
 	subtypes      map[effects.Subtype]struct{} // empty = all subtypes match
 	resolution    resolutionMatcher
 	schemas       []glob.Glob // empty = all schemas match
-	objects       []glob.Glob // empty = all objects match
+	objects       []glob.Glob // syntactic object selectors
+	relations     []glob.Glob // resolved relation canonical names
+	functions     []glob.Glob // resolved function identity names
 	timeout       time.Duration
 	msgTemplate   *template.Template // nil = no message rendering
 	serviceFilter serviceFilter
@@ -170,6 +172,20 @@ func compileStatementRule(r *StatementRule) (*compiledStatementRule, error) {
 		}
 		c.objects = append(c.objects, g)
 	}
+	for _, pat := range r.Relations {
+		g, err := glob.Compile(pat)
+		if err != nil {
+			return nil, fmt.Errorf("glob_compile: rule %q relations %q: %w", r.Name, pat, err)
+		}
+		c.relations = append(c.relations, g)
+	}
+	for _, pat := range r.Functions {
+		g, err := glob.Compile(pat)
+		if err != nil {
+			return nil, fmt.Errorf("glob_compile: rule %q functions %q: %w", r.Name, pat, err)
+		}
+		c.functions = append(c.functions, g)
+	}
 
 	if strings.TrimSpace(r.Message) != "" {
 		tmpl, err := template.New("msg").Parse(r.Message)
@@ -187,7 +203,11 @@ func compileStatementRule(r *StatementRule) (*compiledStatementRule, error) {
 	return c, nil
 }
 
-func (c *compiledStatementRule) coversAllObjects() bool { return len(c.objects) == 0 }
+func (c *compiledStatementRule) coversAllObjects() bool { return !c.hasObjectSelectors() }
+
+func (c *compiledStatementRule) hasObjectSelectors() bool {
+	return len(c.objects) > 0 || len(c.relations) > 0 || len(c.functions) > 0
+}
 
 func (c *compiledStatementRule) matchesResolution(r effects.Resolution) bool {
 	return c.resolution.matches(r)
@@ -195,7 +215,8 @@ func (c *compiledStatementRule) matchesResolution(r effects.Resolution) bool {
 
 // objectMatches reports whether any of the rule's `objects` globs matches
 // the given ObjectRef per the kind→field table in this plan's File Structure
-// section. Returns true unconditionally when c.objects is empty.
+// section. Returns true unconditionally only when no object selector family is
+// constrained.
 func (c *compiledStatementRule) objectMatches(o effects.ObjectRef) bool {
 	if c.coversAllObjects() {
 		return true
@@ -209,22 +230,75 @@ func (c *compiledStatementRule) objectMatches(o effects.ObjectRef) bool {
 	return false
 }
 
-// schemaMatches reports whether the schemas: clause is absent or any glob in
-// it matches the object's schema. Non-relation objects (no schema) are treated
-// as covered when schemas: is absent and uncovered when it is present.
-func (c *compiledStatementRule) schemaMatches(o effects.ObjectRef) bool {
+func (c *compiledStatementRule) schemaMatchesObjectSlot(o effects.ObjectRef, resolved effects.ResolvedObjectRef, hasResolved bool) bool {
 	if len(c.schemas) == 0 {
 		return true
 	}
-	if o.Schema == "" {
-		return false
-	}
 	for _, g := range c.schemas {
-		if g.Match(o.Schema) {
+		if o.Schema != "" && g.Match(o.Schema) {
+			return true
+		}
+		if hasResolved && resolved.Schema != "" && g.Match(resolved.Schema) {
 			return true
 		}
 	}
 	return false
+}
+
+func (c *compiledStatementRule) schemaMatchesResolvedObject(resolved effects.ResolvedObjectRef) bool {
+	if len(c.schemas) == 0 {
+		return true
+	}
+	if resolved.Schema == "" {
+		return false
+	}
+	for _, g := range c.schemas {
+		if g.Match(resolved.Schema) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *compiledStatementRule) relationMatches(r effects.ResolvedObjectRef) bool {
+	if len(c.relations) == 0 {
+		return false
+	}
+	if r.Source != effects.ResolvedObjectSourceCatalog ||
+		r.Kind != effects.ResolvedObjectRelation ||
+		r.UnresolvedReason != "" {
+		return false
+	}
+	target := r.CanonicalName()
+	for _, g := range c.relations {
+		if g.Match(target) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *compiledStatementRule) functionMatches(r effects.ResolvedObjectRef) bool {
+	if len(c.functions) == 0 {
+		return false
+	}
+	if r.Source != effects.ResolvedObjectSourceCatalog ||
+		r.Kind != effects.ResolvedObjectFunction ||
+		r.UnresolvedReason != "" {
+		return false
+	}
+	target := resolvedFunctionIdentity(r)
+	for _, g := range c.functions {
+		if g.Match(target) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolvedFunctionIdentity(r effects.ResolvedObjectRef) string {
+	name := r.CanonicalName()
+	return name + "(" + r.FunctionIdentityArgs + ")"
 }
 
 // renderMessage applies the rule's message template, or returns the raw

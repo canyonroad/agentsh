@@ -24,6 +24,20 @@ database_rules:
     operations: [READ, UPDATE]
     decision: allow
 
+  - name: app-read-users-canonical
+    db_service: appdb
+    operations: [READ]
+    relations: ["public.users"]
+    match_object_resolution: catalog_resolved
+    decision: allow
+
+  - name: app-safe-functions-canonical
+    db_service: appdb
+    operations: [procedural]
+    functions: ["public.safe_fn(*)"]
+    match_object_resolution: catalog_resolved
+    decision: approve
+
   - name: app-allow-tx-control
     db_service: appdb
     operations: [transaction]

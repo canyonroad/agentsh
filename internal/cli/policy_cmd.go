@@ -1,15 +1,19 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	dbpolicy "github.com/agentsh/agentsh/internal/db/policy"
+	"github.com/agentsh/agentsh/internal/db/policyexplain"
 	"github.com/agentsh/agentsh/internal/policy"
-	"github.com/agentsh/agentsh/internal/policygen"
 	"github.com/agentsh/agentsh/internal/policy/signing"
+	"github.com/agentsh/agentsh/internal/policygen"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/spf13/cobra"
 )
@@ -92,6 +96,11 @@ func newPolicyCmd() *cobra.Command {
 			}
 			if _, err := policy.NewEngine(po, false, true); err != nil {
 				return err
+			}
+			if _, warns, err := dbpolicy.Decode(po); err != nil {
+				return err
+			} else {
+				printDBPolicyWarnings(cmd, warns)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "ok")
 			return nil
@@ -275,6 +284,8 @@ Examples:
 	verifyCmd.Flags().StringVar(&verifyKeyDir, "key-dir", "", "Path to trust store directory (required)")
 	cmd.AddCommand(verifyCmd)
 
+	cmd.AddCommand(newPolicyDBCmd(configPath, dir))
+
 	return cmd
 }
 
@@ -294,25 +305,25 @@ func resolvePolicyDir(configPath, override string) (string, error) {
 }
 
 func resolvePolicyPath(dir, nameOrPath string) (string, error) {
-    if nameOrPath == "" {
-        return "", fmt.Errorf("policy name/path is required")
-    }
-    if strings.ContainsRune(nameOrPath, os.PathSeparator) || strings.HasSuffix(nameOrPath, ".yml") || strings.HasSuffix(nameOrPath, ".yaml") {
-        p := nameOrPath
-        if !filepath.IsAbs(p) {
-            p = filepath.Clean(p)
-        }
-        if _, err := os.Stat(p); err == nil {
-            return p, nil
-        }
-        // If it's a relative path inside dir, try that.
-        p2 := filepath.Join(dir, nameOrPath)
-        if _, err := os.Stat(p2); err == nil {
-            return p2, nil
-        }
-    }
-    // CLI resolution remains permissive for direct paths; allowlist enforcement is server-side.
-    return policy.ResolvePolicyPath(dir, nameOrPath)
+	if nameOrPath == "" {
+		return "", fmt.Errorf("policy name/path is required")
+	}
+	if strings.ContainsRune(nameOrPath, os.PathSeparator) || strings.HasSuffix(nameOrPath, ".yml") || strings.HasSuffix(nameOrPath, ".yaml") {
+		p := nameOrPath
+		if !filepath.IsAbs(p) {
+			p = filepath.Clean(p)
+		}
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+		// If it's a relative path inside dir, try that.
+		p2 := filepath.Join(dir, nameOrPath)
+		if _, err := os.Stat(p2); err == nil {
+			return p2, nil
+		}
+	}
+	// CLI resolution remains permissive for direct paths; allowlist enforcement is server-side.
+	return policy.ResolvePolicyPath(dir, nameOrPath)
 }
 
 func truncateSessionID(id string) string {
@@ -320,4 +331,152 @@ func truncateSessionID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+func newPolicyDBCmd(configPath, dir string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "db",
+		Short: "Inspect database policy behavior",
+	}
+	cmd.AddCommand(newPolicyDBExplainCmd(configPath, dir))
+	return cmd
+}
+
+func newPolicyDBExplainCmd(configPath, dir string) *cobra.Command {
+	var serviceName string
+	var dialect string
+	var searchPath string
+	var tempTables string
+	var catalogFixture string
+	var sqlFlag string
+	var output string
+
+	cmd := &cobra.Command{
+		Use:   "explain POLICY_OR_PATH",
+		Short: "Explain DB policy classification, resolution, coverage, and decision",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(serviceName) == "" {
+				return fmt.Errorf("--service is required")
+			}
+			pdir, err := resolvePolicyDir(configPath, dir)
+			if err != nil {
+				return err
+			}
+			policyPath, err := resolvePolicyPath(pdir, args[0])
+			if err != nil {
+				return err
+			}
+			rootPolicy, err := policy.LoadFromFile(policyPath)
+			if err != nil {
+				return err
+			}
+			rs, warns, err := dbpolicy.Decode(rootPolicy)
+			if err != nil {
+				return err
+			}
+			sqlText := sqlFlag
+			if sqlText == "" {
+				raw, err := io.ReadAll(cmd.InOrStdin())
+				if err != nil {
+					return err
+				}
+				sqlText = string(raw)
+			}
+			if strings.TrimSpace(sqlText) == "" {
+				return fmt.Errorf("SQL is required via --sql or stdin")
+			}
+			if dialect == "" {
+				if svc, ok := rs.Service(dbpolicy.ServiceID(serviceName)); ok && svc.Dialect != "" {
+					dialect = svc.Dialect
+				} else {
+					dialect = "postgres"
+				}
+			}
+			report, err := policyexplain.Run(rs, warns, policyexplain.Options{
+				SQL:            sqlText,
+				Service:        dbpolicy.ServiceID(serviceName),
+				Dialect:        dialect,
+				SearchPath:     splitCSV(searchPath),
+				TempTables:     splitCSV(tempTables),
+				CatalogFixture: catalogFixture,
+			})
+			if err != nil {
+				return err
+			}
+			switch output {
+			case "", "json":
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(report)
+			case "text":
+				return printDBExplainText(cmd, report)
+			default:
+				return fmt.Errorf("--output must be json or text")
+			}
+		},
+	}
+	cmd.Flags().StringVar(&serviceName, "service", "", "DB service name (required)")
+	cmd.Flags().StringVar(&dialect, "dialect", "", "postgres|aurora_postgres|cockroachdb|redshift")
+	cmd.Flags().StringVar(&searchPath, "search-path", "", "comma-separated search path")
+	cmd.Flags().StringVar(&tempTables, "temp-tables", "", "comma-separated temp table names")
+	cmd.Flags().StringVar(&catalogFixture, "catalog-fixture", "", "YAML catalog fixture path")
+	cmd.Flags().StringVar(&sqlFlag, "sql", "", "SQL statement text (default: stdin)")
+	cmd.Flags().StringVar(&output, "output", "json", "json|text")
+	return cmd
+}
+
+func splitCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		p := strings.TrimSpace(part)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func printDBExplainText(cmd *cobra.Command, report policyexplain.Report) error {
+	for _, stmt := range report.Statements {
+		fmt.Fprintf(cmd.OutOrStdout(), "statement %d: %s\n", stmt.Index, stmt.RawVerb)
+		fmt.Fprintf(cmd.OutOrStdout(), "decision: %s\n", stmt.Decision.Verb)
+		if stmt.Decision.RuleName != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "rule: %s\n", stmt.Decision.RuleName)
+		}
+		for _, eff := range stmt.Effects {
+			fmt.Fprintf(cmd.OutOrStdout(), "effect %d: %s resolution=%s\n", eff.Index, eff.Operation, eff.Resolution)
+			for _, cov := range eff.Coverage {
+				if cov.Covered {
+					fmt.Fprintf(cmd.OutOrStdout(), "  covered: %s selector=%s\n", cov.Object, cov.Selector)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "  uncovered: %s reason=%s\n", cov.Object, cov.UncoveredReason)
+				}
+			}
+		}
+	}
+	if len(report.Warnings) > 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "warnings:")
+		for _, w := range report.Warnings {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s\n", w.Code, w.Message)
+		}
+	}
+	return nil
+}
+
+func printDBPolicyWarnings(cmd *cobra.Command, warns []dbpolicy.Warning) {
+	for _, w := range warns {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning[%s]", w.Code)
+		if w.Rule != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), " rule=%s", w.Rule)
+		}
+		if w.Field != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), " field=%s", w.Field)
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), ": %s\n", w.Message)
+	}
 }

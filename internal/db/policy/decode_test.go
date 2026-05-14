@@ -70,6 +70,43 @@ database_connection_rules:
 	}
 }
 
+func TestDecode_CanonicalSelectors(t *testing.T) {
+	src := `version: 1
+name: t
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+database_rules:
+  - name: canonical-read
+    db_service: appdb
+    operations: [READ]
+    relations: ["public.users", "sales.*"]
+    functions: ["public.safe_fn(integer)", "pg_catalog.*"]
+    match_object_resolution: catalog_resolved
+    decision: allow
+`
+	rs, warns, err := loadDB(t, src)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %+v", warns)
+	}
+	rules := rs.AllStatementRules()
+	if len(rules) != 1 {
+		t.Fatalf("rules = %d, want 1", len(rules))
+	}
+	if got := rules[0].Relations; len(got) != 2 || got[0] != "public.users" || got[1] != "sales.*" {
+		t.Fatalf("Relations = %#v", got)
+	}
+	if got := rules[0].Functions; len(got) != 2 || got[0] != "public.safe_fn(integer)" || got[1] != "pg_catalog.*" {
+		t.Fatalf("Functions = %#v", got)
+	}
+}
+
 func TestDecode_RedactionConfig(t *testing.T) {
 	src := `version: 1
 name: t

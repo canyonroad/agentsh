@@ -105,15 +105,15 @@ func startDBProxyWithStartError(ctx context.Context, deps dbProxyDeps) (*postgre
 // Returns nil when no DB rules are present (decoding succeeds with an empty
 // services map). Errors are returned to the caller; they should be fatal
 // because misconfigured DB policy should not silently disable interception.
-func loadDBRuleSet(p *rootpolicy.Policy) (*dbpolicy.RuleSet, error) {
+func loadDBRuleSet(p *rootpolicy.Policy) (*dbpolicy.RuleSet, []dbpolicy.Warning, error) {
 	if p == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	rs, _, err := dbpolicy.Decode(p)
+	rs, warns, err := dbpolicy.Decode(p)
 	if err != nil {
-		return nil, fmt.Errorf("loadDBRuleSet: decode db policy: %w", err)
+		return nil, warns, fmt.Errorf("loadDBRuleSet: decode db policy: %w", err)
 	}
-	return rs, nil
+	return rs, warns, nil
 }
 
 // collectDBProxyServices enumerates every declared db_service in rs and
