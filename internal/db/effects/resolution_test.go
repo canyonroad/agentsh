@@ -66,3 +66,32 @@ func TestParseResolution(t *testing.T) {
 		}
 	}
 }
+
+func TestResolutionCatalogTags(t *testing.T) {
+	cases := map[string]Resolution{
+		"catalog_resolved":    ResolutionCatalogResolved,
+		"catalog_unresolved":  ResolutionCatalogUnresolved,
+		"catalog_unavailable": ResolutionCatalogUnavailable,
+	}
+	for name, want := range cases {
+		got, ok := ParseResolution(name)
+		if !ok || got != want {
+			t.Fatalf("ParseResolution(%q) = %v, %v; want %v, true", name, got, ok, want)
+		}
+		if got := want.String(); got != name {
+			t.Fatalf("%v.String() = %q, want %q", want, got, name)
+		}
+	}
+}
+
+func TestFoldResolutionUsesCatalogConfidenceRank(t *testing.T) {
+	if got := Fold([]Resolution{ResolutionCatalogResolved, ResolutionQualified}); got != ResolutionQualified {
+		t.Fatalf("Fold(catalog_resolved, qualified_syntactic) = %v, want qualified_syntactic", got)
+	}
+	if got := Fold([]Resolution{ResolutionUnresolved, ResolutionCatalogUnavailable}); got != ResolutionCatalogUnavailable {
+		t.Fatalf("Fold(unresolved, catalog_unavailable) = %v, want catalog_unavailable", got)
+	}
+	if got := Fold([]Resolution{ResolutionCatalogResolved}); got != ResolutionCatalogResolved {
+		t.Fatalf("Fold(catalog_resolved) = %v", got)
+	}
+}

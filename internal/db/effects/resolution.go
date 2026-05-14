@@ -2,11 +2,6 @@
 package effects
 
 // Resolution tags an Effect's object set with a confidence level per §6.1.
-// Ordering is best-to-worst (lower numeric value = higher confidence),
-// matching the §6.2 fold rule:
-//
-//   qualified_syntactic > unqualified_syntactic > ambiguous_after_search_path
-//   > maybe_temp_shadowed > unresolved
 type Resolution uint8
 
 const (
@@ -15,6 +10,9 @@ const (
 	ResolutionAmbiguousAfterSearchPath
 	ResolutionMaybeTempShadowed
 	ResolutionUnresolved
+	ResolutionCatalogResolved
+	ResolutionCatalogUnresolved
+	ResolutionCatalogUnavailable
 )
 
 var resolutionNames = [...]string{
@@ -23,6 +21,20 @@ var resolutionNames = [...]string{
 	ResolutionAmbiguousAfterSearchPath: "ambiguous_after_search_path",
 	ResolutionMaybeTempShadowed:        "maybe_temp_shadowed",
 	ResolutionUnresolved:               "unresolved",
+	ResolutionCatalogResolved:          "catalog_resolved",
+	ResolutionCatalogUnresolved:        "catalog_unresolved",
+	ResolutionCatalogUnavailable:       "catalog_unavailable",
+}
+
+var resolutionConfidenceRank = map[Resolution]int{
+	ResolutionCatalogResolved:          0,
+	ResolutionQualified:                1,
+	ResolutionUnqualified:              2,
+	ResolutionAmbiguousAfterSearchPath: 3,
+	ResolutionMaybeTempShadowed:        4,
+	ResolutionUnresolved:               5,
+	ResolutionCatalogUnresolved:        6,
+	ResolutionCatalogUnavailable:       7,
 }
 
 func (r Resolution) String() string {
@@ -35,13 +47,24 @@ func (r Resolution) String() string {
 // Fold returns the worst (least-confident) Resolution in the set, per §6.2.
 // Empty input returns ResolutionQualified (no objects = no doubt).
 func Fold(rs []Resolution) Resolution {
-	worst := ResolutionQualified
-	for _, r := range rs {
-		if r > worst {
+	if len(rs) == 0 {
+		return ResolutionQualified
+	}
+	worst := rs[0]
+	for _, r := range rs[1:] {
+		if resolutionRank(r) > resolutionRank(worst) {
 			worst = r
 		}
 	}
 	return worst
+}
+
+func resolutionRank(r Resolution) int {
+	rank, ok := resolutionConfidenceRank[r]
+	if !ok {
+		return resolutionConfidenceRank[ResolutionCatalogUnavailable]
+	}
+	return rank
 }
 
 // ParseResolution parses the canonical lowercase resolution-tag name.

@@ -5,10 +5,11 @@ import "sort"
 
 // Effect is one classified consequence of a statement, per §5.2.
 type Effect struct {
-	Group      Group
-	Subtype    Subtype
-	Objects    []ObjectRef
-	Resolution Resolution
+	Group           Group
+	Subtype         Subtype
+	Objects         []ObjectRef
+	ResolvedObjects []ResolvedObjectRef `json:"resolved_objects,omitempty"`
+	Resolution      Resolution
 
 	// FunctionOID is populated for procedural effects with Subtype
 	// SubtypeFunctionCallProtocol (the Postgres 'F' FunctionCall frame) or
@@ -46,9 +47,9 @@ var canonicalGroupRank = map[Group]int{
 }
 
 // Order sorts the slice into canonical effect order per §5.2:
-//   1. Highest risk tier first.
-//   2. Within tier, fixed canonical group order.
-//   3. Stable for equal priority (preserves input order).
+//  1. Highest risk tier first.
+//  2. Within tier, fixed canonical group order.
+//  3. Stable for equal priority (preserves input order).
 //
 // Ordering is in-place. The first element after sorting is the primary effect.
 func Order(effects []Effect) {
