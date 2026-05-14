@@ -91,9 +91,12 @@ func (a *App) compileDBPolicyForSession(ctx context.Context, s *session.Session,
 	if base == nil {
 		return a.policy, nil, "", nil
 	}
-	rs, err := loadDBRuleSet(base)
+	rs, warns, err := loadDBRuleSet(base)
 	if err != nil {
 		return nil, nil, "", err
+	}
+	for _, w := range warns {
+		slog.Warn("db policy warning", "code", w.Code, "rule", w.Rule, "field", w.Field, "message", w.Message)
 	}
 	if rs.Unavoidability() == dbservice.UnavoidabilityOff || len(rs.AllServices()) == 0 {
 		engine, err := policy.NewEngineWithVariables(base, enforceApprovals, true, policyVars)
