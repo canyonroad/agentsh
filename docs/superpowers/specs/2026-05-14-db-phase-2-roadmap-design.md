@@ -106,7 +106,7 @@ Deliverables:
 - Sample policies that show Phase 1 syntactic rules next to Phase 2 resolved-object rules.
 - Documentation updates for operator workflows.
 
-External behavior: policy authoring and debugging improve; default enforcement semantics remain strict.
+External behavior: policy authoring and debugging improve; default enforcement semantics remain strict. Plan 10 is implemented and ready for DB Plan 11 redirect planner work.
 
 ### DB Plan 11 - Redirect Planner
 
