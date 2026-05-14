@@ -30,11 +30,12 @@ type DBEvent struct {
 
 	Effects []effects.Effect `json:"effects"`
 
-	OperationGroup   string `json:"operation_group,omitempty"`
-	OperationGroupID uint8  `json:"operation_group_id,omitempty"`
-	OperationSubtype string `json:"operation_subtype,omitempty"`
-	RawVerb          string `json:"raw_verb,omitempty"`
-	ObjectResolution string `json:"object_resolution,omitempty"`
+	OperationGroup         string `json:"operation_group,omitempty"`
+	OperationGroupID       uint8  `json:"operation_group_id,omitempty"`
+	OperationSubtype       string `json:"operation_subtype,omitempty"`
+	RawVerb                string `json:"raw_verb,omitempty"`
+	ObjectResolution       string `json:"object_resolution,omitempty"`
+	ObjectResolutionReason string `json:"object_resolution_reason,omitempty"`
 
 	StatementDigest    string    `json:"statement_digest,omitempty"`
 	StatementText      string    `json:"statement_text,omitempty"`

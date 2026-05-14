@@ -282,3 +282,45 @@ func TestBuildEvent_PropagatesFunctionOID(t *testing.T) {
 		t.Errorf("FunctionOID=%v want 99", ev.Effects[0].FunctionOID)
 	}
 }
+
+func TestBuildStatementEvent_SetsCatalogResolutionFields(t *testing.T) {
+	sql := "SELECT * FROM users"
+	stmt := effects.ClassifiedStatement{
+		RawVerb: "SELECT",
+		Effects: []effects.Effect{{
+			Group:      effects.GroupRead,
+			Resolution: effects.ResolutionCatalogResolved,
+			Objects:    []effects.ObjectRef{{Kind: effects.ObjectTable, Name: "users"}},
+			ResolvedObjects: []effects.ResolvedObjectRef{{
+				Source:       effects.ResolvedObjectSourceCatalog,
+				Kind:         effects.ResolvedObjectRelation,
+				OID:          1259,
+				Schema:       "public",
+				Name:         "users",
+				RelationKind: "table",
+			}},
+		}},
+		SourceStart: 0,
+		SourceEnd:   int32(len(sql)),
+	}
+	parser := classify_pg.New(classify_pg.DialectPostgres)
+	ev := buildStatementEvent(buildArgs{
+		Stmt:       stmt,
+		SQL:        sql,
+		Tier:       policy.RedactParametersRedacted,
+		Conn:       connStateForTest("appdb", "postgres", "terminate_reissue"),
+		Decision:   policy.Decision{Verb: policy.VerbAllow, RuleKind: policy.RuleKindStatement},
+		DenyAction: "none",
+		BatchSHA:   sha256Hex(sql),
+		Parser:     parser,
+	})
+	if ev.ObjectResolution != "catalog_resolved" {
+		t.Fatalf("ObjectResolution = %q", ev.ObjectResolution)
+	}
+	if len(ev.Effects) != 1 || len(ev.Effects[0].ResolvedObjects) != 1 {
+		t.Fatalf("resolved objects missing from event: %+v", ev.Effects)
+	}
+	if ev.Effects[0].ResolvedObjects[0].OID != 1259 {
+		t.Fatalf("resolved oid = %+v", ev.Effects[0].ResolvedObjects[0])
+	}
+}

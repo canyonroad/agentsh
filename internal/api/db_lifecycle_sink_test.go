@@ -143,6 +143,25 @@ func TestDBStatementToEventMapsNormalizedFields(t *testing.T) {
 	}
 }
 
+func TestDBStatementToEventMapsCatalogResolutionReason(t *testing.T) {
+	ev := dbStatementToEvent(dbevents.DBEvent{
+		EventID:                "db-resolved-api",
+		SessionID:              "sess-1",
+		Timestamp:              time.Unix(100, 0).UTC(),
+		DBService:              "appdb",
+		DBFamily:               "postgres",
+		DBDialect:              "postgres",
+		ObjectResolution:       "catalog_unresolved",
+		ObjectResolutionReason: "missing",
+	})
+	if ev.Fields["object_resolution"] != "catalog_unresolved" {
+		t.Fatalf("object_resolution = %#v", ev.Fields["object_resolution"])
+	}
+	if ev.Fields["object_resolution_reason"] != "missing" {
+		t.Fatalf("object_resolution_reason = %#v", ev.Fields["object_resolution_reason"])
+	}
+}
+
 func TestDBAuditSinkEmitStatementPublishesToBroker(t *testing.T) {
 	broker := appevents.NewBroker()
 	ch := broker.Subscribe("sess-db", 1)

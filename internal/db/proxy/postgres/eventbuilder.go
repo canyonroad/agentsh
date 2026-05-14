@@ -94,31 +94,33 @@ func buildStatementEvent(a buildArgs) events.DBEvent {
 	opGroup, opGroupID, opSubtype := operationFromStatement(a.Stmt)
 
 	return events.DBEvent{
-		EventID:            newEventID(),
-		SessionID:          eventSessionID(a.Conn.agentSessionID, a.Conn.clientIdentity),
-		CommandID:          fmt.Sprintf("%s:%d", a.BatchSHA, a.StmtIndex),
-		Timestamp:          timeNow(),
-		DBService:          a.Conn.dbService,
-		DBFamily:           "postgres",
-		DBDialect:          "postgres",
-		DBUser:             a.Conn.dbUser,
-		Database:           a.Conn.database,
-		ApplicationName:    a.Conn.appName,
-		ClientIdentity:     a.Conn.clientIdentity,
-		Effects:            a.Stmt.Effects,
-		OperationGroup:     opGroup,
-		OperationGroupID:   opGroupID,
-		OperationSubtype:   opSubtype,
-		RawVerb:            a.Stmt.RawVerb,
-		ParserBackend:      a.Stmt.ParserBackend,
-		StatementText:      stmtText,
-		StatementDigest:    digest,
-		StatementRedaction: redaction,
-		TLS:                events.EventTLS{Mode: a.Conn.tlsMode, ClientSNI: a.Conn.sniHostname},
-		Decision:           dec,
-		Result:             result,
-		TxContext:          tx,
-		Predicates:         predicates,
+		EventID:                newEventID(),
+		SessionID:              eventSessionID(a.Conn.agentSessionID, a.Conn.clientIdentity),
+		CommandID:              fmt.Sprintf("%s:%d", a.BatchSHA, a.StmtIndex),
+		Timestamp:              timeNow(),
+		DBService:              a.Conn.dbService,
+		DBFamily:               "postgres",
+		DBDialect:              "postgres",
+		DBUser:                 a.Conn.dbUser,
+		Database:               a.Conn.database,
+		ApplicationName:        a.Conn.appName,
+		ClientIdentity:         a.Conn.clientIdentity,
+		Effects:                a.Stmt.Effects,
+		OperationGroup:         opGroup,
+		OperationGroupID:       opGroupID,
+		OperationSubtype:       opSubtype,
+		RawVerb:                a.Stmt.RawVerb,
+		ObjectResolution:       a.Stmt.FoldResolution().String(),
+		ObjectResolutionReason: firstResolutionReason(a.Stmt),
+		ParserBackend:          a.Stmt.ParserBackend,
+		StatementText:          stmtText,
+		StatementDigest:        digest,
+		StatementRedaction:     redaction,
+		TLS:                    events.EventTLS{Mode: a.Conn.tlsMode, ClientSNI: a.Conn.sniHostname},
+		Decision:               dec,
+		Result:                 result,
+		TxContext:              tx,
+		Predicates:             predicates,
 	}
 }
 
@@ -204,6 +206,17 @@ func perStmtSlice(sql string, stmt effects.ClassifiedStatement) string {
 // then we conservatively return false.
 func hasFilter(_ effects.ClassifiedStatement) bool {
 	return false
+}
+
+func firstResolutionReason(stmt effects.ClassifiedStatement) string {
+	for _, eff := range stmt.Effects {
+		for _, obj := range eff.ResolvedObjects {
+			if obj.UnresolvedReason != "" {
+				return obj.UnresolvedReason
+			}
+		}
+	}
+	return ""
 }
 
 // connInTx returns true when the connection is currently inside an upstream

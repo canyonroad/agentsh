@@ -75,6 +75,49 @@ func TestDBEvent_JSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDBEvent_ResolvedObjectMetadataRoundTrip(t *testing.T) {
+	in := DBEvent{
+		EventID:                "db-resolved-1",
+		SessionID:              "sess-1",
+		Timestamp:              time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		DBService:              "appdb",
+		DBFamily:               "postgres",
+		DBDialect:              "postgres",
+		ObjectResolution:       "catalog_unresolved",
+		ObjectResolutionReason: "missing",
+		Effects: []effects.Effect{{
+			Group:      effects.GroupRead,
+			Resolution: effects.ResolutionCatalogUnresolved,
+			Objects:    []effects.ObjectRef{{Kind: effects.ObjectTable, Name: "missing"}},
+			ResolvedObjects: []effects.ResolvedObjectRef{{
+				Source:           effects.ResolvedObjectSourceCatalog,
+				Kind:             effects.ResolvedObjectRelation,
+				Name:             "missing",
+				UnresolvedReason: "missing",
+			}},
+		}},
+		StatementRedaction: RedactionParametersRedacted,
+	}
+
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var out DBEvent
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.ObjectResolution != "catalog_unresolved" || out.ObjectResolutionReason != "missing" {
+		t.Fatalf("resolution fields = %q / %q", out.ObjectResolution, out.ObjectResolutionReason)
+	}
+	if len(out.Effects) != 1 || len(out.Effects[0].ResolvedObjects) != 1 {
+		t.Fatalf("resolved effects lost: %+v", out.Effects)
+	}
+	if out.Effects[0].ResolvedObjects[0].UnresolvedReason != "missing" {
+		t.Fatalf("unresolved reason = %q", out.Effects[0].ResolvedObjects[0].UnresolvedReason)
+	}
+}
+
 func TestDBEvent_Extended_RoundTrip(t *testing.T) {
 	rows := int64(7)
 	in := DBEvent{
