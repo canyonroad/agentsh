@@ -98,6 +98,8 @@ type StatementRule struct {
 	DBDialect                   string        `yaml:"db_dialect,omitempty"`
 	Schemas                     []string      `yaml:"schemas,omitempty"`
 	Objects                     []string      `yaml:"objects,omitempty"`
+	Relations                   []string      `yaml:"relations,omitempty"`
+	Functions                   []string      `yaml:"functions,omitempty"`
 	Operations                  []string      `yaml:"operations"`
 	Subtypes                    []string      `yaml:"subtypes,omitempty"`
 	MatchObjectResolution       string        `yaml:"match_object_resolution,omitempty"`

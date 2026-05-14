@@ -39,6 +39,25 @@ func TestCompileStatementRule_NoObjectsCoversAll(t *testing.T) {
 	}
 }
 
+func TestCompileStatementRule_CanonicalOnlyDoesNotCoverSyntacticObject(t *testing.T) {
+	r := &StatementRule{
+		Name:       "canonical-only",
+		Operations: []string{"READ"},
+		Relations:  []string{"public.users"},
+		Decision:   "allow",
+	}
+	c, err := compileStatementRule(r)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if c.coversAllObjects() {
+		t.Fatal("canonical selector-only rule should not cover all syntactic objects")
+	}
+	if c.objectMatches(effects.ObjectRef{Kind: effects.ObjectTable, Schema: "public", Name: "users"}) {
+		t.Fatal("canonical selector-only rule should not cover a syntactic object without resolved canonical matching")
+	}
+}
+
 func TestCompileStatementRule_ExternalEndpointHostMatch(t *testing.T) {
 	r := &StatementRule{Name: "endpoint", Objects: []string{"*.internal"},
 		Operations: []string{"READ"}, Decision: "deny"}
@@ -87,6 +106,61 @@ func TestCompileStatementRule_BadGlob(t *testing.T) {
 	_, err := compileStatementRule(r)
 	if err == nil || !strings.Contains(err.Error(), "glob_compile") {
 		t.Fatalf("want glob_compile error, got %v", err)
+	}
+}
+
+func TestCompileStatementRule_CanonicalSelectorGlobs(t *testing.T) {
+	r := &StatementRule{
+		Name:       "canonical",
+		Operations: []string{"READ"},
+		Relations:  []string{"public.users", "sales.*"},
+		Functions:  []string{"public.safe_fn(integer)", "pg_catalog.*"},
+		Decision:   "allow",
+	}
+	c, err := compileStatementRule(r)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	rel := effects.ResolvedObjectRef{
+		Source: effects.ResolvedObjectSourceCatalog,
+		Kind:   effects.ResolvedObjectRelation,
+		Schema: "public",
+		Name:   "users",
+	}
+	if !c.relationMatches(rel) {
+		t.Fatalf("public.users relation should match")
+	}
+	fn := effects.ResolvedObjectRef{
+		Source:               effects.ResolvedObjectSourceCatalog,
+		Kind:                 effects.ResolvedObjectFunction,
+		Schema:               "public",
+		Name:                 "safe_fn",
+		FunctionIdentityArgs: "integer",
+	}
+	if !c.functionMatches(fn) {
+		t.Fatalf("public.safe_fn(integer) function should match")
+	}
+}
+
+func TestCompileStatementRule_BadCanonicalGlob(t *testing.T) {
+	_, err := compileStatementRule(&StatementRule{
+		Name:       "bad-relation",
+		Operations: []string{"READ"},
+		Relations:  []string{"["},
+		Decision:   "allow",
+	})
+	if err == nil || !strings.Contains(err.Error(), "glob_compile") || !strings.Contains(err.Error(), "relations") {
+		t.Fatalf("want relation glob_compile error, got %v", err)
+	}
+
+	_, err = compileStatementRule(&StatementRule{
+		Name:       "bad-function",
+		Operations: []string{"READ"},
+		Functions:  []string{"["},
+		Decision:   "allow",
+	})
+	if err == nil || !strings.Contains(err.Error(), "glob_compile") || !strings.Contains(err.Error(), "functions") {
+		t.Fatalf("want function glob_compile error, got %v", err)
 	}
 }
 

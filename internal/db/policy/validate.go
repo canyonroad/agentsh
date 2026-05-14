@@ -78,7 +78,7 @@ func validateStatementRule(r *StatementRule, svcs map[ServiceID]*DBService) ([]e
 	case "allow", "deny", "approve", "audit":
 		// ok
 	case "redirect":
-		errs = append(errs, fmt.Errorf("rule_decision_redirect: database_rules[%q]: redirect is Phase 2", r.Name))
+		errs = append(errs, fmt.Errorf("redirect_not_supported_until_plan_11: database_rules[%q]: decision redirect is supported starting in DB Plan 11", r.Name))
 	default:
 		errs = append(errs, fmt.Errorf("rule_unknown_decision: database_rules[%q]: unknown decision %q", r.Name, r.Decision))
 	}
@@ -87,15 +87,10 @@ func validateStatementRule(r *StatementRule, svcs map[ServiceID]*DBService) ([]e
 	if len(r.Operations) == 0 {
 		errs = append(errs, fmt.Errorf("rule_operations_required: database_rules[%q]: operations is required", r.Name))
 	}
-	groups := map[effects.Group]struct{}{}
+	groups := expandedGroups(r)
 	for _, op := range r.Operations {
-		gs, ok := effects.ExpandAlias(op)
-		if !ok {
+		if _, ok := effects.ExpandAlias(op); !ok {
 			errs = append(errs, fmt.Errorf("rule_unknown_operation: database_rules[%q]: unknown operations token %q", r.Name, op))
-			continue
-		}
-		for _, g := range gs {
-			groups[g] = struct{}{}
 		}
 	}
 	for _, st := range r.Subtypes {
@@ -138,6 +133,33 @@ func validateStatementRule(r *StatementRule, svcs map[ServiceID]*DBService) ([]e
 				Message: fmt.Sprintf("rule %q audits operations of risk tier >= high; set acknowledge_audit_on_dangerous: true to silence", r.Name),
 			})
 		}
+	}
+
+	if ruleHasCanonicalSelectors(r) {
+		if r.MatchObjectResolution != "catalog_resolved" {
+			warns = append(warns, Warning{
+				Rule:    r.Name,
+				Field:   "match_object_resolution",
+				Code:    "canonical_selector_without_resolution_guard",
+				Message: fmt.Sprintf("rule %q uses catalog selectors without match_object_resolution: catalog_resolved", r.Name),
+			})
+		}
+		if !ruleMatchesTerminatePostgresService(r, svcs) {
+			warns = append(warns, Warning{
+				Rule:    r.Name,
+				Field:   canonicalSelectorWarningField(r),
+				Code:    "canonical_selector_without_catalog_service",
+				Message: fmt.Sprintf("rule %q uses catalog selectors but matches no terminate-mode Postgres service", r.Name),
+			})
+		}
+	}
+	if ruleHasAnyObjectSelector(r) && allGroupsObjectless(groups) {
+		warns = append(warns, Warning{
+			Rule:    r.Name,
+			Field:   "objects",
+			Code:    "selector_on_objectless_operation",
+			Message: fmt.Sprintf("rule %q constrains object selectors on objectless operations", r.Name),
+		})
 	}
 
 	// deny_mode_in_tx is only valid on deny rules. §14.3/§14.4.
@@ -205,7 +227,7 @@ func validateConnectionRule(r *ConnectionRule, svcs map[ServiceID]*DBService) ([
 	case "allow", "deny", "approve", "audit":
 		// ok
 	case "redirect":
-		errs = append(errs, fmt.Errorf("rule_decision_redirect: database_connection_rules[%q]: redirect is Phase 2", r.Name))
+		errs = append(errs, fmt.Errorf("redirect_not_supported_until_plan_11: database_connection_rules[%q]: decision redirect is not valid for DB connection rules", r.Name))
 	default:
 		errs = append(errs, fmt.Errorf("rule_unknown_decision: database_connection_rules[%q]: unknown decision %q", r.Name, r.Decision))
 	}
@@ -231,6 +253,66 @@ func validateConnectionRule(r *ConnectionRule, svcs map[ServiceID]*DBService) ([
 	}
 
 	return errs, warns
+}
+
+func ruleHasCanonicalSelectors(r *StatementRule) bool {
+	return len(r.Relations) > 0 || len(r.Functions) > 0
+}
+
+func ruleHasAnyObjectSelector(r *StatementRule) bool {
+	return len(r.Objects) > 0 || len(r.Relations) > 0 || len(r.Functions) > 0
+}
+
+func canonicalSelectorWarningField(r *StatementRule) string {
+	if len(r.Relations) > 0 {
+		return "relations"
+	}
+	return "functions"
+}
+
+func expandedGroups(r *StatementRule) map[effects.Group]struct{} {
+	groups := map[effects.Group]struct{}{}
+	for _, op := range r.Operations {
+		gs, ok := effects.ExpandAlias(op)
+		if !ok {
+			continue
+		}
+		for _, g := range gs {
+			groups[g] = struct{}{}
+		}
+	}
+	return groups
+}
+
+func allGroupsObjectless(groups map[effects.Group]struct{}) bool {
+	if len(groups) == 0 {
+		return false
+	}
+	for g := range groups {
+		if !isObjectlessGroup(g) {
+			return false
+		}
+	}
+	return true
+}
+
+func ruleMatchesTerminatePostgresService(r *StatementRule, svcs map[ServiceID]*DBService) bool {
+	for id, svc := range svcs {
+		if svc == nil {
+			continue
+		}
+		if svc.Family != "postgres" {
+			continue
+		}
+		if svc.TLSMode == "passthrough" {
+			continue
+		}
+		filter := serviceFilter{service: ServiceID(r.DBService), family: r.DBFamily, dialect: r.DBDialect}
+		if filter.matches(id, svc) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateConnectionRuleVsService returns a non-nil error if the rule matches
