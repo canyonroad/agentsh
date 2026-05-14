@@ -62,6 +62,7 @@ type connState struct {
 	smState       *statemachine.ConnState
 	redactionTier policy.RedactionTier // resolved at handshake end
 	tlsMode       string               // svc.TLSMode at handshake end, for EventTLS.Mode
+	catalog       catalogRuntimeContext
 }
 
 // logger narrows *slog.Logger to just the methods we use, so tests can

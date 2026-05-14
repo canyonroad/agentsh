@@ -147,6 +147,7 @@ func (pc *proxyConn) dialUpstreamAndForward(ctx context.Context, m *pgproto3.Sta
 		pc.state.redactionTier = policy.RedactParametersRedacted
 	}
 	pc.state.tlsMode = pc.svc.TLSMode
+	pc.initializeCatalogContext(ctx)
 	return pc.simpleQueryLoop(ctx)
 }
 

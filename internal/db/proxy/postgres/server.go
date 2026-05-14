@@ -95,6 +95,8 @@ type Config struct {
 	// classifierForTest, when non-nil, overrides the per-dialect Parser map
 	// built by New(). Test-only — production callsites must leave this nil.
 	classifierForTest func(dialect string) classify_pg.Parser
+
+	catalogLoaderForTest catalogRuntimeLoader
 }
 
 // Server runs the AgentSH PostgreSQL proxy listeners.
@@ -121,9 +123,10 @@ type Server struct {
 	caMu  sync.Mutex
 	caRef *tlsleaf.CA
 
-	policyPtr   atomic.Pointer[policy.RuleSet]
-	classifiers map[string]classify_pg.Parser
-	cancelMap   *cancelMap
+	policyPtr    atomic.Pointer[policy.RuleSet]
+	classifiers  map[string]classify_pg.Parser
+	cancelMap    *cancelMap
+	catalogStore *catalogSnapshotStore
 }
 
 // New validates cfg and returns a *Server. When cfg.Unavoidability ==
@@ -158,6 +161,7 @@ func New(cfg Config) (*Server, error) {
 				Max:         cfg.CancelMappingMax,
 				GraceWindow: cfg.CancelGraceWindow,
 			}),
+			catalogStore: newCatalogSnapshotStore(cfg.catalogLoaderForTest),
 		}
 		srv.policyPtr.Store(cfg.Policy)
 		return srv, nil
@@ -207,6 +211,7 @@ func New(cfg Config) (*Server, error) {
 			Max:         cfg.CancelMappingMax,
 			GraceWindow: cfg.CancelGraceWindow,
 		}),
+		catalogStore: newCatalogSnapshotStore(cfg.catalogLoaderForTest),
 	}
 	srv.policyPtr.Store(cfg.Policy)
 	return srv, nil

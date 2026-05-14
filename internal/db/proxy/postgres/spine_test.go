@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/agentsh/agentsh/internal/db/catalog"
 	"github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/db/policy"
 	"github.com/agentsh/agentsh/internal/db/service"
@@ -99,6 +100,9 @@ database_connection_rules:
 		Policy:                   rs,
 		Logger:                   slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		UpstreamTLSConfigForTest: upTLSCfg,
+		catalogLoaderForTest: catalogRuntimeLoaderFunc(func(context.Context, *proxyConn) (catalog.Snapshot, []string, string, error) {
+			return catalog.NewSnapshot(nil, nil), []string{"public"}, "", nil
+		}),
 		Services: []Service{{
 			Name:     "appdb",
 			Family:   "postgres",
