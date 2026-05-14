@@ -33,6 +33,42 @@ database_rules:
 	}
 }
 
+func TestEvaluate_RelationSelectorUsesResolvedRelationSlotOrder(t *testing.T) {
+	rs := loadRules(t, `version: 1
+name: t
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: x:1, tls_mode: terminate_reissue}
+database_rules:
+  - {name: public-users, db_service: appdb, operations: [READ], relations: ["public.users"], match_object_resolution: catalog_resolved, decision: allow}
+`)
+	stmt := effects.ClassifiedStatement{Effects: []effects.Effect{{
+		Group:      effects.GroupRead,
+		Resolution: effects.ResolutionCatalogResolved,
+		Objects: []effects.ObjectRef{
+			{Kind: effects.ObjectTable, Schema: "public", Name: "users"},
+			{Kind: effects.ObjectTable, Name: "users"},
+		},
+		ResolvedObjects: []effects.ResolvedObjectRef{{
+			Source: effects.ResolvedObjectSourceCatalog,
+			Kind:   effects.ResolvedObjectRelation,
+			OID:    16384,
+			Schema: "public",
+			Name:   "users",
+		}, {
+			Source: effects.ResolvedObjectSourceCatalog,
+			Kind:   effects.ResolvedObjectRelation,
+			OID:    16385,
+			Schema: "audit",
+			Name:   "users",
+		}},
+	}}}
+
+	d := Evaluate(stmt, rs, "appdb")
+	if d.Verb != VerbDeny || d.RuleName != "" {
+		t.Fatalf("decision = %+v, want implicit deny because second users slot resolved to audit.users", d)
+	}
+}
+
 func TestEvaluate_RelationSelectorDoesNotCoverUnresolvedRelation(t *testing.T) {
 	rs := loadRules(t, `version: 1
 name: t

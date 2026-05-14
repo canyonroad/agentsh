@@ -140,10 +140,61 @@ func resolvedObjectForSlot(e effects.Effect, idx int) (effects.ResolvedObjectRef
 		return effects.ResolvedObjectRef{}, false
 	}
 	o := e.Objects[idx]
+	if hasRelationObjectSlot(e.Objects) {
+		if !isRelationObjectKind(o.Kind) {
+			return effects.ResolvedObjectRef{}, false
+		}
+		ordinal := relationObjectSlotOrdinal(e.Objects, idx)
+		resolved, ok := resolvedRelationObjectAtOrdinal(e.ResolvedObjects, ordinal)
+		if !ok || !resolvedObjectCompatibleWithSlot(o, resolved) {
+			return effects.ResolvedObjectRef{}, false
+		}
+		return resolved, true
+	}
 	for _, resolved := range e.ResolvedObjects {
 		if resolvedObjectCompatibleWithSlot(o, resolved) {
 			return resolved, true
 		}
+	}
+	return effects.ResolvedObjectRef{}, false
+}
+
+func hasRelationObjectSlot(objects []effects.ObjectRef) bool {
+	for _, o := range objects {
+		if isRelationObjectKind(o.Kind) {
+			return true
+		}
+	}
+	return false
+}
+
+func relationObjectSlotOrdinal(objects []effects.ObjectRef, idx int) int {
+	ordinal := 0
+	for i := 0; i <= idx && i < len(objects); i++ {
+		if !isRelationObjectKind(objects[i].Kind) {
+			continue
+		}
+		if i == idx {
+			return ordinal
+		}
+		ordinal++
+	}
+	return -1
+}
+
+func resolvedRelationObjectAtOrdinal(resolvedObjects []effects.ResolvedObjectRef, ordinal int) (effects.ResolvedObjectRef, bool) {
+	if ordinal < 0 {
+		return effects.ResolvedObjectRef{}, false
+	}
+	count := 0
+	for _, resolved := range resolvedObjects {
+		if resolved.Kind != effects.ResolvedObjectRelation {
+			continue
+		}
+		if count == ordinal {
+			return resolved, true
+		}
+		count++
 	}
 	return effects.ResolvedObjectRef{}, false
 }

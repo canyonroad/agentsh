@@ -145,6 +145,42 @@ database_rules:
 	}
 }
 
+func TestResolveEffect_DuplicateRelationNamesPreserveSlotOrder(t *testing.T) {
+	fixture := catalogFixtureForDuplicateUsers()
+	stmt := effects.ClassifiedStatement{Effects: []effects.Effect{{
+		Group:      effects.GroupRead,
+		Resolution: effects.ResolutionUnqualified,
+		Objects: []effects.ObjectRef{
+			{Kind: effects.ObjectTable, Schema: "public", Name: "users"},
+			{Kind: effects.ObjectTable, Name: "users"},
+		},
+	}}}
+
+	got := resolveStatement(stmt, fixture)
+	eff := got.Effects[0]
+	if eff.Resolution != effects.ResolutionCatalogResolved {
+		t.Fatalf("resolution = %v, want catalog_resolved", eff.Resolution)
+	}
+	if len(eff.ResolvedObjects) != 2 {
+		t.Fatalf("resolved objects = %+v, want two resolved relations", eff.ResolvedObjects)
+	}
+	if eff.ResolvedObjects[0].CanonicalName() != "public.users" || eff.ResolvedObjects[1].CanonicalName() != "audit.users" {
+		t.Fatalf("resolved objects = %+v, want public.users then audit.users", eff.ResolvedObjects)
+	}
+
+	rs := loadRuleSetForExplain(t, `version: 1
+name: t
+db_services:
+  appdb: {family: postgres, dialect: postgres, upstream: x:1, tls_mode: terminate_reissue}
+database_rules:
+  - {name: public-users, db_service: appdb, operations: [READ], relations: ["public.users"], match_object_resolution: catalog_resolved, decision: allow}
+`)
+	ex := dbpolicy.ExplainStatement(got, rs, "appdb")
+	if ex.Decision.Verb != dbpolicy.VerbDeny || ex.Decision.RuleName != "" {
+		t.Fatalf("decision = %+v, want implicit deny because second users slot resolved to audit.users", ex.Decision)
+	}
+}
+
 func TestResolveStatements_InvalidatesFixtureAfterSessionStateChange(t *testing.T) {
 	stmts := []effects.ClassifiedStatement{{
 		RawVerb: "SET_SEARCH_PATH=app",
@@ -246,6 +282,21 @@ func catalogFixtureForUsers() CatalogFixture {
 		Snapshot: catalog.NewSnapshot([]catalog.Relation{{
 			OID:  catalog.OID(16384),
 			Name: catalog.Name{Schema: "public", Name: "users"},
+			Kind: catalog.RelationTable,
+		}}, nil),
+	}
+}
+
+func catalogFixtureForDuplicateUsers() CatalogFixture {
+	return CatalogFixture{
+		SearchPath: []string{"audit", "public"},
+		Snapshot: catalog.NewSnapshot([]catalog.Relation{{
+			OID:  catalog.OID(16384),
+			Name: catalog.Name{Schema: "public", Name: "users"},
+			Kind: catalog.RelationTable,
+		}, {
+			OID:  catalog.OID(16385),
+			Name: catalog.Name{Schema: "audit", Name: "users"},
 			Kind: catalog.RelationTable,
 		}}, nil),
 	}
