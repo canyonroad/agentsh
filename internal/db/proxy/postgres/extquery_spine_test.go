@@ -6,10 +6,13 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+
+	"github.com/agentsh/agentsh/internal/db/events"
 )
 
 type clientBackendObservation struct {
@@ -434,6 +437,134 @@ func TestExtquery_RedirectParse_FailureDoesNotCacheOrForward(t *testing.T) {
 	}
 }
 
+func TestExtquery_RedirectExecute_UsesCachedMetadataAndEmitsEventAfterSync(t *testing.T) {
+	pc, clientFE, upBackend, _ := extqueryFixture(t, redirectExtqueryPolicyYAML())
+	pc.state.catalog = testCatalogContext()
+	planner := &fakeRedirectPlanner{plan: redirectRuntimePlan{
+		RewrittenSQL:   "select note from public.safe_users where id=$1",
+		Rule:           "redirect-users",
+		SourceRelation: "public.users",
+		TargetRelation: "public.safe_users",
+	}}
+	pc.redirectPlanner = planner
+	drainClientBackendMessages(clientFE)
+
+	loopErr := make(chan error, 1)
+	go func() { loopErr <- pc.simpleQueryLoop(context.Background()) }()
+
+	clientFE.Send(&pgproto3.Parse{Name: "client_stmt", Query: "select note from public.users where id=$1"})
+	clientFE.Send(&pgproto3.Bind{DestinationPortal: "p1", PreparedStatement: "client_stmt"})
+	clientFE.Send(&pgproto3.Execute{Portal: "p1"})
+	clientFE.Send(&pgproto3.Sync{})
+	if err := clientFE.Flush(); err != nil {
+		t.Fatalf("client flush: %v", err)
+	}
+
+	for i := 0; i < 4; i++ {
+		if _, err := upBackend.Receive(); err != nil {
+			t.Fatalf("upstream Receive %d: %v", i, err)
+		}
+	}
+	upBackend.Send(&pgproto3.ParseComplete{})
+	upBackend.Send(&pgproto3.BindComplete{})
+	upBackend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 0")})
+	upBackend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := upBackend.Flush(); err != nil {
+		t.Fatalf("upstream flush: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var evs []events.DBEvent
+	for time.Now().Before(deadline) {
+		evs = pc.srv.cfg.Sink.(*events.SyncSink).DrainStatements()
+		if len(evs) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("events = %d: %+v", len(evs), evs)
+	}
+	if !evs[0].Redirected || evs[0].RedirectRuntimeStatus != "executed" || evs[0].RedirectTargetRelation != "public.safe_users" {
+		t.Fatalf("redirect execute event = %+v", evs[0])
+	}
+	if planner.calls != 1 {
+		t.Fatalf("planner calls = %d, want Parse-only planning", planner.calls)
+	}
+
+	_ = pc.conn.Close()
+	select {
+	case <-loopErr:
+	case <-time.After(time.Second):
+	}
+}
+
+func TestExtquery_RedirectPolicyReloadKeepsPreparedPlanAndUsesNewPlanForNewParse(t *testing.T) {
+	pc, clientFE, upBackend, _ := extqueryFixture(t, redirectExtqueryPolicyYAML())
+	pc.state.catalog = testCatalogContext()
+	planner := &fakeRedirectPlanner{plan: redirectRuntimePlan{
+		RewrittenSQL:   "select note from public.safe_users_a where id=$1",
+		Rule:           "redirect-users-a",
+		SourceRelation: "public.users",
+		TargetRelation: "public.safe_users_a",
+	}}
+	pc.redirectPlanner = planner
+
+	loopErr := make(chan error, 1)
+	go func() { loopErr <- pc.simpleQueryLoop(context.Background()) }()
+
+	clientFE.Send(&pgproto3.Parse{Name: "old_stmt", Query: "select note from public.users where id=$1"})
+	if err := clientFE.Flush(); err != nil {
+		t.Fatalf("client flush old parse: %v", err)
+	}
+	oldMsg, err := upBackend.Receive()
+	if err != nil {
+		t.Fatalf("old upstream Receive: %v", err)
+	}
+	oldParse := oldMsg.(*pgproto3.Parse)
+	if oldParse.Query != "select note from public.safe_users_a where id=$1" {
+		t.Fatalf("old rewritten SQL = %q", oldParse.Query)
+	}
+
+	pc.srv.SetPolicy(loadRuleSet(t, redirectExtqueryPolicyYAMLTarget("public.safe_users_b", "redirect-users-b")))
+	planner.plan = redirectRuntimePlan{
+		RewrittenSQL:   "select note from public.safe_users_b where id=$1",
+		Rule:           "redirect-users-b",
+		SourceRelation: "public.users",
+		TargetRelation: "public.safe_users_b",
+	}
+
+	clientFE.Send(&pgproto3.Parse{Name: "new_stmt", Query: "select note from public.users where id=$1"})
+	clientFE.Send(&pgproto3.Bind{DestinationPortal: "old_portal", PreparedStatement: "old_stmt"})
+	if err := clientFE.Flush(); err != nil {
+		t.Fatalf("client flush reload frames: %v", err)
+	}
+	newMsg, err := upBackend.Receive()
+	if err != nil {
+		t.Fatalf("new upstream Receive: %v", err)
+	}
+	newParse := newMsg.(*pgproto3.Parse)
+	if newParse.Query != "select note from public.safe_users_b where id=$1" {
+		t.Fatalf("new rewritten SQL = %q", newParse.Query)
+	}
+	bindMsg, err := upBackend.Receive()
+	if err != nil {
+		t.Fatalf("bind upstream Receive: %v", err)
+	}
+	if _, ok := bindMsg.(*pgproto3.Bind); !ok {
+		t.Fatalf("bind upstream got %T", bindMsg)
+	}
+	if oldPortal, ok := pc.wireCache.Get(wirePortalCacheKey("old_portal")); !ok || oldPortal.Redirect == nil || oldPortal.Redirect.TargetRelation != "public.safe_users_a" {
+		t.Fatalf("old prepared redirect was corrupted after reload: ok=%v entry=%+v", ok, oldPortal)
+	}
+
+	_ = pc.conn.Close()
+	select {
+	case <-loopErr:
+	case <-time.After(time.Second):
+	}
+}
+
 func redirectExtqueryPolicyYAML() string {
 	return `version: 1
 name: redirect-extquery
@@ -453,4 +584,12 @@ database_rules:
     redirect:
       relation: public.safe_users
 `
+}
+
+func redirectExtqueryPolicyYAMLTarget(target, ruleName string) string {
+	return strings.ReplaceAll(
+		strings.ReplaceAll(redirectExtqueryPolicyYAML(), "redirect-users", ruleName),
+		"public.safe_users",
+		target,
+	)
 }

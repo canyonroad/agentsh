@@ -15,6 +15,10 @@ import (
 	"github.com/agentsh/agentsh/internal/db/proxy/postgres/statemachine"
 )
 
+type pendingRedirectExecute struct {
+	Entry preparedcache.Entry
+}
+
 // handleExtendedFrame translates a pgproto3 frontend frame into a Transition
 // invocation and executes the returned Actions against the per-connection
 // I/O. Called from simpleQueryLoop for Parse/Bind/Describe/Execute/Sync/
@@ -200,9 +204,11 @@ func (pc *proxyConn) executeActions(ctx context.Context, origFrame pgproto3.Fron
 				return fmt.Errorf("upstream flush rollback: %w", err)
 			}
 		case *statemachine.ActionDrainUntilRFQ:
-			if _, err := pc.forwardUpstreamUntilRFQ(ctx, timeNow(), 0); err != nil {
+			result, err := pc.forwardUpstreamUntilRFQ(ctx, timeNow(), 0)
+			if err != nil {
 				return fmt.Errorf("drain: %w", err)
 			}
+			pc.emitPendingRedirectExecuteEvents(ctx, result)
 			pc.refreshPendingCatalogContext(ctx)
 		case *statemachine.ActionClose:
 			pc.closeUpstream()
@@ -237,7 +243,61 @@ func (pc *proxyConn) markCatalogRefreshPendingForExecute(exec *pgproto3.Execute,
 	if !ok {
 		return
 	}
+	if entry.Redirect != nil {
+		pc.pendingRedirectExec = append(pc.pendingRedirectExec, pendingRedirectExecute{Entry: entry})
+	}
 	pc.markCatalogRefreshPendingForNeeds(entry.CatalogRefreshSearchPath, entry.CatalogRefreshSnapshot)
+}
+
+func (pc *proxyConn) emitPendingRedirectExecuteEvents(ctx context.Context, result upstreamResult) {
+	if len(pc.pendingRedirectExec) == 0 {
+		return
+	}
+	pending := pc.pendingRedirectExec
+	pc.pendingRedirectExec = nil
+	parser := pc.srv.classifierFor(pc.svc.Dialect)
+	for i, p := range pending {
+		if p.Entry.Redirect == nil {
+			continue
+		}
+		var rowsReturned, rowsAffected *int64
+		if i < len(result.RowsByStmt) {
+			rowsReturned = result.RowsByStmt[i]
+		}
+		if i < len(result.AffectedByStmt) {
+			rowsAffected = result.AffectedByStmt[i]
+		}
+		redir := p.Entry.Redirect
+		ev := buildStatementEvent(buildArgs{
+			Stmt:            redir.OriginalClassification,
+			StmtIndex:       i,
+			BatchTotal:      len(pending),
+			Decision:        policy.Decision{Verb: policy.VerbRedirect, RuleKind: policy.RuleKindStatement, RuleName: redir.Rule, MatchingEffectIndex: 0},
+			SQL:             redir.OriginalSQL,
+			Tier:            pc.state.redactionTier,
+			Conn:            *pc.state,
+			BytesOut:        result.BytesOut,
+			LatencyMs:       result.LatencyMs,
+			RowsReturned:    rowsReturned,
+			RowsAffected:    rowsAffected,
+			UpstreamErrCode: result.ErrorCode,
+			DenyAction:      "none",
+			BatchSHA:        redir.OriginalStatementDigest,
+			Parser:          parser,
+			Redirect: redirectEventArgs{
+				Redirected:               true,
+				Rule:                     redir.Rule,
+				RewrittenStatementDigest: redir.RewrittenStatementDigest,
+				SourceRelation:           redir.SourceRelation,
+				TargetRelation:           redir.TargetRelation,
+				RuntimeStatus:            "executed",
+			},
+		})
+		if ev.StatementDigest == "" {
+			ev.StatementDigest = redir.OriginalStatementDigest
+		}
+		_ = pc.srv.cfg.Sink.EmitStatement(ctx, ev)
+	}
 }
 
 func (pc *proxyConn) cacheApprovedParse(parse *pgproto3.Parse, stmt effects.ClassifiedStatement) {

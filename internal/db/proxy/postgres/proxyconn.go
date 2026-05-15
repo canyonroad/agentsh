@@ -94,7 +94,8 @@ type proxyConn struct {
 	wireCache *preparedcache.Cache // 05a wire-protocol Extended Query cache
 	sqlCache  *preparedcache.Cache // 05b SQL-level PREPARE cache (unused in 05a)
 
-	redirectPlanner redirectRuntimePlanner
+	redirectPlanner     redirectRuntimePlanner
+	pendingRedirectExec []pendingRedirectExecute
 }
 
 func newProxyConn(srv *Server, svc Service, conn net.Conn, peerUID uint32) *proxyConn {
