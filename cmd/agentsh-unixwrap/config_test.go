@@ -51,8 +51,8 @@ func TestParseConfigJSON(t *testing.T) {
 	}{
 		{
 			name:  "valid config",
-			input: `{"unix_socket_enabled":true,"blocked_syscalls":["ptrace","mount"]}`,
-			want:  &WrapperConfig{UnixSocketEnabled: true, BlockedSyscalls: []string{"ptrace", "mount"}},
+			input: `{"unix_socket_enabled":true,"blocked_syscalls":["ptrace","mount"],"write_only_opens":true}`,
+			want:  &WrapperConfig{UnixSocketEnabled: true, BlockedSyscalls: []string{"ptrace", "mount"}, WriteOnlyOpens: true},
 		},
 		{
 			name:  "empty config",

@@ -101,6 +101,7 @@ func main() {
 		ExecveEnabled:      cfg.ExecveEnabled,
 		FileMonitorEnabled: cfg.FileMonitorEnabled,
 		InterceptMetadata:  cfg.InterceptMetadata,
+		WriteOnlyOpens:     cfg.WriteOnlyOpens,
 		BlockIOUring:       cfg.BlockIOUring,
 		BlockedSyscalls:    blockedNrs,
 		BlockedFamilies:    cfg.BlockedFamilies,

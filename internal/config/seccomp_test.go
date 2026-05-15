@@ -104,6 +104,22 @@ sandbox:
 		"applyDefaults must auto-enable omitted file_monitor")
 }
 
+func TestFileMonitorWriteOnlyOpensParsesExplicitFalse(t *testing.T) {
+	yamlData := []byte(`
+sandbox:
+  seccomp:
+    enabled: true
+    file_monitor:
+      write_only_opens: false
+`)
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal(yamlData, &cfg))
+
+	require.NotNil(t, cfg.Sandbox.Seccomp.FileMonitor.WriteOnlyOpens,
+		"explicit write_only_opens must parse as non-nil *bool")
+	require.False(t, *cfg.Sandbox.Seccomp.FileMonitor.WriteOnlyOpens)
+}
+
 func TestSeccompConfigDefaults(t *testing.T) {
 	yamlData := `
 sandbox:

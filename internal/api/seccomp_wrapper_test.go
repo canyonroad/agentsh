@@ -286,6 +286,77 @@ func TestSetupSeccompWrapper_FileMonitorDefaults(t *testing.T) {
 	}
 }
 
+func TestBuildSeccompWrapperConfig_WriteOnlyOpensDefaultsFromInterceptMetadata(t *testing.T) {
+	trueVal := true
+	falseVal := false
+
+	cfg := &config.Config{}
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &trueVal
+	cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE = &trueVal
+	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &falseVal
+	app := newTestAppForSeccomp(t, cfg)
+
+	got := app.buildSeccompWrapperConfig(nil, seccompWrapperParams{})
+	if !got.WriteOnlyOpens {
+		t.Fatal("write_only_opens should default true when intercept_metadata is false")
+	}
+
+	cfg.Sandbox.Seccomp.FileMonitor.WriteOnlyOpens = &falseVal
+	got = app.buildSeccompWrapperConfig(nil, seccompWrapperParams{})
+	if got.WriteOnlyOpens {
+		t.Fatal("explicit write_only_opens=false should override the intercept_metadata-derived default")
+	}
+
+	cfg.Sandbox.Seccomp.FileMonitor.WriteOnlyOpens = nil
+	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &trueVal
+	got = app.buildSeccompWrapperConfig(nil, seccompWrapperParams{})
+	if got.WriteOnlyOpens {
+		t.Fatal("write_only_opens should default false when intercept_metadata is true")
+	}
+}
+
+func TestSetupSeccompWrapper_WriteOnlyOpensForwarded(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("seccomp wrapper only available on Linux")
+	}
+
+	enabled := true
+	disabled := false
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &enabled
+	cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE = &enabled
+	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &disabled
+
+	app := newTestAppForSeccomp(t, cfg)
+	result := app.setupSeccompWrapper(types.ExecRequest{
+		Command: "/bin/echo",
+		Args:    []string{"hello"},
+	}, "test-session", nil)
+	if result == nil || result.extraCfg == nil {
+		t.Fatal("expected non-nil wrapper setup result with extraCfg")
+	}
+	defer func() {
+		if result.extraCfg.notifyParentSock != nil {
+			result.extraCfg.notifyParentSock.Close()
+		}
+		for _, f := range result.extraCfg.extraFiles {
+			if f != nil {
+				f.Close()
+			}
+		}
+	}()
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(result.wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"]), &parsed); err != nil {
+		t.Fatalf("unmarshal seccomp config: %v", err)
+	}
+	if got, _ := parsed["write_only_opens"].(bool); !got {
+		t.Fatalf("write_only_opens = %v, want true", got)
+	}
+}
+
 func TestSetupSeccompWrapper_PtraceSync_MitigationSetFamilyLog(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("seccomp wrapper only available on Linux")

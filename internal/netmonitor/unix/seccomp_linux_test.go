@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
+	seccomp "github.com/seccomp/libseccomp-golang"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
@@ -128,4 +129,107 @@ func TestInstallFilterWithConfig_UnknownOnBlockDegrades(t *testing.T) {
 	require.NoError(t, err, "unknown action must degrade, not error")
 	defer filt.Close()
 	require.Empty(t, filt.BlockListMap(), "unknown action must degrade to errno (no notify)")
+}
+
+func TestInstallFileMonitorRules_WriteOnlyOpenatUsesFlagConditions(t *testing.T) {
+	recorder := &recordingFileRuleAdder{}
+
+	added, err := installFileMonitorRules(recorder, seccomp.ActNotify, true)
+
+	require.NoError(t, err)
+	require.Greater(t, added, 0)
+	require.False(t, recorder.hasUnconditional(unix.SYS_OPENAT),
+		"write-only mode should not trap every openat")
+	require.True(t, recorder.hasUnconditional(unix.SYS_OPENAT2),
+		"openat2 flags live behind the open_how pointer, so the filter must keep trapping it")
+	require.True(t, recorder.hasUnconditional(unix.SYS_UNLINKAT),
+		"non-open mutating file syscalls must remain trapped")
+
+	openatConditions := recorder.conditionsFor(unix.SYS_OPENAT)
+	require.NotEmpty(t, openatConditions, "write-only mode should install conditional openat rules")
+	require.True(t, hasSingleCondition(openatConditions, maskedFlagCondition(2, unix.O_ACCMODE, unix.O_WRONLY)))
+	require.True(t, hasSingleCondition(openatConditions, maskedFlagCondition(2, unix.O_ACCMODE, unix.O_RDWR)))
+	require.True(t, hasSingleCondition(openatConditions, maskedFlagCondition(2, unix.O_CREAT, unix.O_CREAT)))
+	require.True(t, hasSingleCondition(openatConditions, maskedFlagCondition(2, unix.O_TRUNC, unix.O_TRUNC)))
+	require.True(t, hasSingleCondition(openatConditions, maskedFlagCondition(2, unix.O_APPEND, unix.O_APPEND)))
+	require.True(t, hasSingleCondition(openatConditions, maskedFlagCondition(2, unix.O_TMPFILE, unix.O_TMPFILE)))
+}
+
+func TestInstallFileMonitorRules_AllOpenModeTrapsOpenatUnconditionally(t *testing.T) {
+	recorder := &recordingFileRuleAdder{}
+
+	added, err := installFileMonitorRules(recorder, seccomp.ActNotify, false)
+
+	require.NoError(t, err)
+	require.Greater(t, added, 0)
+	require.True(t, recorder.hasUnconditional(unix.SYS_OPENAT))
+	require.Empty(t, recorder.conditionsFor(unix.SYS_OPENAT))
+}
+
+type recordingFileRuleAdder struct {
+	unconditional []recordedFileRule
+	conditional   []recordedFileConditionalRule
+}
+
+type recordedFileRule struct {
+	call   seccomp.ScmpSyscall
+	action seccomp.ScmpAction
+}
+
+type recordedFileConditionalRule struct {
+	call       seccomp.ScmpSyscall
+	action     seccomp.ScmpAction
+	conditions []seccomp.ScmpCondition
+}
+
+func (r *recordingFileRuleAdder) AddRule(call seccomp.ScmpSyscall, action seccomp.ScmpAction) error {
+	r.unconditional = append(r.unconditional, recordedFileRule{call: call, action: action})
+	return nil
+}
+
+func (r *recordingFileRuleAdder) AddRuleConditional(call seccomp.ScmpSyscall, action seccomp.ScmpAction, conditions []seccomp.ScmpCondition) error {
+	copied := append([]seccomp.ScmpCondition(nil), conditions...)
+	r.conditional = append(r.conditional, recordedFileConditionalRule{
+		call:       call,
+		action:     action,
+		conditions: copied,
+	})
+	return nil
+}
+
+func (r *recordingFileRuleAdder) hasUnconditional(nr int) bool {
+	for _, rule := range r.unconditional {
+		if rule.call == seccomp.ScmpSyscall(nr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *recordingFileRuleAdder) conditionsFor(nr int) [][]seccomp.ScmpCondition {
+	var out [][]seccomp.ScmpCondition
+	for _, rule := range r.conditional {
+		if rule.call == seccomp.ScmpSyscall(nr) {
+			out = append(out, rule.conditions)
+		}
+	}
+	return out
+}
+
+func maskedFlagCondition(argument uint, mask, value int) seccomp.ScmpCondition {
+	return seccomp.ScmpCondition{
+		Argument: argument,
+		Op:       seccomp.CompareMaskedEqual,
+		Operand1: uint64(mask),
+		Operand2: uint64(value),
+	}
+}
+
+func hasSingleCondition(groups [][]seccomp.ScmpCondition, want seccomp.ScmpCondition) bool {
+	for _, conditions := range groups {
+		if len(conditions) == 1 && conditions[0] == want {
+			return true
+		}
+	}
+	return false
 }

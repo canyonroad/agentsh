@@ -22,6 +22,7 @@ type WrapperConfig struct {
 	OnBlock             string                    `json:"on_block,omitempty"`
 
 	InterceptMetadata bool `json:"intercept_metadata,omitempty"`
+	WriteOnlyOpens    bool `json:"write_only_opens,omitempty"`
 	BlockIOUring      bool `json:"block_io_uring,omitempty"`
 
 	// Landlock filesystem restrictions

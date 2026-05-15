@@ -28,6 +28,10 @@ func legacyFileSyscallList() []int32 {
 	}
 }
 
+func legacyFlaggedOpenSyscallList() []int32 {
+	return []int32{unix.SYS_OPEN}
+}
+
 // isLegacyFileSyscall returns true if nr is a legacy (non-at) file syscall.
 func isLegacyFileSyscall(nr int32) bool {
 	switch nr {

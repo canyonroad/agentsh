@@ -245,6 +245,7 @@ type FilterConfig struct {
 	ExecveEnabled      bool
 	FileMonitorEnabled bool
 	InterceptMetadata  bool  // statx, newfstatat, faccessat2, readlinkat
+	WriteOnlyOpens     bool  // trap only write/create-style open/openat calls
 	BlockIOUring       bool  // io_uring_setup/enter/register → EPERM
 	BlockedSyscalls    []int // syscall numbers to block; action controlled by OnBlockAction
 	BlockedFamilies    []seccompkg.BlockedFamily
@@ -336,30 +337,11 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 
 	// File I/O monitoring via user-notify
 	if cfg.FileMonitorEnabled {
-		trap := seccomp.ActNotify
-		fileRules := []seccomp.ScmpSyscall{
-			seccomp.ScmpSyscall(unix.SYS_OPENAT),
-			seccomp.ScmpSyscall(unix.SYS_OPENAT2),
-			seccomp.ScmpSyscall(unix.SYS_UNLINKAT),
-			seccomp.ScmpSyscall(unix.SYS_MKDIRAT),
-			seccomp.ScmpSyscall(unix.SYS_RENAMEAT2),
-			seccomp.ScmpSyscall(unix.SYS_LINKAT),
-			seccomp.ScmpSyscall(unix.SYS_SYMLINKAT),
-			seccomp.ScmpSyscall(unix.SYS_FCHMODAT),
-			seccomp.ScmpSyscall(unix.SYS_FCHOWNAT),
+		added, err := installFileMonitorRules(filt, seccomp.ActNotify, cfg.WriteOnlyOpens)
+		if err != nil {
+			return nil, err
 		}
-		for _, sc := range fileRules {
-			if err := filt.AddRule(sc, trap); err != nil {
-				return nil, fmt.Errorf("add file monitor rule %v: %w", sc, err)
-			}
-		}
-		legacy := legacyFileSyscallList()
-		for _, sc := range legacy {
-			if err := filt.AddRule(seccomp.ScmpSyscall(sc), trap); err != nil {
-				return nil, fmt.Errorf("add legacy file rule %v: %w", sc, err)
-			}
-		}
-		ruleCounts["file_monitor"] = len(fileRules) + len(legacy)
+		ruleCounts["file_monitor"] = added
 	}
 
 	// Metadata syscalls via user-notify (when intercept_metadata is enabled)
@@ -377,14 +359,6 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 			}
 		}
 		ruleCounts["metadata"] = len(metadataRules)
-	}
-
-	// mknodat is always included with file monitoring (create-category)
-	if cfg.FileMonitorEnabled {
-		trap := seccomp.ActNotify
-		if err := filt.AddRule(seccomp.ScmpSyscall(unix.SYS_MKNODAT), trap); err != nil {
-			return nil, fmt.Errorf("add mknodat rule: %w", err)
-		}
 	}
 
 	// Blocked syscalls — action controlled by OnBlockAction.
@@ -550,6 +524,115 @@ func familyToScmpAction(a seccompkg.OnBlockAction) (seccomp.ScmpAction, error) {
 		return seccomp.ActNotify, nil
 	default:
 		return seccomp.ActAllow, fmt.Errorf("unknown family block action %q", a)
+	}
+}
+
+type fileMonitorRuleAdder interface {
+	AddRule(seccomp.ScmpSyscall, seccomp.ScmpAction) error
+	AddRuleConditional(seccomp.ScmpSyscall, seccomp.ScmpAction, []seccomp.ScmpCondition) error
+}
+
+func installFileMonitorRules(adder fileMonitorRuleAdder, action seccomp.ScmpAction, writeOnlyOpens bool) (int, error) {
+	added := 0
+	addRule := func(sc seccomp.ScmpSyscall, label string) error {
+		if err := adder.AddRule(sc, action); err != nil {
+			return fmt.Errorf("add %s rule %v: %w", label, sc, err)
+		}
+		added++
+		return nil
+	}
+
+	if writeOnlyOpens {
+		n, err := installFlaggedOpenNotifyRules(adder, seccomp.ScmpSyscall(unix.SYS_OPENAT), 2, action)
+		added += n
+		if err != nil {
+			return added, fmt.Errorf("add openat write-only rules: %w", err)
+		}
+		// openat2 stores flags in the user-space open_how struct, which seccomp
+		// BPF cannot dereference. Keep trapping it rather than allowing writes to
+		// bypass policy.
+		if err := addRule(seccomp.ScmpSyscall(unix.SYS_OPENAT2), "file monitor"); err != nil {
+			return added, err
+		}
+	} else {
+		for _, sc := range []seccomp.ScmpSyscall{
+			seccomp.ScmpSyscall(unix.SYS_OPENAT),
+			seccomp.ScmpSyscall(unix.SYS_OPENAT2),
+		} {
+			if err := addRule(sc, "file monitor"); err != nil {
+				return added, err
+			}
+		}
+	}
+
+	for _, sc := range []seccomp.ScmpSyscall{
+		seccomp.ScmpSyscall(unix.SYS_UNLINKAT),
+		seccomp.ScmpSyscall(unix.SYS_MKDIRAT),
+		seccomp.ScmpSyscall(unix.SYS_RENAMEAT2),
+		seccomp.ScmpSyscall(unix.SYS_LINKAT),
+		seccomp.ScmpSyscall(unix.SYS_SYMLINKAT),
+		seccomp.ScmpSyscall(unix.SYS_FCHMODAT),
+		seccomp.ScmpSyscall(unix.SYS_FCHOWNAT),
+		seccomp.ScmpSyscall(unix.SYS_MKNODAT),
+	} {
+		if err := addRule(sc, "file monitor"); err != nil {
+			return added, err
+		}
+	}
+
+	flaggedLegacyOpen := map[int32]bool{}
+	for _, sc := range legacyFlaggedOpenSyscallList() {
+		flaggedLegacyOpen[sc] = true
+		if writeOnlyOpens {
+			n, err := installFlaggedOpenNotifyRules(adder, seccomp.ScmpSyscall(sc), 1, action)
+			added += n
+			if err != nil {
+				return added, fmt.Errorf("add legacy open write-only rules %v: %w", sc, err)
+			}
+		} else if err := addRule(seccomp.ScmpSyscall(sc), "legacy file"); err != nil {
+			return added, err
+		}
+	}
+	for _, sc := range legacyFileSyscallList() {
+		if flaggedLegacyOpen[sc] {
+			continue
+		}
+		if err := addRule(seccomp.ScmpSyscall(sc), "legacy file"); err != nil {
+			return added, err
+		}
+	}
+
+	return added, nil
+}
+
+func installFlaggedOpenNotifyRules(adder fileMonitorRuleAdder, sc seccomp.ScmpSyscall, flagsArg uint, action seccomp.ScmpAction) (int, error) {
+	added := 0
+	for _, condition := range openWriteFlagConditions(flagsArg) {
+		if err := adder.AddRuleConditional(sc, action, []seccomp.ScmpCondition{condition}); err != nil {
+			return added, fmt.Errorf("add conditional rule for syscall %d: %w", sc, err)
+		}
+		added++
+	}
+	return added, nil
+}
+
+func openWriteFlagConditions(flagsArg uint) []seccomp.ScmpCondition {
+	return []seccomp.ScmpCondition{
+		maskedOpenFlagCondition(flagsArg, unix.O_ACCMODE, unix.O_WRONLY),
+		maskedOpenFlagCondition(flagsArg, unix.O_ACCMODE, unix.O_RDWR),
+		maskedOpenFlagCondition(flagsArg, unix.O_CREAT, unix.O_CREAT),
+		maskedOpenFlagCondition(flagsArg, unix.O_TRUNC, unix.O_TRUNC),
+		maskedOpenFlagCondition(flagsArg, unix.O_APPEND, unix.O_APPEND),
+		maskedOpenFlagCondition(flagsArg, unix.O_TMPFILE, unix.O_TMPFILE),
+	}
+}
+
+func maskedOpenFlagCondition(argument uint, mask, value int) seccomp.ScmpCondition {
+	return seccomp.ScmpCondition{
+		Argument: argument,
+		Op:       seccomp.CompareMaskedEqual,
+		Operand1: uint64(mask),
+		Operand2: uint64(value),
 	}
 }
 
@@ -808,6 +891,7 @@ func filterDiagnosticFields(filt *seccomp.ScmpFilter, cfg FilterConfig, waitKill
 		"cfg_execve_enabled", cfg.ExecveEnabled,
 		"cfg_file_monitor_enabled", cfg.FileMonitorEnabled,
 		"cfg_intercept_metadata", cfg.InterceptMetadata,
+		"cfg_write_only_opens", cfg.WriteOnlyOpens,
 		"cfg_block_io_uring", cfg.BlockIOUring,
 	}
 }

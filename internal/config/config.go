@@ -525,6 +525,7 @@ type SandboxSeccompFileMonitorConfig struct {
 	Enabled            *bool `yaml:"enabled"`
 	EnforceWithoutFUSE *bool `yaml:"enforce_without_fuse"`
 	InterceptMetadata  *bool `yaml:"intercept_metadata"`
+	WriteOnlyOpens     *bool `yaml:"write_only_opens"`
 	OpenatEmulation    *bool `yaml:"openat_emulation"`
 	BlockIOUring       *bool `yaml:"block_io_uring"`
 }

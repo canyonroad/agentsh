@@ -4,11 +4,12 @@ agentsh uses seccomp-bpf to enforce syscall-level security controls on agent pro
 
 ## Overview
 
-When enabled, seccomp filtering provides three types of protection:
+When enabled, seccomp filtering provides four types of protection:
 
 1. **Unix Socket Monitoring**: Intercepts socket operations for policy-based access control
-2. **Signal Interception**: Intercepts signal delivery for policy-based allow/deny/redirect
-3. **Syscall Blocking**: Denies (and optionally kills) processes that attempt blocked syscalls
+2. **File Monitoring**: Intercepts filesystem operations for policy-based access control
+3. **Signal Interception**: Intercepts signal delivery for policy-based allow/deny/redirect
+4. **Syscall Blocking**: Denies (and optionally kills) processes that attempt blocked syscalls
 
 ## Configuration
 
@@ -25,6 +26,12 @@ sandbox:
     signal_filter:
       enabled: true
       action: enforce  # enforce | audit
+
+    file_monitor:
+      enabled: true
+      enforce_without_fuse: true
+      intercept_metadata: false
+      write_only_opens: true  # default: true when intercept_metadata is false
 
     syscalls:
       default_action: allow  # allow | block
@@ -64,6 +71,12 @@ sandbox:
     #     protocol: NETLINK_XFRM
     #     action: log_and_kill
 ```
+
+## File Monitoring
+
+File monitoring uses `SECCOMP_RET_USER_NOTIF` to evaluate filesystem policy for file syscalls. When `write_only_opens` is true, the seccomp filter only traps `openat` and legacy `open` calls whose flags request write/create behavior (`O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TMPFILE`, `O_TRUNC`, or `O_APPEND`). Read-only opens stay on the kernel fast path and do not emit file-open events.
+
+`openat2` is still trapped when file monitoring is enabled because its flags live in the user-space `open_how` struct; seccomp-BPF cannot dereference that pointer safely in the kernel filter.
 
 ## Signal Interception
 

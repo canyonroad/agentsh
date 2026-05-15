@@ -6,6 +6,8 @@ package unix
 // ARM64 and others only have the -at variants.
 func legacyFileSyscallList() []int32 { return nil }
 
+func legacyFlaggedOpenSyscallList() []int32 { return nil }
+
 // isLegacyFileSyscall returns false on non-amd64 architectures.
 func isLegacyFileSyscall(nr int32) bool { return false }
 

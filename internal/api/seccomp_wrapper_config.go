@@ -24,6 +24,7 @@ type seccompWrapperConfig struct {
 
 	// File monitor sub-options
 	InterceptMetadata bool `json:"intercept_metadata,omitempty"`
+	WriteOnlyOpens    bool `json:"write_only_opens,omitempty"`
 	BlockIOUring      bool `json:"block_io_uring,omitempty"`
 
 	// Landlock filesystem restrictions
@@ -78,6 +79,12 @@ func (a *App) buildSeccompWrapperConfig(s *session.Session, p seccompWrapperPara
 
 	fmDefault := config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE, false)
 	seccompCfg.InterceptMetadata = config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata, fmDefault)
+	if seccompCfg.FileMonitorEnabled {
+		seccompCfg.WriteOnlyOpens = config.FileMonitorBoolWithDefault(
+			a.cfg.Sandbox.Seccomp.FileMonitor.WriteOnlyOpens,
+			!seccompCfg.InterceptMetadata,
+		)
+	}
 	seccompCfg.BlockIOUring = config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.BlockIOUring, fmDefault)
 
 	if a.cfg.Landlock.Enabled {
