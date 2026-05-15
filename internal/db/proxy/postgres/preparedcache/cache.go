@@ -26,6 +26,21 @@ type Entry struct {
 	RedactionTier            policy.RedactionTier
 	CatalogRefreshSearchPath bool
 	CatalogRefreshSnapshot   bool
+	Redirect                 *RedirectMetadata
+}
+
+// RedirectMetadata captures parse-time redirect state for wire-protocol
+// prepared statements. Classification on Entry is the rewritten statement;
+// OriginalClassification keeps the client statement for audit.
+type RedirectMetadata struct {
+	OriginalClassification   effects.ClassifiedStatement
+	OriginalSQL              string
+	OriginalStatementDigest  string
+	RewrittenStatementDigest string
+	Rule                     string
+	SourceRelation           string
+	TargetRelation           string
+	PolicyIdentity           string
 }
 
 // Cache is a fixed-capacity LRU keyed by prepared-statement name. Empty name

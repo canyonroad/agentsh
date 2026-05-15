@@ -123,3 +123,49 @@ func TestCachePreservesResolvedObjects(t *testing.T) {
 		t.Fatalf("ResolvedObjects lost: %+v", got.Classification)
 	}
 }
+
+func TestCache_RedirectMetadataRoundTrip(t *testing.T) {
+	c := New(2)
+	entry := Entry{
+		Classification: effects.ClassifiedStatement{RawVerb: "SELECT"},
+		Redirect: &RedirectMetadata{
+			OriginalClassification:   effects.ClassifiedStatement{RawVerb: "SELECT"},
+			OriginalSQL:              "select note from public.users",
+			OriginalStatementDigest:  "sha256:original",
+			RewrittenStatementDigest: "sha256:rewritten",
+			Rule:                     "redirect-users",
+			SourceRelation:           "public.users",
+			TargetRelation:           "public.safe_users",
+			PolicyIdentity:           "redirect-users",
+		},
+	}
+	c.Put("stmt", entry)
+
+	got, ok := c.Get("stmt")
+	if !ok {
+		t.Fatal("cache miss")
+	}
+	if got.Redirect == nil {
+		t.Fatal("Redirect metadata missing")
+	}
+	if got.Redirect.Rule != "redirect-users" || got.Redirect.TargetRelation != "public.safe_users" {
+		t.Fatalf("Redirect metadata = %+v", got.Redirect)
+	}
+}
+
+func TestCache_RedirectMetadataReplacementClearsOldValue(t *testing.T) {
+	c := New(2)
+	c.Put("stmt", Entry{
+		Classification: effects.ClassifiedStatement{RawVerb: "SELECT"},
+		Redirect:       &RedirectMetadata{Rule: "redirect-users"},
+	})
+	c.Put("stmt", Entry{Classification: effects.ClassifiedStatement{RawVerb: "SELECT"}})
+
+	got, ok := c.Get("stmt")
+	if !ok {
+		t.Fatal("cache miss")
+	}
+	if got.Redirect != nil {
+		t.Fatalf("old redirect metadata leaked after replacement: %+v", got.Redirect)
+	}
+}
