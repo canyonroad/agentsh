@@ -35,6 +35,9 @@ func (p Planner) Plan(in Input) (Plan, error) {
 
 	sourceSchema, sourceName := splitRelation(in.Action.SourceRelation)
 	targetSchema, targetName := splitRelation(in.Action.TargetRelation)
+	if hasSchemaQualifiedSourceColumnRef(selectStmt, sourceSchema, sourceName) {
+		return Plan{}, reject(ReasonUnsupportedStatement, nil)
+	}
 	count, err := rewriteSelectRelations(selectStmt, relationRewrite{
 		sourceSchema: sourceSchema,
 		sourceName:   sourceName,

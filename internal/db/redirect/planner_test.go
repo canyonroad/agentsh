@@ -191,6 +191,23 @@ func TestPlannerRewritesQualifiedRelation(t *testing.T) {
 	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
 }
 
+func TestPlannerRewritesTableQualifiedColumnReferenceWithImplicitAlias(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL:       "SELECT users.id FROM public.users",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertRewrittenRelationAlias(t, plan.RewrittenSQL, "public.safe_users", "users")
+}
+
 func TestPlannerRewritesUnqualifiedResolvedRelation(t *testing.T) {
 	plan, err := testPlanner().Plan(Input{
 		SQL:       "SELECT * FROM users",
@@ -224,11 +241,7 @@ func TestPlannerPreservesAlias(t *testing.T) {
 		t.Fatalf("Plan() error = %v", err)
 	}
 
-	rewritten := strings.ToLower(plan.RewrittenSQL)
-	if !strings.Contains(rewritten, "public.safe_users as u") &&
-		!strings.Contains(rewritten, "public.safe_users u") {
-		t.Fatalf("rewritten SQL = %q, want rewritten FROM relation to keep alias u", plan.RewrittenSQL)
-	}
+	assertRewrittenRelationAlias(t, plan.RewrittenSQL, "public.safe_users", "u")
 }
 
 func TestPlannerRewritesOneRelationInJoin(t *testing.T) {
@@ -248,6 +261,38 @@ func TestPlannerRewritesOneRelationInJoin(t *testing.T) {
 	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
 	assertSQLContains(t, plan.RewrittenSQL, "public.orders")
 	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
+}
+
+func TestPlannerRewritesJoinTableQualifiedReferenceWithImplicitAlias(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM public.users JOIN public.orders ON users.id = orders.user_id",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertRewrittenRelationAlias(t, plan.RewrittenSQL, "public.safe_users", "users")
+	assertSQLContains(t, plan.RewrittenSQL, "public.orders")
+}
+
+func TestPlannerRejectsSchemaQualifiedSourceColumnReference(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL:       "SELECT public.users.id FROM public.users",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+
+	assertRejection(t, err, ReasonUnsupportedStatement)
 }
 
 func TestRejectionValueImplementsError(t *testing.T) {
@@ -326,6 +371,17 @@ func assertSQLNotContains(t *testing.T, sql, unwanted string) {
 	t.Helper()
 	if strings.Contains(sql, unwanted) {
 		t.Fatalf("rewritten SQL = %q, want not to contain %q", sql, unwanted)
+	}
+}
+
+func assertRewrittenRelationAlias(t *testing.T, sql, relation, alias string) {
+	t.Helper()
+	rewritten := strings.ToLower(sql)
+	relation = strings.ToLower(relation)
+	alias = strings.ToLower(alias)
+	if !strings.Contains(rewritten, relation+" as "+alias) &&
+		!strings.Contains(rewritten, relation+" "+alias) {
+		t.Fatalf("rewritten SQL = %q, want rewritten FROM relation to keep alias %s", sql, alias)
 	}
 }
 
