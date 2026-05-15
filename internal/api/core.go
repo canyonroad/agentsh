@@ -377,8 +377,9 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					PolicyEngine: policyEngine,
 					Unmount: func() error {
 						deregisterFUSEMount(sessionID, capturedMountPoint)
+						err := m.Close()
 						close(eventChan)
-						return m.Close()
+						return err
 					},
 				})
 			}
@@ -1298,8 +1299,9 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 	capturedMountPoint := mountPoint
 	s.SetWorkspaceUnmount(func() error {
 		deregisterFUSEMount(sessionID, capturedMountPoint)
+		err := m.Close()
 		close(eventChan)
-		return m.Close()
+		return err
 	})
 
 	fields := map[string]any{

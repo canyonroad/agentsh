@@ -434,10 +434,19 @@ type eventEmitter struct {
 }
 
 // AppendEvent implements fsmonitor.Emitter.
-func (e *eventEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
+func (e *eventEmitter) AppendEvent(ctx context.Context, ev types.Event) (err error) {
 	if e.eventChan == nil {
 		return nil
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			if fmt.Sprint(r) == "send on closed channel" {
+				err = nil
+				return
+			}
+			panic(r)
+		}
+	}()
 
 	// Use session/command from config if not in event
 	sessionID := ev.SessionID
