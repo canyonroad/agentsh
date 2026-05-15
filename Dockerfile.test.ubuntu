@@ -278,7 +278,7 @@ fi
 echo ""
 echo "=== Shim tests ==="
 
-sh_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo hello_sh' 2>&1 | tr -d '\r' | tail -n 1)"
+sh_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo hello_sh' 2>&1 | grep -v 'INFO seccomp:' | tr -d '\r' | tail -n 1)"
 if [ "$sh_out" = "hello_sh" ]; then
   pass "echo through /bin/sh shim"
 else
@@ -288,7 +288,7 @@ fi
 # -------------------------------------------------------------------
 # Test: basic echo through /bin/bash shim
 # -------------------------------------------------------------------
-bash_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/bash -c 'echo hello_bash' 2>&1 | tr -d '\r' | tail -n 1)"
+bash_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/bash -c 'echo hello_bash' 2>&1 | grep -v 'INFO seccomp:' | tr -d '\r' | tail -n 1)"
 if [ "$bash_out" = "hello_bash" ]; then
   pass "echo through /bin/bash shim"
 else
@@ -301,7 +301,7 @@ fi
 # When AGENTSH_IN_SESSION is set, the shim should delegate directly to the
 # real shell without contacting the server. We set AGENTSH_BIN to a
 # nonexistent path to prove the shim doesn't try to call it.
-rec_out="$(AGENTSH_BIN=/nonexistent/agentsh AGENTSH_IN_SESSION=1 /bin/sh -c 'echo recursion_ok' 2>&1 | tr -d '\r' | tail -n 1)"
+rec_out="$(AGENTSH_BIN=/nonexistent/agentsh AGENTSH_IN_SESSION=1 /bin/sh -c 'echo recursion_ok' 2>&1 | grep -v 'INFO seccomp:' | tr -d '\r' | tail -n 1)"
 if [ "$rec_out" = "recursion_ok" ]; then
   pass "AGENTSH_IN_SESSION recursion guard"
 else
@@ -311,7 +311,7 @@ fi
 # -------------------------------------------------------------------
 # Test: multi-word arguments preserved
 # -------------------------------------------------------------------
-multi_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo "hello world"' 2>&1 | tr -d '\r' | tail -n 1)"
+multi_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo "hello world"' 2>&1 | grep -v 'INFO seccomp:' | tr -d '\r' | tail -n 1)"
 if [ "$multi_out" = "hello world" ]; then
   pass "multi-word arguments preserved"
 else
@@ -577,7 +577,7 @@ echo ""
 echo "=== Shim + policy integration ==="
 
 # Safe command through shim should work
-shim_safe="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo shim_policy_ok' 2>&1 | tr -d '\r' | tail -n 1)"
+shim_safe="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo shim_policy_ok' 2>&1 | grep -v 'INFO seccomp:' | tr -d '\r' | tail -n 1)"
 if [ "$shim_safe" = "shim_policy_ok" ]; then
   pass "safe command through shim works"
 else
