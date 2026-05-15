@@ -10,6 +10,12 @@ import (
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
+func TestReasonAmbiguousSourceAlias(t *testing.T) {
+	if ReasonAmbiguousSource != ReasonAmbiguousRedirectSource {
+		t.Fatalf("ReasonAmbiguousSource = %q, want %q", ReasonAmbiguousSource, ReasonAmbiguousRedirectSource)
+	}
+}
+
 func TestPlannerRejectsMissingTarget(t *testing.T) {
 	_, err := testPlanner().Plan(Input{
 		SQL:       "SELECT * FROM public.users",

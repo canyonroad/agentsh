@@ -21,8 +21,10 @@ const (
 	ReasonUnresolvedObject        Reason = "unresolved_object"
 	ReasonMissingRedirectTarget   Reason = "missing_redirect_target"
 	ReasonAmbiguousRedirectSource Reason = "ambiguous_redirect_source"
-	ReasonSourceNotFound          Reason = "source_relation_not_found"
-	ReasonDeparseFailed           Reason = "deparse_failed"
+	// ReasonAmbiguousSource is a compatibility alias used by the Plan 12 dependency gate.
+	ReasonAmbiguousSource Reason = ReasonAmbiguousRedirectSource
+	ReasonSourceNotFound  Reason = "source_relation_not_found"
+	ReasonDeparseFailed   Reason = "deparse_failed"
 )
 
 type Rejection struct {
