@@ -128,6 +128,83 @@ func TestEvaluate_RedirectBeatsAuditAndAllow(t *testing.T) {
 	}
 }
 
+func TestEvaluate_RedirectCoversOneRelationAndAllowCoversAnother(t *testing.T) {
+	rs := loadRules(t, redirectPolicy(`
+  - name: redirect-users
+    db_service: appdb
+    operations: [READ]
+    relations: ["public.users"]
+    match_object_resolution: catalog_resolved
+    decision: redirect
+    redirect:
+      relation: public.safe_users
+  - name: allow-orders
+    db_service: appdb
+    operations: [READ]
+    relations: ["public.orders"]
+    match_object_resolution: catalog_resolved
+    decision: allow
+`))
+
+	stmt := catalogResolvedRead("public", "users")
+	stmt.Effects[0].Objects = append(stmt.Effects[0].Objects, effects.ObjectRef{Kind: effects.ObjectTable, Name: "orders"})
+	stmt.Effects[0].ResolvedObjects = append(stmt.Effects[0].ResolvedObjects, effects.ResolvedObjectRef{
+		Source: effects.ResolvedObjectSourceCatalog,
+		Kind:   effects.ResolvedObjectRelation,
+		Schema: "public",
+		Name:   "orders",
+	})
+
+	d := Evaluate(stmt, rs, "appdb")
+	if d.Verb != VerbRedirect || d.RuleName != "redirect-users" {
+		t.Fatalf("decision = %+v, want redirect by redirect-users", d)
+	}
+	if d.Redirect == nil {
+		t.Fatal("Redirect metadata nil")
+	}
+	if d.Redirect.SourceRelation != "public.users" || d.Redirect.TargetRelation != "public.safe_users" {
+		t.Fatalf("Redirect = %+v, want public.users -> public.safe_users", d.Redirect)
+	}
+}
+
+func TestEvaluate_TwoRedirectCoveredRelationsImplicitDeny(t *testing.T) {
+	rs := loadRules(t, redirectPolicy(`
+  - name: redirect-users
+    db_service: appdb
+    operations: [READ]
+    relations: ["public.users"]
+    match_object_resolution: catalog_resolved
+    decision: redirect
+    redirect:
+      relation: public.safe_users
+  - name: redirect-orders
+    db_service: appdb
+    operations: [READ]
+    relations: ["public.orders"]
+    match_object_resolution: catalog_resolved
+    decision: redirect
+    redirect:
+      relation: public.safe_orders
+`))
+
+	stmt := catalogResolvedRead("public", "users")
+	stmt.Effects[0].Objects = append(stmt.Effects[0].Objects, effects.ObjectRef{Kind: effects.ObjectTable, Name: "orders"})
+	stmt.Effects[0].ResolvedObjects = append(stmt.Effects[0].ResolvedObjects, effects.ResolvedObjectRef{
+		Source: effects.ResolvedObjectSourceCatalog,
+		Kind:   effects.ResolvedObjectRelation,
+		Schema: "public",
+		Name:   "orders",
+	})
+
+	d := Evaluate(stmt, rs, "appdb")
+	if d.Verb != VerbDeny || d.RuleName != "" {
+		t.Fatalf("decision = %+v, want implicit deny", d)
+	}
+	if d.Redirect != nil {
+		t.Fatalf("Redirect = %+v, want nil", d.Redirect)
+	}
+}
+
 func TestEvaluate_ImplicitDenyBeatsRedirect(t *testing.T) {
 	rs := loadRules(t, redirectPolicy(`
   - name: redirect-users

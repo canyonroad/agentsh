@@ -134,7 +134,7 @@ func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effec
 
 	// Pass 3 — most-restrictive verb across covering rules. Fold in policy file
 	// order so same-verb primary RuleName ties are independent of object order.
-	return foldCoverageRules(coverageRulesInPolicyOrder(applicable, coverage, len(e.Objects)))
+	return foldObjectCoverageRules(applicable, coverage, len(e.Objects))
 }
 
 func resolvedObjectForSlot(e effects.Effect, idx int) (effects.ResolvedObjectRef, bool) {
@@ -293,6 +293,31 @@ func coverageRulesInPolicyOrder(applicable []*compiledStatementRule, coverage ma
 		}
 	}
 	return out
+}
+
+func foldObjectCoverageRules(applicable []*compiledStatementRule, coverage map[int][]*compiledStatementRule, objectCount int) effectDecision {
+	rules := coverageRulesInPolicyOrder(applicable, coverage, objectCount)
+	d := foldCoverageRules(rules)
+	if d.verb != verbRedirect {
+		return d
+	}
+	if redirectSourceCount(coverage, objectCount) != 1 {
+		return effectDecision{verb: verbImplicitDeny}
+	}
+	return d
+}
+
+func redirectSourceCount(coverage map[int][]*compiledStatementRule, objectCount int) int {
+	sources := map[string]struct{}{}
+	for i := 0; i < objectCount; i++ {
+		for _, r := range coverage[i] {
+			if r.verb != VerbRedirect || r.redirect == nil {
+				continue
+			}
+			sources[r.redirect.SourceRelation] = struct{}{}
+		}
+	}
+	return len(sources)
 }
 
 // isObjectlessGroup reports whether the group inherently has no objects

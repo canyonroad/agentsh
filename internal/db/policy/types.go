@@ -245,6 +245,12 @@ func (rs *RuleSet) AllStatementRules() []StatementRule {
 	for _, cr := range rs.statement {
 		if cr.src != nil {
 			r := *cr.src
+			r.Schemas = copyStringSlice(cr.src.Schemas)
+			r.Objects = copyStringSlice(cr.src.Objects)
+			r.Relations = copyStringSlice(cr.src.Relations)
+			r.Functions = copyStringSlice(cr.src.Functions)
+			r.Operations = copyStringSlice(cr.src.Operations)
+			r.Subtypes = copyStringSlice(cr.src.Subtypes)
 			if cr.src.Redirect != nil {
 				redirect := *cr.src.Redirect
 				r.Redirect = &redirect
@@ -253,6 +259,13 @@ func (rs *RuleSet) AllStatementRules() []StatementRule {
 		}
 	}
 	return out
+}
+
+func copyStringSlice(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	return append([]string(nil), in...)
 }
 
 // UsesCanonicalSelectors reports whether any statement rule applicable to svc
