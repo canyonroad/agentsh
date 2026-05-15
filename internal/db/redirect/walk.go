@@ -24,12 +24,15 @@ func rewriteSelectRelations(stmt *pg_query.SelectStmt, rewrite relationRewrite) 
 	if len(stmt.LockingClause) > 0 {
 		return 0, reject(ReasonUnsupportedStatement, nil)
 	}
+	if stmt.WithClause != nil && stmt.WithClause.Recursive {
+		return 0, reject(ReasonUnsupportedStatement, nil)
+	}
 
-	scopedRewrite := rewrite.withCTENames(stmt.WithClause)
-	count, err := rewriteCTEs(stmt.WithClause, scopedRewrite)
+	count, err := rewriteCTEs(stmt.WithClause, rewrite)
 	if err != nil {
 		return 0, err
 	}
+	scopedRewrite := rewrite.withCTENames(stmt.WithClause)
 	more, err := rewriteRangeNodes(stmt.FromClause, scopedRewrite)
 	if err != nil {
 		return 0, err

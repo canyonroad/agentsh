@@ -319,7 +319,7 @@ func TestPlannerRewritesReadOnlyCTE(t *testing.T) {
 
 func TestPlannerRewritesCTEShadowingSourceName(t *testing.T) {
 	plan, err := testPlanner().Plan(Input{
-		SQL:       "WITH users AS (SELECT id FROM public.users) SELECT * FROM users",
+		SQL:       "WITH users AS (SELECT id FROM users) SELECT * FROM users",
 		Statement: readStatement("public", "users"),
 		Action: Action{
 			RuleName:       "redirect-users",
