@@ -26,22 +26,16 @@ func validateInput(in Input) error {
 	}
 
 	for _, eff := range in.Statement.Effects {
-		switch eff.Group {
-		case effects.GroupRead:
+		if eff.Group == effects.GroupRead {
 			if eff.Resolution != effects.ResolutionCatalogResolved {
 				return reject(ReasonUnresolvedObject, nil)
 			}
-		case effects.GroupWrite, effects.GroupModify, effects.GroupDelete:
-			return reject(ReasonWriteStatement, nil)
-		case effects.GroupSchemaCreate, effects.GroupSchemaAlter, effects.GroupSchemaDestroy, effects.GroupPrivilege:
-			return reject(ReasonDDLStatement, nil)
-		case effects.GroupBulkLoad, effects.GroupBulkExport:
-			return reject(ReasonCopyStatement, nil)
-		case effects.GroupProcedural, effects.GroupUnsafeIO:
-			return reject(ReasonProceduralStatement, nil)
-		default:
-			return reject(ReasonUnsupportedStatement, nil)
+			continue
 		}
+		if reason, ok := rejectionForNonReadEffect(eff.Group); ok {
+			return reject(reason, nil)
+		}
+		return reject(ReasonUnsupportedStatement, nil)
 	}
 
 	if !sourceRelationExists(in.Statement, source) {
@@ -69,6 +63,21 @@ func sourceRelationExists(stmt effects.ClassifiedStatement, source string) bool 
 		}
 	}
 	return false
+}
+
+func rejectionForNonReadEffect(group effects.Group) (Reason, bool) {
+	switch group {
+	case effects.GroupWrite, effects.GroupModify, effects.GroupDelete:
+		return ReasonWriteStatement, true
+	case effects.GroupSchemaCreate, effects.GroupSchemaAlter, effects.GroupSchemaDestroy, effects.GroupPrivilege:
+		return ReasonDDLStatement, true
+	case effects.GroupBulkLoad, effects.GroupBulkExport:
+		return ReasonCopyStatement, true
+	case effects.GroupProcedural, effects.GroupUnsafeIO:
+		return ReasonProceduralStatement, true
+	default:
+		return "", false
+	}
 }
 
 func hasUnresolvedObject(objects []effects.ResolvedObjectRef) bool {

@@ -281,6 +281,64 @@ func TestPlannerRewritesJoinTableQualifiedReferenceWithImplicitAlias(t *testing.
 	assertSQLContains(t, plan.RewrittenSQL, "public.orders")
 }
 
+func TestPlannerRewritesNestedSubselect(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM (SELECT id FROM public.users) s",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
+	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
+}
+
+func TestPlannerRewritesReadOnlyCTE(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL:       "WITH u AS (SELECT id FROM public.users) SELECT * FROM u",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
+	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
+}
+
+func TestPlannerRewritesSetOperation(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL: "SELECT id FROM public.users UNION ALL SELECT id FROM public.archive_users",
+		Statement: readStatementWithResolved(
+			resolvedRelation("public", "users"),
+			resolvedRelation("public", "archive_users"),
+		),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
+	assertSQLContains(t, plan.RewrittenSQL, "public.archive_users")
+	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
+}
+
 func TestPlannerRejectsSchemaQualifiedSourceColumnReference(t *testing.T) {
 	_, err := testPlanner().Plan(Input{
 		SQL:       "SELECT public.users.id FROM public.users",
@@ -293,6 +351,56 @@ func TestPlannerRejectsSchemaQualifiedSourceColumnReference(t *testing.T) {
 	})
 
 	assertRejection(t, err, ReasonUnsupportedStatement)
+}
+
+func TestPlannerRejectsSelectInto(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * INTO temp_user_ids FROM public.users",
+		Statement: readStatement("public", "users"),
+		Action:    testAction(),
+	})
+
+	assertRejection(t, err, ReasonDDLStatement)
+}
+
+func TestPlannerRejectsDataModifyingCTE(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL:       "WITH moved AS (DELETE FROM public.users RETURNING id) SELECT * FROM moved",
+		Statement: readStatement("public", "users"),
+		Action:    testAction(),
+	})
+
+	assertRejection(t, err, ReasonWriteStatement)
+}
+
+func TestPlannerRejectsLockingClause(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM public.users FOR UPDATE",
+		Statement: readStatement("public", "users"),
+		Action:    testAction(),
+	})
+
+	assertRejection(t, err, ReasonUnsupportedStatement)
+}
+
+func TestPlannerRejectsRangeFunction(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM public.users, generate_series(1, 3)",
+		Statement: readStatement("public", "users"),
+		Action:    testAction(),
+	})
+
+	assertRejection(t, err, ReasonProceduralStatement)
+}
+
+func TestPlannerRejectsMultipleSourceOccurrences(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM public.users u1 JOIN public.users u2 ON u1.id = u2.id",
+		Statement: readStatement("public", "users"),
+		Action:    testAction(),
+	})
+
+	assertRejection(t, err, ReasonAmbiguousRedirectSource)
 }
 
 func TestRejectionValueImplementsError(t *testing.T) {
@@ -320,20 +428,28 @@ func testAction() Action {
 }
 
 func readStatement(schema, name string) effects.ClassifiedStatement {
-	return readStatementWithResolved(effects.ResolvedObjectRef{
+	return readStatementWithResolved(resolvedRelation(schema, name))
+}
+
+func readStatementWithResolved(resolved ...effects.ResolvedObjectRef) effects.ClassifiedStatement {
+	return effects.ClassifiedStatement{Effects: []effects.Effect{readEffect(resolved...)}}
+}
+
+func readEffect(resolved ...effects.ResolvedObjectRef) effects.Effect {
+	return effects.Effect{
+		Group:           effects.GroupRead,
+		Resolution:      effects.ResolutionCatalogResolved,
+		ResolvedObjects: resolved,
+	}
+}
+
+func resolvedRelation(schema, name string) effects.ResolvedObjectRef {
+	return effects.ResolvedObjectRef{
 		Source: effects.ResolvedObjectSourceCatalog,
 		Kind:   effects.ResolvedObjectRelation,
 		Schema: schema,
 		Name:   name,
-	})
-}
-
-func readStatementWithResolved(resolved effects.ResolvedObjectRef) effects.ClassifiedStatement {
-	return effects.ClassifiedStatement{Effects: []effects.Effect{{
-		Group:           effects.GroupRead,
-		Resolution:      effects.ResolutionCatalogResolved,
-		ResolvedObjects: []effects.ResolvedObjectRef{resolved},
-	}}}
+	}
 }
 
 func assertRejection(t *testing.T, err error, reason Reason) {

@@ -17,10 +17,22 @@ func rewriteSelectRelations(stmt *pg_query.SelectStmt, rewrite relationRewrite) 
 		return 0, nil
 	}
 
-	count, err := rewriteRangeNodes(stmt.FromClause, rewrite)
+	if stmt.IntoClause != nil {
+		return 0, reject(ReasonDDLStatement, nil)
+	}
+	if len(stmt.LockingClause) > 0 {
+		return 0, reject(ReasonUnsupportedStatement, nil)
+	}
+
+	count, err := rewriteCTEs(stmt.WithClause, rewrite)
 	if err != nil {
 		return 0, err
 	}
+	more, err := rewriteRangeNodes(stmt.FromClause, rewrite)
+	if err != nil {
+		return 0, err
+	}
+	count += more
 	if stmt.Larg != nil {
 		more, err := rewriteSelectRelations(stmt.Larg, rewrite)
 		if err != nil {
@@ -30,6 +42,33 @@ func rewriteSelectRelations(stmt *pg_query.SelectStmt, rewrite relationRewrite) 
 	}
 	if stmt.Rarg != nil {
 		more, err := rewriteSelectRelations(stmt.Rarg, rewrite)
+		if err != nil {
+			return 0, err
+		}
+		count += more
+	}
+	return count, nil
+}
+
+func rewriteCTEs(withClause *pg_query.WithClause, rewrite relationRewrite) (int, error) {
+	if withClause == nil {
+		return 0, nil
+	}
+
+	count := 0
+	for _, node := range withClause.Ctes {
+		if node == nil {
+			continue
+		}
+		cteNode, ok := node.Node.(*pg_query.Node_CommonTableExpr)
+		if !ok || cteNode.CommonTableExpr == nil || cteNode.CommonTableExpr.Ctequery == nil {
+			continue
+		}
+		query, ok := cteNode.CommonTableExpr.Ctequery.Node.(*pg_query.Node_SelectStmt)
+		if !ok || query.SelectStmt == nil {
+			return 0, reject(ReasonWriteStatement, nil)
+		}
+		more, err := rewriteSelectRelations(query.SelectStmt, rewrite)
 		if err != nil {
 			return 0, err
 		}
