@@ -34,6 +34,18 @@ type buildArgs struct {
 	IsDeniedBySibling bool
 	BatchSHA          string // sha256 hex of the full Q.String; used for command_id
 	Parser            classify_pg.Parser
+	Redirect          redirectEventArgs
+}
+
+type redirectEventArgs struct {
+	Redirected               bool
+	Rule                     string
+	RewrittenSQL             string
+	RewrittenStatementDigest string
+	SourceRelation           string
+	TargetRelation           string
+	RuntimeStatus            string
+	RejectionReason          string
 }
 
 // buildStatementEvent returns a fully-populated events.DBEvent. Pure function
@@ -41,12 +53,13 @@ type buildArgs struct {
 func buildStatementEvent(a buildArgs) events.DBEvent {
 	slice := perStmtSlice(a.SQL, a.Stmt)
 
-	normalized, err := a.Parser.Normalize(slice)
-	if err != nil || normalized == "" {
-		normalized = strings.TrimSpace(slice)
+	normalized, _ := normalizeStatement(a.Parser, slice)
+	digest := statementDigest(a.Parser, slice)
+
+	rewrittenDigest := a.Redirect.RewrittenStatementDigest
+	if rewrittenDigest == "" && a.Redirect.RewrittenSQL != "" {
+		rewrittenDigest = statementDigest(a.Parser, a.Redirect.RewrittenSQL)
 	}
-	digestBytes := sha256.Sum256([]byte(normalized))
-	digest := "sha256:" + hex.EncodeToString(digestBytes[:])
 
 	var stmtText string
 	var redaction events.Redaction
@@ -94,34 +107,58 @@ func buildStatementEvent(a buildArgs) events.DBEvent {
 	opGroup, opGroupID, opSubtype := operationFromStatement(a.Stmt)
 
 	return events.DBEvent{
-		EventID:                newEventID(),
-		SessionID:              eventSessionID(a.Conn.agentSessionID, a.Conn.clientIdentity),
-		CommandID:              fmt.Sprintf("%s:%d", a.BatchSHA, a.StmtIndex),
-		Timestamp:              timeNow(),
-		DBService:              a.Conn.dbService,
-		DBFamily:               "postgres",
-		DBDialect:              "postgres",
-		DBUser:                 a.Conn.dbUser,
-		Database:               a.Conn.database,
-		ApplicationName:        a.Conn.appName,
-		ClientIdentity:         a.Conn.clientIdentity,
-		Effects:                a.Stmt.Effects,
-		OperationGroup:         opGroup,
-		OperationGroupID:       opGroupID,
-		OperationSubtype:       opSubtype,
-		RawVerb:                a.Stmt.RawVerb,
-		ObjectResolution:       a.Stmt.FoldResolution().String(),
-		ObjectResolutionReason: firstResolutionReason(a.Stmt),
-		ParserBackend:          a.Stmt.ParserBackend,
-		StatementText:          stmtText,
-		StatementDigest:        digest,
-		StatementRedaction:     redaction,
-		TLS:                    events.EventTLS{Mode: a.Conn.tlsMode, ClientSNI: a.Conn.sniHostname},
-		Decision:               dec,
-		Result:                 result,
-		TxContext:              tx,
-		Predicates:             predicates,
+		EventID:                  newEventID(),
+		SessionID:                eventSessionID(a.Conn.agentSessionID, a.Conn.clientIdentity),
+		CommandID:                fmt.Sprintf("%s:%d", a.BatchSHA, a.StmtIndex),
+		Timestamp:                timeNow(),
+		DBService:                a.Conn.dbService,
+		DBFamily:                 "postgres",
+		DBDialect:                "postgres",
+		DBUser:                   a.Conn.dbUser,
+		Database:                 a.Conn.database,
+		ApplicationName:          a.Conn.appName,
+		ClientIdentity:           a.Conn.clientIdentity,
+		Effects:                  a.Stmt.Effects,
+		OperationGroup:           opGroup,
+		OperationGroupID:         opGroupID,
+		OperationSubtype:         opSubtype,
+		RawVerb:                  a.Stmt.RawVerb,
+		ObjectResolution:         a.Stmt.FoldResolution().String(),
+		ObjectResolutionReason:   firstResolutionReason(a.Stmt),
+		ParserBackend:            a.Stmt.ParserBackend,
+		StatementText:            stmtText,
+		StatementDigest:          digest,
+		StatementRedaction:       redaction,
+		Redirected:               a.Redirect.Redirected,
+		RedirectRule:             a.Redirect.Rule,
+		RewrittenStatementDigest: rewrittenDigest,
+		RedirectSourceRelation:   a.Redirect.SourceRelation,
+		RedirectTargetRelation:   a.Redirect.TargetRelation,
+		RedirectRuntimeStatus:    a.Redirect.RuntimeStatus,
+		RedirectRejectionReason:  a.Redirect.RejectionReason,
+		TLS:                      events.EventTLS{Mode: a.Conn.tlsMode, ClientSNI: a.Conn.sniHostname},
+		Decision:                 dec,
+		Result:                   result,
+		TxContext:                tx,
+		Predicates:               predicates,
 	}
+}
+
+func normalizeStatement(parser classify_pg.Parser, sql string) (string, error) {
+	normalized, err := parser.Normalize(sql)
+	if err != nil || normalized == "" {
+		normalized = strings.TrimSpace(sql)
+	}
+	return normalized, err
+}
+
+func statementDigest(parser classify_pg.Parser, sql string) string {
+	normalized, err := normalizeStatement(parser, sql)
+	if err != nil || normalized == "" {
+		normalized = strings.TrimSpace(sql)
+	}
+	digestBytes := sha256.Sum256([]byte(normalized))
+	return "sha256:" + hex.EncodeToString(digestBytes[:])
 }
 
 func buildCancelEvent(entry cancelEntry, d policy.Decision, resultErr string) events.DBEvent {
