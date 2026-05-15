@@ -33,6 +33,11 @@ func rewriteSelectRelations(stmt *pg_query.SelectStmt, rewrite relationRewrite) 
 		return 0, err
 	}
 	count += more
+	more, err = rewriteSelectExpressionSubqueries(stmt, rewrite)
+	if err != nil {
+		return 0, err
+	}
+	count += more
 	if stmt.Larg != nil {
 		more, err := rewriteSelectRelations(stmt.Larg, rewrite)
 		if err != nil {
@@ -42,6 +47,39 @@ func rewriteSelectRelations(stmt *pg_query.SelectStmt, rewrite relationRewrite) 
 	}
 	if stmt.Rarg != nil {
 		more, err := rewriteSelectRelations(stmt.Rarg, rewrite)
+		if err != nil {
+			return 0, err
+		}
+		count += more
+	}
+	return count, nil
+}
+
+func rewriteSelectExpressionSubqueries(stmt *pg_query.SelectStmt, rewrite relationRewrite) (int, error) {
+	count, err := rewriteExpressionSubqueriesInNodes(stmt.DistinctClause, rewrite)
+	if err != nil {
+		return 0, err
+	}
+	for _, nodes := range [][]*pg_query.Node{
+		stmt.TargetList,
+		stmt.GroupClause,
+		stmt.WindowClause,
+		stmt.ValuesLists,
+		stmt.SortClause,
+	} {
+		more, err := rewriteExpressionSubqueriesInNodes(nodes, rewrite)
+		if err != nil {
+			return 0, err
+		}
+		count += more
+	}
+	for _, node := range []*pg_query.Node{
+		stmt.WhereClause,
+		stmt.HavingClause,
+		stmt.LimitOffset,
+		stmt.LimitCount,
+	} {
+		more, err := rewriteExpressionSubqueriesInNode(node, rewrite)
 		if err != nil {
 			return 0, err
 		}
@@ -117,7 +155,11 @@ func rewriteRangeNode(node *pg_query.Node, rewrite relationRewrite) (int, error)
 		if err != nil {
 			return 0, err
 		}
-		return left + right, nil
+		quals, err := rewriteExpressionSubqueriesInNode(n.JoinExpr.Quals, rewrite)
+		if err != nil {
+			return 0, err
+		}
+		return left + right + quals, nil
 	case *pg_query.Node_RangeSubselect:
 		if n.RangeSubselect == nil || n.RangeSubselect.Subquery == nil {
 			return 0, nil
@@ -132,6 +174,104 @@ func rewriteRangeNode(node *pg_query.Node, rewrite relationRewrite) (int, error)
 	default:
 		return 0, nil
 	}
+}
+
+func rewriteExpressionSubqueriesInNodes(nodes []*pg_query.Node, rewrite relationRewrite) (int, error) {
+	count := 0
+	for _, node := range nodes {
+		more, err := rewriteExpressionSubqueriesInNode(node, rewrite)
+		if err != nil {
+			return 0, err
+		}
+		count += more
+	}
+	return count, nil
+}
+
+func rewriteExpressionSubqueriesInNode(node *pg_query.Node, rewrite relationRewrite) (int, error) {
+	if node == nil {
+		return 0, nil
+	}
+	return rewriteExpressionSubqueriesInMessage(node.ProtoReflect(), rewrite)
+}
+
+func rewriteExpressionSubqueriesInMessage(msg protoreflect.Message, rewrite relationRewrite) (int, error) {
+	if !msg.IsValid() {
+		return 0, nil
+	}
+	if subLink, ok := msg.Interface().(*pg_query.SubLink); ok {
+		return rewriteSubLink(subLink, rewrite)
+	}
+
+	count := 0
+	var err error
+	msg.Range(func(fd protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		if fd.IsList() {
+			list := value.List()
+			for i := 0; i < list.Len(); i++ {
+				var more int
+				more, err = rewriteExpressionSubqueriesInValue(fd, list.Get(i), rewrite)
+				if err != nil {
+					return false
+				}
+				count += more
+			}
+			return true
+		}
+		more, valueErr := rewriteExpressionSubqueriesInValue(fd, value, rewrite)
+		if valueErr != nil {
+			err = valueErr
+			return false
+		}
+		count += more
+		return true
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func rewriteExpressionSubqueriesInValue(fd protoreflect.FieldDescriptor, value protoreflect.Value, rewrite relationRewrite) (int, error) {
+	if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
+		return 0, nil
+	}
+	return rewriteExpressionSubqueriesInMessage(value.Message(), rewrite)
+}
+
+func rewriteSubLink(subLink *pg_query.SubLink, rewrite relationRewrite) (int, error) {
+	if subLink == nil {
+		return 0, nil
+	}
+
+	count, err := rewriteExpressionSubqueriesInNode(subLink.Xpr, rewrite)
+	if err != nil {
+		return 0, err
+	}
+	more, err := rewriteExpressionSubqueriesInNode(subLink.Testexpr, rewrite)
+	if err != nil {
+		return 0, err
+	}
+	count += more
+	more, err = rewriteExpressionSubqueriesInNodes(subLink.OperName, rewrite)
+	if err != nil {
+		return 0, err
+	}
+	count += more
+
+	if subLink.Subselect == nil {
+		return 0, reject(ReasonUnsupportedStatement, nil)
+	}
+	subquery, ok := subLink.Subselect.Node.(*pg_query.Node_SelectStmt)
+	if !ok || subquery.SelectStmt == nil {
+		return 0, reject(ReasonUnsupportedStatement, nil)
+	}
+	more, err = rewriteSelectRelations(subquery.SelectStmt, rewrite)
+	if err != nil {
+		return 0, err
+	}
+	count += more
+	return count, nil
 }
 
 func rangeVarMatches(rv *pg_query.RangeVar, sourceSchema, sourceName string) bool {
