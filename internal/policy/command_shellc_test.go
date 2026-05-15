@@ -38,7 +38,10 @@ func TestEngine_CheckCommand_ShellCDerive(t *testing.T) {
 		{"bash -euxc 'shutdown' → clustered safe options, derived deny", "/bin/bash", []string{"-euxc", "shutdown"}, types.DecisionDeny, "deny-shutdown"},
 		{"sh -e -c 'shutdown' → split safe option + c, derived deny", "/bin/sh", []string{"-e", "-c", "shutdown"}, types.DecisionDeny, "deny-shutdown"},
 		{"bash -e -u -c 'shutdown' → multi-split, derived deny", "/bin/bash", []string{"-e", "-u", "-c", "shutdown"}, types.DecisionDeny, "deny-shutdown"},
-		{"sh -l -c 'shutdown' → login option hides -c, bypass-deny", "/bin/sh", []string{"-l", "-c", "shutdown"}, types.DecisionDeny, "shellc-wrapper-bypass"},
+		{"sh -l -c 'shutdown' → login flag is safe, derive past it to inner deny", "/bin/sh", []string{"-l", "-c", "shutdown"}, types.DecisionDeny, "deny-shutdown"},
+		{"bash -lc 'shutdown' → login+c cluster derives to inner deny", "/bin/bash", []string{"-lc", "shutdown"}, types.DecisionDeny, "deny-shutdown"},
+		{"bash -ilxc 'shutdown' → mixed safe shorts cluster derives", "/bin/bash", []string{"-ilxc", "shutdown"}, types.DecisionDeny, "deny-shutdown"},
+		{"sh -pc 'shutdown' → privileged flag still bypass-deny", "/bin/sh", []string{"-pc", "shutdown"}, types.DecisionDeny, "shellc-wrapper-bypass"},
 		{"bash -o errexit -c 'shutdown' → operand option hides -c, bypass-deny", "/bin/bash", []string{"-o", "errexit", "-c", "shutdown"}, types.DecisionDeny, "shellc-wrapper-bypass"},
 		{"sh -c 'shutdown now' argv0 → POSIX positional params ignored, derived deny", "/bin/sh", []string{"-c", "shutdown now", "argv0_name"}, types.DecisionDeny, "deny-shutdown"},
 		{"sh -c 'shutdown' argv0 p1 p2 → positional params ignored, derived deny", "/bin/sh", []string{"-c", "shutdown", "argv0_name", "p1", "p2"}, types.DecisionDeny, "deny-shutdown"},
@@ -529,13 +532,18 @@ func TestEngine_CheckCommand_ShellCDerive_BypassFailsClosed(t *testing.T) {
 		{"nice -19 (unsupported form)", "/bin/sh", []string{"-c", "nice -19 shutdown"}},
 		{"nice --adjustment=N (byte-allowlist evasion)", "/bin/sh", []string{"-c", "nice --adjustment=19 shutdown"}},
 		{"nohup --preserve-status=1 (byte-allowlist evasion)", "/bin/sh", []string{"-c", "nohup --preserve-status=1 shutdown"}},
-		// Unsafe shell options hiding -c.
-		{"bash -lc shutdown (login + c cluster)", "/bin/bash", []string{"-lc", "shutdown"}},
-		{"bash -l -c shutdown (login split)", "/bin/bash", []string{"-l", "-c", "shutdown"}},
+		// Unsafe shell options hiding -c. -l/-i/-v/-B/-H/-s are now in the
+		// safe set (they don't affect -c parsing), so the bypass cases here
+		// are the ones we haven't audited or that take arguments.
+		{"bash -pc shutdown (privileged + c)", "/bin/bash", []string{"-pc", "shutdown"}},
+		{"bash -rc shutdown (restricted + c)", "/bin/bash", []string{"-rc", "shutdown"}},
+		{"sh -ac shutdown (allexport + c)", "/bin/sh", []string{"-ac", "shutdown"}},
+		{"bash -nc shutdown (no-execute + c)", "/bin/bash", []string{"-nc", "shutdown"}},
 		{"bash -o errexit -c shutdown (operand option)", "/bin/bash", []string{"-o", "errexit", "-c", "shutdown"}},
+		{"bash +o noclobber -c shutdown (plus-form)", "/bin/bash", []string{"+o", "noclobber", "-c", "shutdown"}},
 		{"bash --rcfile=X -c shutdown (long option)", "/bin/bash", []string{"--rcfile=/tmp/rc", "-c", "shutdown"}},
 		{"bash --norc -c shutdown (long option)", "/bin/bash", []string{"--norc", "-c", "shutdown"}},
-		{"bash -ic shutdown (interactive + c)", "/bin/bash", []string{"-ic", "shutdown"}},
+		{"bash --init-file=X -c shutdown (long option)", "/bin/bash", []string{"--init-file=/tmp/rc", "-c", "shutdown"}},
 		// Env-assignment prefix with inner bypass (parse-through strips
 		// the assignment but the inner form is still unparsable).
 		{"assign + exec -a", "/bin/sh", []string{"-c", "VAR=x exec -a foo shutdown"}},
@@ -784,7 +792,8 @@ func TestEngine_CheckCommand_ShellCDerive_ShimRealSuffix(t *testing.T) {
 		// --- ensure wrapper/opaque handling still applies through .real ---
 		{"/bin/sh.real -c 'nohup shutdown' → wrapper stripped, derived deny", "/bin/sh.real", []string{"-c", "nohup shutdown"}, types.DecisionDeny, "deny-shutdown"},
 		{"/bin/sh.real -c 'shutdown; true' → opaque is deny-on-restrictive-policy", "/bin/sh.real", []string{"-c", "shutdown; true"}, types.DecisionDeny, "shellc-opaque-script"},
-		{"/bin/sh.real -l -c 'shutdown' → login option bypass-deny", "/bin/sh.real", []string{"-l", "-c", "shutdown"}, types.DecisionDeny, "shellc-wrapper-bypass"},
+		{"/bin/sh.real -l -c 'shutdown' → login flag is safe via shim, derive past it", "/bin/sh.real", []string{"-l", "-c", "shutdown"}, types.DecisionDeny, "deny-shutdown"},
+		{"/bin/sh.real -pc 'shutdown' → privileged stays bypass via shim", "/bin/sh.real", []string{"-pc", "shutdown"}, types.DecisionDeny, "shellc-wrapper-bypass"},
 		// --- allow path when inner has no explicit rule ---
 		{"/bin/sh.real -c 'ls' → no ls rule, fall back to shim-shells allow", "/bin/sh.real", []string{"-c", "ls"}, types.DecisionAllow, "allow-shim-shells"},
 		// --- bare invocation of .real still allowed ---

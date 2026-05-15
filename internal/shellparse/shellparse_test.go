@@ -104,15 +104,34 @@ func TestDerivePolicyTarget(t *testing.T) {
 		{"random binary with -c", "/usr/bin/python3", []string{"-c", "print('hi')"}, "", nil, false},
 		{"empty command", "", []string{"-c", "ls"}, "", nil, false},
 
+		// --- shell-mode flags that don't change -c parsing now derive ---
+		// l/i/v/B/H/s alter startup files, prompt/job control, verbose
+		// printing, brace/history expansion, or stdin mode. None of these
+		// change how -c tokenizes its script argument; the script bytes are
+		// still constrained by our narrow allowlist, so the inner binary is
+		// still uniquely determined.
+		{"-l -c split (login, derives)", "sh", []string{"-l", "-c", "ls"}, "ls", []string{}, true},
+		{"-lc cluster (derives)", "bash", []string{"-lc", "ls"}, "ls", []string{}, true},
+		{"-lc shutdown (derives, was bypass)", "bash", []string{"-lc", "shutdown"}, "shutdown", []string{}, true},
+		{"-l -c shutdown split (derives, was bypass)", "bash", []string{"-l", "-c", "shutdown"}, "shutdown", []string{}, true},
+		{"-i -c (interactive, derives)", "bash", []string{"-i", "-c", "ls"}, "ls", []string{}, true},
+		{"-ic cluster (derives)", "bash", []string{"-ic", "shutdown"}, "shutdown", []string{}, true},
+		{"-s -c (stdin flag harmless when -c wins)", "sh", []string{"-s", "-c", "ls"}, "ls", []string{}, true},
+		{"-v -c (verbose, derives)", "sh", []string{"-v", "-c", "ls"}, "ls", []string{}, true},
+		{"-vc cluster (derives)", "bash", []string{"-vc", "shutdown"}, "shutdown", []string{}, true},
+		{"-Bc cluster (brace expansion, derives)", "bash", []string{"-Bc", "ls"}, "ls", []string{}, true},
+		{"-Hc cluster (history expansion, derives)", "bash", []string{"-Hc", "ls"}, "ls", []string{}, true},
+		{"-lec mixed cluster (issue + existing safe)", "bash", []string{"-lec", "shutdown"}, "shutdown", []string{}, true},
+		{"-ilxc all safe shorts clustered", "bash", []string{"-ilxc", "shutdown"}, "shutdown", []string{}, true},
+		{"-l -e -u -c chained safes", "bash", []string{"-l", "-e", "-u", "-c", "rm foo"}, "rm", []string{"foo"}, true},
+
 		// --- wrong flag forms ---
 		{"no flag", "sh", []string{"ls"}, "", nil, false},
-		{"-l (login)", "sh", []string{"-l", "-c", "ls"}, "", nil, false},
 		{"--login", "bash", []string{"--login", "-c", "ls"}, "", nil, false},
-		{"-lc cluster", "bash", []string{"-lc", "ls"}, "", nil, false},
-		{"-i (interactive)", "bash", []string{"-i", "-c", "ls"}, "", nil, false},
-		{"-p (privileged)", "bash", []string{"-p", "-c", "ls"}, "", nil, false},
-		{"-a (allexport)", "sh", []string{"-a", "-c", "ls"}, "", nil, false},
-		{"-s (read-stdin)", "sh", []string{"-s", "-c", "ls"}, "", nil, false},
+		{"-p (privileged) stays unsafe", "bash", []string{"-p", "-c", "ls"}, "", nil, false},
+		{"-a (allexport) stays unsafe", "sh", []string{"-a", "-c", "ls"}, "", nil, false},
+		{"-r (restricted) stays unsafe", "bash", []string{"-r", "-c", "ls"}, "", nil, false},
+		{"-n (no-execute) stays unsafe", "bash", []string{"-n", "-c", "ls"}, "", nil, false},
 		{"-o errexit (operand option rejected)", "bash", []string{"-o", "errexit", "-c", "ls"}, "", nil, false},
 		{"+o (plus-form rejected)", "bash", []string{"+o", "noclobber", "-c", "ls"}, "", nil, false},
 		{"--rcfile=file (profile source)", "bash", []string{"--rcfile=/tmp/rc", "-c", "ls"}, "", nil, false},
@@ -121,9 +140,8 @@ func TestDerivePolicyTarget(t *testing.T) {
 		{"empty args", "sh", nil, "", nil, false},
 		{"single arg no script", "sh", []string{"-c"}, "", nil, false},
 		// --- unsafe-option shapes with -c (treated as bypass, not fallback) ---
-		{"-lc with script (bypass, not fallback)", "bash", []string{"-lc", "shutdown"}, "", nil, false},
-		{"-rc cluster with script", "bash", []string{"-rc", "shutdown"}, "", nil, false},
-		{"-l -c split (bypass)", "bash", []string{"-l", "-c", "shutdown"}, "", nil, false},
+		{"-rc cluster (restricted stays bypass)", "bash", []string{"-rc", "shutdown"}, "", nil, false},
+		{"-pc cluster (privileged stays bypass)", "bash", []string{"-pc", "shutdown"}, "", nil, false},
 		{"-o errexit -c (bypass)", "bash", []string{"-o", "errexit", "-c", "shutdown"}, "", nil, false},
 		{"--rcfile -c (bypass)", "bash", []string{"--rcfile=/tmp/rc", "-c", "shutdown"}, "", nil, false},
 		{"--norc -c (bypass)", "bash", []string{"--norc", "-c", "shutdown"}, "", nil, false},
@@ -307,14 +325,28 @@ func TestIsShellCBypassAttempt(t *testing.T) {
 		{"env VAR=val CMD (byte-allowlist evasion)", "sh", []string{"-c", "env VAR=val shutdown"}, true},
 		{"env --chdir=/tmp CMD (byte-allowlist evasion)", "sh", []string{"-c", "env --chdir=/tmp shutdown"}, true},
 
-		// Bypass — unsafe shell options hiding -c.
-		{"bash -lc shutdown", "bash", []string{"-lc", "shutdown"}, true},
-		{"bash -l -c shutdown", "bash", []string{"-l", "-c", "shutdown"}, true},
+		// Bypass — unsafe shell options hiding -c. Note: -lc/-l -c/-ic/-vc/
+		// -sc/-Bc/-Hc are now in the parseable safe set (they don't affect
+		// how -c tokenizes its script). Only flags that take an arg (-o, -O,
+		// --rcfile=, --init-file=) or whose semantics we haven't audited
+		// (-p, -a, -r, -n, ...) still trigger bypass.
 		{"bash -o errexit -c shutdown", "bash", []string{"-o", "errexit", "-c", "shutdown"}, true},
 		{"bash --rcfile=X -c shutdown", "bash", []string{"--rcfile=/tmp/rc", "-c", "shutdown"}, true},
 		{"bash --norc -c shutdown", "bash", []string{"--norc", "-c", "shutdown"}, true},
-		{"bash -ic shutdown (interactive+c)", "bash", []string{"-ic", "shutdown"}, true},
 		{"sh -pc shutdown (privileged+c)", "sh", []string{"-pc", "shutdown"}, true},
+		{"sh -ac shutdown (allexport+c)", "sh", []string{"-ac", "shutdown"}, true},
+		{"bash -rc shutdown (restricted+c)", "bash", []string{"-rc", "shutdown"}, true},
+		{"bash -nc shutdown (no-execute+c)", "bash", []string{"-nc", "shutdown"}, true},
+
+		// Not a bypass — safe shell-mode flags clustered with -c.
+		{"bash -lc shutdown (now derives)", "bash", []string{"-lc", "shutdown"}, false},
+		{"bash -l -c shutdown (now derives)", "bash", []string{"-l", "-c", "shutdown"}, false},
+		{"bash -ic shutdown (now derives)", "bash", []string{"-ic", "shutdown"}, false},
+		{"bash -vc shutdown (now derives)", "bash", []string{"-vc", "shutdown"}, false},
+		{"sh -sc shutdown (now derives)", "sh", []string{"-sc", "shutdown"}, false},
+		{"bash -Bc shutdown (now derives)", "bash", []string{"-Bc", "shutdown"}, false},
+		{"bash -Hc shutdown (now derives)", "bash", []string{"-Hc", "shutdown"}, false},
+		{"bash -lec shutdown (now derives)", "bash", []string{"-lec", "shutdown"}, false},
 
 		// Bypass — env-assignment prefix followed by a wrapper in an
 		// UNPARSABLE flag form (inner bypass survives the parse-through).
@@ -423,7 +455,8 @@ func TestIsOpaqueShellC(t *testing.T) {
 		// --- NOT opaque: bypass cases return statusBypass, not opaque ---
 		{"exec -a bypass (not opaque)", "sh", []string{"-c", "exec -a foo shutdown"}, false},
 		{"nohup --help bypass (not opaque)", "sh", []string{"-c", "nohup --help shutdown"}, false},
-		{"bash -lc bypass (not opaque)", "bash", []string{"-lc", "shutdown"}, false},
+		{"bash -lc (derives, not opaque)", "bash", []string{"-lc", "shutdown"}, false},
+		{"bash -pc (bypass, not opaque)", "bash", []string{"-pc", "shutdown"}, false},
 
 		// --- NOT opaque: normal derivable scripts ---
 		{"plain command", "sh", []string{"-c", "ls"}, false},
@@ -477,6 +510,122 @@ func TestIsKnownShell(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBypassReason verifies that BypassReason returns a non-empty string
+// whenever IsShellCBypassAttempt returns true, and "" otherwise. The exact
+// wording is not part of the API contract, but the reason MUST mention the
+// specific construct that triggered the classification (e.g. the offending
+// flag name) so the policy engine can put it in the deny hint.
+func TestBypassReason(t *testing.T) {
+	tests := []struct {
+		name          string
+		command       string
+		args          []string
+		wantNonEmpty  bool
+		wantSubstring string // optional: substring that MUST appear in the reason
+	}{
+		// Unsafe short flags surface the offending flag name.
+		{"unsafe -p with c", "bash", []string{"-pc", "shutdown"}, true, "-p"},
+		{"unsafe -r with c", "bash", []string{"-rc", "shutdown"}, true, "-r"},
+		{"unsafe -a with c", "sh", []string{"-ac", "shutdown"}, true, "-a"},
+		{"unsafe -n with c", "bash", []string{"-nc", "shutdown"}, true, "-n"},
+		// Operand options.
+		{"operand -o", "bash", []string{"-o", "errexit", "-c", "shutdown"}, true, "-o"},
+		{"operand +o", "bash", []string{"+o", "noclobber", "-c", "shutdown"}, true, "+o"},
+		// Long options.
+		{"long --rcfile=", "bash", []string{"--rcfile=/tmp/rc", "-c", "shutdown"}, true, "--rcfile"},
+		{"long --norc", "bash", []string{"--norc", "-c", "shutdown"}, true, "--norc"},
+		{"long --init-file=", "bash", []string{"--init-file=/tmp/rc", "-c", "shutdown"}, true, "--init-file"},
+		// Wrapper-flag bypass — surface the wrapper name.
+		{"exec -a NAME", "sh", []string{"-c", "exec -a foo shutdown"}, true, "exec"},
+		{"nohup --help", "sh", []string{"-c", "nohup --help shutdown"}, true, "nohup"},
+		{"nice --adjustment=", "sh", []string{"-c", "nice --adjustment=19 shutdown"}, true, "nice"},
+		{"time -p", "sh", []string{"-c", "time -p shutdown"}, true, "time"},
+		{"env -i", "sh", []string{"-c", "env -i shutdown"}, true, "env"},
+		// Dirty env-assignment VALUE — mention assignment.
+		{"assign with colon", "sh", []string{"-c", "PATH=/tmp:/bin shutdown"}, true, "assignment"},
+		{"assign with dollar", "sh", []string{"-c", "FOO=$VAR shutdown"}, true, "assignment"},
+
+		// Not a bypass — reason MUST be "".
+		{"plain shutdown derives", "sh", []string{"-c", "shutdown"}, false, ""},
+		{"-lc derives now", "bash", []string{"-lc", "shutdown"}, false, ""},
+		{"opaque pipe (not bypass)", "sh", []string{"-c", "ls | wc"}, false, ""},
+		{"empty command", "", []string{"-c", "exec -a foo shutdown"}, false, ""},
+		{"unknown shell", "python3", []string{"-c", "exec -a foo shutdown"}, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BypassReason(tt.command, tt.args)
+			if tt.wantNonEmpty && got == "" {
+				t.Fatalf("BypassReason(%q, %v) = %q, want non-empty", tt.command, tt.args, got)
+			}
+			if !tt.wantNonEmpty && got != "" {
+				t.Fatalf("BypassReason(%q, %v) = %q, want empty", tt.command, tt.args, got)
+			}
+			if tt.wantSubstring != "" && !containsSubstring(got, tt.wantSubstring) {
+				t.Errorf("BypassReason(%q, %v) = %q, want substring %q", tt.command, tt.args, got, tt.wantSubstring)
+			}
+		})
+	}
+}
+
+// TestOpaqueReason verifies that OpaqueReason returns a non-empty string
+// whenever IsOpaqueShellC returns true, and "" otherwise. The reason MUST
+// name the construct (metacharacter, glob, expansion) that made the script
+// opaque so the deny hint can guide the operator.
+func TestOpaqueReason(t *testing.T) {
+	tests := []struct {
+		name          string
+		command       string
+		args          []string
+		wantNonEmpty  bool
+		wantSubstring string
+	}{
+		{"pipe", "sh", []string{"-c", "ls | wc"}, true, "|"},
+		{"semicolon", "sh", []string{"-c", "foo; bar"}, true, ";"},
+		{"ampersand", "bash", []string{"-c", "foo && bar"}, true, "&"},
+		{"redirect out", "sh", []string{"-c", "foo > out"}, true, ">"},
+		{"redirect in", "sh", []string{"-c", "foo < in"}, true, "<"},
+		{"glob", "sh", []string{"-c", "ls *.go"}, true, "*"},
+		{"dollar var", "sh", []string{"-c", "echo $X"}, true, "$"},
+		{"backtick", "sh", []string{"-c", "echo `date`"}, true, "`"},
+		{"subshell paren", "sh", []string{"-c", "(foo)"}, true, "("},
+		{"unterminated quote", "sh", []string{"-c", "echo \"hi"}, true, "quote"},
+
+		// Not opaque.
+		{"plain command", "sh", []string{"-c", "ls"}, false, ""},
+		{"bypass form (not opaque)", "sh", []string{"-c", "exec -a foo shutdown"}, false, ""},
+		{"-lc derives now (not opaque)", "bash", []string{"-lc", "shutdown"}, false, ""},
+		{"unknown shell", "python3", []string{"-c", "ls | wc"}, false, ""},
+		{"empty command", "", []string{"-c", "ls | wc"}, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := OpaqueReason(tt.command, tt.args)
+			if tt.wantNonEmpty && got == "" {
+				t.Fatalf("OpaqueReason(%q, %v) = %q, want non-empty", tt.command, tt.args, got)
+			}
+			if !tt.wantNonEmpty && got != "" {
+				t.Fatalf("OpaqueReason(%q, %v) = %q, want empty", tt.command, tt.args, got)
+			}
+			if tt.wantSubstring != "" && !containsSubstring(got, tt.wantSubstring) {
+				t.Errorf("OpaqueReason(%q, %v) = %q, want substring %q", tt.command, tt.args, got, tt.wantSubstring)
+			}
+		})
+	}
+}
+
+func containsSubstring(s, sub string) bool {
+	if sub == "" {
+		return true
+	}
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 func slicesEqual(a, b []string) bool {

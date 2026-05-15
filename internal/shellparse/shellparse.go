@@ -20,6 +20,7 @@
 package shellparse
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -101,6 +102,229 @@ func IsOpaqueShellC(command string, args []string) bool {
 	}
 	_, _, status := parseSimpleShellC(args)
 	return status == statusOpaque
+}
+
+// BypassReason returns a short human-readable reason explaining why
+// command+args is classified as a wrapper-bypass attempt by
+// IsShellCBypassAttempt, or "" if it isn't. The reason names the
+// specific construct that triggered the classification (offending
+// flag, wrapper, or env-assignment) so the policy engine can put it
+// in the deny hint and operators don't have to guess what shape of
+// invocation tripped the check.
+//
+// The exact wording is not part of the API contract — callers should
+// surface it as-is in user-facing messages and not parse it.
+func BypassReason(command string, args []string) string {
+	if command == "" {
+		return ""
+	}
+	if !isKnownShell(basenameLower(command)) {
+		return ""
+	}
+	_, _, status := parseSimpleShellC(args)
+	if status != statusBypass {
+		return ""
+	}
+	return computeBypassReason(args)
+}
+
+// OpaqueReason returns a short human-readable reason explaining why
+// command+args is classified as opaque by IsOpaqueShellC, or "" if it
+// isn't. The reason names the construct (metacharacter, glob, expansion
+// trigger, unterminated quote, ...) that prevented safe tokenization.
+//
+// Same non-parseability caveat as BypassReason.
+func OpaqueReason(command string, args []string) string {
+	if command == "" {
+		return ""
+	}
+	if !isKnownShell(basenameLower(command)) {
+		return ""
+	}
+	_, _, status := parseSimpleShellC(args)
+	if status != statusOpaque {
+		return ""
+	}
+	return computeOpaqueReason(args)
+}
+
+// computeBypassReason inspects shellArgs to identify which construct
+// caused statusBypass. The classification mirrors parseSimpleShellC's
+// own decision tree, walked just deeply enough to name the offender.
+func computeBypassReason(shellArgs []string) string {
+	cFlagIdx := -1
+	for i, arg := range shellArgs {
+		if len(arg) < 2 || (arg[0] != '-' && arg[0] != '+') {
+			break
+		}
+		if arg[0] == '-' && arg[1] == '-' {
+			// Long option (--rcfile=…, --norc, --init-file=…) or the
+			// bare `--` end-of-options marker.
+			return fmt.Sprintf("long option %q is not in the safe set", arg)
+		}
+		// `-o NAME` / `+o NAME` / `-O NAME` / `+O NAME` take their value
+		// in the next argv slot. Surface the option itself.
+		if arg == "-o" || arg == "+o" || arg == "-O" || arg == "+O" {
+			return fmt.Sprintf("option %q takes an argument and shifts the script position", arg)
+		}
+		// `+`-prefixed clusters (other than +o/+O above) aren't in our
+		// safe set — bash uses `+` to disable an option that `-` would
+		// enable, and we haven't audited either direction.
+		if arg[0] == '+' {
+			return fmt.Sprintf("%q starts with '+' which is not in the safe set", arg)
+		}
+		cluster := arg[1:]
+		foundC := false
+		for j := 0; j < len(cluster); j++ {
+			ch := cluster[j]
+			if ch == 'c' {
+				foundC = true
+				continue
+			}
+			if !isSafeShellShortFlag(ch) {
+				return fmt.Sprintf("unsafe option -%c clustered with -c", ch)
+			}
+		}
+		if foundC {
+			cFlagIdx = i
+			break
+		}
+	}
+	// Past the flag scan: the bypass came from inside the script.
+	if cFlagIdx < 0 || cFlagIdx+1 >= len(shellArgs) {
+		return "unparsable shell-c invocation"
+	}
+	script := strings.TrimSpace(shellArgs[cFlagIdx+1])
+	if _, dirty := stripLeadingAssignments(script); dirty {
+		return "environment assignment with a value containing an unsafe character"
+	}
+	script, _ = stripLeadingAssignments(script)
+	script = strings.TrimSpace(script)
+	if script == "" {
+		return "unparsable shell-c invocation"
+	}
+	tokens, opaque := tokenizeSimpleScript(script)
+	if opaque {
+		if head := firstWord(script); isTransparentWrapper(head) {
+			return fmt.Sprintf("wrapper %q used in a form we can't safely parse", head)
+		}
+		return "unparsable shell-c invocation"
+	}
+	// Wrapper followed by a flag we don't accept.
+	for len(tokens) >= 2 && isTransparentWrapper(tokens[0]) {
+		wrapper, next := tokens[0], tokens[1]
+		if !strings.HasPrefix(next, "-") {
+			tokens = tokens[1:]
+			continue
+		}
+		if wrapper == "nice" && next == "-n" && len(tokens) >= 3 && isNumericIncrement(tokens[2]) {
+			tokens = tokens[3:]
+			continue
+		}
+		return fmt.Sprintf("wrapper %q used with flag %q", wrapper, next)
+	}
+	return "unparsable shell-c invocation"
+}
+
+// computeOpaqueReason walks the script through the same state machine
+// tokenizeSimpleScript uses and emits a description of the first byte or
+// state that triggered the opaque classification.
+func computeOpaqueReason(shellArgs []string) string {
+	cFlagIdx, ok := findShellCFlag(shellArgs)
+	if !ok || cFlagIdx+1 >= len(shellArgs) {
+		return "unparsable shell script"
+	}
+	script := strings.TrimSpace(shellArgs[cFlagIdx+1])
+	script, _ = stripLeadingAssignments(script)
+	script = strings.TrimSpace(script)
+	const (
+		stOutside = iota
+		stUnquoted
+		stSingle
+		stDouble
+	)
+	state := stOutside
+	for i := 0; i < len(script); i++ {
+		b := script[i]
+		switch state {
+		case stOutside:
+			switch {
+			case b == ' ' || b == '\t':
+			case b == '\'':
+				state = stSingle
+			case b == '"':
+				state = stDouble
+			case isUnquotedAllowedByte(b):
+				state = stUnquoted
+			default:
+				return describeOpaqueByte(b)
+			}
+		case stUnquoted:
+			switch {
+			case b == ' ' || b == '\t':
+				state = stOutside
+			case b == '\'':
+				state = stSingle
+			case b == '"':
+				state = stDouble
+			case isUnquotedAllowedByte(b):
+			default:
+				return describeOpaqueByte(b)
+			}
+		case stSingle:
+			if b == '\'' {
+				state = stUnquoted
+			}
+			// Anything else is literal in single quotes.
+		case stDouble:
+			switch b {
+			case '"':
+				state = stUnquoted
+			case '$', '`', '\\':
+				return describeOpaqueByte(b)
+			}
+		}
+	}
+	if state == stSingle || state == stDouble {
+		return "unterminated quote"
+	}
+	return "unparsable shell script"
+}
+
+// describeOpaqueByte returns a short description for the first byte
+// outside our unquoted allowlist or first expansion trigger inside a
+// double-quoted span. Names match what an operator would see in a shell
+// script, so the deny hint reads naturally ("contains metacharacter ';'").
+func describeOpaqueByte(b byte) string {
+	switch b {
+	case ';', '|', '&':
+		return fmt.Sprintf("metacharacter %q", b)
+	case '>', '<':
+		return fmt.Sprintf("redirect %q", b)
+	case '(', ')':
+		return fmt.Sprintf("subshell %q", b)
+	case '*', '?', '[':
+		return fmt.Sprintf("glob %q", b)
+	case '$':
+		return "expansion '$'"
+	case '`':
+		return "command substitution '`'"
+	case '\\':
+		return "escape '\\'"
+	case '=':
+		return "assignment-shape '='"
+	case '#':
+		return "comment '#'"
+	case '~':
+		return "tilde '~'"
+	case '{', '}':
+		return fmt.Sprintf("brace %q", b)
+	case '!':
+		return "history expansion '!'"
+	case '\n':
+		return "newline"
+	}
+	return fmt.Sprintf("unsafe byte 0x%02x", b)
 }
 
 // basenameLower returns the last path segment of s, lowercased, treating
@@ -189,15 +413,18 @@ const (
 //
 // Returns (cmd, args, statusOK) only when:
 //   - shellArgs begins with zero or more SAFE short-option clusters
-//     followed by the cluster containing 'c'. Safe clusters contain only
-//     {c, e, u, f, x}: e (errexit) and u (nounset) are no-ops for a
-//     single external command, f (noglob) is redundant with our script
-//     byte-allowlist, and x (xtrace) only prints. So `sh -c "…"`,
-//     `sh -ec "…"`, `sh -euxc "…"`, AND split forms like `sh -e -c "…"`
-//     or `bash -e -u -c "…"` are all accepted. Long options (`--login`,
-//     `--rcfile=…`), operand options (`-o name`, `+o name`), and unknown
-//     short options are REJECTED — they either source profile scripts,
-//     change the inherited environment, or we can't prove they don't.
+//     followed by the cluster containing 'c'. The safe short-flag set is
+//     defined by isSafeShellShortFlag: existing {e, u, f, x} (errexit,
+//     nounset, noglob, xtrace — all no-ops or printing-only for a single
+//     external command) plus {l, i, v, B, H, s} (login, interactive,
+//     verbose, brace/history expansion, stdin — all boolean shell-mode
+//     flags that don't change how `-c` tokenizes its argument). So
+//     `sh -c "…"`, `sh -ec "…"`, `bash -lc "…"`, `bash -ilxc "…"`, AND
+//     split forms like `sh -l -e -c "…"` are all accepted. Long options
+//     (`--login`, `--rcfile=…`), operand options (`-o name`, `+o name`),
+//     and any short option outside the safe set are REJECTED — they
+//     either source profile scripts, shift the script's argv position,
+//     or we haven't audited them.
 //   - The argv entry immediately after the -c cluster is the script. Any
 //     arguments AFTER the script are POSIX-positional parameters: the
 //     first becomes `$0` inside the script and subsequent ones become
@@ -635,10 +862,28 @@ func isNumericIncrement(s string) bool {
 // (long option, operand option like `-o errexit`, unknown short char)
 // it returns (0, false).
 //
-// Safe leading option chars are {e, u, f, x} — see parseSimpleShellC for
-// why each is harmless for our single-external-command scope. The 'c'
-// option may appear anywhere in a cluster; it terminates scanning as
-// soon as it is seen because -c's required argument is the script.
+// Safe leading option chars are the union of two groups:
+//   - Existing `set`-style booleans we already trusted: e (errexit),
+//     u (nounset), f (noglob), x (xtrace).
+//   - Bash invocation/`set` booleans that only affect shell mode or
+//     initialization (not how `-c` tokenizes its script):
+//     l (login), i (interactive), v (verbose), B (brace expansion),
+//     H (history expansion), s (stdin — harmless when -c is also
+//     present, since -c wins as the script source).
+//
+// Each of these is a boolean toggle that the shell consumes itself; none
+// consume the next argv slot, so the script's index is still `c-cluster + 1`.
+// Flags that DO take arguments (`-o opt`, `+o opt`, `-O shopt`, `+O shopt`)
+// are rejected because they'd shift the script position. Flags whose
+// semantics we haven't audited for derivation safety (`-p` privileged,
+// `-a` allexport, `-r` restricted, `-n` no-execute, `-D` dump-strings,
+// etc.) also stay rejected and fall through to statusBypass — they don't
+// widen the bypass surface in any obvious way, but staying conservative
+// here costs operators almost nothing (these are not used in real-world
+// agent integrations) while keeping the audit footprint small.
+//
+// The 'c' option may appear anywhere in a cluster; it terminates scanning
+// as soon as it is seen because -c's required argument is the script.
 func findShellCFlag(shellArgs []string) (int, bool) {
 	for i, arg := range shellArgs {
 		if len(arg) < 2 || arg[0] != '-' {
@@ -654,12 +899,12 @@ func findShellCFlag(shellArgs []string) (int, bool) {
 		cluster := arg[1:]
 		hasC := false
 		for j := 0; j < len(cluster); j++ {
-			switch cluster[j] {
-			case 'c':
+			ch := cluster[j]
+			if ch == 'c' {
 				hasC = true
-			case 'e', 'u', 'f', 'x':
-				// safe; no impact on a single-command script
-			default:
+				continue
+			}
+			if !isSafeShellShortFlag(ch) {
 				return 0, false
 			}
 		}
@@ -668,6 +913,25 @@ func findShellCFlag(shellArgs []string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// isSafeShellShortFlag reports whether ch is a boolean shell flag that
+// can safely appear in the same short-option cluster as `-c` (or in a
+// cluster before the one containing `-c`) without changing how the
+// shell parses the `-c` argument or shifting argv positions.
+//
+// See findShellCFlag for the rationale behind each entry.
+func isSafeShellShortFlag(ch byte) bool {
+	switch ch {
+	// Existing set-style booleans.
+	case 'e', 'u', 'f', 'x':
+		return true
+	// Bash invocation/set booleans that only affect shell mode or
+	// initialization, never `-c` tokenization.
+	case 'l', 'i', 'v', 'B', 'H', 's':
+		return true
+	}
+	return false
 }
 
 // hasShellCWithUnsafeOptions reports whether shellArgs contains a `-c`

@@ -603,7 +603,11 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 			// wrappers we can't collapse, and falling through to that
 			// rule would leak the deny.
 			if shellparse.IsShellCBypassAttempt(cur, curArgs) {
-				denyDec := e.wrapDecision(string(types.DecisionDeny), "shellc-wrapper-bypass", "bypass attempt via unparsable shell-c wrapper", nil)
+				msg := "bypass attempt via unparsable shell-c wrapper"
+				if reason := shellparse.BypassReason(cur, curArgs); reason != "" {
+					msg = "bypass attempt: " + reason
+				}
+				denyDec := e.wrapDecision(string(types.DecisionDeny), "shellc-wrapper-bypass", msg, nil)
 				if dec := denyDec; decisionStrictness(dec.PolicyDecision) > resultStrictness {
 					if dec.PolicyDecision == types.DecisionAudit || dec.PolicyDecision == types.DecisionApprove {
 						dec.EnvPolicy = result.EnvPolicy
@@ -617,7 +621,11 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 				// command rule in the policy, silently falling through to
 				// the outer `allow sh` admits a bypass (`sh -c "shutdown; :"`).
 				// Policies without restrictive command rules are unaffected.
-				denyDec := e.wrapDecision(string(types.DecisionDeny), "shellc-opaque-script", "opaque shell script cannot be safely parsed for policy pre-check", nil)
+				msg := "opaque shell script cannot be safely parsed for policy pre-check"
+				if reason := shellparse.OpaqueReason(cur, curArgs); reason != "" {
+					msg = "opaque shell script: contains " + reason
+				}
+				denyDec := e.wrapDecision(string(types.DecisionDeny), "shellc-opaque-script", msg, nil)
 				if dec := denyDec; decisionStrictness(dec.PolicyDecision) > resultStrictness {
 					result = dec
 					resultStrictness = decisionStrictness(dec.PolicyDecision)
