@@ -230,33 +230,14 @@ else
   exit 1
 fi
 
-# -------------------------------------------------------------------
-# Layer 1 (WAIT_KILLABLE_RECV) engagement check
-#
-# unixwrap (the seccomp-installing wrapper invoked per exec) emits a
-# structured Info log "seccomp: filter loaded ... wait_killable=true"
-# when the kernel accepts SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV. That
-# log goes to unixwrap's stderr, which the server captures per-command
-# and streams back through `agentsh exec` as stderr events. Create a
-# probe session, run a no-op exec with stderr redirected to a file,
-# then grep the file. On the GitHub runner's host kernel (>=6.0) the
-# flag is always supported, so the log MUST appear — false would mean
-# Layer 1 silently degraded, exactly what this entire design exists
-# to prevent.
-# -------------------------------------------------------------------
-probe_sid_json="$(agentsh session create --workspace /tmp --json)"
-probe_sid="$(echo "$probe_sid_json" | jq -r '.id')"
-seccomp_probe_log="$tmp/seccomp_probe.log"
-agentsh exec "$probe_sid" -- /bin/true >/dev/null 2>"$seccomp_probe_log" || true
-if grep -q 'wait_killable=true' "$seccomp_probe_log" || grep -q '"wait_killable":true' "$seccomp_probe_log"; then
-  pass "wait_killable=true (Layer 1 engaged)"
-else
-  fail "wait_killable=true in unixwrap stderr" "Layer 1 silently disabled — check seccomp_load_linux.go"
-  echo "--- relevant probe log lines ---" >&2
-  grep -i wait_killable "$seccomp_probe_log" >&2 || echo "(no wait_killable lines in probe log)" >&2
-  echo "--- full probe log (head -40) ---" >&2
-  head -40 "$seccomp_probe_log" >&2 || true
-fi
+# Layer 1 (WAIT_KILLABLE_RECV) is validated by the unit test
+# TestInstallFilter_EmitsWaitKillEngagedOnSupportedKernel in
+# internal/netmonitor/unix/sigurg_probe_test.go, which re-execs itself
+# with a minimal seccomp filter config and asserts the raw seccomp(2)
+# load path emits wait_killable=true. We don't repeat that check here
+# because this Dockerfile.test config disables sandbox.unix_sockets,
+# so agentsh-unixwrap is never invoked and no Layer 1 filter is
+# installed for the docker matrix to observe.
 
 # -------------------------------------------------------------------
 # Create a session
