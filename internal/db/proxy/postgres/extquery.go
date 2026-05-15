@@ -93,6 +93,10 @@ func (pc *proxyConn) tryHandleRedirectParse(ctx context.Context, parse *pgproto3
 			RuntimeStatus:   "rejected",
 			RejectionReason: "multi_statement_redirect_unsupported",
 		}
+		if decisions[redirectIndex].Redirect != nil {
+			plan.SourceRelation = decisions[redirectIndex].Redirect.SourceRelation
+			plan.TargetRelation = decisions[redirectIndex].Redirect.TargetRelation
+		}
 		pc.emitRedirectRejectedEvent(ctx, stmts[redirectIndex], decisions[redirectIndex], parse.Query, sha256HexBatch(parse.Query), plan)
 		return true, pc.executeActions(ctx, parse, statemachine.DenyRoute(*pc.state.smState, policy.StatementRule{}, "redirect rejected by AgentSH policy: multi-statement redirect unsupported", sqlstateRedirectRejected))
 	}

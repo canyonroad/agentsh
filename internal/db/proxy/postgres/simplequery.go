@@ -238,6 +238,10 @@ func (pc *proxyConn) runSimpleQueryRedirect(
 			RuntimeStatus:   "rejected",
 			RejectionReason: "multi_statement_redirect_unsupported",
 		}
+		if decisions[redirectIndex].Redirect != nil {
+			plan.SourceRelation = decisions[redirectIndex].Redirect.SourceRelation
+			plan.TargetRelation = decisions[redirectIndex].Redirect.TargetRelation
+		}
 		pc.emitRedirectRejectedEvent(ctx, stmts[redirectIndex], decisions[redirectIndex], q.String, batchSHA, plan)
 		return pc.synthErrorAndRFQ(sqlstateRedirectRejected, "redirect rejected by AgentSH policy: multi-statement redirect unsupported")
 	}

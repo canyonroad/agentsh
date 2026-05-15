@@ -34,7 +34,7 @@ func main() {
 	var (
 		dsn      = flag.String("dsn", "", "direct PostgreSQL DSN")
 		socket   = flag.String("socket", "", "AgentSH DB proxy Unix socket path")
-		mode     = flag.String("mode", "scalar", "scalar, exec, tx-deny, cancel, copy-to, or copy-from")
+		mode     = flag.String("mode", "scalar", "scalar, exec, tx-deny, cancel, copy-to, copy-from, or prepared-repeat")
 		sqlText  = flag.String("sql", "select 1", "SQL statement")
 		data     = flag.String("data", "", "COPY FROM STDIN payload")
 		user     = flag.String("user", "app", "startup user for socket mode")
@@ -117,6 +117,16 @@ func run(ctx context.Context, conn *pgx.Conn, mode, sqlText, data string) (outpu
 			return output{}, err
 		}
 		return output{Scalar: scalar}, nil
+	case "prepared-repeat":
+		var first string
+		var second string
+		if err := conn.QueryRow(ctx, sqlText, 1).Scan(&first); err != nil {
+			return output{}, err
+		}
+		if err := conn.QueryRow(ctx, sqlText, 1).Scan(&second); err != nil {
+			return output{}, err
+		}
+		return output{Scalar: first + "," + second}, nil
 	case "exec":
 		tag, err := conn.Exec(ctx, sqlText)
 		if err != nil {

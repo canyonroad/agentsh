@@ -243,6 +243,71 @@ func TestDB09RealPostgresCatalogResolution(t *testing.T) {
 	}, "catalog_unresolved missing-object event")
 }
 
+func TestDB12RealPostgresSimpleQueryRedirect(t *testing.T) {
+	ctx := context.Background()
+	env := startDB07CEnvironment(t, ctx)
+	defer env.cleanup()
+
+	seedDB07C(t, ctx, env.hostDSN)
+	sess := createDB07CSession(t, ctx, env.client)
+	socket := filepath.Join(sess.DBProxySocketDir, "appdb.sock")
+
+	out := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "scalar", "-sql", "select note from plan12.users_source where id = 1", "-simple")
+	if out.Scalar != "target-a" {
+		t.Fatalf("plan12 simple redirect returned %+v", out)
+	}
+
+	waitForSessionEvent07C(t, ctx, env.client, sess.ID, func(ev types.Event) bool {
+		return isPlan12RedirectEvent(ev, "executed", "redirect-plan12-source-a", "plan12.users_target_a")
+	}, "db_statement plan12 simple redirect executed")
+}
+
+func TestDB12RealPostgresExtendedPreparedRedirect(t *testing.T) {
+	ctx := context.Background()
+	env := startDB07CEnvironment(t, ctx)
+	defer env.cleanup()
+
+	seedDB07C(t, ctx, env.hostDSN)
+	sess := createDB07CSession(t, ctx, env.client)
+	socket := filepath.Join(sess.DBProxySocketDir, "appdb.sock")
+
+	out := execDB07CClient(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "prepared-repeat", "-sql", "select note from plan12.users_source where id = $1")
+	if out.Scalar != "target-a,target-a" {
+		t.Fatalf("plan12 prepared redirect returned %+v", out)
+	}
+
+	waitForSessionEvent07C(t, ctx, env.client, sess.ID, func(ev types.Event) bool {
+		return isPlan12RedirectEvent(ev, "executed", "redirect-plan12-source-a", "plan12.users_target_a")
+	}, "db_statement plan12 prepared redirect executed")
+}
+
+func TestDB12RealPostgresRedirectUnsupportedFormsFailClosed(t *testing.T) {
+	ctx := context.Background()
+	env := startDB07CEnvironment(t, ctx)
+	defer env.cleanup()
+
+	seedDB07C(t, ctx, env.hostDSN)
+	sess := createDB07CSession(t, ctx, env.client)
+	socket := filepath.Join(sess.DBProxySocketDir, "appdb.sock")
+
+	multi := execDB07CClientAllowFailure(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "scalar", "-sql", "select note from plan12.users_source where id = 1; select note from plan12.users_source where id = 1", "-simple")
+	if multi.OK || multi.SQLState != "0A000" {
+		t.Fatalf("plan12 multi-statement redirect did not fail closed with 0A000: %+v", multi)
+	}
+	waitForSessionEvent07C(t, ctx, env.client, sess.ID, func(ev types.Event) bool {
+		if !isPlan12RedirectEvent(ev, "rejected", "redirect-plan12-source-a", "plan12.users_target_a") {
+			return false
+		}
+		return ev.Fields["redirect_rejection_reason"] == "multi_statement_redirect_unsupported"
+	}, "db_statement plan12 redirect rejected")
+
+	write := execDB07CClientAllowFailure(t, ctx, env.client, sess.ID, "-socket", socket, "-mode", "exec", "-sql", "insert into plan12.users_source(id, note) values (2, 'blocked')", "-simple")
+	if write.OK || write.SQLState == "" {
+		t.Fatalf("plan12 source write was not blocked: %+v", write)
+	}
+	assertPlan12SourceCount(t, ctx, env.hostDSN, 1)
+}
+
 func isPlan09CatalogAllowEvent(ev types.Event, object, statementNeedle string) bool {
 	if ev.Type != "db_statement" || ev.Fields["object_resolution"] != "catalog_resolved" {
 		return false
@@ -257,6 +322,29 @@ func isPlan09CatalogAllowEvent(ev types.Event, object, statementNeedle string) b
 	}
 	effects := fmt.Sprint(ev.Fields["effects"])
 	return strings.Contains(effects, "plan09") && strings.Contains(effects, object)
+}
+
+func isPlan12RedirectEvent(ev types.Event, status, rule, target string) bool {
+	if ev.Type != "db_statement" || ev.Fields["redirected"] != true {
+		return false
+	}
+	statementText, _ := ev.Fields["statement_text"].(string)
+	decision, _ := ev.Fields["decision"].(map[string]any)
+	rewrittenDigest, _ := ev.Fields["rewritten_statement_digest"].(string)
+	statementDigest, _ := ev.Fields["statement_digest"].(string)
+	if ev.Fields["redirect_runtime_status"] != status ||
+		ev.Fields["redirect_rule"] != rule ||
+		ev.Fields["redirect_source_relation"] != "plan12.users_source" ||
+		ev.Fields["redirect_target_relation"] != target ||
+		decision["verb"] != "redirect" ||
+		!strings.Contains(statementText, "plan12.users_source") ||
+		statementDigest == "" {
+		return false
+	}
+	if status == "executed" {
+		return rewrittenDigest != "" && statementDigest != rewrittenDigest
+	}
+	return rewrittenDigest == ""
 }
 
 func startDB07CEnvironment(t *testing.T, ctx context.Context) db07cEnv {
@@ -533,6 +621,14 @@ database_rules:
     objects: [users, active_users]
     match_object_resolution: catalog_resolved
     decision: allow
+  - name: redirect-plan12-source-a
+    db_service: appdb
+    operations: [read]
+    relations: ["plan12.users_source"]
+    match_object_resolution: catalog_resolved
+    decision: redirect
+    redirect:
+      relation: plan12.users_target_a
   - name: allow-read
     db_service: appdb
     operations: [read]
@@ -590,6 +686,14 @@ insert into plan09.users(id, note) values (1, 'schema-qualified');
 create or replace view plan09.active_users as select id, note from plan09.users;
 create or replace function plan09.identity_text(v text) returns text
 language sql immutable strict as $$ select v $$;
+drop schema if exists plan12 cascade;
+create schema plan12;
+create table plan12.users_source(id int primary key, note text);
+create table plan12.users_target_a(id int primary key, note text);
+create table plan12.users_target_b(id int primary key, note text);
+insert into plan12.users_source(id, note) values (1, 'source');
+insert into plan12.users_target_a(id, note) values (1, 'target-a');
+insert into plan12.users_target_b(id, note) values (1, 'target-b');
 alter role app in database app set search_path = plan09, public;
 `)
 	if err != nil {
@@ -667,6 +771,22 @@ func assertCopyRow07C(t *testing.T, ctx context.Context, dsn, note string) {
 	}
 	if count != 1 {
 		t.Fatalf("07c COPY FROM row count for %q = %d, want 1", note, count)
+	}
+}
+
+func assertPlan12SourceCount(t *testing.T, ctx context.Context, dsn string, want int) {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("07c connect host Postgres: %v", err)
+	}
+	defer conn.Close(ctx)
+	var got int
+	if err := conn.QueryRow(ctx, "select count(*) from plan12.users_source").Scan(&got); err != nil {
+		t.Fatalf("plan12 count source rows: %v", err)
+	}
+	if got != want {
+		t.Fatalf("plan12 source rows = %d, want %d", got, want)
 	}
 }
 

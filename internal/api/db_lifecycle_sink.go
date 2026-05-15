@@ -59,6 +59,15 @@ func dbStatementToEvent(ev dbevents.DBEvent) types.Event {
 	if ev.Predicates != (dbevents.EventPredicates{}) {
 		fields["predicates"] = dbEventField(ev.Predicates)
 	}
+	if ev.Redirected {
+		fields["redirected"] = ev.Redirected
+		fields["redirect_rule"] = ev.RedirectRule
+		fields["rewritten_statement_digest"] = ev.RewrittenStatementDigest
+		fields["redirect_source_relation"] = ev.RedirectSourceRelation
+		fields["redirect_target_relation"] = ev.RedirectTargetRelation
+		fields["redirect_runtime_status"] = ev.RedirectRuntimeStatus
+		fields["redirect_rejection_reason"] = ev.RedirectRejectionReason
+	}
 
 	return types.Event{
 		ID:        ev.EventID,
