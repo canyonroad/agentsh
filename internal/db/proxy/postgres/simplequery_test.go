@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"strings"
@@ -352,6 +353,147 @@ func TestHandleQuery_CopyToStdout_EmitsBytesOut(t *testing.T) {
 		t.Fatalf("BytesOut=%d want at least copied data bytes", evs[0].Result.BytesOut)
 	}
 	_ = loopErr
+}
+
+func TestHandleQuery_RedirectForwardsRewrittenSQL(t *testing.T) {
+	pc, clientFE, sink := newSimpleQueryFixture(t)
+	pc.state.smState.LastUpstreamRFQ = 'I'
+	pc.state.catalog = testCatalogContext()
+	pc.srv.SetPolicy(redirectReadRuleSet(t))
+	pc.redirectPlanner = &fakeRedirectPlanner{plan: redirectRuntimePlan{
+		RewrittenSQL:   "select note from public.safe_users",
+		Rule:           "redirect-users",
+		SourceRelation: "public.users",
+		TargetRelation: "public.safe_users",
+	}}
+
+	upClient, upServer := net.Pipe()
+	t.Cleanup(func() { _ = upClient.Close(); _ = upServer.Close() })
+	pc.state.upstream = upServer
+	pc.state.upstreamFE = pgproto3.NewFrontend(upServer, upServer)
+	upBackend := pgproto3.NewBackend(upClient, upClient)
+	drainClientBackendMessages(clientFE)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- pc.handleQuery(context.Background(), &pgproto3.Query{String: "select note from public.users"})
+	}()
+
+	msg, err := upBackend.Receive()
+	if err != nil {
+		t.Fatalf("upstream Receive: %v", err)
+	}
+	q, ok := msg.(*pgproto3.Query)
+	if !ok {
+		t.Fatalf("upstream got %T", msg)
+	}
+	if q.String != "select note from public.safe_users" {
+		t.Fatalf("forwarded SQL = %q", q.String)
+	}
+	upBackend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 0")})
+	upBackend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if err := upBackend.Flush(); err != nil {
+		t.Fatalf("upstream flush: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("handleQuery: %v", err)
+	}
+
+	evs := sink.DrainStatements()
+	if len(evs) != 1 {
+		t.Fatalf("events = %d: %+v", len(evs), evs)
+	}
+	ev := evs[0]
+	if !ev.Redirected || ev.RedirectRule != "redirect-users" || ev.RedirectRuntimeStatus != "executed" {
+		t.Fatalf("redirect event fields = %+v", ev)
+	}
+	if ev.StatementDigest == "" || ev.RewrittenStatementDigest == "" || ev.StatementDigest == ev.RewrittenStatementDigest {
+		t.Fatalf("bad digests: original=%q rewritten=%q", ev.StatementDigest, ev.RewrittenStatementDigest)
+	}
+}
+
+func TestHandleQuery_RedirectPlannerFailureFailsClosed(t *testing.T) {
+	pc, clientFE, sink := newSimpleQueryFixture(t)
+	pc.state.smState.LastUpstreamRFQ = 'I'
+	pc.state.catalog = testCatalogContext()
+	pc.srv.SetPolicy(redirectReadRuleSet(t))
+	pc.redirectPlanner = &fakeRedirectPlanner{err: errors.New("missing_target_relation")}
+
+	upClient, upServer := net.Pipe()
+	t.Cleanup(func() { _ = upClient.Close(); _ = upServer.Close() })
+	pc.state.upstream = upServer
+	pc.state.upstreamFE = pgproto3.NewFrontend(upServer, upServer)
+	upBackend := pgproto3.NewBackend(upClient, upClient)
+	drainClientBackendMessages(clientFE)
+
+	upRecv := make(chan pgproto3.FrontendMessage, 1)
+	go func() {
+		msg, err := upBackend.Receive()
+		if err == nil {
+			upRecv <- msg
+		}
+	}()
+	done := make(chan error, 1)
+	go func() {
+		done <- pc.handleQuery(context.Background(), &pgproto3.Query{String: "select note from public.users"})
+	}()
+
+	select {
+	case msg := <-upRecv:
+		t.Fatalf("upstream received original SQL after redirect rejection: %T", msg)
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("handleQuery returned transport error: %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	evs := sink.DrainStatements()
+	if len(evs) != 1 {
+		t.Fatalf("events = %d: %+v", len(evs), evs)
+	}
+	if evs[0].RedirectRuntimeStatus != "rejected" || evs[0].RedirectRejectionReason != "missing_target_relation" {
+		t.Fatalf("redirect rejection event = %+v", evs[0])
+	}
+	if evs[0].Result.ErrorCode != sqlstateRedirectRejected {
+		t.Fatalf("ErrorCode = %q", evs[0].Result.ErrorCode)
+	}
+}
+
+func drainClientBackendMessages(fe *pgproto3.Frontend) {
+	go func() {
+		for {
+			if _, err := fe.Receive(); err != nil {
+				return
+			}
+		}
+	}()
+}
+
+func redirectReadRuleSet(t *testing.T) *policy.RuleSet {
+	t.Helper()
+	return loadRuleSet(t, `version: 1
+name: redirect-test
+db_services:
+  test:
+    family: postgres
+    dialect: postgres
+    upstream: "127.0.0.1:5432"
+    tls_mode: terminate_reissue
+database_rules:
+  - name: block-delete
+    db_service: test
+    operations: [delete]
+    decision: deny
+  - name: redirect-users
+    db_service: test
+    operations: [read]
+    relations: ["public.users"]
+    match_object_resolution: catalog_resolved
+    decision: redirect
+    redirect:
+      relation: public.safe_users
+`)
 }
 
 // denyDeletesRuleSet allows all read/session/ddl operations on service "test"
