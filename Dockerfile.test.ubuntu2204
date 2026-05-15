@@ -313,19 +313,29 @@ fi
 # -------------------------------------------------------------------
 # Layer 1 (WAIT_KILLABLE_RECV) engagement check
 #
-# The new raw-seccomp(2) load path emits a structured Info log
-# "seccomp: filter loaded ... wait_killable=true" when the kernel
-# accepts SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV. On the GitHub
-# runner's host kernel (>=6.0) the flag is always supported, so
-# the log MUST contain wait_killable=true. False would mean Layer 1
-# silently degraded — exactly what this entire design exists to prevent.
+# unixwrap (the seccomp-installing wrapper invoked per exec) emits a
+# structured Info log "seccomp: filter loaded ... wait_killable=true"
+# when the kernel accepts SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV. That
+# log goes to unixwrap's stderr, which the server captures per-command
+# and streams back through `agentsh exec` as stderr events. Create a
+# probe session, run a no-op exec with stderr redirected to a file,
+# then grep the file. On the GitHub runner's host kernel (>=6.0) the
+# flag is always supported, so the log MUST appear — false would mean
+# Layer 1 silently degraded, exactly what this entire design exists
+# to prevent.
 # -------------------------------------------------------------------
-if grep -q 'wait_killable=true' "$tmp/server.log" || grep -q '"wait_killable":true' "$tmp/server.log"; then
-  pass "server log shows wait_killable=true (Layer 1 engaged)"
+probe_sid_json="$(agentsh session create --workspace /tmp --json)"
+probe_sid="$(echo "$probe_sid_json" | jq -r '.id')"
+seccomp_probe_log="$tmp/seccomp_probe.log"
+agentsh exec "$probe_sid" -- /bin/true >/dev/null 2>"$seccomp_probe_log" || true
+if grep -q 'wait_killable=true' "$seccomp_probe_log" || grep -q '"wait_killable":true' "$seccomp_probe_log"; then
+  pass "wait_killable=true (Layer 1 engaged)"
 else
-  fail "server log shows wait_killable=true" "Layer 1 silently disabled — check seccomp_load_linux.go"
-  echo "--- relevant server log lines ---" >&2
-  grep -i wait_killable "$tmp/server.log" >&2 || echo "(no wait_killable lines in log)" >&2
+  fail "wait_killable=true in unixwrap stderr" "Layer 1 silently disabled — check seccomp_load_linux.go"
+  echo "--- relevant probe log lines ---" >&2
+  grep -i wait_killable "$seccomp_probe_log" >&2 || echo "(no wait_killable lines in probe log)" >&2
+  echo "--- full probe log (head -40) ---" >&2
+  head -40 "$seccomp_probe_log" >&2 || true
 fi
 
 # -------------------------------------------------------------------
