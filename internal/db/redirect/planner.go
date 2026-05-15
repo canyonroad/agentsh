@@ -29,8 +29,14 @@ func (p Planner) Plan(in Input) (Plan, error) {
 	if selectStmt.IntoClause != nil {
 		return Plan{}, reject(ReasonDDLStatement, nil)
 	}
+	if isTopLevelUnsupportedSelectSurface(selectStmt) {
+		return Plan{}, reject(ReasonUnsupportedStatement, nil)
+	}
 	if len(selectStmt.LockingClause) > 0 {
 		return Plan{}, reject(ReasonUnsupportedStatement, nil)
+	}
+	if err := validateSelectRelationMetadata(selectStmt, in.Statement); err != nil {
+		return Plan{}, err
 	}
 
 	sourceSchema, sourceName := splitRelation(in.Action.SourceRelation)
@@ -84,4 +90,8 @@ func singleSelect(tree *pg_query.ParseResult) (*pg_query.SelectStmt, error) {
 		return nil, reject(ReasonNonSelectStatement, nil)
 	}
 	return node.SelectStmt, nil
+}
+
+func isTopLevelUnsupportedSelectSurface(stmt *pg_query.SelectStmt) bool {
+	return stmt != nil && len(stmt.ValuesLists) > 0
 }

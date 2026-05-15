@@ -252,8 +252,11 @@ func TestPlannerPreservesAlias(t *testing.T) {
 
 func TestPlannerRewritesOneRelationInJoin(t *testing.T) {
 	plan, err := testPlanner().Plan(Input{
-		SQL:       "SELECT * FROM public.users JOIN public.orders ON users.id = orders.user_id",
-		Statement: readStatement("public", "users"),
+		SQL: "SELECT * FROM public.users JOIN public.orders ON users.id = orders.user_id",
+		Statement: readStatementWithResolved(
+			resolvedRelation("public", "users"),
+			resolvedRelation("public", "orders"),
+		),
 		Action: Action{
 			RuleName:       "redirect-users",
 			SourceRelation: "public.users",
@@ -271,8 +274,11 @@ func TestPlannerRewritesOneRelationInJoin(t *testing.T) {
 
 func TestPlannerRewritesJoinTableQualifiedReferenceWithImplicitAlias(t *testing.T) {
 	plan, err := testPlanner().Plan(Input{
-		SQL:       "SELECT * FROM public.users JOIN public.orders ON users.id = orders.user_id",
-		Statement: readStatement("public", "users"),
+		SQL: "SELECT * FROM public.users JOIN public.orders ON users.id = orders.user_id",
+		Statement: readStatementWithResolved(
+			resolvedRelation("public", "users"),
+			resolvedRelation("public", "orders"),
+		),
 		Action: Action{
 			RuleName:       "redirect-users",
 			SourceRelation: "public.users",
@@ -406,6 +412,52 @@ func TestPlannerRewritesWhereExistsSubquery(t *testing.T) {
 	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
 }
 
+func TestPlannerRejectsHiddenExpressionSubqueryRelationMissingFromMetadata(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM public.users WHERE EXISTS (SELECT 1 FROM public.secrets)",
+		Statement: readStatement("public", "users"),
+		Action:    testAction(),
+	})
+
+	assertRejection(t, err, ReasonUnresolvedObject)
+}
+
+func TestPlannerPreservesExpressionSubqueryRelationPresentInMetadata(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL: "SELECT * FROM public.users WHERE EXISTS (SELECT 1 FROM public.orders)",
+		Statement: readStatementWithResolved(
+			resolvedRelation("public", "users"),
+			resolvedRelation("public", "orders"),
+		),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
+	assertSQLContains(t, plan.RewrittenSQL, "public.orders")
+	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
+}
+
+func TestPlannerRejectsAmbiguousUnqualifiedExpressionSubqueryRelationMetadata(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL: "SELECT * FROM public.users WHERE EXISTS (SELECT 1 FROM orders)",
+		Statement: readStatementWithResolved(
+			resolvedRelation("public", "users"),
+			resolvedRelation("public", "orders"),
+			resolvedRelation("archive", "orders"),
+		),
+		Action: testAction(),
+	})
+
+	assertRejection(t, err, ReasonUnresolvedObject)
+}
+
 func TestPlannerRejectsWhereExistsMultipleSourceOccurrences(t *testing.T) {
 	_, err := testPlanner().Plan(Input{
 		SQL:       "SELECT * FROM public.users WHERE EXISTS (SELECT 1 FROM public.users u2 WHERE u2.id = users.id)",
@@ -493,6 +545,16 @@ func TestPlannerRejectsDataModifyingCTE(t *testing.T) {
 func TestPlannerRejectsLockingClause(t *testing.T) {
 	_, err := testPlanner().Plan(Input{
 		SQL:       "SELECT * FROM public.users FOR UPDATE",
+		Statement: readStatement("public", "users"),
+		Action:    testAction(),
+	})
+
+	assertRejection(t, err, ReasonUnsupportedStatement)
+}
+
+func TestPlannerRejectsTopLevelValuesSelectStmt(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL:       "VALUES (1)",
 		Statement: readStatement("public", "users"),
 		Action:    testAction(),
 	})
