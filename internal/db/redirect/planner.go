@@ -1,6 +1,10 @@
 package redirect
 
-import pg_query "github.com/pganalyze/pg_query_go/v6"
+import (
+	"strings"
+
+	pg_query "github.com/pganalyze/pg_query_go/v6"
+)
 
 func (p Planner) Plan(in Input) (Plan, error) {
 	if err := validateInput(in); err != nil {
@@ -28,7 +32,43 @@ func (p Planner) Plan(in Input) (Plan, error) {
 	if len(selectStmt.LockingClause) > 0 {
 		return Plan{}, reject(ReasonUnsupportedStatement, nil)
 	}
-	return Plan{}, reject(ReasonSourceNotFound, nil)
+
+	sourceSchema, sourceName := splitRelation(in.Action.SourceRelation)
+	targetSchema, targetName := splitRelation(in.Action.TargetRelation)
+	count, err := rewriteSelectRelations(selectStmt, relationRewrite{
+		sourceSchema: sourceSchema,
+		sourceName:   sourceName,
+		targetSchema: targetSchema,
+		targetName:   targetName,
+	})
+	if err != nil {
+		return Plan{}, err
+	}
+	switch {
+	case count == 0:
+		return Plan{}, reject(ReasonSourceNotFound, nil)
+	case count > 1:
+		return Plan{}, reject(ReasonAmbiguousRedirectSource, nil)
+	}
+
+	rewritten, err := p.Backend.Deparse(tree)
+	if err != nil {
+		return Plan{}, reject(ReasonDeparseFailed, err)
+	}
+	return Plan{
+		RewrittenSQL:   rewritten,
+		RuleName:       in.Action.RuleName,
+		SourceRelation: in.Action.SourceRelation,
+		TargetRelation: in.Action.TargetRelation,
+	}, nil
+}
+
+func splitRelation(relation string) (string, string) {
+	schema, name, ok := strings.Cut(strings.TrimSpace(relation), ".")
+	if !ok {
+		return "", strings.TrimSpace(relation)
+	}
+	return strings.TrimSpace(schema), strings.TrimSpace(name)
 }
 
 func singleSelect(tree *pg_query.ParseResult) (*pg_query.SelectStmt, error) {

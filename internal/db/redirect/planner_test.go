@@ -2,6 +2,7 @@ package redirect
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/db/classify/postgres"
@@ -171,6 +172,81 @@ func TestPlannerRejectsNilParseResultAsMultiStatement(t *testing.T) {
 	assertRejection(t, err, ReasonMultiStatement)
 }
 
+func TestPlannerRewritesQualifiedRelation(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM public.users",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertPlanMetadata(t, plan, "redirect-users", "public.users", "public.safe_users")
+	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
+	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
+}
+
+func TestPlannerRewritesUnqualifiedResolvedRelation(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM users",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertPlanMetadata(t, plan, "redirect-users", "public.users", "public.safe_users")
+	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
+	assertSQLNotContains(t, plan.RewrittenSQL, " FROM users")
+}
+
+func TestPlannerPreservesAlias(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL:       "SELECT u.id FROM public.users AS u",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
+	assertSQLContains(t, plan.RewrittenSQL, " u")
+}
+
+func TestPlannerRewritesOneRelationInJoin(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM public.users JOIN public.orders ON users.id = orders.user_id",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
+	assertSQLContains(t, plan.RewrittenSQL, "public.orders")
+	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
+}
+
 func TestRejectionValueImplementsError(t *testing.T) {
 	err := error(Rejection{Reason: ReasonUnsupportedStatement})
 
@@ -220,6 +296,33 @@ func assertRejection(t *testing.T, err error, reason Reason) {
 	}
 	if rej.Reason != reason {
 		t.Fatalf("rejection reason = %q, want %q", rej.Reason, reason)
+	}
+}
+
+func assertPlanMetadata(t *testing.T, plan Plan, ruleName, source, target string) {
+	t.Helper()
+	if plan.RuleName != ruleName {
+		t.Fatalf("RuleName = %q, want %q", plan.RuleName, ruleName)
+	}
+	if plan.SourceRelation != source {
+		t.Fatalf("SourceRelation = %q, want %q", plan.SourceRelation, source)
+	}
+	if plan.TargetRelation != target {
+		t.Fatalf("TargetRelation = %q, want %q", plan.TargetRelation, target)
+	}
+}
+
+func assertSQLContains(t *testing.T, sql, want string) {
+	t.Helper()
+	if !strings.Contains(sql, want) {
+		t.Fatalf("rewritten SQL = %q, want to contain %q", sql, want)
+	}
+}
+
+func assertSQLNotContains(t *testing.T, sql, unwanted string) {
+	t.Helper()
+	if strings.Contains(sql, unwanted) {
+		t.Fatalf("rewritten SQL = %q, want not to contain %q", sql, unwanted)
 	}
 }
 
