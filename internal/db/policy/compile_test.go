@@ -58,6 +58,33 @@ func TestCompileStatementRule_CanonicalOnlyDoesNotCoverSyntacticObject(t *testin
 	}
 }
 
+func TestCompileStatementRule_RedirectAction(t *testing.T) {
+	r := &StatementRule{
+		Name:                  "redirect-users",
+		Operations:            []string{"READ"},
+		Relations:             []string{"public.users"},
+		MatchObjectResolution: "catalog_resolved",
+		Decision:              "redirect",
+		Redirect:              &RedirectAction{Relation: "public.safe_users"},
+	}
+	c, err := compileStatementRule(r)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if c.verb != VerbRedirect {
+		t.Fatalf("verb = %v, want redirect", c.verb)
+	}
+	if c.redirect == nil {
+		t.Fatal("redirect metadata nil")
+	}
+	if c.redirect.SourceRelation != "public.users" {
+		t.Errorf("SourceRelation = %q, want public.users", c.redirect.SourceRelation)
+	}
+	if c.redirect.TargetRelation != "public.safe_users" {
+		t.Errorf("TargetRelation = %q, want public.safe_users", c.redirect.TargetRelation)
+	}
+}
+
 func TestCompileStatementRule_ExternalEndpointHostMatch(t *testing.T) {
 	r := &StatementRule{Name: "endpoint", Objects: []string{"*.internal"},
 		Operations: []string{"READ"}, Decision: "deny"}

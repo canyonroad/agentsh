@@ -13,12 +13,28 @@ func newParser(d Dialect) Parser {
 	return &wasmParser{dialect: d}
 }
 
+func newRewriteBackend(d Dialect) RewriteBackend {
+	return &wasmParser{dialect: d}
+}
+
 type wasmParser struct {
 	dialect Dialect
 }
 
 func (p *wasmParser) Classify(sql string, sess SessionState, opts Options) ([]effects.ClassifiedStatement, error) {
 	return classifyWithBackend(p.dialect, sql, sess, opts, parseWASM, effects.ParserBackendPureGo)
+}
+
+func (p *wasmParser) Parse(sql string) (*pg_query.ParseResult, error) {
+	return parseWASM(sql)
+}
+
+func (p *wasmParser) Deparse(tree *pg_query.ParseResult) (string, error) {
+	return pgquery_wasm.Deparse(tree)
+}
+
+func (p *wasmParser) Backend() effects.ParserBackend {
+	return effects.ParserBackendPureGo
 }
 
 // parseWASM delegates to wasilibs/go-pgquery, which loads libpg_query into a

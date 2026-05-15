@@ -107,6 +107,118 @@ database_rules:
 	}
 }
 
+func TestDecode_RedirectStatementRule(t *testing.T) {
+	src := `version: 1
+name: t
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+database_rules:
+  - name: redirect-users
+    db_service: appdb
+    operations: [READ]
+    relations: ["public.users"]
+    match_object_resolution: catalog_resolved
+    decision: redirect
+    redirect:
+      relation: public.safe_users
+`
+	rs, warns, err := loadDB(t, src)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %+v", warns)
+	}
+	rules := rs.AllStatementRules()
+	if len(rules) != 1 {
+		t.Fatalf("rules = %d, want 1", len(rules))
+	}
+	if rules[0].Redirect == nil || rules[0].Redirect.Relation != "public.safe_users" {
+		t.Fatalf("Redirect = %+v", rules[0].Redirect)
+	}
+}
+
+func TestRuleSet_AllStatementRules_DeepCopiesRedirect(t *testing.T) {
+	src := `version: 1
+name: t
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+database_rules:
+  - name: redirect-users
+    db_service: appdb
+    operations: [READ]
+    relations: ["public.users"]
+    match_object_resolution: catalog_resolved
+    decision: redirect
+    redirect:
+      relation: public.safe_users
+`
+	rs, warns, err := loadDB(t, src)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %+v", warns)
+	}
+
+	rules := rs.AllStatementRules()
+	if len(rules) != 1 || rules[0].Redirect == nil {
+		t.Fatalf("rules = %+v", rules)
+	}
+	rules[0].Redirect.Relation = "public.tampered"
+
+	rules = rs.AllStatementRules()
+	if rules[0].Redirect == nil || rules[0].Redirect.Relation != "public.safe_users" {
+		t.Fatalf("Redirect after external mutation = %+v, want public.safe_users", rules[0].Redirect)
+	}
+}
+
+func TestRuleSet_AllStatementRules_DeepCopiesSlices(t *testing.T) {
+	src := `version: 1
+name: t
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+database_rules:
+  - name: canonical-read
+    db_service: appdb
+    schemas: ["public"]
+    relations: ["public.users"]
+    operations: [READ]
+    match_object_resolution: catalog_resolved
+    decision: allow
+`
+	rs, warns, err := loadDB(t, src)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %+v", warns)
+	}
+
+	rules := rs.AllStatementRules()
+	if len(rules) != 1 || len(rules[0].Relations) != 1 {
+		t.Fatalf("rules = %+v", rules)
+	}
+	rules[0].Relations[0] = "public.tampered"
+
+	rules = rs.AllStatementRules()
+	if rules[0].Relations[0] != "public.users" {
+		t.Fatalf("Relations after external mutation = %+v, want public.users", rules[0].Relations)
+	}
+}
+
 func TestDecode_RedactionConfig(t *testing.T) {
 	src := `version: 1
 name: t

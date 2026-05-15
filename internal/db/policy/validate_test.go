@@ -98,10 +98,237 @@ func TestValidate_ConnPassthroughFieldUnavailable(t *testing.T) {
 }
 
 func TestValidate_RuleDecisionRedirect(t *testing.T) {
-	stmt := []*StatementRule{{Name: "r", Operations: []string{"READ"}, Decision: "redirect"}}
-	_, err := helperValidate(t, nil, stmt, nil)
-	if err == nil || !strings.Contains(err.Error(), "redirect_not_supported_until_plan_11") {
-		t.Fatalf("want redirect_not_supported_until_plan_11, got %v", err)
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	stmt := []*StatementRule{{
+		Name:                  "redirect-users",
+		DBService:             "appdb",
+		Operations:            []string{"READ"},
+		Relations:             []string{"public.users"},
+		MatchObjectResolution: "catalog_resolved",
+		Decision:              "redirect",
+		Redirect:              &RedirectAction{Relation: "public.safe_users"},
+	}}
+	if _, err := helperValidate(t, svcs, stmt, nil); err != nil {
+		t.Fatalf("validate redirect statement rule: %v", err)
+	}
+}
+
+func TestValidate_RedirectRequiresAction(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	stmt := []*StatementRule{{
+		Name:                  "redirect-users",
+		DBService:             "appdb",
+		Operations:            []string{"READ"},
+		Relations:             []string{"public.users"},
+		MatchObjectResolution: "catalog_resolved",
+		Decision:              "redirect",
+	}}
+	_, err := helperValidate(t, svcs, stmt, nil)
+	if err == nil || !strings.Contains(err.Error(), "redirect_relation_required") {
+		t.Fatalf("want redirect_relation_required, got %v", err)
+	}
+}
+
+func TestValidate_RedirectRequiresCanonicalTarget(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	stmt := []*StatementRule{{
+		Name:                  "redirect-users",
+		DBService:             "appdb",
+		Operations:            []string{"READ"},
+		Relations:             []string{"public.users"},
+		MatchObjectResolution: "catalog_resolved",
+		Decision:              "redirect",
+		Redirect:              &RedirectAction{Relation: "safe_users"},
+	}}
+	_, err := helperValidate(t, svcs, stmt, nil)
+	if err == nil || !strings.Contains(err.Error(), "redirect_relation_not_canonical") {
+		t.Fatalf("want redirect_relation_not_canonical, got %v", err)
+	}
+}
+
+func TestValidate_RedirectRejectsNonPlainTargetRelation(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	for _, relation := range []string{"Public.Users", "public.user-name", " public.users", "public.123users"} {
+		t.Run(relation, func(t *testing.T) {
+			stmt := []*StatementRule{{
+				Name:                  "redirect-users",
+				DBService:             "appdb",
+				Operations:            []string{"READ"},
+				Relations:             []string{"public.users"},
+				MatchObjectResolution: "catalog_resolved",
+				Decision:              "redirect",
+				Redirect:              &RedirectAction{Relation: relation},
+			}}
+			_, err := helperValidate(t, svcs, stmt, nil)
+			if err == nil || !strings.Contains(err.Error(), "redirect_relation_not_canonical") {
+				t.Fatalf("want redirect_relation_not_canonical, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidate_RedirectRequiresCanonicalSourceRelation(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	stmt := []*StatementRule{{
+		Name:                  "redirect-users",
+		DBService:             "appdb",
+		Operations:            []string{"READ"},
+		Relations:             []string{"public.*"},
+		MatchObjectResolution: "catalog_resolved",
+		Decision:              "redirect",
+		Redirect:              &RedirectAction{Relation: "public.safe_users"},
+	}}
+	_, err := helperValidate(t, svcs, stmt, nil)
+	if err == nil || !strings.Contains(err.Error(), "redirect_source_relation_not_canonical") {
+		t.Fatalf("want redirect_source_relation_not_canonical, got %v", err)
+	}
+}
+
+func TestValidate_RedirectSourceRelationExclusive(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	cases := []struct {
+		name      string
+		objects   []string
+		functions []string
+	}{
+		{name: "objects", objects: []string{"users"}},
+		{name: "functions", functions: []string{"public.safe_fn(integer)"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stmt := []*StatementRule{{
+				Name:                  "redirect-users",
+				DBService:             "appdb",
+				Operations:            []string{"READ"},
+				Objects:               tc.objects,
+				Relations:             []string{"public.users"},
+				Functions:             tc.functions,
+				MatchObjectResolution: "catalog_resolved",
+				Decision:              "redirect",
+				Redirect:              &RedirectAction{Relation: "public.safe_users"},
+			}}
+			_, err := helperValidate(t, svcs, stmt, nil)
+			if err == nil || !strings.Contains(err.Error(), "redirect_source_relation_exclusive") {
+				t.Fatalf("want redirect_source_relation_exclusive, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidate_RedirectRejectsNonPlainSourceRelation(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	for _, relation := range []string{"Public.Users", "public.user-name", " public.users", "public.123users"} {
+		t.Run(relation, func(t *testing.T) {
+			stmt := []*StatementRule{{
+				Name:                  "redirect-users",
+				DBService:             "appdb",
+				Operations:            []string{"READ"},
+				Relations:             []string{relation},
+				MatchObjectResolution: "catalog_resolved",
+				Decision:              "redirect",
+				Redirect:              &RedirectAction{Relation: "public.safe_users"},
+			}}
+			_, err := helperValidate(t, svcs, stmt, nil)
+			if err == nil || !strings.Contains(err.Error(), "redirect_source_relation_not_canonical") {
+				t.Fatalf("want redirect_source_relation_not_canonical, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidate_RedirectRequiresSourceRelation(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	stmt := []*StatementRule{{
+		Name:                  "redirect-users",
+		DBService:             "appdb",
+		Operations:            []string{"READ"},
+		Objects:               []string{"users"},
+		MatchObjectResolution: "catalog_resolved",
+		Decision:              "redirect",
+		Redirect:              &RedirectAction{Relation: "public.safe_users"},
+	}}
+	_, err := helperValidate(t, svcs, stmt, nil)
+	if err == nil || !strings.Contains(err.Error(), "redirect_source_relation_required") {
+		t.Fatalf("want redirect_source_relation_required, got %v", err)
+	}
+}
+
+func TestValidate_RedirectRequiresCatalogResolved(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	stmt := []*StatementRule{{
+		Name:       "redirect-users",
+		DBService:  "appdb",
+		Operations: []string{"READ"},
+		Relations:  []string{"public.users"},
+		Decision:   "redirect",
+		Redirect:   &RedirectAction{Relation: "public.safe_users"},
+	}}
+	_, err := helperValidate(t, svcs, stmt, nil)
+	if err == nil || !strings.Contains(err.Error(), "redirect_requires_catalog_resolved") {
+		t.Fatalf("want redirect_requires_catalog_resolved, got %v", err)
+	}
+}
+
+func TestValidate_RedirectOperationsMustBeRead(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	stmt := []*StatementRule{{
+		Name:                  "redirect-users",
+		DBService:             "appdb",
+		Operations:            []string{"MUTATE"},
+		Relations:             []string{"public.users"},
+		MatchObjectResolution: "catalog_resolved",
+		Decision:              "redirect",
+		Redirect:              &RedirectAction{Relation: "public.safe_users"},
+	}}
+	_, err := helperValidate(t, svcs, stmt, nil)
+	if err == nil || !strings.Contains(err.Error(), "redirect_operations_must_be_read") {
+		t.Fatalf("want redirect_operations_must_be_read, got %v", err)
+	}
+}
+
+func TestValidate_RedirectRequiresTerminatePostgresService(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"legacy": {Name: "legacy", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "passthrough"},
+	}
+	stmt := []*StatementRule{{
+		Name:                  "redirect-users",
+		Operations:            []string{"READ"},
+		Relations:             []string{"public.users"},
+		MatchObjectResolution: "catalog_resolved",
+		Decision:              "redirect",
+		Redirect:              &RedirectAction{Relation: "public.safe_users"},
+	}}
+	_, err := helperValidate(t, svcs, stmt, nil)
+	if err == nil || !strings.Contains(err.Error(), "redirect_requires_terminate_postgres_service") {
+		t.Fatalf("want redirect_requires_terminate_postgres_service, got %v", err)
+	}
+}
+
+func TestValidate_ConnectionRuleRedirectInvalid(t *testing.T) {
+	conn := []*ConnectionRule{{Name: "conn-redirect", Decision: "redirect"}}
+	_, err := helperValidate(t, nil, nil, conn)
+	if err == nil || !strings.Contains(err.Error(), "conn_redirect_invalid") {
+		t.Fatalf("want conn_redirect_invalid, got %v", err)
 	}
 }
 

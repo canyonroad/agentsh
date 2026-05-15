@@ -12,12 +12,28 @@ func newParser(d Dialect) Parser {
 	return &cgoParser{dialect: d}
 }
 
+func newRewriteBackend(d Dialect) RewriteBackend {
+	return &cgoParser{dialect: d}
+}
+
 type cgoParser struct {
 	dialect Dialect
 }
 
 func (p *cgoParser) Classify(sql string, sess SessionState, opts Options) ([]effects.ClassifiedStatement, error) {
 	return classifyWithBackend(p.dialect, sql, sess, opts, parseCGO, effects.ParserBackendLibPgQuery)
+}
+
+func (p *cgoParser) Parse(sql string) (*pg_query.ParseResult, error) {
+	return parseCGO(sql)
+}
+
+func (p *cgoParser) Deparse(tree *pg_query.ParseResult) (string, error) {
+	return pg_query.Deparse(tree)
+}
+
+func (p *cgoParser) Backend() effects.ParserBackend {
+	return effects.ParserBackendLibPgQuery
 }
 
 func parseCGO(sql string) (*pg_query.ParseResult, error) {

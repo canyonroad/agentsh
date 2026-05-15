@@ -71,18 +71,20 @@ Unavoidability rests on AgentSH's existing primitives: process interception, net
 - PostgreSQL wire protocol v3, normal frontend/backend mode.
 - Dialects: `postgres` (full), `aurora_postgres` (full), `redshift` (beta), `cockroachdb` (beta).
 - TLS modes: `terminate_reissue`, `passthrough` (connection-level rules only), `terminate_plaintext_upstream`.
-- Decision verbs: `allow`, `deny`, `approve`, `audit`.
+- Decision verbs: `allow`, `deny`, `approve`, `audit`, plus statement-level `redirect` policy/planner metadata. Runtime redirect execution is DB Plan 12.
 - Two rule families: `database_rules` (statement-level), `database_connection_rules` (connection-level).
 - Per-effect policy evaluation with strict multi-object semantics.
 - CancelRequest correlation (§15).
 - Startup-packet handling for SSLRequest / GSSENCRequest / CancelRequest / StartupMessage (§11.1).
+
+Plan 11 extends this scope by accepting statement-level redirect policy/planner metadata; proxy execution of redirected Simple Query and Extended Query traffic remains DB Plan 12.
 
 ### 2.2 Out of scope for Phase 1
 
 - Replication protocol (CopyBoth, `START_REPLICATION`, walsender, logical decoding). Default-deny per §11.1.
 - GSSAPI encryption (default-deny per §11.1).
 - Column-level masking, row redaction, result-set DLP (Phase 7).
-- Statement rewriting (`redirect`, Phase 2).
+- Runtime statement rewriting / proxy execution for `redirect` (DB Plan 12).
 - Credential brokering (Phase 4).
 - Catalog-aware metadata controls (Phase 7).
 - ORM-level rules.
@@ -94,7 +96,7 @@ Unavoidability rests on AgentSH's existing primitives: process interception, net
 | Phase | Adds |
 |-------|------|
 | Phase 1 | PostgreSQL adapter: classifier, policy evaluation, proxy, CancelRequest mapping, unavoidability bundle, and real-Postgres CI integration. |
-| Phase 2 | Object resolution via upstream catalog. Postgres `redirect` decision (statement rewriting). Improved policy ergonomics. |
+| Phase 2 | Object resolution via upstream catalog. Runtime Postgres `redirect` execution / statement rewriting. Improved policy ergonomics. |
 | Phase 3 | MySQL adapter. |
 | Phase 4 | Credential broker. |
 | Phase 5 | MongoDB adapter. |
@@ -702,12 +704,13 @@ database_rules:
 | `operations` | yes | Group names or aliases. Rule matches an effect whose `group` is in the list. |
 | `subtypes` | no | If specified, rule matches only effects whose `operation_subtype` is in the list. |
 | `match_object_resolution` | no | One of the resolution tags or `*`. Matches against the effect's per-effect resolution tag. |
-| `decision` | yes | `allow`, `deny`, `approve`, `audit`. |
+| `decision` | yes | `allow`, `deny`, `approve`, `audit`, `redirect`. `redirect` is statement-level only and requires `redirect.relation`, `relations`, `match_object_resolution: catalog_resolved`, read-only operations, and an eligible terminate-mode Postgres service. |
+| `redirect.relation` | only for `decision: redirect` | Canonical target relation formatted as `schema.name`. Plan 11 supports one source relation selected by a canonical `relations` entry and one target relation. Runtime execution is wired in DB Plan 12. |
 | `message` | no | Template with `{{.Operation}}, {{.Subtype}}, {{.Schema}}, {{.Object}}, {{.Verb}}, {{.StatementPreview}}`. |
 | `timeout` | only for `approve` | Default 60 seconds. Sized to be safe inside open transactions (§14.5). Operators with long-form approval workflows opt up explicitly per rule. |
 | `acknowledge_audit_on_dangerous` | no | Required `true` to silence the load-time warning emitted when `decision: audit` is paired with operations of risk tier ≥ high (§9.4, R13). |
 
-`objects` remains syntactic-only. `relations` and `functions` are catalog selectors and do not match unresolved or unavailable catalog metadata. Strict object coverage still applies: every object slot in an effect must be covered by an allow/audit/approve rule, and any matching deny rule still wins.
+`objects` remains syntactic-only. `relations` and `functions` are catalog selectors and do not match unresolved or unavailable catalog metadata. Strict object coverage still applies: every object slot in an effect must be covered by an allow/audit/redirect/approve rule, and any matching deny rule still wins.
 
 ### DB policy explain
 
@@ -767,7 +770,7 @@ Connection rules evaluate **before** any statement is classified. A connection-l
 - Statement rule referencing a `db_service` whose `tls_mode` is `passthrough` → **load error**.
 - Connection rule under a `passthrough` service that matches `db_user`, `database`, or `application_name` → load error. (Those fields are not visible in passthrough; see §13.2.)
 - Rule referencing a `db_service` that does not exist → load error.
-- Rule with `decision: redirect` in Phase 1 → load error.
+- Statement rule with malformed `decision: redirect` shape → load error. Connection-rule redirect remains invalid.
 - Rule with `subtypes` referencing a non-existent subtype → load error.
 - Rule with no `db_service` and no `db_family` and `decision: allow` and `operations: ["*"]` → load error (too broad).
 - Service with `tls_mode: terminate_plaintext_upstream` to a non-RFC1918, non-loopback destination without `trusted_network: true` → load error.
@@ -789,8 +792,9 @@ Connection rules evaluate **before** any statement is classified. A connection-l
 | `deny` | Synthesize `ErrorResponse` (SQLSTATE 42501). See §14. | See §13.3. |
 | `approve` | Held; approval flow. On approval, forward. On denial/timeout, behaves as `deny`. | Held until approval. |
 | `audit` | Forward, tag event. Functionally equivalent to allow at the wire; differs only in event labeling and downstream alerting/handling. | Connection established with audit tag. |
+| `redirect` | Statement-level policy decision with structured redirect metadata. Runtime Simple Query and Extended Query execution is DB Plan 12. | Invalid; connection-level redirect is not available. |
 
-`redirect` is Phase 2.
+Plan 11 accepts valid statement-level `redirect` rules and returns redirect policy/planner metadata. Runtime proxy execution remains DB Plan 12.
 
 > **Operator note: `audit` is allow-with-observation, not block-with-observation.** A statement whose final decision is `audit` is **forwarded to the database**. The agent gets a normal response. The only difference from `allow` is that the event carries `decision.verb: "audit"` and downstream Watchtower alerting policies can treat it differently (e.g., page on-call, send to a dedicated SOC queue). Operators who want "observe but block" should use `approve` (which holds the statement until a human decides) or `deny` (which blocks unconditionally). This is a common point of confusion; repeat it wherever sample policies appear.
 
@@ -812,26 +816,35 @@ DENY matching:
   e is denied by rule R if:
     - R.group/subtype matches e.group/e.subtype
     - R.match_object_resolution matches e.object_resolution (or R has none)
-    - any object in e.objects matches R.objects (or R has no objects: clause)
-  → If any deny rule fires for any object in e, decision_i = deny.
+    - any object slot in e matches R's object selector families, or R constrains
+      no object selector family
+  → If any deny rule fires for any object slot in e, decision_i = deny.
   Order-independent: any matching deny anywhere in the policy file produces deny.
 
-ALLOW / AUDIT / APPROVE coverage (strict):
-  Collect all allow/audit/approve rules whose group/subtype/resolution match e.
-  An object o ∈ e.objects is "covered" if some matching rule's objects glob matches o.
-  A rule with no objects: clause covers any object.
+ALLOW / AUDIT / REDIRECT / APPROVE coverage (strict):
+  Collect all allow/audit/redirect/approve rules whose group/subtype/resolution match e.
+  An object slot o is "covered" if some matching rule selects it through at
+  least one object selector family:
+    - objects: syntactic object fields
+    - relations: catalog-resolved relation canonical names for relation slots
+    - functions: catalog-resolved function identities for function slots
+  A rule with no object selector family constrained covers all object slots.
+  Redirect statement rules are not selector-less broad coverage: config
+  validation requires exactly one canonical relations source selector plus
+  redirect.relation.
   Order-independent: any matching coverage rule contributes regardless of position.
 
-  e is fully covered if every object in e.objects is covered by at least one rule.
+  e is fully covered if every object slot in e is covered by at least one rule.
 
   If e is fully covered AND no deny matched:
     The effect-level decision is the most-restrictive verb among the rules that
     cover the object set:
       - If any covering rule has decision: approve → decision_i = approve
+      - Else if any covering rule has decision: redirect → decision_i = redirect
       - Else if any covering rule has decision: audit → decision_i = audit
       - Else                                              decision_i = allow
 
-  If at least one object in e is uncovered:
+  If at least one object slot in e is uncovered:
     decision_i = implicit_deny (regardless of approve coverage on other objects).
 
   If multiple approve rules apply across objects, all approvers are notified;
@@ -841,18 +854,20 @@ ALLOW / AUDIT / APPROVE coverage (strict):
 **Restrictiveness order (most to least):**
 
 ```
-deny  ≡  implicit_deny  >  approve  >  audit  >  allow
+deny  ≡  implicit_deny  >  approve  >  redirect  >  audit  >  allow
 ```
 
 A final decision of `audit` forwards the statement unchanged to upstream. The difference from `allow` is event labeling (`decision.verb: "audit"`) and downstream alerting policies in Watchtower.
 
+A final decision of `redirect` carries structured redirect metadata for the statement. Runtime proxy execution of redirected Simple Query and Extended Query traffic remains DB Plan 12.
+
 A final decision of `approve` holds the statement until a human decides. After approval, the forwarded event carries `decision.verb: "approve"`. Audit-tagged rules that co-cover the object set are recorded in `decision.contributing_audit_rules` (array of rule names) but do not change the verb. Watchtower alerting that targets `decision.verb == audit` does not fire on approved events; alerting that targets `contributing_audit_rules` does.
 
-> **Operator note: `approve` does not cover unrelated uncovered objects.** A common misreading is "approve" = "ask a human for permission for the whole effect." It does not. Each object must independently be covered by `allow`, `audit`, or `approve`. If an effect has objects `{allowed_table, mystery_table}` and a rule says "approve READ on allowed_table" but no rule mentions `mystery_table`, the effect is denied (because `mystery_table` is uncovered → implicit_deny → wins over approve). To get human-in-the-loop on the whole effect, use a rule that matches the broader object set (e.g., `objects: ["*"]` with `decision: approve`), not a narrow rule that happens to match one of the touched objects.
+> **Operator note: `approve` does not cover unrelated uncovered objects.** A common misreading is "approve" = "ask a human for permission for the whole effect." It does not. Each object must independently be covered by `allow`, `audit`, `redirect`, or `approve`. If an effect has objects `{allowed_table, mystery_table}` and a rule says "approve READ on allowed_table" but no rule mentions `mystery_table`, the effect is denied (because `mystery_table` is uncovered → implicit_deny → wins over approve). To get human-in-the-loop on the whole effect, use a rule that matches the broader object set (e.g., `objects: ["*"]` with `decision: approve`), not a narrow rule that happens to match one of the touched objects.
 
 **`match_object_resolution` semantics.** When an effect contains multiple objects with potentially different individual resolution confidences, the effect's resolution tag is the **worst-confidence tag** across all objects in the effect (mirroring §6.2's top-level worst-case computation, applied per-effect). A rule with `match_object_resolution: qualified_syntactic` matches an effect only if every object in that effect is `qualified_syntactic`. This keeps resolution-aware policies conservative.
 
-**Why strict coverage for allow:** an effect that touches multiple objects (`SELECT * FROM allowed_table JOIN sensitive_table`) must have *all* objects covered by an allow rule. A rule that allows reads on `allowed_table` does not automatically allow reads on `sensitive_table`. Operators who want broad allow can still write `objects: ["*"]` or omit `objects:` entirely.
+**Why strict coverage for non-deny decisions:** an effect that touches multiple objects (`SELECT * FROM allowed_table JOIN sensitive_table`) must have *all* objects covered by a non-deny rule. A rule that allows, audits, redirects, or approves reads on `allowed_table` does not automatically cover reads on `sensitive_table`. Operators who want broad coverage can still write `objects: ["*"]` or omit `objects:` entirely.
 
 **Why "any object" for deny:** a single sensitive object in an effect's object set is enough to trigger a deny rule, even if other objects in the same effect are uncontroversial. This is the security-conservative posture. The same JOIN above, if a deny rule names `sensitive_table`, denies the whole statement.
 
@@ -917,9 +932,9 @@ A privacy-sensitive deployment sets `log_statements: parameters_redacted` (or `n
 For each individual effect, rule evaluation is **order-independent**:
 
 - Deny rules trigger on any object match regardless of position in the policy file.
-- Allow / audit / approve rules contribute to the per-object coverage set.
-- The final effect-level decision is the most-restrictive verb among rules that cover the object set, with `deny ≡ implicit_deny > approve > audit > allow` (§10.2).
-- No-match for any object in an effect → `implicit_deny`. Statements are denied unless every object in every effect is covered by at least one allow, audit, or approve rule, and no object is matched by a deny rule.
+- Allow / audit / redirect / approve rules contribute to the per-object coverage set.
+- The final effect-level decision is the most-restrictive verb among rules that cover the object set, with `deny ≡ implicit_deny > approve > redirect > audit > allow` (§10.2).
+- No-match for any object in an effect → `implicit_deny`. Statements are denied unless every object in every effect is covered by at least one allow, audit, redirect, or approve rule, and no object is matched by a deny rule.
 
 Two implementations of the policy evaluator that read this section will produce identical decisions for any (rules, statement) pair. Rule order in the policy file does not affect outcomes; operators may reorder rules for readability without changing semantics.
 
@@ -1369,7 +1384,7 @@ The default config bundle includes a sample `CREATE ROLE` script for Postgres th
 | Classifier panic | Connection terminated. Crash logged. Process does not exit. Per-connection isolation. |
 | Statement rule attached to passthrough service | Config load error. |
 | Connection rule matching invisible field under passthrough | Config load error. |
-| `decision: redirect` in Phase 1 policy | Config load error. |
+| Malformed statement-level `decision: redirect` shape or connection-rule redirect | Config load error. |
 
 ---
 
@@ -1379,7 +1394,7 @@ The default config bundle includes a sample `CREATE ROLE` script for Postgres th
 |-------|-------|--------|
 | 0 | This spec, reviewed and approved. | done |
 | 1 | Postgres adapter. Operation taxonomy with subtypes. Per-effect evaluation with strict object coverage. Two rule families. Event emission. Unavoidability bundle. Transaction correctness. SQL PREPARE/EXECUTE. FunctionCall default-deny. CancelRequest translation. Startup-packet handling. Replication & GSSENC default-deny. | done |
-| 2 | Object resolution via upstream catalog. `redirect` decision (statement rewriting). Improved policy ergonomics. | next |
+| 2 | Object resolution via upstream catalog. Runtime Postgres `redirect` execution / statement rewriting. Improved policy ergonomics. | next |
 | 3 | MySQL adapter. | |
 | 4 | Credential broker (resolves SCRAM-SHA-256-PLUS channel binding). | |
 | 5 | MongoDB adapter. | |
@@ -1574,15 +1589,15 @@ Each entry is a `(wire_bytes_in, expected_classification, expected_decision_unde
 - **Primary effect:** The effect with the highest risk tier, used as the headline classification.
 - **Secondary effects:** Additional effects beyond the primary; participate fully in policy evaluation, not audit-only.
 - **Per-effect evaluation:** Policy decision algorithm where each effect is matched independently against the rule list, with the final decision being the most-restrictive across effects.
-- **Strict object coverage:** For an effect to be allowed, every object in its object set must be covered by at least one allow / audit / approve rule, and no object may be matched by a deny rule.
-- **Asymmetric matching:** Allow / audit / approve use strict coverage; deny uses any-object match.
+- **Strict object coverage:** For an effect to be allowed, audited, redirected, or approved, every object in its object set must be covered by at least one allow / audit / redirect / approve rule, and no object may be matched by a deny rule.
+- **Asymmetric matching:** Allow / audit / redirect / approve use strict coverage; deny uses any-object match.
 - **Risk-tier-first ordering:** Primary effect is the effect with the highest risk tier; ties broken by canonical group order then stable AST traversal order (§5.2).
-- **Order-independent evaluation:** Rule position in the policy file does not affect outcomes. Deny matches anywhere produce deny; allow / audit / approve rules contribute to coverage; most-restrictive verb wins. Operators may reorder rules for readability without changing semantics. (§10.2, §10.4.)
+- **Order-independent evaluation:** Rule position in the policy file does not affect outcomes. Deny matches anywhere produce deny; allow / audit / redirect / approve rules contribute to coverage; most-restrictive verb wins. Operators may reorder rules for readability without changing semantics. (§10.2, §10.4.)
 - **Per-effect resolution:** Confidence tag on object identity, computed and stored independently for each effect.
 - **`implicit_deny`:** The effect-level decision when no rule covers the effect (or some object in it is uncovered). Equivalent to `deny` for restrictiveness purposes.
-- **Most-restrictive decision:** `deny ≡ implicit_deny > approve > audit > allow`.
+- **Most-restrictive decision:** `deny ≡ implicit_deny > approve > redirect > audit > allow`.
 - **Audit (as decision):** Allow-with-observation. The statement is forwarded to the database; the event carries `decision.verb: "audit"`. **Not a block.**
-- **Coverage (for an object):** An allow / audit / approve rule that matches the effect's group/subtype/resolution and whose `objects:` glob matches that specific object (or whose `objects:` clause is absent, which covers all objects).
+- **Coverage (for an object slot):** An allow / audit / redirect / approve rule that matches the effect's group/subtype/resolution and selects that slot through `objects`, `relations`, or `functions`; a rule with no object selector family covers all slots. Redirect statement rules are validated to use exactly one canonical `relations` source selector plus `redirect.relation`.
 - **Classifier:** Per-protocol component that parses a wire frame into a `ClassifiedStatement`.
 - **DBEvent:** Normalized per-statement event emitted by the proxy.
 - **db_service:** Operator-named upstream database, analogous to `http_services`.
@@ -1643,11 +1658,11 @@ Per §20. The policy evaluator should be implementable and testable independentl
 
 Required test categories:
 
-- Strict object coverage (allow, audit, approve cases).
+- Strict object coverage (allow, audit, redirect, approve cases).
 - Implicit deny on uncovered objects.
 - `audit` as coverage (forward + tag).
 - `approve` does not extend coverage to unrelated objects.
-- Deny precedence over allow / audit / approve.
+- Deny precedence over allow / audit / redirect / approve.
 - `match_object_resolution` per-effect.
 - Multi-effect statements with mixed decisions.
 - Risk-tier-first primary effect ordering.

@@ -53,7 +53,8 @@ type effectDecision struct {
 // foldEffects can prefer explicit deny over implicit deny (preserving RuleName
 // per the design doc §7 tiebreak note).
 //
-// Ordering: verbAllow < verbAudit < verbApprove < verbImplicitDeny < verbDeny.
+// Ordering:
+// verbAllow < verbAudit < verbRedirect < verbApprove < verbImplicitDeny < verbDeny.
 // Higher value = more restrictive. verbImplicitDeny ranks just below verbDeny
 // so explicit deny wins ties, giving a non-empty RuleName whenever possible.
 type internalVerb uint8
@@ -61,7 +62,8 @@ type internalVerb uint8
 const (
 	verbAllow        internalVerb = iota
 	verbAudit                     // more restrictive than allow
-	verbApprove                   // more restrictive than audit
+	verbRedirect                  // more restrictive than audit
+	verbApprove                   // more restrictive than redirect
 	verbImplicitDeny              // more restrictive than approve; loses to explicit deny on tie
 	verbDeny                      // most restrictive
 )
@@ -132,7 +134,7 @@ func evaluateEffect(e effects.Effect, applicable []*compiledStatementRule) effec
 
 	// Pass 3 — most-restrictive verb across covering rules. Fold in policy file
 	// order so same-verb primary RuleName ties are independent of object order.
-	return foldCoverageRules(coverageRulesInPolicyOrder(applicable, coverage, len(e.Objects)))
+	return foldObjectCoverageRules(applicable, coverage, len(e.Objects))
 }
 
 func resolvedObjectForSlot(e effects.Effect, idx int) (effects.ResolvedObjectRef, bool) {
@@ -293,6 +295,31 @@ func coverageRulesInPolicyOrder(applicable []*compiledStatementRule, coverage ma
 	return out
 }
 
+func foldObjectCoverageRules(applicable []*compiledStatementRule, coverage map[int][]*compiledStatementRule, objectCount int) effectDecision {
+	rules := coverageRulesInPolicyOrder(applicable, coverage, objectCount)
+	d := foldCoverageRules(rules)
+	if d.verb != verbRedirect {
+		return d
+	}
+	if redirectSourceCount(coverage, objectCount) != 1 {
+		return effectDecision{verb: verbImplicitDeny}
+	}
+	return d
+}
+
+func redirectSourceCount(coverage map[int][]*compiledStatementRule, objectCount int) int {
+	sources := map[string]struct{}{}
+	for i := 0; i < objectCount; i++ {
+		for _, r := range coverage[i] {
+			if r.verb != VerbRedirect || r.redirect == nil {
+				continue
+			}
+			sources[r.redirect.SourceRelation] = struct{}{}
+		}
+	}
+	return len(sources)
+}
+
 // isObjectlessGroup reports whether the group inherently has no objects
 // in its classified effects (BEGIN/COMMIT/SAVEPOINT, SET/RESET, NOTIFY).
 // Object-less effects in these groups must still be reachable through the
@@ -433,11 +460,19 @@ func foldCoverageRules(coverage []*compiledStatementRule) effectDecision {
 		primary      *compiledStatementRule
 		approveRules []*compiledStatementRule
 		auditRules   []*compiledStatementRule
+		redirectRule *compiledStatementRule
 		approveSeen  = map[string]bool{}
 		auditSeen    = map[string]bool{}
 	)
 	for _, r := range coverage {
 		switch r.verb {
+		case VerbRedirect:
+			if verbRedirect > best {
+				best = verbRedirect
+			}
+			if redirectRule == nil {
+				redirectRule = r
+			}
 		case VerbApprove:
 			if verbApprove > best {
 				best = verbApprove
@@ -459,6 +494,8 @@ func foldCoverageRules(coverage []*compiledStatementRule) effectDecision {
 	switch best {
 	case verbApprove:
 		primary = approveRules[0]
+	case verbRedirect:
+		primary = redirectRule
 	case verbAudit:
 		primary = auditRules[0]
 	default:
@@ -528,6 +565,17 @@ func foldEffects(stmt effects.ClassifiedStatement, perEffect []effectDecision) D
 			Reason:              d.rule.renderMessage(messageContextFor(e, stmt)),
 		}
 
+	case verbRedirect:
+		return Decision{
+			Verb:                VerbRedirect,
+			RuleKind:            RuleKindStatement,
+			RuleName:            d.rule.src.Name,
+			MatchingEffectIndex: bestIdx,
+			MatchingEffectGroup: e.Group,
+			Reason:              d.rule.renderMessage(messageContextFor(e, stmt)),
+			Redirect:            copyRedirectDecision(d.rule.redirect),
+		}
+
 	case verbApprove:
 		// Shortest timeout wins (D-OQ2 — most-restrictive principle applied to time).
 		timeout := d.contributingApprove[0].timeout
@@ -579,9 +627,9 @@ func foldEffects(stmt effects.ClassifiedStatement, perEffect []effectDecision) D
 // Defined as a function (instead of inline `>`) so call sites read as
 // "this is a tiebreak comparison" rather than "this is integer math".
 //
-// Order: allow < audit < approve < implicit_deny < deny. implicit_deny
-// ranks just below explicit deny so the explicit deny path wins ties
-// (preserving Decision.RuleName).
+// Order: allow < audit < redirect < approve < implicit_deny < deny.
+// implicit_deny ranks just below explicit deny so the explicit deny path wins
+// ties (preserving Decision.RuleName).
 func compareInternalVerb(a, b internalVerb) int {
 	if a > b {
 		return 1
@@ -590,6 +638,16 @@ func compareInternalVerb(a, b internalVerb) int {
 		return -1
 	}
 	return 0
+}
+
+func copyRedirectDecision(r *RedirectDecision) *RedirectDecision {
+	if r == nil {
+		return nil
+	}
+	return &RedirectDecision{
+		SourceRelation: r.SourceRelation,
+		TargetRelation: r.TargetRelation,
+	}
 }
 
 // messageContextFor builds the template-render context for an effect.

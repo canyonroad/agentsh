@@ -75,10 +75,8 @@ func validateStatementRule(r *StatementRule, svcs map[ServiceID]*DBService) ([]e
 
 	// decision verb.
 	switch r.Decision {
-	case "allow", "deny", "approve", "audit":
+	case "allow", "deny", "approve", "audit", "redirect":
 		// ok
-	case "redirect":
-		errs = append(errs, fmt.Errorf("redirect_not_supported_until_plan_11: database_rules[%q]: decision redirect is supported starting in DB Plan 11", r.Name))
 	default:
 		errs = append(errs, fmt.Errorf("rule_unknown_decision: database_rules[%q]: unknown decision %q", r.Name, r.Decision))
 	}
@@ -107,6 +105,9 @@ func validateStatementRule(r *StatementRule, svcs map[ServiceID]*DBService) ([]e
 	// approve timeout.
 	if r.Decision == "approve" && r.Timeout > approveTimeoutMax {
 		errs = append(errs, fmt.Errorf("approve_timeout_exceeds_max: database_rules[%q]: timeout %s exceeds %s", r.Name, r.Timeout, approveTimeoutMax))
+	}
+	if r.Decision == "redirect" {
+		errs = append(errs, validateRedirectStatementRule(r, svcs, groups)...)
 	}
 
 	// rule_too_broad_allow.
@@ -227,7 +228,7 @@ func validateConnectionRule(r *ConnectionRule, svcs map[ServiceID]*DBService) ([
 	case "allow", "deny", "approve", "audit":
 		// ok
 	case "redirect":
-		errs = append(errs, fmt.Errorf("redirect_not_supported_until_plan_11: database_connection_rules[%q]: decision redirect is not valid for DB connection rules", r.Name))
+		errs = append(errs, fmt.Errorf("conn_redirect_invalid: database_connection_rules[%q]: decision redirect is not valid for DB connection rules", r.Name))
 	default:
 		errs = append(errs, fmt.Errorf("rule_unknown_decision: database_connection_rules[%q]: unknown decision %q", r.Name, r.Decision))
 	}
@@ -253,6 +254,33 @@ func validateConnectionRule(r *ConnectionRule, svcs map[ServiceID]*DBService) ([
 	}
 
 	return errs, warns
+}
+
+func validateRedirectStatementRule(r *StatementRule, svcs map[ServiceID]*DBService, groups map[effects.Group]struct{}) []error {
+	var errs []error
+	if r.Redirect == nil || r.Redirect.Relation == "" {
+		errs = append(errs, fmt.Errorf("redirect_relation_required: database_rules[%q]: redirect.relation is required", r.Name))
+	} else if !isCanonicalRelationName(r.Redirect.Relation) {
+		errs = append(errs, fmt.Errorf("redirect_relation_not_canonical: database_rules[%q]: redirect.relation %q must be canonical schema.name", r.Name, r.Redirect.Relation))
+	}
+	if len(r.Relations) != 1 {
+		errs = append(errs, fmt.Errorf("redirect_source_relation_required: database_rules[%q]: exactly one relations selector is required for redirect", r.Name))
+	} else if !isCanonicalRelationName(r.Relations[0]) {
+		errs = append(errs, fmt.Errorf("redirect_source_relation_not_canonical: database_rules[%q]: relations[0] %q must be canonical schema.name", r.Name, r.Relations[0]))
+	}
+	if len(r.Objects) > 0 || len(r.Functions) > 0 {
+		errs = append(errs, fmt.Errorf("redirect_source_relation_exclusive: database_rules[%q]: redirect rules cannot combine relations with objects or functions selectors", r.Name))
+	}
+	if r.MatchObjectResolution != "catalog_resolved" {
+		errs = append(errs, fmt.Errorf("redirect_requires_catalog_resolved: database_rules[%q]: redirect requires match_object_resolution: catalog_resolved", r.Name))
+	}
+	if !groupsOnlyRead(groups) {
+		errs = append(errs, fmt.Errorf("redirect_operations_must_be_read: database_rules[%q]: redirect operations must expand only to read", r.Name))
+	}
+	if !ruleMatchesTerminatePostgresService(r, svcs) {
+		errs = append(errs, fmt.Errorf("redirect_requires_terminate_postgres_service: database_rules[%q]: redirect requires at least one terminate-mode Postgres service", r.Name))
+	}
+	return errs
 }
 
 func ruleHasCanonicalSelectors(r *StatementRule) bool {
@@ -284,6 +312,17 @@ func expandedGroups(r *StatementRule) map[effects.Group]struct{} {
 	return groups
 }
 
+func groupsOnlyRead(groups map[effects.Group]struct{}) bool {
+	if len(groups) == 0 {
+		return false
+	}
+	if len(groups) != 1 {
+		return false
+	}
+	_, ok := groups[effects.GroupRead]
+	return ok
+}
+
 func allGroupsObjectless(groups map[effects.Group]struct{}) bool {
 	if len(groups) == 0 {
 		return false
@@ -313,6 +352,31 @@ func ruleMatchesTerminatePostgresService(r *StatementRule, svcs map[ServiceID]*D
 		}
 	}
 	return false
+}
+
+func isCanonicalRelationName(s string) bool {
+	parts := strings.Split(s, ".")
+	return len(parts) == 2 && isPlainIdentifier(parts[0]) && isPlainIdentifier(parts[1])
+}
+
+func isPlainIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if i == 0 {
+			if (c >= 'a' && c <= 'z') || c == '_' {
+				continue
+			}
+			return false
+		}
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // validateConnectionRuleVsService returns a non-nil error if the rule matches

@@ -109,6 +109,13 @@ type Parser interface {
 	Normalize(sql string) (string, error)
 }
 
+// RewriteBackend exposes parse/deparse primitives for SQL rewrite callers.
+type RewriteBackend interface {
+	Parse(sql string) (*pg_query.ParseResult, error)
+	Deparse(tree *pg_query.ParseResult) (string, error)
+	Backend() effects.ParserBackend
+}
+
 // New returns the parser for the given dialect, using whichever libpg_query
 // embedding the active build tag selected. Panics on unknown dialect; the
 // dialect set is closed and a typo at construction time is a programmer error.
@@ -117,6 +124,15 @@ func New(d Dialect) Parser {
 		panic(fmt.Sprintf("postgres.New: unknown dialect %d", d))
 	}
 	return newParser(d)
+}
+
+// NewRewriteBackend returns parse/deparse primitives for the given dialect,
+// using the same build-tag-selected backend as New.
+func NewRewriteBackend(d Dialect) RewriteBackend {
+	if d.String() == "" {
+		panic(fmt.Sprintf("postgres.NewRewriteBackend: unknown dialect %d", d))
+	}
+	return newRewriteBackend(d)
 }
 
 // ApplyStatement evolves session state after the proxy has confirmed the
