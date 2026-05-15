@@ -25,6 +25,7 @@ type compiledStatementRule struct {
 	functions     []glob.Glob // resolved function identity names
 	timeout       time.Duration
 	msgTemplate   *template.Template // nil = no message rendering
+	redirect      *RedirectDecision
 	serviceFilter serviceFilter
 }
 
@@ -130,6 +131,15 @@ func compileStatementRule(r *StatementRule) (*compiledStatementRule, error) {
 		c.verb = VerbRedirect
 	default:
 		return nil, fmt.Errorf("compile: rule %q has unhandled decision %q (validate should have rejected)", r.Name, r.Decision)
+	}
+	if c.verb == VerbRedirect {
+		if len(r.Relations) != 1 || r.Redirect == nil || r.Redirect.Relation == "" {
+			return nil, fmt.Errorf("compile: rule %q has incomplete redirect action (validate should have rejected)", r.Name)
+		}
+		c.redirect = &RedirectDecision{
+			SourceRelation: r.Relations[0],
+			TargetRelation: r.Redirect.Relation,
+		}
 	}
 
 	for _, op := range r.Operations {
