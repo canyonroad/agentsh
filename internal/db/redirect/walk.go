@@ -66,7 +66,6 @@ func (rewrite relationRewrite) withCTENames(withClause *pg_query.WithClause) rel
 	}
 
 	scoped := rewrite
-	copied := false
 	for _, node := range withClause.Ctes {
 		if node == nil {
 			continue
@@ -75,15 +74,22 @@ func (rewrite relationRewrite) withCTENames(withClause *pg_query.WithClause) rel
 		if !ok || cteNode.CommonTableExpr == nil || cteNode.CommonTableExpr.Ctename == "" {
 			continue
 		}
-		if !copied {
-			scoped.cteNames = make(map[string]struct{}, len(rewrite.cteNames)+len(withClause.Ctes))
-			for name := range rewrite.cteNames {
-				scoped.cteNames[name] = struct{}{}
-			}
-			copied = true
-		}
-		scoped.cteNames[cteNode.CommonTableExpr.Ctename] = struct{}{}
+		scoped = scoped.withCTEName(cteNode.CommonTableExpr.Ctename)
 	}
+	return scoped
+}
+
+func (rewrite relationRewrite) withCTEName(name string) relationRewrite {
+	if name == "" {
+		return rewrite
+	}
+
+	scoped := rewrite
+	scoped.cteNames = make(map[string]struct{}, len(rewrite.cteNames)+1)
+	for existing := range rewrite.cteNames {
+		scoped.cteNames[existing] = struct{}{}
+	}
+	scoped.cteNames[name] = struct{}{}
 	return scoped
 }
 
@@ -126,6 +132,7 @@ func rewriteCTEs(withClause *pg_query.WithClause, rewrite relationRewrite) (int,
 	}
 
 	count := 0
+	bodyRewrite := rewrite
 	for _, node := range withClause.Ctes {
 		if node == nil {
 			continue
@@ -138,11 +145,12 @@ func rewriteCTEs(withClause *pg_query.WithClause, rewrite relationRewrite) (int,
 		if !ok || query.SelectStmt == nil {
 			return 0, reject(ReasonWriteStatement, nil)
 		}
-		more, err := rewriteSelectRelations(query.SelectStmt, rewrite)
+		more, err := rewriteSelectRelations(query.SelectStmt, bodyRewrite)
 		if err != nil {
 			return 0, err
 		}
 		count += more
+		bodyRewrite = bodyRewrite.withCTEName(cteNode.CommonTableExpr.Ctename)
 	}
 	return count, nil
 }
@@ -166,7 +174,10 @@ func rewriteRangeNode(node *pg_query.Node, rewrite relationRewrite) (int, error)
 
 	switch n := node.Node.(type) {
 	case *pg_query.Node_RangeVar:
-		if n.RangeVar == nil || !rangeVarMatches(n.RangeVar, rewrite) {
+		if n.RangeVar == nil {
+			return 0, reject(ReasonUnsupportedStatement, nil)
+		}
+		if !rangeVarMatches(n.RangeVar, rewrite) {
 			return 0, nil
 		}
 		if n.RangeVar.Alias == nil {
@@ -176,8 +187,8 @@ func rewriteRangeNode(node *pg_query.Node, rewrite relationRewrite) (int, error)
 		n.RangeVar.Relname = rewrite.targetName
 		return 1, nil
 	case *pg_query.Node_JoinExpr:
-		if n.JoinExpr == nil {
-			return 0, nil
+		if n.JoinExpr == nil || n.JoinExpr.Larg == nil || n.JoinExpr.Rarg == nil {
+			return 0, reject(ReasonUnsupportedStatement, nil)
 		}
 		left, err := rewriteRangeNode(n.JoinExpr.Larg, rewrite)
 		if err != nil {
@@ -194,19 +205,21 @@ func rewriteRangeNode(node *pg_query.Node, rewrite relationRewrite) (int, error)
 		return left + right + quals, nil
 	case *pg_query.Node_RangeSubselect:
 		if n.RangeSubselect == nil || n.RangeSubselect.Subquery == nil {
-			return 0, nil
+			return 0, reject(ReasonUnsupportedStatement, nil)
 		}
 		subquery, ok := n.RangeSubselect.Subquery.Node.(*pg_query.Node_SelectStmt)
 		if !ok || subquery.SelectStmt == nil {
-			return 0, nil
+			return 0, reject(ReasonUnsupportedStatement, nil)
 		}
 		return rewriteSelectRelations(subquery.SelectStmt, rewrite)
 	case *pg_query.Node_RangeTableSample:
 		return 0, reject(ReasonUnsupportedStatement, nil)
 	case *pg_query.Node_RangeFunction:
 		return 0, reject(ReasonProceduralStatement, nil)
+	case *pg_query.Node_RangeTableFunc:
+		return 0, reject(ReasonUnsupportedStatement, nil)
 	default:
-		return 0, nil
+		return 0, reject(ReasonUnsupportedStatement, nil)
 	}
 }
 

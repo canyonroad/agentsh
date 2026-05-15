@@ -336,6 +336,26 @@ func TestPlannerRewritesCTEShadowingSourceName(t *testing.T) {
 	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
 }
 
+func TestPlannerRewritesCTESiblingReferenceNotSource(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL:       "WITH users AS (SELECT id FROM public.users), x AS (SELECT * FROM users) SELECT * FROM x",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
+	assertSQLContains(t, plan.RewrittenSQL, "FROM users")
+	assertSQLContains(t, plan.RewrittenSQL, "FROM x")
+	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
+}
+
 func TestPlannerRewritesSetOperation(t *testing.T) {
 	plan, err := testPlanner().Plan(Input{
 		SQL: "SELECT id FROM public.users UNION ALL SELECT id FROM public.archive_users",
@@ -504,6 +524,51 @@ func TestPlannerRejectsMultipleSourceOccurrences(t *testing.T) {
 	assertRejection(t, err, ReasonAmbiguousRedirectSource)
 }
 
+func TestRewriteRangeNodeRejectsMalformedRangeSubselect(t *testing.T) {
+	tests := []struct {
+		name string
+		node *pg_query.Node
+	}{
+		{
+			name: "missing subquery",
+			node: &pg_query.Node{Node: &pg_query.Node_RangeSubselect{
+				RangeSubselect: &pg_query.RangeSubselect{},
+			}},
+		},
+		{
+			name: "non-select subquery",
+			node: &pg_query.Node{Node: &pg_query.Node_RangeSubselect{
+				RangeSubselect: &pg_query.RangeSubselect{Subquery: &pg_query.Node{
+					Node: &pg_query.Node_InsertStmt{InsertStmt: &pg_query.InsertStmt{}},
+				}},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := rewriteRangeNode(tt.node, testRewrite())
+			assertRejection(t, err, ReasonUnsupportedStatement)
+		})
+	}
+}
+
+func TestRewriteRangeNodeRejectsUnsupportedRangeTableFunc(t *testing.T) {
+	_, err := rewriteRangeNode(&pg_query.Node{Node: &pg_query.Node_RangeTableFunc{
+		RangeTableFunc: &pg_query.RangeTableFunc{},
+	}}, testRewrite())
+
+	assertRejection(t, err, ReasonUnsupportedStatement)
+}
+
+func TestRewriteRangeNodeRejectsUnknownRangeVariant(t *testing.T) {
+	_, err := rewriteRangeNode(&pg_query.Node{Node: &pg_query.Node_RangeTblRef{
+		RangeTblRef: &pg_query.RangeTblRef{},
+	}}, testRewrite())
+
+	assertRejection(t, err, ReasonUnsupportedStatement)
+}
+
 func TestRejectionValueImplementsError(t *testing.T) {
 	err := error(Rejection{Reason: ReasonUnsupportedStatement})
 
@@ -525,6 +590,15 @@ func testAction() Action {
 		RuleName:       "redirect-users",
 		SourceRelation: "public.users",
 		TargetRelation: "archive.users",
+	}
+}
+
+func testRewrite() relationRewrite {
+	return relationRewrite{
+		sourceSchema: "public",
+		sourceName:   "users",
+		targetSchema: "public",
+		targetName:   "safe_users",
 	}
 }
 
