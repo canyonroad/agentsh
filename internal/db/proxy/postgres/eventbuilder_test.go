@@ -324,3 +324,63 @@ func TestBuildStatementEvent_SetsCatalogResolutionFields(t *testing.T) {
 		t.Fatalf("resolved oid = %+v", ev.Effects[0].ResolvedObjects[0])
 	}
 }
+
+func TestBuildStatementEvent_RedirectMetadataPreservesOriginalDigest(t *testing.T) {
+	parser := classify_pg.New(classify_pg.DialectPostgres)
+	stmt := effects.ClassifiedStatement{
+		RawVerb: "SELECT",
+		Effects: []effects.Effect{{
+			Group:      effects.GroupRead,
+			Resolution: effects.ResolutionCatalogResolved,
+			Objects:    []effects.ObjectRef{{Kind: effects.ObjectTable, Schema: "public", Name: "users"}},
+		}},
+	}
+
+	ev := buildStatementEvent(buildArgs{
+		Stmt:       stmt,
+		StmtIndex:  0,
+		BatchTotal: 1,
+		Decision: policy.Decision{
+			Verb:                policy.VerbRedirect,
+			RuleKind:            policy.RuleKindStatement,
+			RuleName:            "redirect-users",
+			MatchingEffectIndex: 0,
+			MatchingEffectGroup: effects.GroupRead,
+		},
+		SQL:      "select id from public.users",
+		Tier:     policy.RedactParametersRedacted,
+		Conn:     connState{dbService: "appdb", smState: &statemachine.ConnState{LastUpstreamRFQ: 'I'}},
+		BatchSHA: sha256HexBatch("select id from public.users"),
+		Parser:   parser,
+		Redirect: redirectEventArgs{
+			Redirected:     true,
+			Rule:           "redirect-users",
+			RewrittenSQL:   "select id from public.safe_users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+			RuntimeStatus:  "executed",
+		},
+	})
+
+	if !ev.Redirected {
+		t.Fatalf("Redirected = false")
+	}
+	if ev.RedirectRule != "redirect-users" {
+		t.Fatalf("RedirectRule = %q", ev.RedirectRule)
+	}
+	if ev.RedirectSourceRelation != "public.users" || ev.RedirectTargetRelation != "public.safe_users" {
+		t.Fatalf("redirect relations = %q -> %q", ev.RedirectSourceRelation, ev.RedirectTargetRelation)
+	}
+	if ev.RedirectRuntimeStatus != "executed" {
+		t.Fatalf("RedirectRuntimeStatus = %q", ev.RedirectRuntimeStatus)
+	}
+	if ev.StatementDigest == "" || ev.RewrittenStatementDigest == "" {
+		t.Fatalf("digests missing: original=%q rewritten=%q", ev.StatementDigest, ev.RewrittenStatementDigest)
+	}
+	if ev.StatementDigest == ev.RewrittenStatementDigest {
+		t.Fatalf("original and rewritten digests must differ: %q", ev.StatementDigest)
+	}
+	if ev.StatementText != "select id from public.users" {
+		t.Fatalf("StatementText = %q, want original statement text", ev.StatementText)
+	}
+}

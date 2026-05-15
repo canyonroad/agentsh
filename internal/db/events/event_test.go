@@ -118,6 +118,87 @@ func TestDBEvent_ResolvedObjectMetadataRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDBEvent_RedirectMetadataRoundTrip(t *testing.T) {
+	in := DBEvent{
+		EventID:                  "db-redirect-1",
+		SessionID:                "sess-1",
+		Timestamp:                time.Date(2026, 5, 14, 13, 0, 0, 0, time.UTC),
+		DBService:                "appdb",
+		DBFamily:                 "postgres",
+		DBDialect:                "postgres",
+		StatementDigest:          "sha256:original",
+		RewrittenStatementDigest: "sha256:rewritten",
+		Redirected:               true,
+		RedirectRule:             "redirect-users-to-safe-users",
+		RedirectSourceRelation:   "public.users",
+		RedirectTargetRelation:   "public.safe_users",
+		RedirectRuntimeStatus:    "executed",
+		StatementRedaction:       RedactionParametersRedacted,
+	}
+
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	s := string(raw)
+	for _, want := range []string{
+		`"redirected":true`,
+		`"redirect_rule":"redirect-users-to-safe-users"`,
+		`"rewritten_statement_digest":"sha256:rewritten"`,
+		`"redirect_source_relation":"public.users"`,
+		`"redirect_target_relation":"public.safe_users"`,
+		`"redirect_runtime_status":"executed"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("json %s missing %s", s, want)
+		}
+	}
+
+	var out DBEvent
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !out.Redirected || out.RedirectRule != in.RedirectRule || out.RewrittenStatementDigest != in.RewrittenStatementDigest {
+		t.Fatalf("redirect fields lost: %+v", out)
+	}
+	if out.StatementDigest != "sha256:original" {
+		t.Fatalf("StatementDigest = %q, want original digest", out.StatementDigest)
+	}
+}
+
+func TestDBEvent_RedirectRejectionRoundTrip(t *testing.T) {
+	in := DBEvent{
+		EventID:                 "db-redirect-reject-1",
+		SessionID:               "sess-1",
+		Timestamp:               time.Date(2026, 5, 14, 13, 1, 0, 0, time.UTC),
+		DBService:               "appdb",
+		DBFamily:                "postgres",
+		DBDialect:               "postgres",
+		StatementDigest:         "sha256:original",
+		Redirected:              true,
+		RedirectRule:            "redirect-users-to-safe-users",
+		RedirectSourceRelation:  "public.users",
+		RedirectTargetRelation:  "public.safe_users",
+		RedirectRuntimeStatus:   "rejected",
+		RedirectRejectionReason: "unsupported_statement",
+		StatementRedaction:      RedactionParametersRedacted,
+		Result:                  EventResult{ErrorCode: "0A000"},
+		TxContext:               EventTxContext{DenyAction: "none"},
+	}
+
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var out DBEvent
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.RedirectRuntimeStatus != "rejected" || out.RedirectRejectionReason != "unsupported_statement" {
+		t.Fatalf("redirect rejection fields lost: %+v", out)
+	}
+}
+
 func TestDBEvent_Extended_RoundTrip(t *testing.T) {
 	rows := int64(7)
 	in := DBEvent{

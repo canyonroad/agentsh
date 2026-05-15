@@ -41,6 +41,14 @@ type DBEvent struct {
 	StatementText      string    `json:"statement_text,omitempty"`
 	StatementRedaction Redaction `json:"statement_redaction"`
 
+	Redirected               bool   `json:"redirected,omitempty"`
+	RedirectRule             string `json:"redirect_rule,omitempty"`
+	RewrittenStatementDigest string `json:"rewritten_statement_digest,omitempty"`
+	RedirectSourceRelation   string `json:"redirect_source_relation,omitempty"`
+	RedirectTargetRelation   string `json:"redirect_target_relation,omitempty"`
+	RedirectRuntimeStatus    string `json:"redirect_runtime_status,omitempty"`
+	RedirectRejectionReason  string `json:"redirect_rejection_reason,omitempty"`
+
 	ParserBackend effects.ParserBackend `json:"parser_backend,omitempty"`
 
 	TLS        EventTLS        `json:"tls"`
@@ -58,7 +66,7 @@ type EventTLS struct {
 }
 
 // EventDecision mirrors spec §8 decision{}. Verb is one of "allow"|"deny"|
-// "approve"|"audit".
+// "approve"|"audit"|"redirect".
 type EventDecision struct {
 	Verb                   string   `json:"verb"`
 	RuleKind               string   `json:"rule_kind"`

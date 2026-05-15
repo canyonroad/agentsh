@@ -143,6 +143,33 @@ func TestDBStatementToEventMapsNormalizedFields(t *testing.T) {
 	}
 }
 
+func TestDBStatementToEventMapsRedirectFields(t *testing.T) {
+	ev := dbStatementToEvent(dbevents.DBEvent{
+		EventID:                  "db-redirect-api",
+		SessionID:                "sess-1",
+		Timestamp:                time.Unix(500, 0).UTC(),
+		DBService:                "appdb",
+		DBFamily:                 "postgres",
+		DBDialect:                "postgres",
+		StatementDigest:          "sha256:original",
+		Redirected:               true,
+		RedirectRule:             "redirect-users",
+		RewrittenStatementDigest: "sha256:rewritten",
+		RedirectSourceRelation:   "public.users",
+		RedirectTargetRelation:   "public.safe_users",
+		RedirectRuntimeStatus:    "executed",
+	})
+
+	if ev.Fields["redirected"] != true ||
+		ev.Fields["redirect_rule"] != "redirect-users" ||
+		ev.Fields["rewritten_statement_digest"] != "sha256:rewritten" ||
+		ev.Fields["redirect_source_relation"] != "public.users" ||
+		ev.Fields["redirect_target_relation"] != "public.safe_users" ||
+		ev.Fields["redirect_runtime_status"] != "executed" {
+		t.Fatalf("redirect fields = %+v", ev.Fields)
+	}
+}
+
 func TestDBStatementToEventMapsCatalogResolutionReason(t *testing.T) {
 	ev := dbStatementToEvent(dbevents.DBEvent{
 		EventID:                "db-resolved-api",

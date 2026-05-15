@@ -123,11 +123,17 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 	decisions := make([]policy.Decision, len(stmts))
 	anyDeny := false
 	approveIndex := -1
+	redirectIndex := -1
 	for i, s := range stmts {
 		decisions[i] = policy.Evaluate(s, rs, policy.ServiceID(pc.svc.Name))
 		if decisions[i].Verb == policy.VerbApprove {
 			if approveIndex == -1 {
 				approveIndex = i
+			}
+		}
+		if decisions[i].Verb == policy.VerbRedirect {
+			if redirectIndex == -1 {
+				redirectIndex = i
 			}
 		}
 		if decisions[i].Verb == policy.VerbDeny {
@@ -156,6 +162,10 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 	}
 
 	batchSHA := sha256HexBatch(q.String)
+
+	if !anyDeny && redirectIndex >= 0 {
+		return pc.runSimpleQueryRedirect(ctx, q, stmts, decisions, redirectIndex, batchSHA)
+	}
 
 	if !anyDeny && approveIndex >= 0 {
 		return pc.runSimpleQueryApproval(ctx, q, stmts, decisions, approveIndex, batchSHA)
@@ -212,6 +222,96 @@ func (pc *proxyConn) handleQuery(ctx context.Context, q *pgproto3.Query) error {
 	rendered, sqlstate := pickDenySynth(decisions)
 	actions := statemachine.DenyRoute(*pc.state.smState, denyRule, rendered, sqlstate)
 	return pc.executeActions(ctx, q, actions)
+}
+
+func (pc *proxyConn) runSimpleQueryRedirect(
+	ctx context.Context,
+	q *pgproto3.Query,
+	stmts []effects.ClassifiedStatement,
+	decisions []policy.Decision,
+	redirectIndex int,
+	batchSHA string,
+) error {
+	if len(stmts) != 1 || redirectIndex != 0 {
+		plan := redirectRuntimePlan{
+			Rule:            decisions[redirectIndex].RuleName,
+			RuntimeStatus:   "rejected",
+			RejectionReason: "multi_statement_redirect_unsupported",
+		}
+		if decisions[redirectIndex].Redirect != nil {
+			plan.SourceRelation = decisions[redirectIndex].Redirect.SourceRelation
+			plan.TargetRelation = decisions[redirectIndex].Redirect.TargetRelation
+		}
+		pc.emitRedirectRejectedEvent(ctx, stmts[redirectIndex], decisions[redirectIndex], q.String, batchSHA, plan)
+		return pc.synthErrorAndRFQ(sqlstateRedirectRejected, "redirect rejected by AgentSH policy: multi-statement redirect unsupported")
+	}
+
+	plan, ok := pc.planRuntimeRedirect(ctx, q.String, stmts[redirectIndex], decisions[redirectIndex])
+	if !ok {
+		pc.emitRedirectRejectedEvent(ctx, stmts[redirectIndex], decisions[redirectIndex], q.String, batchSHA, plan)
+		return pc.synthErrorAndRFQ(sqlstateRedirectRejected, "redirect rejected by AgentSH policy: "+plan.RejectionReason)
+	}
+
+	sentAt := timeNow()
+	pc.state.upstreamFE.Send(&pgproto3.Query{String: plan.RewrittenSQL})
+	if err := pc.state.upstreamFE.Flush(); err != nil {
+		return err
+	}
+	result, ferr := pc.forwardUpstreamUntilRFQ(ctx, sentAt, len(q.String))
+	pc.emitRedirectAllowEvent(ctx, stmts[redirectIndex], decisions[redirectIndex], q.String, batchSHA, plan, result)
+	pc.refreshCatalogAfterSuccessfulStatements(ctx, plan.RewrittenStatements, result)
+	return ferr
+}
+
+func (pc *proxyConn) emitRedirectAllowEvent(ctx context.Context, stmt effects.ClassifiedStatement, decision policy.Decision, sql, batchSHA string, plan redirectRuntimePlan, result upstreamResult) {
+	parser := pc.srv.classifierFor(pc.svc.Dialect)
+	var rowsReturned, rowsAffected *int64
+	if len(result.RowsByStmt) > 0 {
+		rowsReturned = result.RowsByStmt[0]
+	}
+	if len(result.AffectedByStmt) > 0 {
+		rowsAffected = result.AffectedByStmt[0]
+	}
+	ev := buildStatementEvent(buildArgs{
+		Stmt:            stmt,
+		StmtIndex:       0,
+		BatchTotal:      1,
+		Decision:        decision,
+		SQL:             sql,
+		Tier:            pc.state.redactionTier,
+		Conn:            *pc.state,
+		BytesIn:         int64(len(sql)),
+		BytesOut:        result.BytesOut,
+		LatencyMs:       result.LatencyMs,
+		RowsReturned:    rowsReturned,
+		RowsAffected:    rowsAffected,
+		UpstreamErrCode: result.ErrorCode,
+		DenyAction:      "none",
+		BatchSHA:        batchSHA,
+		Parser:          parser,
+		Redirect:        redirectEventFromPlan(plan, "executed"),
+	})
+	_ = pc.srv.cfg.Sink.EmitStatement(ctx, ev)
+}
+
+func (pc *proxyConn) emitRedirectRejectedEvent(ctx context.Context, stmt effects.ClassifiedStatement, decision policy.Decision, sql, batchSHA string, plan redirectRuntimePlan) {
+	parser := pc.srv.classifierFor(pc.svc.Dialect)
+	ev := buildStatementEvent(buildArgs{
+		Stmt:            stmt,
+		StmtIndex:       0,
+		BatchTotal:      1,
+		Decision:        decision,
+		SQL:             sql,
+		Tier:            pc.state.redactionTier,
+		Conn:            *pc.state,
+		BytesIn:         int64(len(sql)),
+		UpstreamErrCode: sqlstateRedirectRejected,
+		DenyAction:      "none",
+		BatchSHA:        batchSHA,
+		Parser:          parser,
+		Redirect:        redirectEventFromPlan(plan, "rejected"),
+	})
+	_ = pc.srv.cfg.Sink.EmitStatement(ctx, ev)
 }
 
 // denyActionForState returns the deny action string based on the current
