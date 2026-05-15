@@ -224,8 +224,11 @@ func TestPlannerPreservesAlias(t *testing.T) {
 		t.Fatalf("Plan() error = %v", err)
 	}
 
-	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
-	assertSQLContains(t, plan.RewrittenSQL, " u")
+	rewritten := strings.ToLower(plan.RewrittenSQL)
+	if !strings.Contains(rewritten, "public.safe_users as u") &&
+		!strings.Contains(rewritten, "public.safe_users u") {
+		t.Fatalf("rewritten SQL = %q, want rewritten FROM relation to keep alias u", plan.RewrittenSQL)
+	}
 }
 
 func TestPlannerRewritesOneRelationInJoin(t *testing.T) {
