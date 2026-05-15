@@ -10,6 +10,7 @@ type relationRewrite struct {
 	sourceName   string
 	targetSchema string
 	targetName   string
+	cteNames     map[string]struct{}
 }
 
 func rewriteSelectRelations(stmt *pg_query.SelectStmt, rewrite relationRewrite) (int, error) {
@@ -24,35 +25,63 @@ func rewriteSelectRelations(stmt *pg_query.SelectStmt, rewrite relationRewrite) 
 		return 0, reject(ReasonUnsupportedStatement, nil)
 	}
 
-	count, err := rewriteCTEs(stmt.WithClause, rewrite)
+	scopedRewrite := rewrite.withCTENames(stmt.WithClause)
+	count, err := rewriteCTEs(stmt.WithClause, scopedRewrite)
 	if err != nil {
 		return 0, err
 	}
-	more, err := rewriteRangeNodes(stmt.FromClause, rewrite)
+	more, err := rewriteRangeNodes(stmt.FromClause, scopedRewrite)
 	if err != nil {
 		return 0, err
 	}
 	count += more
-	more, err = rewriteSelectExpressionSubqueries(stmt, rewrite)
+	more, err = rewriteSelectExpressionSubqueries(stmt, scopedRewrite)
 	if err != nil {
 		return 0, err
 	}
 	count += more
 	if stmt.Larg != nil {
-		more, err := rewriteSelectRelations(stmt.Larg, rewrite)
+		more, err := rewriteSelectRelations(stmt.Larg, scopedRewrite)
 		if err != nil {
 			return 0, err
 		}
 		count += more
 	}
 	if stmt.Rarg != nil {
-		more, err := rewriteSelectRelations(stmt.Rarg, rewrite)
+		more, err := rewriteSelectRelations(stmt.Rarg, scopedRewrite)
 		if err != nil {
 			return 0, err
 		}
 		count += more
 	}
 	return count, nil
+}
+
+func (rewrite relationRewrite) withCTENames(withClause *pg_query.WithClause) relationRewrite {
+	if withClause == nil || len(withClause.Ctes) == 0 {
+		return rewrite
+	}
+
+	scoped := rewrite
+	copied := false
+	for _, node := range withClause.Ctes {
+		if node == nil {
+			continue
+		}
+		cteNode, ok := node.Node.(*pg_query.Node_CommonTableExpr)
+		if !ok || cteNode.CommonTableExpr == nil || cteNode.CommonTableExpr.Ctename == "" {
+			continue
+		}
+		if !copied {
+			scoped.cteNames = make(map[string]struct{}, len(rewrite.cteNames)+len(withClause.Ctes))
+			for name := range rewrite.cteNames {
+				scoped.cteNames[name] = struct{}{}
+			}
+			copied = true
+		}
+		scoped.cteNames[cteNode.CommonTableExpr.Ctename] = struct{}{}
+	}
+	return scoped
 }
 
 func rewriteSelectExpressionSubqueries(stmt *pg_query.SelectStmt, rewrite relationRewrite) (int, error) {
@@ -134,7 +163,7 @@ func rewriteRangeNode(node *pg_query.Node, rewrite relationRewrite) (int, error)
 
 	switch n := node.Node.(type) {
 	case *pg_query.Node_RangeVar:
-		if n.RangeVar == nil || !rangeVarMatches(n.RangeVar, rewrite.sourceSchema, rewrite.sourceName) {
+		if n.RangeVar == nil || !rangeVarMatches(n.RangeVar, rewrite) {
 			return 0, nil
 		}
 		if n.RangeVar.Alias == nil {
@@ -169,6 +198,8 @@ func rewriteRangeNode(node *pg_query.Node, rewrite relationRewrite) (int, error)
 			return 0, nil
 		}
 		return rewriteSelectRelations(subquery.SelectStmt, rewrite)
+	case *pg_query.Node_RangeTableSample:
+		return 0, reject(ReasonUnsupportedStatement, nil)
 	case *pg_query.Node_RangeFunction:
 		return 0, reject(ReasonProceduralStatement, nil)
 	default:
@@ -274,11 +305,14 @@ func rewriteSubLink(subLink *pg_query.SubLink, rewrite relationRewrite) (int, er
 	return count, nil
 }
 
-func rangeVarMatches(rv *pg_query.RangeVar, sourceSchema, sourceName string) bool {
+func rangeVarMatches(rv *pg_query.RangeVar, rewrite relationRewrite) bool {
 	if rv.Schemaname != "" {
-		return rv.Schemaname == sourceSchema && rv.Relname == sourceName
+		return rv.Schemaname == rewrite.sourceSchema && rv.Relname == rewrite.sourceName
 	}
-	return rv.Relname == sourceName
+	if _, ok := rewrite.cteNames[rv.Relname]; ok {
+		return false
+	}
+	return rv.Relname == rewrite.sourceName
 }
 
 func hasSchemaQualifiedSourceColumnRef(stmt *pg_query.SelectStmt, sourceSchema, sourceName string) bool {

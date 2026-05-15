@@ -317,6 +317,25 @@ func TestPlannerRewritesReadOnlyCTE(t *testing.T) {
 	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
 }
 
+func TestPlannerRewritesCTEShadowingSourceName(t *testing.T) {
+	plan, err := testPlanner().Plan(Input{
+		SQL:       "WITH users AS (SELECT id FROM public.users) SELECT * FROM users",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: "public.safe_users",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+
+	assertSQLContains(t, plan.RewrittenSQL, "public.safe_users")
+	assertSQLContains(t, plan.RewrittenSQL, "FROM users")
+	assertSQLNotContains(t, plan.RewrittenSQL, "public.users")
+}
+
 func TestPlannerRewritesSetOperation(t *testing.T) {
 	plan, err := testPlanner().Plan(Input{
 		SQL: "SELECT id FROM public.users UNION ALL SELECT id FROM public.archive_users",
@@ -463,6 +482,16 @@ func TestPlannerRejectsRangeFunction(t *testing.T) {
 	})
 
 	assertRejection(t, err, ReasonProceduralStatement)
+}
+
+func TestPlannerRejectsSampledSourceWithExpressionSubquery(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM public.users TABLESAMPLE SYSTEM (1) WHERE EXISTS (SELECT 1 FROM public.users)",
+		Statement: readStatement("public", "users"),
+		Action:    testAction(),
+	})
+
+	assertRejection(t, err, ReasonUnsupportedStatement)
 }
 
 func TestPlannerRejectsMultipleSourceOccurrences(t *testing.T) {
