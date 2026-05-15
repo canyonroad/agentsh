@@ -126,6 +126,8 @@ func compileStatementRule(r *StatementRule) (*compiledStatementRule, error) {
 		c.verb = VerbApprove
 	case "audit":
 		c.verb = VerbAudit
+	case "redirect":
+		c.verb = VerbRedirect
 	default:
 		return nil, fmt.Errorf("compile: rule %q has unhandled decision %q (validate should have rejected)", r.Name, r.Decision)
 	}

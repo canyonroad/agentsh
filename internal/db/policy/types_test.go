@@ -13,6 +13,7 @@ func TestDecisionVerbString(t *testing.T) {
 	}{
 		{VerbAllow, "allow"},
 		{VerbAudit, "audit"},
+		{VerbRedirect, "redirect"},
 		{VerbApprove, "approve"},
 		{VerbDeny, "deny"},
 	}

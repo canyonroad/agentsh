@@ -18,7 +18,7 @@ type ServiceID string
 // verb; it is encoded as Verb == VerbDeny with RuleName == "" (see §7 of the
 // design doc and Decision below).
 //
-// The numeric ordering (Allow < Audit < Approve < Deny) encodes
+// The numeric ordering (Allow < Audit < Redirect < Approve < Deny) encodes
 // restrictiveness — the evaluator's hot path uses integer comparison
 // (max(verb, ...)) to fold per-effect verdicts. Do not reorder these values.
 type DecisionVerb uint8
@@ -26,6 +26,7 @@ type DecisionVerb uint8
 const (
 	VerbAllow DecisionVerb = iota
 	VerbAudit
+	VerbRedirect
 	VerbApprove
 	VerbDeny
 )
@@ -36,6 +37,8 @@ func (v DecisionVerb) String() string {
 		return "allow"
 	case VerbAudit:
 		return "audit"
+	case VerbRedirect:
+		return "redirect"
 	case VerbApprove:
 		return "approve"
 	case VerbDeny:
@@ -68,6 +71,18 @@ func (k RuleKind) String() string {
 	}
 }
 
+// RedirectAction is the on-disk action metadata for statement rules with
+// decision: redirect.
+type RedirectAction struct {
+	Relation string `yaml:"relation"`
+}
+
+// RedirectDecision is the evaluator output metadata for redirect decisions.
+type RedirectDecision struct {
+	SourceRelation string
+	TargetRelation string
+}
+
 // ConnectionMatchKind is the connection rule's match_kind field, used by
 // EvaluateConnection.
 type ConnectionMatchKind uint8
@@ -92,22 +107,23 @@ type DBService struct {
 
 // StatementRule is the on-disk shape of a database_rules entry per §9.2.
 type StatementRule struct {
-	Name                        string        `yaml:"name"`
-	DBService                   string        `yaml:"db_service,omitempty"`
-	DBFamily                    string        `yaml:"db_family,omitempty"`
-	DBDialect                   string        `yaml:"db_dialect,omitempty"`
-	Schemas                     []string      `yaml:"schemas,omitempty"`
-	Objects                     []string      `yaml:"objects,omitempty"`
-	Relations                   []string      `yaml:"relations,omitempty"`
-	Functions                   []string      `yaml:"functions,omitempty"`
-	Operations                  []string      `yaml:"operations"`
-	Subtypes                    []string      `yaml:"subtypes,omitempty"`
-	MatchObjectResolution       string        `yaml:"match_object_resolution,omitempty"`
-	Decision                    string        `yaml:"decision"`
-	Message                     string        `yaml:"message,omitempty"`
-	Timeout                     time.Duration `yaml:"timeout,omitempty"`
-	AcknowledgeAuditOnDangerous bool          `yaml:"acknowledge_audit_on_dangerous,omitempty"`
-	DenyModeInTx                string        `yaml:"deny_mode_in_tx,omitempty"`
+	Name                        string          `yaml:"name"`
+	DBService                   string          `yaml:"db_service,omitempty"`
+	DBFamily                    string          `yaml:"db_family,omitempty"`
+	DBDialect                   string          `yaml:"db_dialect,omitempty"`
+	Schemas                     []string        `yaml:"schemas,omitempty"`
+	Objects                     []string        `yaml:"objects,omitempty"`
+	Relations                   []string        `yaml:"relations,omitempty"`
+	Functions                   []string        `yaml:"functions,omitempty"`
+	Operations                  []string        `yaml:"operations"`
+	Subtypes                    []string        `yaml:"subtypes,omitempty"`
+	MatchObjectResolution       string          `yaml:"match_object_resolution,omitempty"`
+	Decision                    string          `yaml:"decision"`
+	Message                     string          `yaml:"message,omitempty"`
+	Timeout                     time.Duration   `yaml:"timeout,omitempty"`
+	Redirect                    *RedirectAction `yaml:"redirect,omitempty"`
+	AcknowledgeAuditOnDangerous bool            `yaml:"acknowledge_audit_on_dangerous,omitempty"`
+	DenyModeInTx                string          `yaml:"deny_mode_in_tx,omitempty"`
 }
 
 // ConnectionRule is the on-disk shape of a database_connection_rules entry per §9.3.
@@ -150,6 +166,7 @@ type Decision struct {
 	Reason                 string
 	ContributingAuditRules []string // populated only when Verb == VerbApprove
 	Approval               *ApprovalRequest
+	Redirect               *RedirectDecision
 }
 
 // ApprovalRequest carries data Plan 04 needs to spin up the approval flow.
