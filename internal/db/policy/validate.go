@@ -352,11 +352,28 @@ func ruleMatchesTerminatePostgresService(r *StatementRule, svcs map[ServiceID]*D
 }
 
 func isCanonicalRelationName(s string) bool {
-	if strings.ContainsAny(s, "*?[") {
+	parts := strings.Split(s, ".")
+	return len(parts) == 2 && isPlainIdentifier(parts[0]) && isPlainIdentifier(parts[1])
+}
+
+func isPlainIdentifier(s string) bool {
+	if s == "" {
 		return false
 	}
-	parts := strings.Split(s, ".")
-	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if i == 0 {
+			if (c >= 'a' && c <= 'z') || c == '_' {
+				continue
+			}
+			return false
+		}
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // validateConnectionRuleVsService returns a non-nil error if the rule matches
