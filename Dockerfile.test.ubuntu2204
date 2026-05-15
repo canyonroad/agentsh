@@ -480,8 +480,14 @@ rm -f /tmp/test_binary
 # This test runs sh under the seccomp wrapper. The shim runs under seccomp
 # user-notify, so all its stat/exec calls are intercepted. Retry once on
 # failure to handle transient races in notification handler startup.
+#
+# We filter "INFO seccomp:" lines from the captured output because
+# agentsh-unixwrap emits a structured slog line to its stderr when it
+# installs the Layer 1 filter ("INFO seccomp: filter loaded ... wait_killable=...").
+# That line propagates back to the CLI's stderr via the SSE stderr
+# stream and would otherwise become the tail line, masking exec_ok.
 set +e
-exec_full="$(agentsh exec "$sid" -- sh -c 'echo exec_ok' 2>&1)"
+exec_full="$(agentsh exec "$sid" -- sh -c 'echo exec_ok' 2>&1 | grep -v 'INFO seccomp:')"
 exec_rc=$?
 set -e
 exec_out="$(echo "$exec_full" | tr -d '\r' | tail -n 1)"
@@ -493,7 +499,7 @@ else
   echo "  first attempt output: $exec_full" >&2
   sleep 0.5
   set +e
-  exec_full="$(agentsh exec "$sid" -- sh -c 'echo exec_ok' 2>&1)"
+  exec_full="$(agentsh exec "$sid" -- sh -c 'echo exec_ok' 2>&1 | grep -v 'INFO seccomp:')"
   exec_rc=$?
   set -e
   exec_out="$(echo "$exec_full" | tr -d '\r' | tail -n 1)"

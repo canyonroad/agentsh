@@ -12,7 +12,7 @@
 # Run:
 #   docker run --rm agentsh-test-rockylinux10:latest
 
-FROM rockylinux:10
+FROM rockylinux/rockylinux:10
 
 ARG AGENTSH_REPO=canyonroad/agentsh
 ARG AGENTSH_TAG=v0.10.1
