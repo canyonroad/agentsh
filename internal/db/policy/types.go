@@ -244,7 +244,12 @@ func (rs *RuleSet) AllStatementRules() []StatementRule {
 	out := make([]StatementRule, 0, len(rs.statement))
 	for _, cr := range rs.statement {
 		if cr.src != nil {
-			out = append(out, *cr.src)
+			r := *cr.src
+			if cr.src.Redirect != nil {
+				redirect := *cr.src.Redirect
+				r.Redirect = &redirect
+			}
+			out = append(out, r)
 		}
 	}
 	return out

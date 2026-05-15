@@ -268,6 +268,9 @@ func validateRedirectStatementRule(r *StatementRule, svcs map[ServiceID]*DBServi
 	} else if !isCanonicalRelationName(r.Relations[0]) {
 		errs = append(errs, fmt.Errorf("redirect_source_relation_not_canonical: database_rules[%q]: relations[0] %q must be canonical schema.name", r.Name, r.Relations[0]))
 	}
+	if len(r.Objects) > 0 || len(r.Functions) > 0 {
+		errs = append(errs, fmt.Errorf("redirect_source_relation_exclusive: database_rules[%q]: redirect rules cannot combine relations with objects or functions selectors", r.Name))
+	}
 	if r.MatchObjectResolution != "catalog_resolved" {
 		errs = append(errs, fmt.Errorf("redirect_requires_catalog_resolved: database_rules[%q]: redirect requires match_object_resolution: catalog_resolved", r.Name))
 	}

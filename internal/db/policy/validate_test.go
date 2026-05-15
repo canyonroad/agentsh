@@ -194,6 +194,39 @@ func TestValidate_RedirectRequiresCanonicalSourceRelation(t *testing.T) {
 	}
 }
 
+func TestValidate_RedirectSourceRelationExclusive(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	cases := []struct {
+		name      string
+		objects   []string
+		functions []string
+	}{
+		{name: "objects", objects: []string{"users"}},
+		{name: "functions", functions: []string{"public.safe_fn(integer)"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stmt := []*StatementRule{{
+				Name:                  "redirect-users",
+				DBService:             "appdb",
+				Operations:            []string{"READ"},
+				Objects:               tc.objects,
+				Relations:             []string{"public.users"},
+				Functions:             tc.functions,
+				MatchObjectResolution: "catalog_resolved",
+				Decision:              "redirect",
+				Redirect:              &RedirectAction{Relation: "public.safe_users"},
+			}}
+			_, err := helperValidate(t, svcs, stmt, nil)
+			if err == nil || !strings.Contains(err.Error(), "redirect_source_relation_exclusive") {
+				t.Fatalf("want redirect_source_relation_exclusive, got %v", err)
+			}
+		})
+	}
+}
+
 func TestValidate_RedirectRejectsNonPlainSourceRelation(t *testing.T) {
 	svcs := map[ServiceID]*DBService{
 		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
