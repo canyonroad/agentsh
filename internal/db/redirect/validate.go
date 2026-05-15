@@ -28,7 +28,7 @@ func validateInput(in Input) error {
 	for _, eff := range in.Statement.Effects {
 		switch eff.Group {
 		case effects.GroupRead:
-			if eff.Resolution != effects.ResolutionCatalogResolved || hasUnresolvedObject(eff.ResolvedObjects) {
+			if eff.Resolution != effects.ResolutionCatalogResolved {
 				return reject(ReasonUnresolvedObject, nil)
 			}
 		case effects.GroupWrite, effects.GroupModify, effects.GroupDelete:
@@ -48,13 +48,22 @@ func validateInput(in Input) error {
 		return reject(ReasonSourceNotFound, nil)
 	}
 
+	for _, eff := range in.Statement.Effects {
+		if eff.Group == effects.GroupRead && hasUnresolvedObject(eff.ResolvedObjects) {
+			return reject(ReasonUnresolvedObject, nil)
+		}
+	}
+
 	return nil
 }
 
 func sourceRelationExists(stmt effects.ClassifiedStatement, source string) bool {
 	for _, eff := range stmt.Effects {
 		for _, obj := range eff.ResolvedObjects {
-			if obj.Kind == effects.ResolvedObjectRelation && obj.CanonicalName() == source {
+			if obj.Source == effects.ResolvedObjectSourceCatalog &&
+				obj.Kind == effects.ResolvedObjectRelation &&
+				obj.UnresolvedReason == "" &&
+				obj.CanonicalName() == source {
 				return true
 			}
 		}

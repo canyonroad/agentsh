@@ -99,6 +99,48 @@ func TestPlannerRejectsMissingSourceRelationBeforeParsing(t *testing.T) {
 	}
 }
 
+func TestPlannerRejectsSourceRelationWithoutCatalogMetadataBeforeParsing(t *testing.T) {
+	tests := []struct {
+		name     string
+		resolved effects.ResolvedObjectRef
+	}{
+		{
+			name: "empty source",
+			resolved: effects.ResolvedObjectRef{
+				Kind:   effects.ResolvedObjectRelation,
+				Schema: "public",
+				Name:   "users",
+			},
+		},
+		{
+			name: "unresolved reason",
+			resolved: effects.ResolvedObjectRef{
+				Source:           effects.ResolvedObjectSourceCatalog,
+				Kind:             effects.ResolvedObjectRelation,
+				Schema:           "public",
+				Name:             "users",
+				UnresolvedReason: "not visible",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &fakeBackend{t: t}
+			_, err := Planner{Backend: backend}.Plan(Input{
+				SQL:       "SELECT * FROM public.users",
+				Statement: readStatementWithResolved(tt.resolved),
+				Action:    testAction(),
+			})
+
+			assertRejection(t, err, ReasonSourceNotFound)
+			if backend.parseCalled {
+				t.Fatal("Parse called before catalog source relation validation")
+			}
+		})
+	}
+}
+
 func TestPlannerRejectsMultiStatement(t *testing.T) {
 	_, err := testPlanner().Plan(Input{
 		SQL:       "SELECT * FROM public.users; SELECT * FROM public.users",
@@ -154,15 +196,19 @@ func testAction() Action {
 }
 
 func readStatement(schema, name string) effects.ClassifiedStatement {
+	return readStatementWithResolved(effects.ResolvedObjectRef{
+		Source: effects.ResolvedObjectSourceCatalog,
+		Kind:   effects.ResolvedObjectRelation,
+		Schema: schema,
+		Name:   name,
+	})
+}
+
+func readStatementWithResolved(resolved effects.ResolvedObjectRef) effects.ClassifiedStatement {
 	return effects.ClassifiedStatement{Effects: []effects.Effect{{
-		Group:      effects.GroupRead,
-		Resolution: effects.ResolutionCatalogResolved,
-		ResolvedObjects: []effects.ResolvedObjectRef{{
-			Source: effects.ResolvedObjectSourceCatalog,
-			Kind:   effects.ResolvedObjectRelation,
-			Schema: schema,
-			Name:   name,
-		}},
+		Group:           effects.GroupRead,
+		Resolution:      effects.ResolutionCatalogResolved,
+		ResolvedObjects: []effects.ResolvedObjectRef{resolved},
 	}}}
 }
 
