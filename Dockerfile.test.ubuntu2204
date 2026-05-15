@@ -400,7 +400,7 @@ echo "=== Shim tests ==="
 # passthrough test further down deliberately omits this flag: its
 # purpose IS to exercise the bypass path, not the enforcement path.
 
-sh_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo hello_sh' 2>&1 | tr -d '\r' | tail -n 1)"
+sh_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo hello_sh' 2>&1 | grep -v 'INFO seccomp:' | tr -d '\r' | tail -n 1)"
 if [ "$sh_out" = "hello_sh" ]; then
   pass "echo through /bin/sh shim"
 else
@@ -410,7 +410,7 @@ fi
 # -------------------------------------------------------------------
 # Test: basic echo through /bin/bash shim
 # -------------------------------------------------------------------
-bash_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/bash -c 'echo hello_bash' 2>&1 | tr -d '\r' | tail -n 1)"
+bash_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/bash -c 'echo hello_bash' 2>&1 | grep -v 'INFO seccomp:' | tr -d '\r' | tail -n 1)"
 if [ "$bash_out" = "hello_bash" ]; then
   pass "echo through /bin/bash shim"
 else
@@ -426,7 +426,7 @@ fi
 # Do NOT set AGENTSH_SHIM_FORCE here — the shim's AGENTSH_IN_SESSION
 # recursion guard runs BEFORE the non-tty bypass check, so force would
 # be a no-op. This test is about the recursion guard, not enforcement.
-rec_out="$(AGENTSH_BIN=/nonexistent/agentsh AGENTSH_IN_SESSION=1 /bin/sh -c 'echo recursion_ok' 2>&1 | tr -d '\r' | tail -n 1)"
+rec_out="$(AGENTSH_BIN=/nonexistent/agentsh AGENTSH_IN_SESSION=1 /bin/sh -c 'echo recursion_ok' 2>&1 | grep -v 'INFO seccomp:' | tr -d '\r' | tail -n 1)"
 if [ "$rec_out" = "recursion_ok" ]; then
   pass "AGENTSH_IN_SESSION recursion guard"
 else
@@ -436,7 +436,7 @@ fi
 # -------------------------------------------------------------------
 # Test: multi-word arguments preserved
 # -------------------------------------------------------------------
-multi_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo "hello world"' 2>&1 | tr -d '\r' | tail -n 1)"
+multi_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo "hello world"' 2>&1 | grep -v 'INFO seccomp:' | tr -d '\r' | tail -n 1)"
 if [ "$multi_out" = "hello world" ]; then
   pass "multi-word arguments preserved"
 else
@@ -710,7 +710,7 @@ echo "=== Shim + policy integration ==="
 # stdin triggers the shim's bypass, which execs the real shell
 # directly and skips the policy path entirely — making this
 # "integration" test prove nothing about shim+policy.
-shim_safe="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo shim_policy_ok' 2>&1 | tr -d '\r' | tail -n 1)"
+shim_safe="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo shim_policy_ok' 2>&1 | grep -v 'INFO seccomp:' | tr -d '\r' | tail -n 1)"
 if [ "$shim_safe" = "shim_policy_ok" ]; then
   pass "safe command through shim works"
 else
