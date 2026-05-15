@@ -1,12 +1,18 @@
 package redirect
 
-import "github.com/agentsh/agentsh/internal/db/effects"
+import (
+	"strings"
+
+	"github.com/agentsh/agentsh/internal/db/effects"
+)
 
 func validateInput(in Input) error {
-	if in.Action.TargetRelation == "" {
+	target := strings.TrimSpace(in.Action.TargetRelation)
+	if target == "" {
 		return reject(ReasonMissingRedirectTarget, nil)
 	}
-	if in.Action.SourceRelation == "" {
+	source := strings.TrimSpace(in.Action.SourceRelation)
+	if source == "" {
 		return reject(ReasonSourceNotFound, nil)
 	}
 	if len(in.Statement.Effects) == 0 {
@@ -38,6 +44,10 @@ func validateInput(in Input) error {
 		}
 	}
 
+	if !sourceRelationExists(in.Statement, source) {
+		return reject(ReasonSourceNotFound, nil)
+	}
+
 	return nil
 }
 
@@ -62,5 +72,5 @@ func hasUnresolvedObject(objects []effects.ResolvedObjectRef) bool {
 }
 
 func reject(reason Reason, err error) error {
-	return &Rejection{Reason: reason, Err: err}
+	return Rejection{Reason: reason, Err: err}
 }

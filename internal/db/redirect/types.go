@@ -30,20 +30,14 @@ type Rejection struct {
 	Err    error
 }
 
-func (r *Rejection) Error() string {
-	if r == nil {
-		return ""
-	}
+func (r Rejection) Error() string {
 	if r.Err != nil {
 		return fmt.Sprintf("%s: %v", r.Reason, r.Err)
 	}
 	return string(r.Reason)
 }
 
-func (r *Rejection) Unwrap() error {
-	if r == nil {
-		return nil
-	}
+func (r Rejection) Unwrap() error {
 	return r.Err
 }
 

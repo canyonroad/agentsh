@@ -6,6 +6,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/db/classify/postgres"
 	"github.com/agentsh/agentsh/internal/db/effects"
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
 func TestPlannerRejectsMissingTarget(t *testing.T) {
@@ -19,6 +20,34 @@ func TestPlannerRejectsMissingTarget(t *testing.T) {
 	})
 
 	assertRejection(t, err, ReasonMissingRedirectTarget)
+}
+
+func TestPlannerRejectsWhitespaceOnlyTarget(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM public.users",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: "public.users",
+			TargetRelation: " \t\n ",
+		},
+	})
+
+	assertRejection(t, err, ReasonMissingRedirectTarget)
+}
+
+func TestPlannerRejectsWhitespaceOnlySource(t *testing.T) {
+	_, err := testPlanner().Plan(Input{
+		SQL:       "SELECT * FROM public.users",
+		Statement: readStatement("public", "users"),
+		Action: Action{
+			RuleName:       "redirect-users",
+			SourceRelation: " \t\n ",
+			TargetRelation: "archive.users",
+		},
+	})
+
+	assertRejection(t, err, ReasonSourceNotFound)
 }
 
 func TestPlannerRejectsUnresolvedObject(t *testing.T) {
@@ -56,6 +85,20 @@ func TestPlannerRejectsWriteStatement(t *testing.T) {
 	assertRejection(t, err, ReasonWriteStatement)
 }
 
+func TestPlannerRejectsMissingSourceRelationBeforeParsing(t *testing.T) {
+	backend := &fakeBackend{t: t}
+	_, err := Planner{Backend: backend}.Plan(Input{
+		SQL:       "SELECT * FROM public.users",
+		Statement: readStatement("public", "orders"),
+		Action:    testAction(),
+	})
+
+	assertRejection(t, err, ReasonSourceNotFound)
+	if backend.parseCalled {
+		t.Fatal("Parse called before source relation validation")
+	}
+}
+
 func TestPlannerRejectsMultiStatement(t *testing.T) {
 	_, err := testPlanner().Plan(Input{
 		SQL:       "SELECT * FROM public.users; SELECT * FROM public.users",
@@ -68,15 +111,34 @@ func TestPlannerRejectsMultiStatement(t *testing.T) {
 
 func TestPlannerRejectsNonSelectStatement(t *testing.T) {
 	_, err := testPlanner().Plan(Input{
-		SQL: "BEGIN",
-		Statement: effects.ClassifiedStatement{Effects: []effects.Effect{{
-			Group:      effects.GroupRead,
-			Resolution: effects.ResolutionCatalogResolved,
-		}}},
-		Action: testAction(),
+		SQL:       "BEGIN",
+		Statement: readStatement("public", "users"),
+		Action:    testAction(),
 	})
 
 	assertRejection(t, err, ReasonNonSelectStatement)
+}
+
+func TestPlannerRejectsNilParseResultAsMultiStatement(t *testing.T) {
+	_, err := Planner{Backend: &fakeBackend{parseResult: nil}}.Plan(Input{
+		SQL:       "SELECT * FROM public.users",
+		Statement: readStatement("public", "users"),
+		Action:    testAction(),
+	})
+
+	assertRejection(t, err, ReasonMultiStatement)
+}
+
+func TestRejectionValueImplementsError(t *testing.T) {
+	err := error(Rejection{Reason: ReasonUnsupportedStatement})
+
+	var rej Rejection
+	if !errors.As(err, &rej) {
+		t.Fatalf("errors.As() = false, want true for Rejection value")
+	}
+	if rej.Reason != ReasonUnsupportedStatement {
+		t.Fatalf("rejection reason = %q, want %q", rej.Reason, ReasonUnsupportedStatement)
+	}
 }
 
 func testPlanner() Planner {
@@ -106,11 +168,33 @@ func readStatement(schema, name string) effects.ClassifiedStatement {
 
 func assertRejection(t *testing.T, err error, reason Reason) {
 	t.Helper()
-	var rej *Rejection
+	var rej Rejection
 	if !errors.As(err, &rej) {
-		t.Fatalf("Plan() error = %T %v, want *Rejection", err, err)
+		t.Fatalf("Plan() error = %T %v, want Rejection", err, err)
 	}
 	if rej.Reason != reason {
 		t.Fatalf("rejection reason = %q, want %q", rej.Reason, reason)
 	}
+}
+
+type fakeBackend struct {
+	t           *testing.T
+	parseCalled bool
+	parseResult *pg_query.ParseResult
+}
+
+func (f *fakeBackend) Parse(string) (*pg_query.ParseResult, error) {
+	if f.t != nil {
+		f.t.Helper()
+	}
+	f.parseCalled = true
+	return f.parseResult, nil
+}
+
+func (f *fakeBackend) Deparse(*pg_query.ParseResult) (string, error) {
+	return "", nil
+}
+
+func (f *fakeBackend) Backend() effects.ParserBackend {
+	return effects.ParserBackendPureGo
 }

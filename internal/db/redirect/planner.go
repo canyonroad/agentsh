@@ -14,10 +14,7 @@ func (p Planner) Plan(in Input) (Plan, error) {
 	if err != nil {
 		return Plan{}, reject(ReasonUnsupportedStatement, err)
 	}
-	if tree == nil {
-		return Plan{}, reject(ReasonUnsupportedStatement, nil)
-	}
-	if len(tree.Stmts) != 1 {
+	if tree == nil || len(tree.Stmts) != 1 {
 		return Plan{}, reject(ReasonMultiStatement, nil)
 	}
 
@@ -31,10 +28,6 @@ func (p Planner) Plan(in Input) (Plan, error) {
 	if len(selectStmt.LockingClause) > 0 {
 		return Plan{}, reject(ReasonUnsupportedStatement, nil)
 	}
-	if !sourceRelationExists(in.Statement, in.Action.SourceRelation) {
-		return Plan{}, reject(ReasonSourceNotFound, nil)
-	}
-
 	return Plan{}, reject(ReasonSourceNotFound, nil)
 }
 
