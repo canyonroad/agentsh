@@ -83,7 +83,7 @@ func withNotifyHandoffHook(t *testing.T) chan struct{} {
 
 	called := make(chan struct{})
 	prev := startNotifyHandlerForWrapHook
-	startNotifyHandlerForWrapHook = func(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session, cleanup func() error) {
+	startNotifyHandlerForWrapHook = func(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session, cleanup func() error) error {
 		if cleanup != nil {
 			_ = cleanup()
 		}
@@ -91,6 +91,7 @@ func withNotifyHandoffHook(t *testing.T) chan struct{} {
 			_ = notifyFD.Close()
 		}
 		close(called)
+		return nil
 	}
 	t.Cleanup(func() {
 		startNotifyHandlerForWrapHook = prev
@@ -119,7 +120,9 @@ func TestStartNotifyHandlerForWrap_CleansUpAfterProbeFailure(t *testing.T) {
 		return nil
 	}
 
-	startNotifyHandlerForWrap(context.Background(), notifyFD, "test-session", app, false, 999999999, nil, cleanup)
+	if err := startNotifyHandlerForWrap(context.Background(), notifyFD, "test-session", app, false, 999999999, nil, cleanup); err == nil {
+		t.Fatal("expected synchronous handler startup failure")
+	}
 
 	if got := cleanupCalls.Load(); got != 1 {
 		t.Fatalf("cleanup calls = %d, want 1", got)
@@ -352,12 +355,13 @@ func TestAcceptNotifyFD_UsesMetadataWrapperPIDForCgroupBeforeAck(t *testing.T) {
 		setupCalled <- wrapperPID
 		return func() error { return nil }, nil
 	}
-	startNotifyHandlerForWrapHook = func(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session, cleanup func() error) {
+	startNotifyHandlerForWrapHook = func(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session, cleanup func() error) error {
 		_ = notifyFD.Close()
 		if cleanup != nil {
 			_ = cleanup()
 		}
 		close(startCalled)
+		return nil
 	}
 	t.Cleanup(func() {
 		wrapCgroupSetupForNotifyHook = prevSetup
@@ -449,6 +453,78 @@ func TestAcceptNotifyFD_RejectsMissingMetadataWhenEBPFRequired(t *testing.T) {
 	default:
 	}
 	waitForTestDone(t, done)
+}
+
+func TestAcceptNotifyFD_RejectsWhenNotifyHandlerFailsBeforeAck(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = true
+	cfg.Sandbox.Network.EBPF.Enabled = true
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &enabled
+	app, mgr := newTestAppForWrap(t, cfg)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	const missingWrapperPID = 999999999
+	prevSetup := wrapCgroupSetupForNotifyHook
+	setupCalled := make(chan int, 1)
+	var cleanupCalls atomic.Int32
+	wrapCgroupSetupForNotifyHook = func(ctx context.Context, a *App, s *session.Session, sessionID string, wrapperPID int) (func() error, error) {
+		setupCalled <- wrapperPID
+		return func() error {
+			cleanupCalls.Add(1)
+			return nil
+		}, nil
+	}
+	t.Cleanup(func() {
+		wrapCgroupSetupForNotifyHook = prevSetup
+	})
+
+	socketDir := t.TempDir()
+	socketPath := filepath.Join(socketDir, "notify.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, 0, false)
+	}()
+
+	conn := dialUnixConn(t, socketPath)
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pipeR.Close()
+		_ = pipeW.Close()
+	})
+
+	if err := wraphandoff.SendNotifyFD(conn, int(pipeR.Fd()), wraphandoff.Metadata{WrapperPID: missingWrapperPID}); err != nil {
+		t.Fatalf("send handoff: %v", err)
+	}
+	if err := wraphandoff.ReadStatus(conn); err == nil {
+		t.Fatal("expected server rejection status")
+	}
+	waitForTestDone(t, done)
+
+	select {
+	case got := <-setupCalled:
+		if got != missingWrapperPID {
+			t.Fatalf("cgroup setup pid = %d, want %d", got, missingWrapperPID)
+		}
+	default:
+		t.Fatal("expected cgroup setup to be called")
+	}
+	if got := cleanupCalls.Load(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", got)
+	}
 }
 
 func TestAcceptNotifyFD_ContinuesAfterWrongUID(t *testing.T) {

@@ -71,7 +71,7 @@ func writeNotifyStatusForWrap(w io.Writer, ok bool) error {
 // startNotifyHandlerForWrap starts the seccomp notify handler for a wrap session.
 // Unlike the exec path where the notify fd comes from a socketpair, here it comes
 // from the CLI via a Unix socket connection.
-func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session, cleanup func() error) {
+func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session, cleanup func() error) error {
 	emitter := &notifyEmitterAdapter{store: a.store, broker: a.broker}
 
 	// Prefer session-specific policy engine (has expanded ${PROJECT_ROOT} etc.)
@@ -112,13 +112,13 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 							stubPath = abs
 						}
 					}
-					symlinkPath, cleanup, err := unixmon.CreateStubSymlink(stubPath)
+					symlinkPath, symlinkCleanup, err := unixmon.CreateStubSymlink(stubPath)
 					if err != nil {
 						slog.Warn("wrap: failed to create stub symlink, redirect will deny",
 							"error", err, "session_id", sessionID)
 					} else {
 						execveHandler.SetStubSymlinkPath(symlinkPath)
-						cleanupSymlink = cleanup
+						cleanupSymlink = symlinkCleanup
 						slog.Debug("wrap: created stub symlink",
 							"symlink", symlinkPath, "target", stubPath, "session_id", sessionID)
 					}
@@ -153,7 +153,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 				if cleanupSymlink != nil {
 					cleanupSymlink()
 				}
-				return
+				return fmt.Errorf("wrap notify handler startup probe failed for wrapper pid %d: pvr_error=%v mem_error=%v", wrapperPID, pvrErr, memErr)
 			}
 			slog.Warn("wrap: ProcessVMReadv probe failed, monitoring may be degraded",
 				"wrapper_pid", wrapperPID, "pvr_error", pvrErr, "mem_error", memErr)
@@ -192,6 +192,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, sessionPolicy, emitter, execveHandler, fileHandler, bl)
 		slog.Info("wrap: notify handler returned", "session_id", sessionID)
 	}()
+	return nil
 }
 
 // startSignalHandlerForWrap starts the signal filter handler for a wrap session.

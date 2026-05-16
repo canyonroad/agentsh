@@ -760,7 +760,13 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 	slog.Info("wrap: received notify fd", "session_id", sessionID, "fd", notifyFD.Fd(), "wrapper_pid", wrapperPID)
 
 	// Start the notify handler using existing infrastructure
-	startNotifyHandlerForWrapHook(ctx, notifyFD, sessionID, a, execveEnabled, wrapperPID, s, cleanup)
+	if err := startNotifyHandlerForWrapHook(ctx, notifyFD, sessionID, a, execveEnabled, wrapperPID, s, cleanup); err != nil {
+		if statusErr := writeNotifyStatusForWrap(unixConn, false); statusErr != nil {
+			slog.Debug("wrap: failed to write notify setup rejection", "session_id", sessionID, "error", statusErr)
+		}
+		slog.Warn("wrap: notify handler failed before ack", "session_id", sessionID, "wrapper_pid", wrapperPID, "error", err)
+		return
+	}
 	if err := writeNotifyStatusForWrap(unixConn, true); err != nil {
 		slog.Debug("wrap: failed to write notify setup status", "session_id", sessionID, "error", err)
 	}
