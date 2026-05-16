@@ -5,16 +5,21 @@ package cli
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"syscall"
+	"time"
 	"unsafe"
 
+	"github.com/agentsh/agentsh/internal/wraphandoff"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
+
+var notifySetupStatusTimeout = 30 * time.Second
 
 // platformSetupWrap creates a socket pair, configures the wrapper launch, and
 // returns a postStart function that receives the notify fd from the wrapper and
@@ -170,7 +175,7 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 				reclaimTerminal()
 			}
 		},
-		postStart: func() {
+		postStart: func(childPID int) {
 			defer parentFile.Close()
 			// Receive the seccomp notify fd from the wrapper
 			notifyFD, err := recvNotifyFD(parentFile)
@@ -181,11 +186,11 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 			defer func() { unix.Close(notifyFD) }()
 
 			// Forward the notify fd to the server's Unix listener socket
-			if err := forwardNotifyFD(notifySocket, notifyFD); err != nil {
+			if err := forwardNotifyFDWithPID(notifySocket, notifyFD, childPID); err != nil {
 				slog.Error("wrap: failed to forward notify fd to server", "error", err, "session_id", sessID)
 				return
 			}
-			slog.Info("wrap: notify fd forwarded to server", "session_id", sessID, "socket", notifySocket)
+			slog.Info("wrap: notify fd accepted by server", "session_id", sessID, "socket", notifySocket, "wrapper_pid", childPID)
 
 			// Send ACK to wrapper so it knows the handler is ready before exec.
 			// This prevents a race where the wrapper execs before the seccomp
@@ -241,8 +246,34 @@ func recvNotifyFD(sock *os.File) (int, error) {
 	return -1, fmt.Errorf("no fd in control message")
 }
 
-// forwardNotifyFD connects to the server's Unix listener socket and sends the
-// notify fd using SCM_RIGHTS.
+func forwardNotifyFDWithPID(socketPath string, notifyFD int, wrapperPID int) error {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", socketPath, err)
+	}
+	defer conn.Close()
+
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		return fmt.Errorf("not a unix connection")
+	}
+
+	if err := wraphandoff.SendNotifyFD(unixConn, notifyFD, wraphandoff.Metadata{WrapperPID: wrapperPID}); err != nil {
+		return err
+	}
+	if err := unixConn.SetReadDeadline(time.Now().Add(notifySetupStatusTimeout)); err != nil {
+		return fmt.Errorf("set notify setup status deadline: %w", err)
+	}
+	if err := wraphandoff.ReadStatus(unixConn); err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return fmt.Errorf("timed out waiting for notify setup status after %s: %w", notifySetupStatusTimeout, err)
+		}
+		return fmt.Errorf("read notify setup status: %w", err)
+	}
+	return nil
+}
+
 func forwardNotifyFD(socketPath string, notifyFD int) error {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
