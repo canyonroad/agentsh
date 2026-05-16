@@ -38,9 +38,10 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 		CPUQuotaPct:    lim.CPUQuotaPercent,
 		PidsMax:        lim.PidsMax,
 	}
+	needsConcreteCgroup := !cgLimits.IsEmpty() || ebpfEnabled
 
 	if app.cgroupMgr == nil {
-		if cgLimits.IsEmpty() {
+		if !needsConcreteCgroup {
 			return func() error { return nil }, nil
 		}
 		return nil, &limits.CgroupUnavailableError{
@@ -85,8 +86,14 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 		return nil, err
 	}
 
-	// If unavailable mode allowed us (empty limits), cg is nil. Treat as no-op.
+	// If unavailable mode allowed us with no concrete cgroup need, treat as no-op.
 	if cg == nil {
+		if needsConcreteCgroup {
+			return nil, &limits.CgroupUnavailableError{
+				Reason: "cgroup manager returned no cgroup",
+				Limits: cgLimits,
+			}
+		}
 		return func() error { return nil }, nil
 	}
 
