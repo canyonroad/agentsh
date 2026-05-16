@@ -224,6 +224,119 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 				}
 			} else {
 				ebpfDetach = detach
+
+				// Populate allowlist before starting the collector. When eBPF is
+				// required, enforcement setup failures must reject the wrap before
+				// the wrapper is ACKed.
+				if ebpfEnforce {
+					cgid, cgErr := ebpfCgroupID(cg.Path)
+					if cgErr != nil {
+						ev := types.Event{
+							ID:        uuid.NewString(),
+							Timestamp: time.Now().UTC(),
+							Type:      "ebpf_enforce_disabled",
+							SessionID: sessionID,
+							CommandID: cmdID,
+							Fields: map[string]any{
+								"error": cgErr.Error(),
+							},
+						}
+						_ = emit.AppendEvent(ctx, ev)
+						emit.Publish(ev)
+						if ebpfRequired {
+							cleanupAfterSetupFailure()
+							return nil, fmt.Errorf("ebpf enforcement setup failed and required: cgroup id: %w", cgErr)
+						}
+					} else {
+						allowlistColl = coll
+						allowCgid = cgid
+						maxTTL := time.Duration(cfg.Sandbox.Network.EBPF.DNSMaxTTLSeconds) * time.Second
+						ep, cidrs, denyKeys, denyCidrs, strict, hasDomains, ttlHint := buildAllowedEndpoints(pol, maxTTL)
+						if len(ep) == 0 && len(cidrs) == 0 && !enforceNoDNS {
+							// disable default deny when we couldn't resolve anything
+							strict = false
+						}
+						if err := ebpfPopulateAllowlist(coll, cgid, ep, cidrs, denyKeys, denyCidrs, strict); err != nil {
+							ev := types.Event{
+								ID:        uuid.NewString(),
+								Timestamp: time.Now().UTC(),
+								Type:      "ebpf_enforce_disabled",
+								SessionID: sessionID,
+								CommandID: cmdID,
+								Fields: map[string]any{
+									"error": err.Error(),
+								},
+							}
+							_ = emit.AppendEvent(ctx, ev)
+							emit.Publish(ev)
+							if m != nil {
+								m.IncEBPFAttachFail()
+							}
+							if ebpfRequired {
+								cleanupAfterSetupFailure()
+								return nil, fmt.Errorf("ebpf enforcement setup failed and required: populate allowlist: %w", err)
+							}
+							// best effort disable default deny and clear entries
+							_ = ebpfCleanupAllowlist(coll, cgid)
+						}
+						if ebpfEnforce && !strict {
+							ev := types.Event{
+								ID:        uuid.NewString(),
+								Timestamp: time.Now().UTC(),
+								Type:      "ebpf_enforce_non_strict",
+								SessionID: sessionID,
+								CommandID: cmdID,
+								Fields: map[string]any{
+									"reason": "rules include wildcards or cidrs; default-deny disabled",
+								},
+							}
+							_ = emit.AppendEvent(ctx, ev)
+							emit.Publish(ev)
+						}
+
+						// Optional DNS refresh loop for domain-based rules.
+						if hasDomains && strict && refreshInterval > 0 {
+							refreshCtx, cancel := context.WithCancel(ctx)
+							refreshCancel = cancel
+							go func() {
+								base := time.Duration(refreshInterval) * time.Second
+								if ttlHint > 0 && ttlHint < base {
+									base = ttlHint
+								}
+								t := time.NewTimer(jitterInterval(base))
+								defer t.Stop()
+								for {
+									select {
+									case <-refreshCtx.Done():
+										return
+									case <-t.C:
+										ep2, cidrs2, deny2, denyCidrs2, strict2, _, ttl2 := buildAllowedEndpoints(pol, base)
+										if err := ebpfPopulateAllowlist(coll, cgid, ep2, cidrs2, deny2, denyCidrs2, strict2); err != nil {
+											ev := types.Event{
+												ID:        uuid.NewString(),
+												Timestamp: time.Now().UTC(),
+												Type:      "ebpf_enforce_refresh_failed",
+												SessionID: sessionID,
+												CommandID: cmdID,
+												Fields: map[string]any{
+													"error": err.Error(),
+												},
+											}
+											_ = emit.AppendEvent(ctx, ev)
+											emit.Publish(ev)
+										}
+										next := base
+										if ttl2 > 0 && ttl2 < next {
+											next = ttl2
+										}
+										t.Reset(jitterInterval(next))
+									}
+								}
+							}()
+						}
+					}
+				}
+
 				collector, cerr := ebpfStartCollector(coll, 4096)
 				if cerr != nil {
 					ev := types.Event{
@@ -245,115 +358,12 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 					_ = detach()
 					ebpfDetach = nil
 				} else {
+					ebpfCollector = collector
 					collector.SetOnDrop(func() {
 						if m != nil {
 							m.IncEBPFDropped()
 						}
 					})
-
-					// Populate allowlist if enforcement is requested.
-					if ebpfEnforce {
-						cgid, cgErr := ebpfCgroupID(cg.Path)
-						if cgErr != nil {
-							ev := types.Event{
-								ID:        uuid.NewString(),
-								Timestamp: time.Now().UTC(),
-								Type:      "ebpf_enforce_disabled",
-								SessionID: sessionID,
-								CommandID: cmdID,
-								Fields: map[string]any{
-									"error": cgErr.Error(),
-								},
-							}
-							_ = emit.AppendEvent(ctx, ev)
-							emit.Publish(ev)
-						} else {
-							allowlistColl = coll
-							allowCgid = cgid
-							maxTTL := time.Duration(cfg.Sandbox.Network.EBPF.DNSMaxTTLSeconds) * time.Second
-							ep, cidrs, denyKeys, denyCidrs, strict, hasDomains, ttlHint := buildAllowedEndpoints(pol, maxTTL)
-							if len(ep) == 0 && len(cidrs) == 0 && !enforceNoDNS {
-								// disable default deny when we couldn't resolve anything
-								strict = false
-							}
-							if err := ebpfPopulateAllowlist(coll, cgid, ep, cidrs, denyKeys, denyCidrs, strict); err != nil {
-								ev := types.Event{
-									ID:        uuid.NewString(),
-									Timestamp: time.Now().UTC(),
-									Type:      "ebpf_enforce_disabled",
-									SessionID: sessionID,
-									CommandID: cmdID,
-									Fields: map[string]any{
-										"error": err.Error(),
-									},
-								}
-								_ = emit.AppendEvent(ctx, ev)
-								emit.Publish(ev)
-								if m != nil {
-									m.IncEBPFAttachFail()
-								}
-								// best effort disable default deny and clear entries
-								_ = ebpfCleanupAllowlist(coll, cgid)
-							}
-							if ebpfEnforce && !strict {
-								ev := types.Event{
-									ID:        uuid.NewString(),
-									Timestamp: time.Now().UTC(),
-									Type:      "ebpf_enforce_non_strict",
-									SessionID: sessionID,
-									CommandID: cmdID,
-									Fields: map[string]any{
-										"reason": "rules include wildcards or cidrs; default-deny disabled",
-									},
-								}
-								_ = emit.AppendEvent(ctx, ev)
-								emit.Publish(ev)
-							}
-
-							// Optional DNS refresh loop for domain-based rules.
-							if hasDomains && strict && refreshInterval > 0 {
-								refreshCtx, cancel := context.WithCancel(ctx)
-								refreshCancel = cancel
-								go func() {
-									base := time.Duration(refreshInterval) * time.Second
-									if ttlHint > 0 && ttlHint < base {
-										base = ttlHint
-									}
-									t := time.NewTimer(jitterInterval(base))
-									defer t.Stop()
-									for {
-										select {
-										case <-refreshCtx.Done():
-											return
-										case <-t.C:
-											ep2, cidrs2, deny2, denyCidrs2, strict2, _, ttl2 := buildAllowedEndpoints(pol, base)
-											if err := ebpfPopulateAllowlist(coll, cgid, ep2, cidrs2, deny2, denyCidrs2, strict2); err != nil {
-												ev := types.Event{
-													ID:        uuid.NewString(),
-													Timestamp: time.Now().UTC(),
-													Type:      "ebpf_enforce_refresh_failed",
-													SessionID: sessionID,
-													CommandID: cmdID,
-													Fields: map[string]any{
-														"error": err.Error(),
-													},
-												}
-												_ = emit.AppendEvent(ctx, ev)
-												emit.Publish(ev)
-											}
-											next := base
-											if ttl2 > 0 && ttl2 < next {
-												next = ttl2
-											}
-											t.Reset(jitterInterval(next))
-										}
-									}
-								}()
-							}
-						}
-					}
-
-					ebpfCollector = collector
 					go forwardConnectEvents(ctx, collector.Events(), emit, sessionID, cmdID, m)
 				}
 				ev := types.Event{
