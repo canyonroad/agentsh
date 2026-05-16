@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -428,6 +429,123 @@ func TestBuildWrapEnv_ReplacesInheritedMixedCaseAgentshVarsWhenBypassEnabled(t *
 	assert.Equal(t, 0, envMap["agentsh_session_id=stale-session"])
 	assert.Equal(t, 0, envMap["Agentsh_Server=http://stale"])
 	assert.Equal(t, 0, envMap["agentsh_in_session=1"])
+}
+
+func envSliceToMap(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, kv := range env {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func envKeyCounts(env []string) map[string]int {
+	out := make(map[string]int, len(env))
+	for _, kv := range env {
+		k, _, ok := strings.Cut(kv, "=")
+		if ok {
+			out[k]++
+		}
+	}
+	return out
+}
+
+func splitNoProxyTokens(noProxy string) []string {
+	parts := strings.Split(noProxy, ",")
+	tokens := make([]string, 0, len(parts))
+	for _, part := range parts {
+		tokens = append(tokens, strings.TrimSpace(part))
+	}
+	return tokens
+}
+
+func TestAppendWrapNetworkProxyEnv_AddsSessionProxyVars(t *testing.T) {
+	env := appendWrapNetworkProxyEnv([]string{"PATH=/usr/bin"}, "http://127.0.0.1:18081")
+	got := envSliceToMap(env)
+
+	for _, key := range []string{
+		"HTTP_PROXY",
+		"HTTPS_PROXY",
+		"ALL_PROXY",
+		"http_proxy",
+		"https_proxy",
+		"all_proxy",
+	} {
+		assert.Equal(t, "http://127.0.0.1:18081", got[key], key)
+	}
+	assert.Contains(t, got["NO_PROXY"], "localhost")
+	assert.Contains(t, got["NO_PROXY"], "127.0.0.1")
+	assert.Equal(t, got["NO_PROXY"], got["no_proxy"])
+}
+
+func TestAppendWrapNetworkProxyEnv_ReplacesInheritedProxyVars(t *testing.T) {
+	env := appendWrapNetworkProxyEnv([]string{
+		"PATH=/usr/bin",
+		"HTTP_PROXY=http://stale",
+		"https_proxy=http://stale",
+		"NO_PROXY=example.test",
+	}, "http://127.0.0.1:18081")
+	got := envSliceToMap(env)
+	counts := envKeyCounts(env)
+
+	assert.Equal(t, "http://127.0.0.1:18081", got["HTTP_PROXY"])
+	assert.Equal(t, "http://127.0.0.1:18081", got["https_proxy"])
+	assert.NotContains(t, env, "HTTP_PROXY=http://stale")
+	assert.NotContains(t, env, "https_proxy=http://stale")
+	assert.Equal(t, 1, counts["HTTP_PROXY"])
+	assert.Equal(t, 1, counts["https_proxy"])
+	assert.Equal(t, 1, counts["NO_PROXY"])
+	assert.Equal(t, 1, counts["no_proxy"])
+	assert.Contains(t, got["NO_PROXY"], "example.test")
+	assert.Contains(t, got["NO_PROXY"], "localhost")
+	assert.Contains(t, got["NO_PROXY"], "127.0.0.1")
+}
+
+func TestAppendWrapNetworkProxyEnv_AppendsDistinctNoProxyTokens(t *testing.T) {
+	env := appendWrapNetworkProxyEnv([]string{
+		"PATH=/usr/bin",
+		"NO_PROXY=notlocalhost.example,127.0.0.10",
+	}, "http://127.0.0.1:18081")
+	got := envSliceToMap(env)
+	noProxyTokens := splitNoProxyTokens(got["NO_PROXY"])
+
+	assert.Contains(t, noProxyTokens, "notlocalhost.example")
+	assert.Contains(t, noProxyTokens, "127.0.0.10")
+	assert.Contains(t, noProxyTokens, "localhost")
+	assert.Contains(t, noProxyTokens, "127.0.0.1")
+	assert.Equal(t, got["NO_PROXY"], got["no_proxy"])
+}
+
+func TestAppendWrapNetworkProxyEnv_MergesInheritedNoProxyVariants(t *testing.T) {
+	env := appendWrapNetworkProxyEnv([]string{
+		"PATH=/usr/bin",
+		"NO_PROXY=api.internal, shared.internal",
+		"no_proxy=metadata.internal,shared.internal",
+	}, "http://127.0.0.1:18081")
+	got := envSliceToMap(env)
+	noProxyTokens := splitNoProxyTokens(got["NO_PROXY"])
+
+	assert.Equal(t, []string{
+		"api.internal",
+		"shared.internal",
+		"metadata.internal",
+		"localhost",
+		"127.0.0.1",
+	}, noProxyTokens)
+	assert.Equal(t, got["NO_PROXY"], got["no_proxy"])
+}
+
+func TestAppendWrapNetworkProxyEnv_NoProxyWhenSessionProxyEmpty(t *testing.T) {
+	base := []string{
+		"PATH=/usr/bin",
+		"HTTP_PROXY=http://host-proxy",
+	}
+	env := appendWrapNetworkProxyEnv(base, "")
+
+	assert.Equal(t, base, env)
 }
 
 func TestWrapLaunchConfig_EnvContainsSessionAndWrapper(t *testing.T) {
