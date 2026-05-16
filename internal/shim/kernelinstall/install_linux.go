@@ -4,6 +4,7 @@ package kernelinstall
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -15,11 +16,14 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/client"
+	"github.com/agentsh/agentsh/internal/wraphandoff"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
 
 const wrapInitTimeout = 10 * time.Second
+
+var notifySetupStatusTimeout = 30 * time.Second
 
 // signalSockFDKey is the env var that the CLI injects for the signal filter
 // socketpair fd.  The shim does NOT replicate the signal-filter second
@@ -263,7 +267,7 @@ func runRelay(p InstallParams, resp types.WrapInitResponse) (Result, error) {
 	// the wrapper's waitForACK read returns EOF/error, causing the wrapper to
 	// exit with a fatal log.  Then wait for the wrapper and return
 	// ResultFailClosed so the shim aborts rather than running the command.
-	if fwdErr := forwardNotifyFD(notifySocket, notifyFD); fwdErr != nil {
+	if fwdErr := forwardNotifyFDWithPID(notifySocket, notifyFD, cmd.Process.Pid); fwdErr != nil {
 		unix.Close(notifyFD)
 		slog.Error("kernelinstall: failed to forward notify fd — closing parent fd to abort wrapper", "error", fwdErr)
 		// Close parentFile: wrapper's waitForACK will see EOF/EBADF and fatal.
@@ -337,10 +341,9 @@ func recvNotifyFD(sock *os.File) (int, error) {
 	return -1, fmt.Errorf("no fd in control message")
 }
 
-// forwardNotifyFD connects to the server's Unix listener socket and sends the
-// notify fd using SCM_RIGHTS.  Mirrors internal/cli/wrap_linux.go
-// forwardNotifyFD.
-func forwardNotifyFD(socketPath string, notifyFD int) error {
+// forwardNotifyFDWithPID connects to the server's Unix listener socket, sends
+// the notify fd plus wrapper PID metadata, and waits for server setup status.
+func forwardNotifyFDWithPID(socketPath string, notifyFD int, wrapperPID int) error {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", socketPath, err)
@@ -352,15 +355,18 @@ func forwardNotifyFD(socketPath string, notifyFD int) error {
 		return fmt.Errorf("not a unix connection")
 	}
 
-	file, err := unixConn.File()
-	if err != nil {
-		return fmt.Errorf("get file from connection: %w", err)
+	if err := wraphandoff.SendNotifyFD(unixConn, notifyFD, wraphandoff.Metadata{WrapperPID: wrapperPID}); err != nil {
+		return err
 	}
-	defer file.Close()
-
-	rights := unix.UnixRights(notifyFD)
-	if err := unix.Sendmsg(int(file.Fd()), []byte{0}, rights, nil, 0); err != nil {
-		return fmt.Errorf("sendmsg: %w", err)
+	if err := unixConn.SetReadDeadline(time.Now().Add(notifySetupStatusTimeout)); err != nil {
+		return fmt.Errorf("set notify setup status deadline: %w", err)
+	}
+	if err := wraphandoff.ReadStatus(unixConn); err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return fmt.Errorf("timed out waiting for notify setup status after %s: %w", notifySetupStatusTimeout, err)
+		}
+		return fmt.Errorf("read notify setup status: %w", err)
 	}
 	return nil
 }

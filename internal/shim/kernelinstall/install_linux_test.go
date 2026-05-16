@@ -9,9 +9,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/agentsh/agentsh/internal/wraphandoff"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -43,6 +46,23 @@ func baseParams(srv *httptest.Server) InstallParams {
 		ShellArgs:     []string{"-c", "echo hello"},
 		Env:           []string{"HOME=/tmp"},
 	}
+}
+
+func serveNotifySetupStatus(ln net.Listener, okStatus bool) {
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		unixConn := conn.(*net.UnixConn)
+		fd, _, _, err := wraphandoff.RecvNotifyFD(unixConn)
+		if err == nil {
+			_ = fd.Close()
+			_ = wraphandoff.WriteStatus(unixConn, okStatus)
+		}
+	}()
 }
 
 // ─── Test 1: ModeOff returns ResultSkip without any HTTP call ───────────────
@@ -307,21 +327,13 @@ func TestInstall_StripsSignalSockFdFromPEnv(t *testing.T) {
 
 	// Start a fake notify-socket listener.
 	sockDir := t.TempDir()
-	notifySockPath := sockDir + "/notify.sock"
+	notifySockPath := filepath.Join(sockDir, "notify.sock")
 	ln, err := net.Listen("unix", notifySockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
-	go func() {
-		conn, _ := ln.Accept()
-		if conn != nil {
-			buf := make([]byte, 1)
-			oob := make([]byte, 64)
-			conn.(*net.UnixConn).ReadMsgUnix(buf, oob) //nolint:errcheck
-			conn.Close()
-		}
-	}()
+	serveNotifySetupStatus(ln, true)
 
 	wrapResp := types.WrapInitResponse{
 		WrapperBinary: wrapperBin,
@@ -388,21 +400,13 @@ func TestInstall_PassesArgv0ToWrapper(t *testing.T) {
 	wrapperBin := buildFakeWrapperPrintEnv(t)
 
 	sockDir := t.TempDir()
-	notifySockPath := sockDir + "/notify.sock"
+	notifySockPath := filepath.Join(sockDir, "notify.sock")
 	ln, err := net.Listen("unix", notifySockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
-	go func() {
-		conn, _ := ln.Accept()
-		if conn != nil {
-			buf := make([]byte, 1)
-			oob := make([]byte, 64)
-			conn.(*net.UnixConn).ReadMsgUnix(buf, oob) //nolint:errcheck
-			conn.Close()
-		}
-	}()
+	serveNotifySetupStatus(ln, true)
 
 	handler, _ := makeWrapInitHandler(200, types.WrapInitResponse{
 		WrapperBinary: wrapperBin,
@@ -449,21 +453,13 @@ func TestInstall_OmitsArgv0WhenEmpty(t *testing.T) {
 	wrapperBin := buildFakeWrapperPrintEnv(t)
 
 	sockDir := t.TempDir()
-	notifySockPath := sockDir + "/notify.sock"
+	notifySockPath := filepath.Join(sockDir, "notify.sock")
 	ln, err := net.Listen("unix", notifySockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
-	go func() {
-		conn, _ := ln.Accept()
-		if conn != nil {
-			buf := make([]byte, 1)
-			oob := make([]byte, 64)
-			conn.(*net.UnixConn).ReadMsgUnix(buf, oob) //nolint:errcheck
-			conn.Close()
-		}
-	}()
+	serveNotifySetupStatus(ln, true)
 
 	handler, _ := makeWrapInitHandler(200, types.WrapInitResponse{
 		WrapperBinary: wrapperBin,
@@ -512,21 +508,13 @@ func TestInstall_StripsStaleArgv0FromInheritedEnv(t *testing.T) {
 	wrapperBin := buildFakeWrapperPrintEnv(t)
 
 	sockDir := t.TempDir()
-	notifySockPath := sockDir + "/notify.sock"
+	notifySockPath := filepath.Join(sockDir, "notify.sock")
 	ln, err := net.Listen("unix", notifySockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
-	go func() {
-		conn, _ := ln.Accept()
-		if conn != nil {
-			buf := make([]byte, 1)
-			oob := make([]byte, 64)
-			conn.(*net.UnixConn).ReadMsgUnix(buf, oob) //nolint:errcheck
-			conn.Close()
-		}
-	}()
+	serveNotifySetupStatus(ln, true)
 
 	handler, _ := makeWrapInitHandler(200, types.WrapInitResponse{
 		WrapperBinary: wrapperBin,
@@ -589,8 +577,8 @@ func TestFilterShimInternalEnv(t *testing.T) {
 		}
 	}
 	want := map[string]bool{
-		"OTHER=x":                            true,
-		"HOME=/tmp":                          true,
+		"OTHER=x":                              true,
+		"HOME=/tmp":                            true,
 		"AGENTSH_UNIXWRAP_ARGV0_NOT_OURS=keep": true,
 	}
 	got := map[string]bool{}
@@ -667,12 +655,12 @@ func buildFakeWrapperPrintEnv(t *testing.T) string {
 	}
 	t.Cleanup(func() { os.RemoveAll(srcDir) })
 
-	if err := os.WriteFile(srcDir+"/main.go", []byte(fakeWrapperPrintEnvSrc), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte(fakeWrapperPrintEnvSrc), 0644); err != nil {
 		t.Fatalf("write fake wrapper printenv source: %v", err)
 	}
 
 	binDir := t.TempDir()
-	binPath := binDir + "/fakewrap-printenv"
+	binPath := filepath.Join(binDir, "fakewrap-printenv")
 
 	buildCmd := exec.Command(goExe, "build", "-o", binPath, srcDir)
 	buildCmd.Dir = modRoot
@@ -726,6 +714,125 @@ func TestInstall_RelayForwardFail_NoACK_ResultFailClosed(t *testing.T) {
 	}
 	if !strings.Contains(res.Reason, "forward notify fd failed") {
 		t.Errorf("expected Reason to contain 'forward notify fd failed', got %q", res.Reason)
+	}
+}
+
+func TestInstall_RelayServerReject_NoACK_ResultFailClosed(t *testing.T) {
+	wrapperBin := buildFakeWrapperNoACKExit(t)
+
+	notifyDir := t.TempDir()
+	notifySocket := filepath.Join(notifyDir, "notify.sock")
+	ln, err := net.Listen("unix", notifySocket)
+	if err != nil {
+		t.Fatalf("listen notify socket: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		unixConn := conn.(*net.UnixConn)
+		fd, _, _, err := wraphandoff.RecvNotifyFD(unixConn)
+		if err == nil {
+			_ = fd.Close()
+		}
+		_ = wraphandoff.WriteStatus(unixConn, false)
+	}()
+
+	wrapResp := types.WrapInitResponse{
+		WrapperBinary: wrapperBin,
+		NotifySocket:  notifySocket,
+		WrapperEnv:    map[string]string{},
+	}
+	handler, _ := makeWrapInitHandler(200, wrapResp)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeOn
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("Install returned error: %v", err)
+	}
+	if res.Action != ResultFailClosed {
+		t.Fatalf("expected ResultFailClosed, got %v (reason: %s)", res.Action, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "server rejected wrap setup") {
+		t.Fatalf("expected server rejection in reason, got %q", res.Reason)
+	}
+}
+
+func TestInstall_RelaySetupStatusTimeout_NoACK_ResultFailClosed(t *testing.T) {
+	wrapperBin := buildFakeWrapperNoACKExit(t)
+
+	origTimeout := notifySetupStatusTimeout
+	notifySetupStatusTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { notifySetupStatusTimeout = origTimeout })
+
+	notifyDir := t.TempDir()
+	notifySocket := filepath.Join(notifyDir, "notify.sock")
+	ln, err := net.Listen("unix", notifySocket)
+	if err != nil {
+		t.Fatalf("listen notify socket: %v", err)
+	}
+	defer ln.Close()
+
+	releaseServer := make(chan struct{})
+	defer close(releaseServer)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		unixConn := conn.(*net.UnixConn)
+		fd, _, _, err := wraphandoff.RecvNotifyFD(unixConn)
+		if err == nil {
+			_ = fd.Close()
+		}
+		<-releaseServer
+	}()
+
+	wrapResp := types.WrapInitResponse{
+		WrapperBinary: wrapperBin,
+		NotifySocket:  notifySocket,
+		WrapperEnv:    map[string]string{},
+	}
+	handler, _ := makeWrapInitHandler(200, wrapResp)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeOn
+
+	type installResult struct {
+		res Result
+		err error
+	}
+	done := make(chan installResult, 1)
+	go func() {
+		res, err := Install(p)
+		done <- installResult{res: res, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("Install returned error: %v", got.err)
+		}
+		if got.res.Action != ResultFailClosed {
+			t.Fatalf("expected ResultFailClosed, got %v (reason: %s)", got.res.Action, got.res.Reason)
+		}
+		if !strings.Contains(got.res.Reason, "timed out waiting for notify setup status") {
+			t.Fatalf("expected timeout in reason, got %q", got.res.Reason)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Install did not return after notify setup status timeout")
 	}
 }
 
@@ -788,12 +895,12 @@ func buildFakeWrapperNoACKExit(t *testing.T) string {
 	}
 	t.Cleanup(func() { os.RemoveAll(srcDir) })
 
-	if err := os.WriteFile(srcDir+"/main.go", []byte(fakeWrapperNoACKExitSrc), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte(fakeWrapperNoACKExitSrc), 0644); err != nil {
 		t.Fatalf("write fake wrapper no-ack source: %v", err)
 	}
 
 	binDir := t.TempDir()
-	binPath := binDir + "/fakewrap-noack"
+	binPath := filepath.Join(binDir, "fakewrap-noack")
 
 	buildCmd := exec.Command(goExe, "build", "-o", binPath, srcDir)
 	buildCmd.Dir = modRoot
@@ -813,7 +920,7 @@ func buildFakeWrapperNoACKExit(t *testing.T) string {
 //   3. Reads the ACK byte.
 //   4. Exits with code 42.
 //
-// The fake server listener accepts the forwarded fd and closes immediately.
+// The fake server listener accepts the forwarded fd and writes OK setup status.
 // If the Go toolchain is unavailable the test is skipped.
 
 func TestInstall_RelayHappyPath(t *testing.T) {
@@ -822,24 +929,14 @@ func TestInstall_RelayHappyPath(t *testing.T) {
 
 	// Start a fake notify-socket listener.
 	sockDir := t.TempDir()
-	notifySockPath := sockDir + "/notify.sock"
+	notifySockPath := filepath.Join(sockDir, "notify.sock")
 	ln, err := net.Listen("unix", notifySockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
 
-	// Accept and close in background (emulates server receiving the notify fd).
-	go func() {
-		conn, _ := ln.Accept()
-		if conn != nil {
-			// Drain SCM_RIGHTS payload so the sender doesn't block.
-			buf := make([]byte, 1)
-			oob := make([]byte, 64)
-			conn.(*net.UnixConn).ReadMsgUnix(buf, oob) //nolint:errcheck
-			conn.Close()
-		}
-	}()
+	serveNotifySetupStatus(ln, true)
 
 	// httptest server that returns a populated WrapInitResponse.
 	wrapResp := types.WrapInitResponse{
@@ -925,12 +1022,12 @@ func buildFakeWrapper(t *testing.T) string {
 	}
 	t.Cleanup(func() { os.RemoveAll(srcDir) })
 
-	if err := os.WriteFile(srcDir+"/main.go", []byte(fakeWrapperSrc), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte(fakeWrapperSrc), 0644); err != nil {
 		t.Fatalf("write fake wrapper source: %v", err)
 	}
 
 	binDir := t.TempDir()
-	binPath := binDir + "/fakewrap"
+	binPath := filepath.Join(binDir, "fakewrap")
 
 	buildCmd := exec.Command(goExe, "build", "-o", binPath, srcDir)
 	buildCmd.Dir = modRoot
@@ -949,13 +1046,13 @@ func findModuleRoot(t *testing.T) string {
 		t.Fatalf("getwd: %v", err)
 	}
 	for {
-		if _, err := os.Stat(dir + "/go.mod"); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			return dir
 		}
-		idx := strings.LastIndex(dir, "/")
-		if idx <= 0 {
+		parent := filepath.Dir(dir)
+		if parent == dir {
 			t.Fatal("could not find go.mod")
 		}
-		dir = dir[:idx]
+		dir = parent
 	}
 }
