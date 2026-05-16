@@ -53,7 +53,7 @@ type App struct {
 	broker   *events.Broker
 	dbBypass *dbevents.BypassEmitter
 
-	cgroupMgr *limits.CgroupManager // issue #197: per-process cgroup manager, nil on non-Linux
+	cgroupMgr cgroupManager // issue #197: per-process cgroup manager, nil on non-Linux
 
 	apiKeyAuth *auth.APIKeyAuth
 	oidcAuth   *auth.OIDCAuth
@@ -122,6 +122,11 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		slog.Warn("real_paths enabled but enforce_without_fuse is false: outside-workspace file access will be audit-only (not blocked)")
 	}
 
+	var appCgroupMgr cgroupManager
+	if cgroupMgr != nil {
+		appCgroupMgr = cgroupMgr
+	}
+
 	app := &App{
 		cfg:          cfg,
 		sessions:     sessions,
@@ -129,7 +134,7 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		policy:       engine,
 		broker:       broker,
 		dbBypass:     dbevents.NewBypassEmitter(storeEmitter{store: store, broker: broker}),
-		cgroupMgr:    cgroupMgr,
+		cgroupMgr:    appCgroupMgr,
 		apiKeyAuth:   apiKeyAuth,
 		oidcAuth:     oidcAuth,
 		approvals:    approvalsMgr,

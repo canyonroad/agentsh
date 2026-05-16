@@ -905,6 +905,39 @@ func TestWrapInit_SeccompConfigContent(t *testing.T) {
 	}
 }
 
+func TestWrapInit_ForcesNotifyHandoffWhenEBPFRequiresPreAckCgroup(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	disabled := false
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &disabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	cfg.Sandbox.Cgroups.Enabled = true
+	cfg.Sandbox.Network.EBPF.Required = true
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+
+	var parsed seccompWrapperConfig
+	require.NoError(t, json.Unmarshal([]byte(resp.SeccompConfig), &parsed))
+	require.True(t, parsed.UnixSocketEnabled, "pre-ACK cgroup/eBPF setup requires a user-notify handoff before wrapper exec")
+}
+
 func TestWrapInit_SeccompConfigContent_MitigationSetsForwardSocketRules(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("wrap is Linux-only")

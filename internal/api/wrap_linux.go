@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
@@ -237,6 +239,81 @@ func (a *App) wrapInitWindows(_ context.Context, _ *session.Session, _ string, _
 type peerCreds struct {
 	PID int
 	UID uint32
+}
+
+type wrapperProcStatus struct {
+	PPid int
+	UIDs []uint32
+}
+
+func validateWrapperPIDForNotify(wrapperPID, peerPID int, peerUID uint32) error {
+	if wrapperPID <= 0 {
+		return fmt.Errorf("invalid wrapper pid %d", wrapperPID)
+	}
+	if peerPID <= 0 {
+		return fmt.Errorf("missing notify peer pid for wrapper pid %d", wrapperPID)
+	}
+	status, err := readWrapperProcStatus(wrapperPID)
+	if err != nil {
+		return err
+	}
+	if status.PPid != peerPID {
+		return fmt.Errorf("wrapper pid %d parent pid %d does not match notify peer pid %d", wrapperPID, status.PPid, peerPID)
+	}
+	for _, uid := range status.UIDs {
+		if uid == peerUID {
+			return nil
+		}
+	}
+	return fmt.Errorf("wrapper pid %d uid set %v does not include notify peer uid %d", wrapperPID, status.UIDs, peerUID)
+}
+
+func readWrapperProcStatus(pid int) (wrapperProcStatus, error) {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+	if err != nil {
+		return wrapperProcStatus{}, fmt.Errorf("read wrapper proc status for pid %d: %w", pid, err)
+	}
+	status, err := parseWrapperProcStatus(data)
+	if err != nil {
+		return wrapperProcStatus{}, fmt.Errorf("parse wrapper proc status for pid %d: %w", pid, err)
+	}
+	return status, nil
+}
+
+func parseWrapperProcStatus(data []byte) (wrapperProcStatus, error) {
+	var status wrapperProcStatus
+	ppidSet := false
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "PPid:":
+			ppid, err := strconv.Atoi(fields[1])
+			if err != nil {
+				return wrapperProcStatus{}, fmt.Errorf("invalid PPid %q: %w", fields[1], err)
+			}
+			status.PPid = ppid
+			ppidSet = true
+		case "Uid:":
+			status.UIDs = status.UIDs[:0]
+			for _, field := range fields[1:] {
+				uid64, err := strconv.ParseUint(field, 10, 32)
+				if err != nil {
+					return wrapperProcStatus{}, fmt.Errorf("invalid Uid %q: %w", field, err)
+				}
+				status.UIDs = append(status.UIDs, uint32(uid64))
+			}
+		}
+	}
+	if !ppidSet {
+		return wrapperProcStatus{}, errors.New("missing PPid")
+	}
+	if len(status.UIDs) == 0 {
+		return wrapperProcStatus{}, errors.New("missing Uid")
+	}
+	return status, nil
 }
 
 // getConnPeerCreds extracts the peer process credentials from a Unix connection.

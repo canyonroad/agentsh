@@ -27,10 +27,11 @@ import (
 )
 
 var (
-	wrapChown                     = os.Chown
-	wrapChmod                     = os.Chmod
-	startNotifyHandlerForWrapHook = startNotifyHandlerForWrap
-	wrapCgroupSetupForNotifyHook  = defaultWrapCgroupSetupForNotify
+	wrapChown                       = os.Chown
+	wrapChmod                       = os.Chmod
+	startNotifyHandlerForWrapHook   = startNotifyHandlerForWrap
+	wrapCgroupSetupForNotifyHook    = defaultWrapCgroupSetupForNotify
+	validateWrapperPIDForNotifyHook = validateWrapperPIDForNotify
 )
 
 type wrapNotifyMetadata struct {
@@ -374,11 +375,24 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// NOTE: Signal filter is disabled when execve interception is enabled because
 	// stacking two seccomp USER_NOTIF filters causes notification delivery failures
 	// (the signal filter's semaphore interferes with execve notification reception).
+	unixSocketEnabled := a.cfg.Sandbox.Seccomp.UnixSocket.Enabled
+	if a.cfg.Sandbox.UnixSockets.Enabled != nil && *a.cfg.Sandbox.UnixSockets.Enabled {
+		unixSocketEnabled = true
+	}
+	forceNotifyForPreAckCgroup := wrapNeedsCgroupBeforeAck(a, s)
+	if forceNotifyForPreAckCgroup {
+		// Pre-ACK cgroup/eBPF setup only happens after the wrapper hands a
+		// seccomp notify fd to this listener. Force a user-notify rule so the
+		// wrapper cannot skip the handoff and exec before eBPF is attached.
+		unixSocketEnabled = true
+	}
+
 	var signalSocketPath string
 	// signalFilterEnabled routes through a helper so the gate can be
 	// exercised in tests end-to-end without standing up seccomp (see
 	// TestWrap_SignalFilterUsesSessionPolicy).
-	signalFilterEnabled := a.signalFilterEnabled(s, execveEnabled)
+	signalUnixSocketEnabled := a.cfg.Sandbox.Seccomp.UnixSocket.Enabled || forceNotifyForPreAckCgroup
+	signalFilterEnabled := a.signalFilterEnabledForMainFilter(s, execveEnabled, signalUnixSocketEnabled)
 	if signalFilterEnabled {
 		signalSocketPath = filepath.Join(notifyDir, "signal-"+safeID+".sock")
 		signalListener, err := net.Listen("unix", signalSocketPath)
@@ -402,11 +416,6 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			}
 			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID, s, req.CallerUID)
 		}
-	}
-
-	unixSocketEnabled := a.cfg.Sandbox.Seccomp.UnixSocket.Enabled
-	if a.cfg.Sandbox.UnixSockets.Enabled != nil && *a.cfg.Sandbox.UnixSockets.Enabled {
-		unixSocketEnabled = true
 	}
 
 	seccompCfg := a.buildSeccompWrapperConfig(s, seccompWrapperParams{
@@ -523,7 +532,15 @@ func (a *App) deriveLandlockAllowPaths(s *session.Session) (execute, read, write
 // tested end-to-end without standing up seccomp. See
 // TestWrap_SignalFilterUsesSessionPolicy.
 func (a *App) signalFilterEnabled(s *session.Session, execveEnabled bool) bool {
-	if a.mainFilterUsesUserNotify(execveEnabled) {
+	unixSocketEnabled := false
+	if a.cfg != nil {
+		unixSocketEnabled = a.cfg.Sandbox.Seccomp.UnixSocket.Enabled
+	}
+	return a.signalFilterEnabledForMainFilter(s, execveEnabled, unixSocketEnabled)
+}
+
+func (a *App) signalFilterEnabledForMainFilter(s *session.Session, execveEnabled bool, unixSocketEnabled bool) bool {
+	if a.mainFilterUsesUserNotifyForWrap(execveEnabled, unixSocketEnabled) {
 		return false
 	}
 	engine := a.policyEngineFor(s)
@@ -549,13 +566,21 @@ func (a *App) signalFilterEnabled(s *session.Session, execveEnabled bool) bool {
 // Returns false when a.cfg is nil: tests construct bare Apps without
 // a config, and in that case no wrapper-installed filter exists.
 func (a *App) mainFilterUsesUserNotify(execveEnabled bool) bool {
+	unixSocketEnabled := false
+	if a.cfg != nil {
+		unixSocketEnabled = a.cfg.Sandbox.Seccomp.UnixSocket.Enabled
+	}
+	return a.mainFilterUsesUserNotifyForWrap(execveEnabled, unixSocketEnabled)
+}
+
+func (a *App) mainFilterUsesUserNotifyForWrap(execveEnabled bool, unixSocketEnabled bool) bool {
 	if execveEnabled {
 		return true
 	}
 	if a.cfg == nil {
 		return false
 	}
-	if a.cfg.Sandbox.Seccomp.UnixSocket.Enabled {
+	if unixSocketEnabled {
 		return true
 	}
 	if config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.Enabled, false) {
@@ -673,6 +698,7 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 
 	var conn net.Conn
 	var notifyPeerPID int
+	var notifyPeerUID uint32
 	for {
 		nextConn, err := listener.Accept()
 		if err != nil {
@@ -690,6 +716,7 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 		// Read the notify-socket peer credentials and enforce the expected UID.
 		creds := getConnPeerCreds(unixConn)
 		notifyPeerPID = creds.PID
+		notifyPeerUID = creds.UID
 		if notifyPeerPID > 0 {
 			slog.Debug("wrap: got notify-socket peer credentials",
 				"peer_pid", notifyPeerPID, "peer_uid", creds.UID, "session_id", sessionID)
@@ -743,6 +770,15 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 				slog.Debug("wrap: failed to write notify setup rejection", "session_id", sessionID, "error", statusErr)
 			}
 			slog.Warn("wrap: rejecting notify fd without wrapper pid metadata", "session_id", sessionID)
+			return
+		}
+		if err := validateWrapperPIDForNotifyHook(meta.WrapperPID, notifyPeerPID, notifyPeerUID); err != nil {
+			_ = notifyFD.Close()
+			if statusErr := writeNotifyStatusForWrap(unixConn, false); statusErr != nil {
+				slog.Debug("wrap: failed to write notify setup rejection", "session_id", sessionID, "error", statusErr)
+			}
+			slog.Warn("wrap: rejecting notify fd with untrusted wrapper pid metadata",
+				"session_id", sessionID, "wrapper_pid", meta.WrapperPID, "peer_pid", notifyPeerPID, "peer_uid", notifyPeerUID, "error", err)
 			return
 		}
 		cgroupCleanup, err := wrapCgroupSetupForNotifyHook(ctx, a, s, sessionID, wrapperPID)

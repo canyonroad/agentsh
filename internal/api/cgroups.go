@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -16,6 +17,20 @@ import (
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
+)
+
+type cgroupManager interface {
+	Apply(name string, pid int, lim limits.CgroupV2Limits) (*limits.CgroupV2, error)
+	Probe() *limits.CgroupProbeResult
+}
+
+var (
+	ebpfCheckSupport          = ebpftrace.CheckSupport
+	ebpfAttachConnectToCgroup = ebpftrace.AttachConnectToCgroup
+	ebpfStartCollector        = ebpftrace.StartCollector
+	ebpfCgroupID              = ebpftrace.CgroupID
+	ebpfPopulateAllowlist     = ebpftrace.PopulateAllowlist
+	ebpfCleanupAllowlist      = ebpftrace.CleanupAllowlist
 )
 
 func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, cmdID string, pid int, lim policy.Limits, m *metrics.Collector, pol *policy.Engine) (func() error, error) {
@@ -119,12 +134,52 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 	var allowlistColl *ebpf.Collection
 	var allowCgid uint64
 	var refreshCancel context.CancelFunc
+	cleanupResources := func() error {
+		if ebpfCollector != nil {
+			_ = ebpfCollector.Close()
+		}
+		if ebpfDetach != nil {
+			// best-effort clean allowlist before detaching/closing collection
+			if allowlistColl != nil && allowCgid != 0 {
+				_ = ebpfCleanupAllowlist(allowlistColl, allowCgid)
+			}
+			if refreshCancel != nil {
+				refreshCancel()
+			}
+			_ = ebpfDetach()
+		}
+		cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := cg.Close(cctx); err != nil {
+			ev := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      "cgroup_cleanup_failed",
+				SessionID: sessionID,
+				CommandID: cmdID,
+				Fields: map[string]any{
+					"path":  cg.Path,
+					"error": err.Error(),
+				},
+			}
+			_ = emit.AppendEvent(context.Background(), ev)
+			emit.Publish(ev)
+			return err
+		}
+		return nil
+	}
+	cleanupAfterSetupFailure := func() {
+		if err := cleanupResources(); err != nil {
+			slog.Warn("cgroup: cleanup after setup failure failed",
+				"session_id", sessionID, "command_id", cmdID, "path", cg.Path, "error", err)
+		}
+	}
 	refreshInterval := cfg.Sandbox.Network.EBPF.DNSRefreshSeconds
 	if refreshInterval <= 0 {
 		refreshInterval = 0
 	}
 	if ebpfEnabled {
-		status := ebpftrace.CheckSupport()
+		status := ebpfCheckSupport()
 		if !status.Supported {
 			ev := types.Event{
 				ID:        uuid.NewString(),
@@ -142,10 +197,11 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 				m.IncEBPFUnavailable()
 			}
 			if ebpfRequired {
+				cleanupAfterSetupFailure()
 				return nil, fmt.Errorf("ebpf required but unsupported: %s", status.Reason)
 			}
 		} else {
-			if coll, detach, err := ebpftrace.AttachConnectToCgroup(cg.Path); err != nil {
+			if coll, detach, err := ebpfAttachConnectToCgroup(cg.Path); err != nil {
 				ev := types.Event{
 					ID:        uuid.NewString(),
 					Timestamp: time.Now().UTC(),
@@ -163,11 +219,12 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 					m.IncEBPFAttachFail()
 				}
 				if ebpfRequired {
+					cleanupAfterSetupFailure()
 					return nil, fmt.Errorf("ebpf attach failed and required: %w", err)
 				}
 			} else {
 				ebpfDetach = detach
-				collector, cerr := ebpftrace.StartCollector(coll, 4096)
+				collector, cerr := ebpfStartCollector(coll, 4096)
 				if cerr != nil {
 					ev := types.Event{
 						ID:        uuid.NewString(),
@@ -182,9 +239,11 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 					_ = emit.AppendEvent(ctx, ev)
 					emit.Publish(ev)
 					if ebpfRequired {
+						cleanupAfterSetupFailure()
 						return nil, fmt.Errorf("ebpf collector failed and required: %w", cerr)
 					}
 					_ = detach()
+					ebpfDetach = nil
 				} else {
 					collector.SetOnDrop(func() {
 						if m != nil {
@@ -194,7 +253,7 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 
 					// Populate allowlist if enforcement is requested.
 					if ebpfEnforce {
-						cgid, cgErr := ebpftrace.CgroupID(cg.Path)
+						cgid, cgErr := ebpfCgroupID(cg.Path)
 						if cgErr != nil {
 							ev := types.Event{
 								ID:        uuid.NewString(),
@@ -217,7 +276,7 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 								// disable default deny when we couldn't resolve anything
 								strict = false
 							}
-							if err := ebpftrace.PopulateAllowlist(coll, cgid, ep, cidrs, denyKeys, denyCidrs, strict); err != nil {
+							if err := ebpfPopulateAllowlist(coll, cgid, ep, cidrs, denyKeys, denyCidrs, strict); err != nil {
 								ev := types.Event{
 									ID:        uuid.NewString(),
 									Timestamp: time.Now().UTC(),
@@ -234,7 +293,7 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 									m.IncEBPFAttachFail()
 								}
 								// best effort disable default deny and clear entries
-								_ = ebpftrace.CleanupAllowlist(coll, cgid)
+								_ = ebpfCleanupAllowlist(coll, cgid)
 							}
 							if ebpfEnforce && !strict {
 								ev := types.Event{
@@ -268,7 +327,7 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 											return
 										case <-t.C:
 											ep2, cidrs2, deny2, denyCidrs2, strict2, _, ttl2 := buildAllowedEndpoints(pol, base)
-											if err := ebpftrace.PopulateAllowlist(coll, cgid, ep2, cidrs2, deny2, denyCidrs2, strict2); err != nil {
+											if err := ebpfPopulateAllowlist(coll, cgid, ep2, cidrs2, deny2, denyCidrs2, strict2); err != nil {
 												ev := types.Event{
 													ID:        uuid.NewString(),
 													Timestamp: time.Now().UTC(),
@@ -313,40 +372,7 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 		}
 	}
 
-	return func() error {
-		if ebpfCollector != nil {
-			_ = ebpfCollector.Close()
-		}
-		if ebpfDetach != nil {
-			// best-effort clean allowlist before detaching/closing collection
-			if allowlistColl != nil && allowCgid != 0 {
-				_ = ebpftrace.CleanupAllowlist(allowlistColl, allowCgid)
-			}
-			if refreshCancel != nil {
-				refreshCancel()
-			}
-			_ = ebpfDetach()
-		}
-		cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := cg.Close(cctx); err != nil {
-			ev := types.Event{
-				ID:        uuid.NewString(),
-				Timestamp: time.Now().UTC(),
-				Type:      "cgroup_cleanup_failed",
-				SessionID: sessionID,
-				CommandID: cmdID,
-				Fields: map[string]any{
-					"path":  cg.Path,
-					"error": err.Error(),
-				},
-			}
-			_ = emit.AppendEvent(context.Background(), ev)
-			emit.Publish(ev)
-			return err
-		}
-		return nil
-	}, nil
+	return cleanupResources, nil
 }
 
 func sanitizeCgroupTag(s string) string {

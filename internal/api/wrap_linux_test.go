@@ -99,6 +99,15 @@ func withNotifyHandoffHook(t *testing.T) chan struct{} {
 	return called
 }
 
+func withWrapperPIDValidationHook(t *testing.T, fn func(wrapperPID, peerPID int, peerUID uint32) error) {
+	t.Helper()
+	prev := validateWrapperPIDForNotifyHook
+	validateWrapperPIDForNotifyHook = fn
+	t.Cleanup(func() {
+		validateWrapperPIDForNotifyHook = prev
+	})
+}
+
 func TestStartNotifyHandlerForWrap_CleansUpAfterProbeFailure(t *testing.T) {
 	enabled := true
 	cfg := &config.Config{}
@@ -363,6 +372,9 @@ func TestAcceptNotifyFD_UsesMetadataWrapperPIDForCgroupBeforeAck(t *testing.T) {
 		close(startCalled)
 		return nil
 	}
+	withWrapperPIDValidationHook(t, func(wrapperPID, peerPID int, peerUID uint32) error {
+		return nil
+	})
 	t.Cleanup(func() {
 		wrapCgroupSetupForNotifyHook = prevSetup
 		startNotifyHandlerForWrapHook = prevStart
@@ -404,6 +416,71 @@ func TestAcceptNotifyFD_UsesMetadataWrapperPIDForCgroupBeforeAck(t *testing.T) {
 	}
 	<-startCalled
 	waitForTestDone(t, done)
+}
+
+func TestAcceptNotifyFD_RejectsMetadataPIDThatIsNotPeerChild(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = true
+	cfg.Sandbox.Network.EBPF.Required = true
+	app, mgr := newTestAppForWrap(t, cfg)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	prevSetup := wrapCgroupSetupForNotifyHook
+	setupCalled := make(chan struct{}, 1)
+	wrapCgroupSetupForNotifyHook = func(ctx context.Context, a *App, s *session.Session, sessionID string, wrapperPID int) (func() error, error) {
+		setupCalled <- struct{}{}
+		return func() error { return nil }, nil
+	}
+	t.Cleanup(func() {
+		wrapCgroupSetupForNotifyHook = prevSetup
+	})
+	called := withNotifyHandoffHook(t)
+
+	socketDir := t.TempDir()
+	socketPath := filepath.Join(socketDir, "notify.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, os.Getuid(), false)
+	}()
+
+	conn := dialUnixConn(t, socketPath)
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pipeR.Close()
+		_ = pipeW.Close()
+	})
+
+	if err := wraphandoff.SendNotifyFD(conn, int(pipeR.Fd()), wraphandoff.Metadata{WrapperPID: os.Getpid()}); err != nil {
+		t.Fatalf("send handoff: %v", err)
+	}
+	if err := wraphandoff.ReadStatus(conn); err == nil {
+		t.Fatal("expected server rejection status")
+	}
+	waitForTestDone(t, done)
+
+	select {
+	case <-setupCalled:
+		t.Fatal("cgroup setup should not run for untrusted wrapper PID metadata")
+	default:
+	}
+	select {
+	case <-called:
+		t.Fatal("notify handler should not start for untrusted wrapper PID metadata")
+	default:
+	}
 }
 
 func TestAcceptNotifyFD_RejectsMissingMetadataWhenEBPFRequired(t *testing.T) {
@@ -478,6 +555,9 @@ func TestAcceptNotifyFD_RejectsWhenNotifyHandlerFailsBeforeAck(t *testing.T) {
 			return nil
 		}, nil
 	}
+	withWrapperPIDValidationHook(t, func(wrapperPID, peerPID int, peerUID uint32) error {
+		return nil
+	})
 	t.Cleanup(func() {
 		wrapCgroupSetupForNotifyHook = prevSetup
 	})

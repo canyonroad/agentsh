@@ -55,6 +55,10 @@ func getConnPeerCreds(conn *net.UnixConn) peerCreds {
 	return peerCreds{}
 }
 
+func validateWrapperPIDForNotify(wrapperPID, peerPID int, peerUID uint32) error {
+	return nil
+}
+
 func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string, expectedUID int) {
 	listener.Close()
 }
