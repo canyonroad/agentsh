@@ -134,20 +134,27 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 	var allowlistColl *ebpf.Collection
 	var allowCgid uint64
 	var refreshCancel context.CancelFunc
-	cleanupResources := func() error {
+	cleanupEBPFResources := func() {
 		if ebpfCollector != nil {
 			_ = ebpfCollector.Close()
+			ebpfCollector = nil
+		}
+		if refreshCancel != nil {
+			refreshCancel()
+			refreshCancel = nil
+		}
+		if allowlistColl != nil && allowCgid != 0 {
+			_ = ebpfCleanupAllowlist(allowlistColl, allowCgid)
+			allowlistColl = nil
+			allowCgid = 0
 		}
 		if ebpfDetach != nil {
-			// best-effort clean allowlist before detaching/closing collection
-			if allowlistColl != nil && allowCgid != 0 {
-				_ = ebpfCleanupAllowlist(allowlistColl, allowCgid)
-			}
-			if refreshCancel != nil {
-				refreshCancel()
-			}
 			_ = ebpfDetach()
+			ebpfDetach = nil
 		}
+	}
+	cleanupResources := func() error {
+		cleanupEBPFResources()
 		cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := cg.Close(cctx); err != nil {
@@ -278,6 +285,8 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 							}
 							// best effort disable default deny and clear entries
 							_ = ebpfCleanupAllowlist(coll, cgid)
+							allowlistColl = nil
+							allowCgid = 0
 						}
 						if ebpfEnforce && !strict {
 							ev := types.Event{
@@ -355,8 +364,7 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 						cleanupAfterSetupFailure()
 						return nil, fmt.Errorf("ebpf collector failed and required: %w", cerr)
 					}
-					_ = detach()
-					ebpfDetach = nil
+					cleanupEBPFResources()
 				} else {
 					ebpfCollector = collector
 					collector.SetOnDrop(func() {
