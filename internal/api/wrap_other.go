@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -27,7 +28,15 @@ func recvFDFromConn(sock *os.File) (*os.File, error) {
 	return nil, errWrapNotSupported
 }
 
-func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session) {
+func recvNotifyFDForWrap(conn *net.UnixConn) (*os.File, wrapNotifyMetadata, bool, error) {
+	return nil, wrapNotifyMetadata{}, false, errWrapNotSupported
+}
+
+func writeNotifyStatusForWrap(w io.Writer, ok bool) error {
+	return errWrapNotSupported
+}
+
+func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session, cleanup func() error) {
 	// No-op on non-Linux platforms
 }
 

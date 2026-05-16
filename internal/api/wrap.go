@@ -18,6 +18,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/landlock"
+	"github.com/agentsh/agentsh/internal/policy"
 	seccomppkg "github.com/agentsh/agentsh/internal/seccomp"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -29,7 +30,12 @@ var (
 	wrapChown                     = os.Chown
 	wrapChmod                     = os.Chmod
 	startNotifyHandlerForWrapHook = startNotifyHandlerForWrap
+	wrapCgroupSetupForNotifyHook  = defaultWrapCgroupSetupForNotify
 )
+
+type wrapNotifyMetadata struct {
+	WrapperPID int
+}
 
 // wrapInit handles POST /api/v1/sessions/{id}/wrap-init.
 // It returns the seccomp wrapper configuration for the CLI to launch the agent
@@ -708,28 +714,101 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 
 	unixConn := conn.(*net.UnixConn)
 
-	file, err := unixConn.File()
-	if err != nil {
-		slog.Debug("wrap: failed to get file from connection", "session_id", sessionID, "error", err)
-		return
-	}
-
-	// Use the existing RecvFD infrastructure to receive the notify fd
-	notifyFD, err := recvFDFromConn(file)
-	file.Close()
+	notifyFD, meta, hasMeta, err := recvNotifyFDForWrap(unixConn)
 	if err != nil {
 		slog.Debug("wrap: failed to receive notify fd", "session_id", sessionID, "error", err)
+		if statusErr := writeNotifyStatusForWrap(unixConn, false); statusErr != nil {
+			slog.Debug("wrap: failed to write notify setup rejection", "session_id", sessionID, "error", statusErr)
+		}
 		return
 	}
 	if notifyFD == nil {
 		slog.Debug("wrap: received nil notify fd", "session_id", sessionID)
+		if statusErr := writeNotifyStatusForWrap(unixConn, false); statusErr != nil {
+			slog.Debug("wrap: failed to write notify setup rejection", "session_id", sessionID, "error", statusErr)
+		}
 		return
 	}
 
-	slog.Info("wrap: received notify fd", "session_id", sessionID, "fd", notifyFD.Fd())
+	wrapperPID := notifyPeerPID
+	if hasMeta && meta.WrapperPID > 0 {
+		wrapperPID = meta.WrapperPID
+	}
+
+	var cleanup func() error
+	if wrapNeedsCgroupBeforeAck(a, s) {
+		if !hasMeta || meta.WrapperPID <= 0 {
+			_ = notifyFD.Close()
+			if statusErr := writeNotifyStatusForWrap(unixConn, false); statusErr != nil {
+				slog.Debug("wrap: failed to write notify setup rejection", "session_id", sessionID, "error", statusErr)
+			}
+			slog.Warn("wrap: rejecting notify fd without wrapper pid metadata", "session_id", sessionID)
+			return
+		}
+		cgroupCleanup, err := wrapCgroupSetupForNotifyHook(ctx, a, s, sessionID, wrapperPID)
+		if err != nil {
+			_ = notifyFD.Close()
+			if statusErr := writeNotifyStatusForWrap(unixConn, false); statusErr != nil {
+				slog.Debug("wrap: failed to write notify setup rejection", "session_id", sessionID, "error", statusErr)
+			}
+			slog.Warn("wrap: cgroup setup before ack failed", "session_id", sessionID, "wrapper_pid", wrapperPID, "error", err)
+			return
+		}
+		cleanup = cgroupCleanup
+	}
+
+	slog.Info("wrap: received notify fd", "session_id", sessionID, "fd", notifyFD.Fd(), "wrapper_pid", wrapperPID)
 
 	// Start the notify handler using existing infrastructure
-	startNotifyHandlerForWrapHook(ctx, notifyFD, sessionID, a, execveEnabled, notifyPeerPID, s)
+	startNotifyHandlerForWrapHook(ctx, notifyFD, sessionID, a, execveEnabled, wrapperPID, s, cleanup)
+	if err := writeNotifyStatusForWrap(unixConn, true); err != nil {
+		slog.Debug("wrap: failed to write notify setup status", "session_id", sessionID, "error", err)
+	}
+}
+
+func wrapNeedsCgroupBeforeAck(a *App, s *session.Session) bool {
+	if a == nil || a.cfg == nil {
+		return false
+	}
+	if a.cfg.Sandbox.Network.EBPF.Required {
+		return true
+	}
+	if !a.cfg.Sandbox.Cgroups.Enabled {
+		return false
+	}
+	if a.cfg.Sandbox.Network.EBPF.Enabled || a.cfg.Sandbox.Network.EBPF.Enforce {
+		return true
+	}
+	engine := a.policyEngineFor(s)
+	if engine == nil {
+		return false
+	}
+	lim := engine.Limits()
+	return lim.MaxMemoryMB > 0 || lim.CPUQuotaPercent > 0 || lim.PidsMax > 0
+}
+
+func defaultWrapCgroupSetupForNotify(ctx context.Context, a *App, s *session.Session, sessionID string, wrapperPID int) (func() error, error) {
+	if !wrapNeedsCgroupBeforeAck(a, s) {
+		return nil, nil
+	}
+	if wrapperPID <= 0 {
+		return nil, fmt.Errorf("wrap cgroup setup requires wrapper pid")
+	}
+	if a.cfg.Sandbox.Network.EBPF.Required && !a.cfg.Sandbox.Cgroups.Enabled {
+		return nil, fmt.Errorf("ebpf required but sandbox.cgroups.enabled=false")
+	}
+	if !a.cfg.Sandbox.Cgroups.Enabled {
+		return nil, nil
+	}
+
+	engine := a.policyEngineFor(s)
+	lim := policy.Limits{}
+	if engine != nil {
+		lim = engine.Limits()
+	}
+	cmdID := "wrap-" + uuid.NewString()
+	em := storeEmitter{store: a.store, broker: a.broker}
+	return applyCgroupV2(ctx, em, a, sessionID, cmdID, wrapperPID, lim, a.metrics, engine)
 }
 
 // acceptSignalFD listens on the Unix socket for a single connection from the CLI,

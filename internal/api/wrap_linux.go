@@ -19,6 +19,7 @@ import (
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/signal"
+	"github.com/agentsh/agentsh/internal/wraphandoff"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
@@ -55,10 +56,22 @@ func recvFDFromConn(sock *os.File) (*os.File, error) {
 	return nil, fmt.Errorf("no fd in control message")
 }
 
+func recvNotifyFDForWrap(conn *net.UnixConn) (*os.File, wrapNotifyMetadata, bool, error) {
+	notifyFD, meta, hasMeta, err := wraphandoff.RecvNotifyFD(conn)
+	if err != nil {
+		return nil, wrapNotifyMetadata{}, false, err
+	}
+	return notifyFD, wrapNotifyMetadata{WrapperPID: meta.WrapperPID}, hasMeta, nil
+}
+
+func writeNotifyStatusForWrap(w io.Writer, ok bool) error {
+	return wraphandoff.WriteStatus(w, ok)
+}
+
 // startNotifyHandlerForWrap starts the seccomp notify handler for a wrap session.
 // Unlike the exec path where the notify fd comes from a socketpair, here it comes
 // from the CLI via a Unix socket connection.
-func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session) {
+func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session, cleanup func() error) {
 	emitter := &notifyEmitterAdapter{store: a.store, broker: a.broker}
 
 	// Prefer session-specific policy engine (has expanded ${PROJECT_ROOT} etc.)
@@ -151,6 +164,13 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 
 	go func() {
 		defer notifyFD.Close()
+		if cleanup != nil {
+			defer func() {
+				if err := cleanup(); err != nil {
+					slog.Warn("wrap: cgroup cleanup failed", "session_id", sessionID, "error", err)
+				}
+			}()
+		}
 		if cleanupSymlink != nil {
 			defer cleanupSymlink()
 		}
