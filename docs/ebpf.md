@@ -13,6 +13,14 @@ agentsh can observe outbound TCP connections and, optionally, enforce per-sessio
 - Wildcard domains stay non-strict (default-deny disabled); an event `ebpf_enforce_non_strict` is emitted.
 - Domains are resolved and refreshed on a jittered interval bounded by `dns_max_ttl_seconds`; DNS cache is bounded.
 
+## `agentsh wrap`
+
+On Linux, `agentsh wrap` attaches the wrapped agent process tree to cgroup eBPF before `agentsh-unixwrap` is acknowledged and allowed to exec the real agent. This protects wrapped subprocesses even when they remove `HTTP_PROXY`, `HTTPS_PROXY`, or related proxy environment variables.
+
+This requires `sandbox.cgroups.enabled: true`. If `sandbox.network.ebpf.required: true` and cgroups or eBPF setup cannot complete, wrap setup fails before the real agent starts.
+
+Domain rules are still enforced by resolving literal domains to IP/port map entries in userspace. eBPF does not match domain strings in the kernel. Wildcard domains, shared CDN IPs, cached DNS answers, hosts-file entries, and DNS-over-HTTPS keep the same caveats described above.
+
 ## Configuration (config.yml)
 ```yaml
 sandbox:
