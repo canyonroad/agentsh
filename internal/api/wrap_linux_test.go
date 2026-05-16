@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -95,6 +96,34 @@ func withNotifyHandoffHook(t *testing.T) chan struct{} {
 		startNotifyHandlerForWrapHook = prev
 	})
 	return called
+}
+
+func TestStartNotifyHandlerForWrap_CleansUpAfterProbeFailure(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.Seccomp.FileMonitor.Enabled = &enabled
+	app, _ := newTestAppForWrap(t, cfg)
+
+	notifyFD, notifyW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = notifyFD.Close()
+		_ = notifyW.Close()
+	})
+
+	var cleanupCalls atomic.Int32
+	cleanup := func() error {
+		cleanupCalls.Add(1)
+		return nil
+	}
+
+	startNotifyHandlerForWrap(context.Background(), notifyFD, "test-session", app, false, 999999999, nil, cleanup)
+
+	if got := cleanupCalls.Load(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", got)
+	}
 }
 
 func TestAcceptNotifyFD_RejectsWrongUID(t *testing.T) {

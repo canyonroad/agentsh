@@ -81,6 +81,14 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 	// Create execve handler if enabled
 	var execveHandler *unixmon.ExecveHandler
 	var cleanupSymlink func()
+	runCleanup := func() {
+		if cleanup == nil {
+			return
+		}
+		if err := cleanup(); err != nil {
+			slog.Warn("wrap: cgroup cleanup failed", "session_id", sessionID, "error", err)
+		}
+	}
 	if execveEnabled {
 		if h := createExecveHandler(a.cfg.Sandbox.Seccomp.Execve, sessionPolicy, a.approvals); h != nil {
 			execveHandler, _ = h.(*unixmon.ExecveHandler)
@@ -141,6 +149,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 						"or set sandbox.seccomp.file_monitor.enabled: false")
 				// Clean up resources that would normally be handled by the goroutine.
 				notifyFD.Close()
+				runCleanup()
 				if cleanupSymlink != nil {
 					cleanupSymlink()
 				}
@@ -165,11 +174,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 	go func() {
 		defer notifyFD.Close()
 		if cleanup != nil {
-			defer func() {
-				if err := cleanup(); err != nil {
-					slog.Warn("wrap: cgroup cleanup failed", "session_id", sessionID, "error", err)
-				}
-			}()
+			defer runCleanup()
 		}
 		if cleanupSymlink != nil {
 			defer cleanupSymlink()
