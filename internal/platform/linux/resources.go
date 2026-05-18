@@ -49,7 +49,7 @@ func (r *cgroupResourceLimiter) ensureManager() (*limits.CgroupManager, error) {
 		return r.mgr, r.initErr
 	}
 	r.inited = true
-	r.mgr, r.initErr = limits.NewCgroupManager(context.Background(), "", false)
+	r.mgr, r.initErr = limits.NewCgroupManager(context.Background(), "", false /*permitAttachOnly*/)
 	return r.mgr, r.initErr
 }
 

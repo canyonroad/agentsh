@@ -468,7 +468,7 @@ func New(cfg *config.Config) (*Server, error) {
 
 	var cgroupMgr *limitspkg.CgroupManager
 	if runtime.GOOS == "linux" {
-		mgr, err := limitspkg.NewCgroupManager(context.Background(), cfg.Sandbox.Cgroups.BasePath, false)
+		mgr, err := limitspkg.NewCgroupManager(context.Background(), cfg.Sandbox.Cgroups.BasePath, false /*permitAttachOnly*/)
 		if err != nil {
 			slog.Warn("cgroup v2 probe failed; per-command limits unavailable", "error", err)
 		} else {
