@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/limits"
 )
 
 // CheckResult represents the result of a single capability check.
@@ -28,7 +29,7 @@ type Check func() CheckResult
 var (
 	checkSeccompUserNotify = realCheckSeccompUserNotify
 	checkPtrace            = realCheckPtrace
-	checkCgroupsV2         = realCheckCgroupsV2
+	checkCgroupsV2ResourceLimits = realCheckCgroupsV2ResourceLimits
 	checkeBPF              = realCheckeBPF
 	checkWrapperBinary     = realCheckWrapperBinary
 )
@@ -51,9 +52,18 @@ func realCheckPtrace() CheckResult {
 	return r
 }
 
-func realCheckCgroupsV2() CheckResult {
-	probe := probeCgroupsV2()
-	return CheckResult{Feature: "cgroups-v2", Available: probe.Available}
+func realCheckCgroupsV2ResourceLimits() CheckResult {
+	// Populate the cache on the first call so that detect output can read it.
+	// If the cache was already set (e.g., by another check or a test fixture)
+	// we skip the probe — the cached value wins.
+	if LastCgroupProbe() == nil {
+		probeCgroupsV2()
+	}
+	available := false
+	if last := LastCgroupProbe(); last != nil {
+		available = last.Mode == limits.ModeNested || last.Mode == limits.ModeTopLevel
+	}
+	return CheckResult{Feature: "cgroups_v2_resource_limits", Available: available}
 }
 
 func realCheckeBPF() CheckResult {
@@ -101,7 +111,7 @@ func CheckAll(cfg *config.Config) error {
 	// Check cgroups.enabled -> requires cgroups v2 + ptrace
 	if cfg.Sandbox.Cgroups.Enabled {
 		// Check cgroups v2
-		cgResult := checkCgroupsV2()
+		cgResult := checkCgroupsV2ResourceLimits()
 		cgResult.ConfigKey = "sandbox.cgroups.enabled"
 		cgResult.Suggestion = "Set 'sandbox.cgroups.enabled: false' in your config"
 		if !cgResult.Available {
