@@ -69,7 +69,7 @@ func TestManagerApply_CreatesAndCleansUp_Integration(t *testing.T) {
 	}
 	defer func() { _ = cmd.Process.Kill() }()
 
-	m, err := NewCgroupManager(context.Background(), "")
+	m, err := NewCgroupManager(context.Background(), "", false)
 	if err != nil {
 		t.Skipf("cannot construct cgroup manager: %v", err)
 	}

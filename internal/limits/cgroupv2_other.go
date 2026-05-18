@@ -48,7 +48,7 @@ type CgroupProbeResult struct {
 type CgroupManager struct{}
 
 // NewCgroupManager is not supported on non-Linux platforms.
-func NewCgroupManager(ctx context.Context, ownHint string) (*CgroupManager, error) {
+func NewCgroupManager(ctx context.Context, ownHint string, permitAttachOnly bool) (*CgroupManager, error) {
 	return nil, fmt.Errorf("cgroups not supported on this platform")
 }
 

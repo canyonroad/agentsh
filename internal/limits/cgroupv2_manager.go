@@ -28,13 +28,13 @@ type CgroupManager struct {
 // NewCgroupManager never fails for expected reasons — environment gaps are reflected
 // in the probed mode, not in the return error. An error is only returned if the
 // process cannot even determine its own cgroup path.
-func NewCgroupManager(ctx context.Context, ownHint string) (*CgroupManager, error) {
-	return newCgroupManagerFS(ctx, osCgroupFS{}, ownHint)
+func NewCgroupManager(ctx context.Context, ownHint string, permitAttachOnly bool) (*CgroupManager, error) {
+	return newCgroupManagerFS(ctx, osCgroupFS{}, ownHint, permitAttachOnly)
 }
 
 // newCgroupManagerFS is the FS-injectable form used by unit tests.
-func newCgroupManagerFS(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupManager, error) {
-	probe, err := ProbeCgroupsV2(ctx, fs, ownHint, false /*permitAttachOnly*/)
+func newCgroupManagerFS(ctx context.Context, fs cgroupFS, ownHint string, permitAttachOnly bool) (*CgroupManager, error) {
+	probe, err := ProbeCgroupsV2(ctx, fs, ownHint, permitAttachOnly)
 	if err != nil {
 		return nil, fmt.Errorf("probe cgroups v2: %w", err)
 	}

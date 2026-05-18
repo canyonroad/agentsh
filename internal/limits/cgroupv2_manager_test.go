@@ -17,7 +17,7 @@ func TestManagerApply_NestedWritesLimits(t *testing.T) {
 	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
 	f.seedFile(own+"/cgroup.subtree_control", "cpu memory pids")
 
-	m, err := newCgroupManagerFS(context.Background(), f, own)
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestManagerApply_TopLevelWritesUnderSlice(t *testing.T) {
 	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
 
-	m, err := newCgroupManagerFS(context.Background(), f, own)
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestManagerApply_UnavailableNoLimitsAllows(t *testing.T) {
 	own := "/sys/fs/cgroup/system.slice/agentsh.service"
 	f.seedFile(own+"/cgroup.controllers", "cpu pids")
 
-	m, err := newCgroupManagerFS(context.Background(), f, own)
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestManagerApply_UnavailableWithLimitsRefuses(t *testing.T) {
 	own := "/sys/fs/cgroup/system.slice/agentsh.service"
 	f.seedFile(own+"/cgroup.controllers", "cpu pids")
 
-	m, err := newCgroupManagerFS(context.Background(), f, own)
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
