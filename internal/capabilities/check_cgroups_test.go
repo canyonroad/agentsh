@@ -65,3 +65,49 @@ func TestCheckCgroupsV2ResourceLimits_Unavailable(t *testing.T) {
 		t.Errorf("Unavailable should NOT report Available; got %+v", r)
 	}
 }
+
+func TestCheckEBPFCgroupAttach_AttachOnlyAvailable(t *testing.T) {
+	resetCgroupProbeCache(t)
+	cacheCgroupProbe(&limits.CgroupProbeResult{
+		Mode:   limits.ModeAttachOnly,
+		Reason: "test fixture",
+	})
+	// Stub the eBPF kernel-support probe to "supported".
+	checkeBPF = func() CheckResult { return CheckResult{Feature: "ebpf", Available: true} }
+	t.Cleanup(func() { checkeBPF = realCheckeBPF })
+
+	r := realCheckEBPFCgroupAttach()
+	if !r.Available {
+		t.Errorf("AttachOnly + ebpf-supported should be Available=true; got %+v", r)
+	}
+	if r.Feature != "ebpf_cgroup_attach" {
+		t.Errorf("Feature: got %q, want %q", r.Feature, "ebpf_cgroup_attach")
+	}
+}
+
+func TestCheckEBPFCgroupAttach_UnavailableMode(t *testing.T) {
+	resetCgroupProbeCache(t)
+	cacheCgroupProbe(&limits.CgroupProbeResult{
+		Mode:   limits.ModeUnavailable,
+		Reason: "test fixture",
+	})
+	checkeBPF = func() CheckResult { return CheckResult{Feature: "ebpf", Available: true} }
+	t.Cleanup(func() { checkeBPF = realCheckeBPF })
+
+	r := realCheckEBPFCgroupAttach()
+	if r.Available {
+		t.Errorf("Mode=Unavailable should be Available=false; got %+v", r)
+	}
+}
+
+func TestCheckEBPFCgroupAttach_KernelUnsupported(t *testing.T) {
+	resetCgroupProbeCache(t)
+	cacheCgroupProbe(&limits.CgroupProbeResult{Mode: limits.ModeNested})
+	checkeBPF = func() CheckResult { return CheckResult{Feature: "ebpf", Available: false} }
+	t.Cleanup(func() { checkeBPF = realCheckeBPF })
+
+	r := realCheckEBPFCgroupAttach()
+	if r.Available {
+		t.Errorf("ebpf unsupported should be Available=false; got %+v", r)
+	}
+}
