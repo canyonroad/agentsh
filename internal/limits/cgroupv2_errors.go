@@ -69,3 +69,21 @@ func joinComma(parts []string) string {
 func (l CgroupV2Limits) IsEmpty() bool {
 	return l.MaxMemoryBytes <= 0 && l.CPUQuotaPct <= 0 && l.PidsMax <= 0
 }
+
+// CgroupResourceLimitsUnavailableError is returned by CgroupManager.Apply when
+// the probe landed on ModeAttachOnly (cgroup mkdir + attach work, but
+// controllers cannot be enabled in subtree_control) and the caller's policy
+// requires one or more non-zero resource limits. BPF attach is still reachable
+// against the cgroup path; only the .max writes have nowhere to bind. Callers
+// surface this differently from CgroupUnavailableError so the operator-facing
+// message can be specific.
+type CgroupResourceLimitsUnavailableError struct {
+	Reason string
+	Limits CgroupV2Limits
+}
+
+func (e *CgroupResourceLimitsUnavailableError) Error() string {
+	return fmt.Sprintf(
+		"cgroup resource limits unavailable (%s); policy requires %s — refusing command",
+		e.Reason, e.Limits.Summary())
+}
