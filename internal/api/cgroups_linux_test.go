@@ -390,6 +390,47 @@ func TestApplyCgroupV2_DetachesAndCleansCgroupWhenRequiredEnforcePopulateFails(t
 	}
 }
 
+// TestApplyCgroupV2_AttachOnly_NoLimits_Succeeds verifies that when
+// cgroups.enabled=false but ebpf.enabled=true the widened activation gate
+// still proceeds, and a successful ModeAttachOnly Apply with no resource limits
+// invokes ebpfAttachConnectToCgroup and returns a non-nil cleanup.
+func TestApplyCgroupV2_AttachOnly_NoLimits_Succeeds(t *testing.T) {
+	withEBPFHooks(t)
+
+	cgPath := filepath.Join(t.TempDir(), "agentsh-test-cgroup")
+
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = false // widened gate: ebpf.enabled alone is sufficient
+	cfg.Sandbox.Network.EBPF.Enabled = true
+
+	app := newAppWithFakeCgroupManager(t, cfg, cgPath)
+	app.cgroupMgr.(*fakeCgroupManagerForAPITest).mode = limits.ModeAttachOnly
+
+	var attachCalled string
+	ebpfCheckSupport = func() ebpftrace.SupportStatus {
+		return ebpftrace.SupportStatus{Supported: true}
+	}
+	ebpfAttachConnectToCgroup = func(path string) (*ebpf.Collection, func() error, error) {
+		attachCalled = path
+		return &ebpf.Collection{}, func() error { return nil }, nil
+	}
+	ebpfStartCollector = func(coll *ebpf.Collection, bufSize int) (*ebpftrace.Collector, error) {
+		return nil, errors.New("collector not needed in attach-only test")
+	}
+
+	cleanup, err := applyCgroupV2(context.Background(), storeEmitter{store: app.store, broker: app.broker}, app, "sess", "cmd", 1234, policy.Limits{}, nil, nil)
+	if err != nil {
+		t.Fatalf("applyCgroupV2: %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("expected non-nil cleanup closure")
+	}
+	if attachCalled == "" {
+		t.Errorf("ebpfAttachConnectToCgroup should have been called")
+	}
+	_ = cleanup()
+}
+
 // TestDefaultWrapCgroupSetup_AttachOnly_NoLimits_Succeeds verifies that when
 // the probe mode is ModeAttachOnly and no resource limits are requested, the
 // wrap cgroup setup succeeds and invokes the ebpf attach hook.

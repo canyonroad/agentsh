@@ -35,7 +35,11 @@ var (
 
 func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, cmdID string, pid int, lim policy.Limits, m *metrics.Collector, pol *policy.Engine) (func() error, error) {
 	cfg := app.cfg
-	if cfg == nil || !cfg.Sandbox.Cgroups.Enabled {
+	needsCgroup := cfg != nil && (cfg.Sandbox.Cgroups.Enabled ||
+		cfg.Sandbox.Network.EBPF.Enabled ||
+		cfg.Sandbox.Network.EBPF.Enforce ||
+		cfg.Sandbox.Network.EBPF.Required)
+	if !needsCgroup {
 		return nil, nil
 	}
 
@@ -68,7 +72,27 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 	cg, err := app.cgroupMgr.Apply("agentsh-"+sanitizeCgroupTag(sessionID)+"-"+sanitizeCgroupTag(cmdID), pid, cgLimits)
 	if err != nil {
 		var ue *limits.CgroupUnavailableError
-		if errors.As(err, &ue) {
+		var rlue *limits.CgroupResourceLimitsUnavailableError
+		switch {
+		case errors.As(err, &rlue):
+			ev := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      string(events.EventCgroupUnavailableRefusal),
+				SessionID: sessionID,
+				CommandID: cmdID,
+				Fields: map[string]any{
+					"reason":                      rlue.Reason,
+					"resource_limits_unavailable": true,
+					"max_memory_mb":               lim.MaxMemoryMB,
+					"cpu_quota_pct":               lim.CPUQuotaPercent,
+					"pids_max":                    lim.PidsMax,
+				},
+			}
+			_ = emit.AppendEvent(ctx, ev)
+			emit.Publish(ev)
+			return nil, err
+		case errors.As(err, &ue):
 			ev := types.Event{
 				ID:        uuid.NewString(),
 				Timestamp: time.Now().UTC(),
@@ -85,20 +109,21 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 			_ = emit.AppendEvent(ctx, ev)
 			emit.Publish(ev)
 			return nil, err
+		default:
+			ev := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      "cgroup_apply_failed",
+				SessionID: sessionID,
+				CommandID: cmdID,
+				Fields: map[string]any{
+					"error": err.Error(),
+				},
+			}
+			_ = emit.AppendEvent(ctx, ev)
+			emit.Publish(ev)
+			return nil, err
 		}
-		ev := types.Event{
-			ID:        uuid.NewString(),
-			Timestamp: time.Now().UTC(),
-			Type:      "cgroup_apply_failed",
-			SessionID: sessionID,
-			CommandID: cmdID,
-			Fields: map[string]any{
-				"error": err.Error(),
-			},
-		}
-		_ = emit.AppendEvent(ctx, ev)
-		emit.Publish(ev)
-		return nil, err
 	}
 
 	// If unavailable mode allowed us with no concrete cgroup need, treat as no-op.
