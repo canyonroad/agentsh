@@ -3,6 +3,7 @@
 package capabilities
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/limits"
@@ -98,6 +99,9 @@ func TestCheckEBPFCgroupAttach_UnavailableMode(t *testing.T) {
 	if r.Available {
 		t.Errorf("Mode=Unavailable should be Available=false; got %+v", r)
 	}
+	if r.Error == nil || !strings.Contains(r.Error.Error(), "cgroup attach feasibility unavailable") {
+		t.Errorf("Error should name cgroup-attach blocker; got %v", r.Error)
+	}
 }
 
 func TestCheckEBPFCgroupAttach_KernelUnsupported(t *testing.T) {
@@ -109,5 +113,8 @@ func TestCheckEBPFCgroupAttach_KernelUnsupported(t *testing.T) {
 	r := realCheckEBPFCgroupAttach()
 	if r.Available {
 		t.Errorf("ebpf unsupported should be Available=false; got %+v", r)
+	}
+	if r.Error == nil || !strings.Contains(r.Error.Error(), "eBPF kernel support unavailable") {
+		t.Errorf("Error should name eBPF kernel blocker; got %v", r.Error)
 	}
 }
