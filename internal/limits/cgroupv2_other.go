@@ -77,6 +77,19 @@ func (e *CgroupUnavailableError) Error() string {
 	return fmt.Sprintf("cgroup enforcement unavailable (%s)", e.Reason)
 }
 
+// CgroupResourceLimitsUnavailableError mirrors the Linux-only type so that
+// callers in platform-agnostic packages can reference it. On non-Linux the
+// cgroup code paths are never reached, so this exists only to satisfy
+// cross-compilation.
+type CgroupResourceLimitsUnavailableError struct {
+	Reason string
+	Limits CgroupV2Limits
+}
+
+func (e *CgroupResourceLimitsUnavailableError) Error() string {
+	return fmt.Sprintf("cgroup resource limits unavailable (%s)", e.Reason)
+}
+
 // Summary returns a compact human-readable description of non-zero limits.
 func (l CgroupV2Limits) Summary() string { return "no limits" }
 
