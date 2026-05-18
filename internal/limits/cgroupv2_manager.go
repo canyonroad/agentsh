@@ -28,13 +28,13 @@ type CgroupManager struct {
 // NewCgroupManager never fails for expected reasons — environment gaps are reflected
 // in the probed mode, not in the return error. An error is only returned if the
 // process cannot even determine its own cgroup path.
-func NewCgroupManager(ctx context.Context, ownHint string) (*CgroupManager, error) {
-	return newCgroupManagerFS(ctx, osCgroupFS{}, ownHint)
+func NewCgroupManager(ctx context.Context, ownHint string, permitAttachOnly bool) (*CgroupManager, error) {
+	return newCgroupManagerFS(ctx, osCgroupFS{}, ownHint, permitAttachOnly)
 }
 
 // newCgroupManagerFS is the FS-injectable form used by unit tests.
-func newCgroupManagerFS(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupManager, error) {
-	probe, err := ProbeCgroupsV2(ctx, fs, ownHint)
+func newCgroupManagerFS(ctx context.Context, fs cgroupFS, ownHint string, permitAttachOnly bool) (*CgroupManager, error) {
+	probe, err := ProbeCgroupsV2(ctx, fs, ownHint, permitAttachOnly)
 	if err != nil {
 		return nil, fmt.Errorf("probe cgroups v2: %w", err)
 	}
@@ -63,6 +63,26 @@ func (m *CgroupManager) Apply(name string, pid int, lim CgroupV2Limits) (*Cgroup
 		}
 		// No limits requested: allow the command but create no cgroup.
 		return nil, nil
+	}
+
+	if m.probe.Mode == ModeAttachOnly {
+		if !lim.IsEmpty() {
+			return nil, &CgroupResourceLimitsUnavailableError{
+				Reason: m.probe.Reason,
+				Limits: lim,
+			}
+		}
+		parent := m.parentDir()
+		safe := sanitizeCgroupName(name)
+		dir := filepath.Join(parent, safe)
+
+		if err := m.fs.Mkdir(dir, 0o755); err != nil && !errors.Is(err, syscall.EEXIST) {
+			return nil, fmt.Errorf("mkdir cgroup (mode=%s, dir=%s): %w", m.probe.Mode, dir, err)
+		}
+		if err := m.fs.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0o644); err != nil {
+			return nil, fmt.Errorf("attach pid (mode=%s, dir=%s): %w", m.probe.Mode, dir, err)
+		}
+		return &CgroupV2{Path: dir}, nil
 	}
 
 	parent := m.parentDir()

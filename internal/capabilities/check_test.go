@@ -175,16 +175,16 @@ func TestCheckAll_SeccompUserNotify_Unavailable(t *testing.T) {
 func TestCheckAll_Ptrace_Unavailable(t *testing.T) {
 	// Save and restore originals
 	origPtrace := checkPtrace
-	origCgroups := checkCgroupsV2
+	origCgroups := checkCgroupsV2ResourceLimits
 	defer func() {
 		checkPtrace = origPtrace
-		checkCgroupsV2 = origCgroups
+		checkCgroupsV2ResourceLimits = origCgroups
 	}()
 
 	// Mock cgroups to pass (so we can test ptrace failure in isolation)
-	checkCgroupsV2 = func() CheckResult {
+	checkCgroupsV2ResourceLimits = func() CheckResult {
 		return CheckResult{
-			Feature:   "cgroups-v2",
+			Feature:   "cgroups_v2_resource_limits",
 			Available: true,
 		}
 	}
@@ -227,10 +227,10 @@ func TestCheckAll_Ptrace_Unavailable(t *testing.T) {
 func TestCheckAll_CgroupsV2_Unavailable(t *testing.T) {
 	// Save and restore originals
 	origPtrace := checkPtrace
-	origCgroups := checkCgroupsV2
+	origCgroups := checkCgroupsV2ResourceLimits
 	defer func() {
 		checkPtrace = origPtrace
-		checkCgroupsV2 = origCgroups
+		checkCgroupsV2ResourceLimits = origCgroups
 	}()
 
 	// Mock ptrace to pass
@@ -242,9 +242,9 @@ func TestCheckAll_CgroupsV2_Unavailable(t *testing.T) {
 	}
 
 	// Mock cgroups v2 to return failure
-	checkCgroupsV2 = func() CheckResult {
+	checkCgroupsV2ResourceLimits = func() CheckResult {
 		return CheckResult{
-			Feature:   "cgroups-v2",
+			Feature:   "cgroups_v2_resource_limits",
 			Available: false,
 			Error:     errors.New("cgroups v2 not available: /sys/fs/cgroup/cgroup.controllers not found"),
 		}
@@ -265,7 +265,7 @@ func TestCheckAll_CgroupsV2_Unavailable(t *testing.T) {
 
 	errStr := err.Error()
 
-	if !strings.Contains(errStr, "cgroups-v2") {
+	if !strings.Contains(errStr, "cgroups_v2_resource_limits") {
 		t.Errorf("error should mention feature, got: %v", err)
 	}
 	if !strings.Contains(errStr, "sandbox.cgroups.enabled") {
@@ -322,13 +322,13 @@ func TestCheckAll_MultipleFailures(t *testing.T) {
 	// Save and restore originals
 	origSeccomp := checkSeccompUserNotify
 	origPtrace := checkPtrace
-	origCgroups := checkCgroupsV2
+	origCgroups := checkCgroupsV2ResourceLimits
 	origEBPF := checkeBPF
 	origBinary := checkWrapperBinary
 	defer func() {
 		checkSeccompUserNotify = origSeccomp
 		checkPtrace = origPtrace
-		checkCgroupsV2 = origCgroups
+		checkCgroupsV2ResourceLimits = origCgroups
 		checkeBPF = origEBPF
 		checkWrapperBinary = origBinary
 	}()
@@ -350,9 +350,9 @@ func TestCheckAll_MultipleFailures(t *testing.T) {
 		}
 	}
 
-	checkCgroupsV2 = func() CheckResult {
+	checkCgroupsV2ResourceLimits = func() CheckResult {
 		return CheckResult{
-			Feature:   "cgroups-v2",
+			Feature:   "cgroups_v2_resource_limits",
 			Available: false,
 			Error:     errors.New("cgroups v2 not available"),
 		}
@@ -406,8 +406,8 @@ func TestCheckAll_MultipleFailures(t *testing.T) {
 	if !strings.Contains(errStr, "ptrace") {
 		t.Errorf("error should mention ptrace, got: %v", err)
 	}
-	if !strings.Contains(errStr, "cgroups-v2") {
-		t.Errorf("error should mention cgroups-v2, got: %v", err)
+	if !strings.Contains(errStr, "cgroups_v2_resource_limits") {
+		t.Errorf("error should mention cgroups_v2_resource_limits, got: %v", err)
 	}
 	if !strings.Contains(errStr, "ebpf") {
 		t.Errorf("error should mention ebpf, got: %v", err)
@@ -543,8 +543,8 @@ func TestCheckAll_SingleFeatureChecks(t *testing.T) {
 		{
 			name: "cgroups enabled triggers both ptrace and cgroups v2 checks",
 			setupMocks: func() {
-				checkCgroupsV2 = func() CheckResult {
-					return CheckResult{Feature: "cgroups-v2", Available: true}
+				checkCgroupsV2ResourceLimits = func() CheckResult {
+					return CheckResult{Feature: "cgroups_v2_resource_limits", Available: true}
 				}
 				checkPtrace = func() CheckResult {
 					return CheckResult{Feature: "ptrace", Available: true}
@@ -578,7 +578,7 @@ func TestCheckAll_SingleFeatureChecks(t *testing.T) {
 	// Save originals
 	origSeccomp := checkSeccompUserNotify
 	origPtrace := checkPtrace
-	origCgroups := checkCgroupsV2
+	origCgroups := checkCgroupsV2ResourceLimits
 	origEBPF := checkeBPF
 	origBinary := checkWrapperBinary
 
@@ -587,7 +587,7 @@ func TestCheckAll_SingleFeatureChecks(t *testing.T) {
 			// Reset to originals before each test
 			checkSeccompUserNotify = origSeccomp
 			checkPtrace = origPtrace
-			checkCgroupsV2 = origCgroups
+			checkCgroupsV2ResourceLimits = origCgroups
 			checkeBPF = origEBPF
 			checkWrapperBinary = origBinary
 
@@ -619,7 +619,7 @@ func TestCheckAll_SingleFeatureChecks(t *testing.T) {
 	// Restore originals after all tests
 	checkSeccompUserNotify = origSeccomp
 	checkPtrace = origPtrace
-	checkCgroupsV2 = origCgroups
+	checkCgroupsV2ResourceLimits = origCgroups
 	checkeBPF = origEBPF
 	checkWrapperBinary = origBinary
 }

@@ -24,10 +24,15 @@ import (
 )
 
 type fakeCgroupManagerForAPITest struct {
-	path string
+	path     string
+	mode     limits.CgroupMode // defaults to ModeNested when zero
+	applyErr error             // when set, Apply returns this instead of a CgroupV2
 }
 
 func (m *fakeCgroupManagerForAPITest) Apply(name string, pid int, lim limits.CgroupV2Limits) (*limits.CgroupV2, error) {
+	if m.applyErr != nil {
+		return nil, m.applyErr
+	}
 	if err := os.MkdirAll(m.path, 0o755); err != nil {
 		return nil, err
 	}
@@ -35,7 +40,11 @@ func (m *fakeCgroupManagerForAPITest) Apply(name string, pid int, lim limits.Cgr
 }
 
 func (m *fakeCgroupManagerForAPITest) Probe() *limits.CgroupProbeResult {
-	return &limits.CgroupProbeResult{Mode: limits.ModeNested}
+	mode := m.mode
+	if mode == "" {
+		mode = limits.ModeNested
+	}
+	return &limits.CgroupProbeResult{Mode: mode}
 }
 
 func newAppWithFakeCgroupManager(t *testing.T, cfg *config.Config, cgPath string) *App {
@@ -378,5 +387,176 @@ func TestApplyCgroupV2_DetachesAndCleansCgroupWhenRequiredEnforcePopulateFails(t
 	}
 	if _, statErr := os.Stat(cgPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected cgroup cleanup after required populate failure, stat err = %v", statErr)
+	}
+}
+
+// TestApplyCgroupV2_AttachOnly_NoLimits_Succeeds verifies that when
+// cgroups.enabled=false but ebpf.enabled=true the widened activation gate
+// still proceeds, and a successful ModeAttachOnly Apply with no resource limits
+// invokes ebpfAttachConnectToCgroup and returns a non-nil cleanup.
+func TestApplyCgroupV2_AttachOnly_NoLimits_Succeeds(t *testing.T) {
+	withEBPFHooks(t)
+
+	cgPath := filepath.Join(t.TempDir(), "agentsh-test-cgroup")
+
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = false // widened gate: ebpf.enabled alone is sufficient
+	cfg.Sandbox.Network.EBPF.Enabled = true
+
+	app := newAppWithFakeCgroupManager(t, cfg, cgPath)
+	app.cgroupMgr.(*fakeCgroupManagerForAPITest).mode = limits.ModeAttachOnly
+
+	var attachCalled string
+	ebpfCheckSupport = func() ebpftrace.SupportStatus {
+		return ebpftrace.SupportStatus{Supported: true}
+	}
+	ebpfAttachConnectToCgroup = func(path string) (*ebpf.Collection, func() error, error) {
+		attachCalled = path
+		return &ebpf.Collection{}, func() error { return nil }, nil
+	}
+	ebpfStartCollector = func(coll *ebpf.Collection, bufSize int) (*ebpftrace.Collector, error) {
+		return nil, errors.New("collector not needed in attach-only test")
+	}
+
+	cleanup, err := applyCgroupV2(context.Background(), storeEmitter{store: app.store, broker: app.broker}, app, "sess", "cmd", 1234, policy.Limits{}, nil, nil)
+	if err != nil {
+		t.Fatalf("applyCgroupV2: %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("expected non-nil cleanup closure")
+	}
+	if attachCalled == "" {
+		t.Errorf("ebpfAttachConnectToCgroup should have been called")
+	}
+	_ = cleanup()
+}
+
+// TestDefaultWrapCgroupSetup_AttachOnly_NoLimits_Succeeds verifies that when
+// the probe mode is ModeAttachOnly and no resource limits are requested, the
+// wrap cgroup setup succeeds and invokes the ebpf attach hook.
+func TestDefaultWrapCgroupSetup_AttachOnly_NoLimits_Succeeds(t *testing.T) {
+	withEBPFHooks(t)
+
+	cgPath := filepath.Join(t.TempDir(), "agentsh-test-cgroup")
+
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = true
+	cfg.Sandbox.Network.EBPF.Enabled = true
+
+	app := newAppWithFakeCgroupManager(t, cfg, cgPath)
+	app.cgroupMgr.(*fakeCgroupManagerForAPITest).mode = limits.ModeAttachOnly
+
+	var attachCalled string
+	ebpfCheckSupport = func() ebpftrace.SupportStatus {
+		return ebpftrace.SupportStatus{Supported: true}
+	}
+	ebpfAttachConnectToCgroup = func(path string) (*ebpf.Collection, func() error, error) {
+		attachCalled = path
+		return &ebpf.Collection{}, func() error { return nil }, nil
+	}
+	ebpfStartCollector = func(coll *ebpf.Collection, bufSize int) (*ebpftrace.Collector, error) {
+		return nil, errors.New("collector not needed in attach-only test")
+	}
+
+	cleanup, err := defaultWrapCgroupSetupForNotify(context.Background(), app, &session.Session{}, "sess-1", 4242)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if cleanup == nil {
+		t.Fatalf("expected cleanup closure, got nil")
+	}
+	if attachCalled == "" {
+		t.Errorf("ebpfAttachConnectToCgroup should have been called")
+	}
+	_ = cleanup()
+}
+
+// TestDefaultWrapCgroupSetup_AttachOnly_LimitsRequested_Errors verifies that
+// when the probe mode is ModeAttachOnly but the fake Apply returns
+// CgroupResourceLimitsUnavailableError, the error propagates out.
+func TestDefaultWrapCgroupSetup_AttachOnly_LimitsRequested_Errors(t *testing.T) {
+	withEBPFHooks(t)
+
+	cgPath := t.TempDir()
+
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = true
+	cfg.Sandbox.Network.EBPF.Enabled = true
+
+	app := newAppWithFakeCgroupManager(t, cfg, cgPath)
+	fake := app.cgroupMgr.(*fakeCgroupManagerForAPITest)
+	fake.mode = limits.ModeAttachOnly
+	fake.applyErr = &limits.CgroupResourceLimitsUnavailableError{
+		Reason: "controllers cannot be enabled: ENOTSUP",
+		Limits: limits.CgroupV2Limits{MaxMemoryBytes: 16 << 20},
+	}
+
+	_, err := defaultWrapCgroupSetupForNotify(context.Background(), app, &session.Session{}, "sess-1", 4242)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	var rlErr *limits.CgroupResourceLimitsUnavailableError
+	if !errors.As(err, &rlErr) {
+		t.Errorf("error type: got %T, want *CgroupResourceLimitsUnavailableError", err)
+	}
+}
+
+// TestDefaultWrapCgroupSetup_Unavailable_NotRequired_WarnContinues verifies
+// that when the probe mode is ModeUnavailable and ebpf.required is false,
+// the setup soft-fails: it returns a no-op cleanup and no error.
+func TestDefaultWrapCgroupSetup_Unavailable_NotRequired_WarnContinues(t *testing.T) {
+	withEBPFHooks(t)
+
+	cgPath := t.TempDir()
+
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = true
+	cfg.Sandbox.Network.EBPF.Enabled = true
+	// ebpf.Required defaults false.
+
+	app := newAppWithFakeCgroupManager(t, cfg, cgPath)
+	fake := app.cgroupMgr.(*fakeCgroupManagerForAPITest)
+	fake.mode = limits.ModeUnavailable
+	fake.applyErr = &limits.CgroupUnavailableError{
+		Reason: "probe unavailable: capability gap",
+	}
+
+	cleanup, err := defaultWrapCgroupSetupForNotify(context.Background(), app, &session.Session{}, "sess-2", 4242)
+	if err != nil {
+		t.Fatalf("expected nil error (soft fail), got %v", err)
+	}
+	if cleanup == nil {
+		t.Errorf("expected a non-nil noop cleanup closure")
+	}
+	if cleanup != nil {
+		_ = cleanup()
+	}
+}
+
+// TestDefaultWrapCgroupSetup_Unavailable_Required_HardFails verifies that
+// when the probe mode is ModeUnavailable and ebpf.required is true, the
+// CgroupUnavailableError propagates as a hard failure.
+func TestDefaultWrapCgroupSetup_Unavailable_Required_HardFails(t *testing.T) {
+	withEBPFHooks(t)
+
+	cgPath := t.TempDir()
+
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = true
+	cfg.Sandbox.Network.EBPF.Enabled = true
+	cfg.Sandbox.Network.EBPF.Required = true
+
+	app := newAppWithFakeCgroupManager(t, cfg, cgPath)
+	fake := app.cgroupMgr.(*fakeCgroupManagerForAPITest)
+	fake.mode = limits.ModeUnavailable
+	fake.applyErr = &limits.CgroupUnavailableError{Reason: "probe unavailable"}
+
+	_, err := defaultWrapCgroupSetupForNotify(context.Background(), app, &session.Session{}, "sess-3", 4242)
+	if err == nil {
+		t.Fatalf("expected error under ebpf.required=true, got nil")
+	}
+	var unavailErr *limits.CgroupUnavailableError
+	if !errors.As(err, &unavailErr) {
+		t.Errorf("error type: got %T, want *CgroupUnavailableError", err)
 	}
 }

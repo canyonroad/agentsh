@@ -46,7 +46,7 @@ func probeCgroupsV2() ProbeResult {
 	}
 	cacheCgroupProbe(res)
 	return ProbeResult{
-		Available: res.Mode != limits.ModeUnavailable,
+		Available: res.Mode == limits.ModeNested || res.Mode == limits.ModeTopLevel,
 		Detail:    string(res.Mode) + ": " + res.Reason,
 	}
 }

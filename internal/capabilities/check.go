@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/limits"
 )
 
 // CheckResult represents the result of a single capability check.
@@ -26,11 +27,12 @@ type Check func() CheckResult
 
 // Check function variables - can be replaced in tests.
 var (
-	checkSeccompUserNotify = realCheckSeccompUserNotify
-	checkPtrace            = realCheckPtrace
-	checkCgroupsV2         = realCheckCgroupsV2
-	checkeBPF              = realCheckeBPF
-	checkWrapperBinary     = realCheckWrapperBinary
+	checkSeccompUserNotify       = realCheckSeccompUserNotify
+	checkPtrace                  = realCheckPtrace
+	checkCgroupsV2ResourceLimits = realCheckCgroupsV2ResourceLimits
+	checkeBPF                    = realCheckeBPF
+	checkEBPFCgroupAttach        = realCheckEBPFCgroupAttach
+	checkWrapperBinary           = realCheckWrapperBinary
 )
 
 func realCheckSeccompUserNotify() CheckResult {
@@ -51,14 +53,46 @@ func realCheckPtrace() CheckResult {
 	return r
 }
 
-func realCheckCgroupsV2() CheckResult {
-	probe := probeCgroupsV2()
-	return CheckResult{Feature: "cgroups-v2", Available: probe.Available}
+func realCheckCgroupsV2ResourceLimits() CheckResult {
+	// Populate the cache on the first call so that detect output can read it.
+	// If the cache was already set (e.g., by another check or a test fixture)
+	// we skip the probe — the cached value wins.
+	if LastCgroupProbe() == nil {
+		probeCgroupsV2()
+	}
+	available := false
+	if last := LastCgroupProbe(); last != nil {
+		available = last.Mode == limits.ModeNested || last.Mode == limits.ModeTopLevel
+	}
+	return CheckResult{Feature: "cgroups_v2_resource_limits", Available: available}
 }
 
 func realCheckeBPF() CheckResult {
 	probe := probeEBPF()
 	return CheckResult{Feature: "ebpf", Available: probe.Available}
+}
+
+func realCheckEBPFCgroupAttach() CheckResult {
+	ebpfResult := checkeBPF()
+	var mode limits.CgroupMode = limits.ModeUnavailable
+	if last := LastCgroupProbe(); last != nil {
+		mode = last.Mode
+	}
+	available := ebpfResult.Available &&
+		(mode == limits.ModeNested || mode == limits.ModeTopLevel || mode == limits.ModeAttachOnly)
+	r := CheckResult{
+		Feature:   "ebpf_cgroup_attach",
+		Available: available,
+	}
+	if !available {
+		switch {
+		case !ebpfResult.Available:
+			r.Error = fmt.Errorf("eBPF kernel support unavailable: %v", ebpfResult.Error)
+		default:
+			r.Error = fmt.Errorf("cgroup attach feasibility unavailable: probe mode is %q", mode)
+		}
+	}
+	return r
 }
 
 func realCheckWrapperBinary(binaryPath string) CheckResult {
@@ -101,7 +135,7 @@ func CheckAll(cfg *config.Config) error {
 	// Check cgroups.enabled -> requires cgroups v2 + ptrace
 	if cfg.Sandbox.Cgroups.Enabled {
 		// Check cgroups v2
-		cgResult := checkCgroupsV2()
+		cgResult := checkCgroupsV2ResourceLimits()
 		cgResult.ConfigKey = "sandbox.cgroups.enabled"
 		cgResult.Suggestion = "Set 'sandbox.cgroups.enabled: false' in your config"
 		if !cgResult.Available {
@@ -133,6 +167,17 @@ func CheckAll(cfg *config.Config) error {
 		result.ConfigKey = "sandbox.network.ebpf.enabled"
 		result.Suggestion = "Set 'sandbox.network.ebpf.enabled: false' in your config"
 		if !result.Available {
+			failures = append(failures, result)
+		}
+	}
+
+	// Check ebpf cgroup attach feasibility (eBPF kernel support + attach-capable cgroup mode).
+	// Only recorded as a fatal failure when ebpf.required=true; enabled=true alone is best-effort.
+	if cfg.Sandbox.Network.EBPF.Enabled || cfg.Sandbox.Network.EBPF.Enforce || cfg.Sandbox.Network.EBPF.Required {
+		result := checkEBPFCgroupAttach()
+		result.ConfigKey = "sandbox.network.ebpf.enabled"
+		result.Suggestion = "See docs/ebpf.md for capability requirements (CAP_BPF, /sys/fs/bpf, CONFIG_CGROUP_BPF)"
+		if !result.Available && cfg.Sandbox.Network.EBPF.Required {
 			failures = append(failures, result)
 		}
 	}

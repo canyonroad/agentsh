@@ -17,7 +17,7 @@ func TestManagerApply_NestedWritesLimits(t *testing.T) {
 	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
 	f.seedFile(own+"/cgroup.subtree_control", "cpu memory pids")
 
-	m, err := newCgroupManagerFS(context.Background(), f, own)
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestManagerApply_TopLevelWritesUnderSlice(t *testing.T) {
 	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
 
-	m, err := newCgroupManagerFS(context.Background(), f, own)
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestManagerApply_UnavailableNoLimitsAllows(t *testing.T) {
 	own := "/sys/fs/cgroup/system.slice/agentsh.service"
 	f.seedFile(own+"/cgroup.controllers", "cpu pids")
 
-	m, err := newCgroupManagerFS(context.Background(), f, own)
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestManagerApply_UnavailableWithLimitsRefuses(t *testing.T) {
 	own := "/sys/fs/cgroup/system.slice/agentsh.service"
 	f.seedFile(own+"/cgroup.controllers", "cpu pids")
 
-	m, err := newCgroupManagerFS(context.Background(), f, own)
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -116,5 +116,77 @@ func TestManagerApply_UnavailableWithLimitsRefuses(t *testing.T) {
 	}
 	if !strings.Contains(ue.Reason, "memory") {
 		t.Fatalf("reason should mention missing memory: %q", ue.Reason)
+	}
+}
+
+func TestManagerApply_AttachOnly_EmptyLimits_Succeeds(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.failSubtreeWrite(own+"/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
+	f.failSubtreeWrite("/sys/fs/cgroup/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
+
+	m, err := newCgroupManagerFS(context.Background(), f, own, true /*permitAttachOnly*/)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	if m.Probe().Mode != ModeAttachOnly {
+		t.Fatalf("mode: %q", m.Probe().Mode)
+	}
+
+	cg, err := m.Apply("agentsh-sess-cmd", 4242, CgroupV2Limits{})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if cg == nil {
+		t.Fatalf("expected handle, got nil")
+	}
+	if !strings.HasPrefix(cg.Path, own+"/") {
+		t.Fatalf("attach-only cgroup path: %q (want prefix %q)", cg.Path, own)
+	}
+	// PID was written.
+	data, _ := f.ReadFile(cg.Path + "/cgroup.procs")
+	if string(data) != "4242" {
+		t.Errorf("cgroup.procs: got %q, want 4242", data)
+	}
+	// No .max files written.
+	if _, err := f.ReadFile(cg.Path + "/memory.max"); err == nil {
+		t.Errorf("memory.max should not be written in AttachOnly mode")
+	}
+	if _, err := f.ReadFile(cg.Path + "/pids.max"); err == nil {
+		t.Errorf("pids.max should not be written in AttachOnly mode")
+	}
+}
+
+func TestManagerApply_AttachOnly_WithLimits_Refuses(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.failSubtreeWrite(own+"/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
+	f.failSubtreeWrite("/sys/fs/cgroup/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
+
+	m, err := newCgroupManagerFS(context.Background(), f, own, true)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	cg, err := m.Apply("agentsh-sess-cmd", 4242, CgroupV2Limits{MaxMemoryBytes: 16 << 20})
+	if err == nil {
+		t.Fatalf("expected error, got cg=%v", cg)
+	}
+	var rlErr *CgroupResourceLimitsUnavailableError
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("error type: got %T, want *CgroupResourceLimitsUnavailableError", err)
+	}
+	if rlErr.Limits.MaxMemoryBytes != 16<<20 {
+		t.Errorf("error carries limits: got %+v", rlErr.Limits)
+	}
+	// No cgroup directory was created.
+	if _, err := f.ReadFile(own + "/agentsh-sess-cmd/cgroup.procs"); err == nil {
+		t.Errorf("AttachOnly+limits refusal should not create the cgroup")
 	}
 }

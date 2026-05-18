@@ -29,6 +29,7 @@ type CgroupMode string
 const (
 	ModeNested      CgroupMode = "nested"
 	ModeTopLevel    CgroupMode = "top-level"
+	ModeAttachOnly  CgroupMode = "attach-only"
 	ModeUnavailable CgroupMode = "unavailable"
 )
 
@@ -48,7 +49,7 @@ type CgroupProbeResult struct {
 type CgroupManager struct{}
 
 // NewCgroupManager is not supported on non-Linux platforms.
-func NewCgroupManager(ctx context.Context, ownHint string) (*CgroupManager, error) {
+func NewCgroupManager(ctx context.Context, ownHint string, permitAttachOnly bool) (*CgroupManager, error) {
 	return nil, fmt.Errorf("cgroups not supported on this platform")
 }
 
@@ -74,6 +75,19 @@ type CgroupUnavailableError struct {
 
 func (e *CgroupUnavailableError) Error() string {
 	return fmt.Sprintf("cgroup enforcement unavailable (%s)", e.Reason)
+}
+
+// CgroupResourceLimitsUnavailableError mirrors the Linux-only type so that
+// callers in platform-agnostic packages can reference it. On non-Linux the
+// cgroup code paths are never reached, so this exists only to satisfy
+// cross-compilation.
+type CgroupResourceLimitsUnavailableError struct {
+	Reason string
+	Limits CgroupV2Limits
+}
+
+func (e *CgroupResourceLimitsUnavailableError) Error() string {
+	return fmt.Sprintf("cgroup resource limits unavailable (%s)", e.Reason)
 }
 
 // Summary returns a compact human-readable description of non-zero limits.

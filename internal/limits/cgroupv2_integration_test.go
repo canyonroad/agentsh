@@ -20,7 +20,7 @@ func TestIntegration_ProbeReal(t *testing.T) {
 	if !DetectCgroupV2() {
 		t.Skip("cgroup v2 not mounted")
 	}
-	m, err := NewCgroupManager(context.Background(), "")
+	m, err := NewCgroupManager(context.Background(), "", false)
 	if err != nil {
 		t.Fatalf("NewCgroupManager: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestIntegration_TopLevelApplyAndEnforce(t *testing.T) {
 	if !DetectCgroupV2() {
 		t.Skip("cgroup v2 not mounted")
 	}
-	m, err := NewCgroupManager(context.Background(), "")
+	m, err := NewCgroupManager(context.Background(), "", false)
 	if err != nil {
 		t.Fatalf("NewCgroupManager: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestIntegration_OrphanReap(t *testing.T) {
 		t.Skip("cgroup v2 not mounted")
 	}
 	// This test only runs meaningfully in top-level mode.
-	probe, err := ProbeCgroupsV2(context.Background(), osCgroupFS{}, "")
+	probe, err := ProbeCgroupsV2(context.Background(), osCgroupFS{}, "", false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestIntegration_OrphanReap(t *testing.T) {
 	}
 
 	// Re-probe to trigger reap.
-	probe2, err := ProbeCgroupsV2(context.Background(), osCgroupFS{}, "")
+	probe2, err := ProbeCgroupsV2(context.Background(), osCgroupFS{}, "", false)
 	if err != nil {
 		t.Fatalf("re-probe: %v", err)
 	}

@@ -31,6 +31,10 @@ type fakeCgroupFS struct {
 	// tests where the first enableControllers write fails with EBUSY and
 	// the retry after leaf-move succeeds.
 	openWriteErrsOnce map[string]error
+	// openWriteContentErrs injects a content-specific error into fakeWriter.WriteString.
+	// Keyed as "path:write:content" — only triggers when the written string matches
+	// the content suffix. Used by failSubtreeWrite to fail specific controller writes.
+	openWriteContentErrs map[string]error
 	// mkdirErrUnder injects an error returned by Mkdir for any direct
 	// child of the given parent directory. Used to simulate hosts where
 	// cgroup.subtree_control reports delegated controllers but the kernel
@@ -45,11 +49,12 @@ type fakeEntry struct {
 
 func newFakeCgroupFS() *fakeCgroupFS {
 	return &fakeCgroupFS{
-		files:        map[string]*fakeEntry{"/sys/fs/cgroup": {isDir: true}},
-		writeErrs:    map[string]error{},
-		openErrs:     map[string]error{},
-		openWriteErrsOnce: map[string]error{},
-		mkdirErrUnder:     map[string]error{},
+		files:                map[string]*fakeEntry{"/sys/fs/cgroup": {isDir: true}},
+		writeErrs:            map[string]error{},
+		openErrs:             map[string]error{},
+		openWriteErrsOnce:    map[string]error{},
+		openWriteContentErrs: map[string]error{},
+		mkdirErrUnder:        map[string]error{},
 	}
 }
 
@@ -182,6 +187,9 @@ func (w *fakeWriter) WriteString(s string) (int, error) {
 	if err, ok := w.fs.openErrs[key]; ok {
 		return 0, &fs.PathError{Op: "write", Path: w.path, Err: err}
 	}
+	if err, ok := w.fs.openWriteContentErrs[key+":"+s]; ok {
+		return 0, &fs.PathError{Op: "write", Path: w.path, Err: err}
+	}
 	w.buf.WriteString(s)
 	// Append to the underlying file content on every write, mimicking
 	// cgroup subtree_control semantics: the kernel stores the controller
@@ -235,6 +243,15 @@ func (d *fakeDirEntry) Type() os.FileMode {
 }
 func (d *fakeDirEntry) Info() (os.FileInfo, error) {
 	return &fakeFileInfo{name: d.name, isDir: d.isDir}, nil
+}
+
+// failSubtreeWrite injects a write error for a specific (path, content) pair.
+// It is keyed as "path:write:content" in openWriteContentErrs so that only
+// writes of the given content to the given path fail — other writes to the
+// same path succeed. This allows tests to fail writes for a specific
+// controller token (e.g. "+memory") without affecting writes for other tokens.
+func (f *fakeCgroupFS) failSubtreeWrite(p string, content string, err error) {
+	f.openWriteContentErrs[path.Clean(p)+":write:"+content] = err
 }
 
 // assertSubtreeControl returns an error unless path's content contains all of
