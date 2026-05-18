@@ -115,7 +115,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string, permitAtta
 		if err == nil && res != nil {
 			res.LeafMoved = res.LeafMoved || leafResident
 		}
-		return maybeUpgradeToAttachOnly(fs, res, err, own, "", permitAttachOnly)
+		return maybeUpgradeToAttachOnly(fs, res, err, own, permitAttachOnly)
 	}
 	if !containsAll(ownAvailable, requiredControllers) {
 		missing := missingControllers(ownAvailable, requiredControllers)
@@ -124,7 +124,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string, permitAtta
 		if err == nil && res != nil {
 			res.LeafMoved = res.LeafMoved || leafResident
 		}
-		return maybeUpgradeToAttachOnly(fs, res, err, own, "", permitAttachOnly)
+		return maybeUpgradeToAttachOnly(fs, res, err, own, permitAttachOnly)
 	}
 
 	// Step 3: already delegated?
@@ -141,7 +141,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string, permitAtta
 			if err == nil && res != nil {
 				res.LeafMoved = res.LeafMoved || leafResident
 			}
-			return maybeUpgradeToAttachOnly(fs, res, err, own, "", permitAttachOnly)
+			return maybeUpgradeToAttachOnly(fs, res, err, own, permitAttachOnly)
 		}
 		return &CgroupProbeResult{
 			Mode:        ModeNested,
@@ -164,7 +164,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string, permitAtta
 			if err == nil && res != nil {
 				res.LeafMoved = res.LeafMoved || leafResident
 			}
-			return maybeUpgradeToAttachOnly(fs, res, err, own, "", permitAttachOnly)
+			return maybeUpgradeToAttachOnly(fs, res, err, own, permitAttachOnly)
 		}
 		// Re-read to confirm and to pick up the io flag.
 		delegatedNow, _ := readControllerSet(fs, filepath.Join(own, "cgroup.subtree_control"))
@@ -188,7 +188,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string, permitAtta
 				if err == nil && res != nil {
 					res.LeafMoved = true
 				}
-				return maybeUpgradeToAttachOnly(fs, res, err, own, "", permitAttachOnly)
+				return maybeUpgradeToAttachOnly(fs, res, err, own, permitAttachOnly)
 			}
 			delegatedNow, _ := readControllerSet(fs, filepath.Join(own, "cgroup.subtree_control"))
 			return &CgroupProbeResult{
@@ -208,7 +208,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string, permitAtta
 			if err == nil && res != nil {
 				res.LeafMoved = true
 			}
-			return maybeUpgradeToAttachOnly(fs, res, err, own, "", permitAttachOnly)
+			return maybeUpgradeToAttachOnly(fs, res, err, own, permitAttachOnly)
 		}
 		// Leaf-move itself failed; include the failure in the reason
 		// alongside the original EBUSY.
@@ -217,7 +217,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string, permitAtta
 		if err == nil && res != nil {
 			res.LeafMoved = res.LeafMoved || leafResident
 		}
-		return maybeUpgradeToAttachOnly(fs, res, err, own, "", permitAttachOnly)
+		return maybeUpgradeToAttachOnly(fs, res, err, own, permitAttachOnly)
 	}
 
 	// Step 5: classify the enable failure and fall through to top-level.
@@ -226,7 +226,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string, permitAtta
 	if err == nil && res != nil {
 		res.LeafMoved = res.LeafMoved || leafResident
 	}
-	return maybeUpgradeToAttachOnly(fs, res, err, own, "", permitAttachOnly)
+	return maybeUpgradeToAttachOnly(fs, res, err, own, permitAttachOnly)
 }
 
 // ProbeCgroupsV2Default is a convenience wrapper that runs ProbeCgroupsV2 with
@@ -455,28 +455,21 @@ func isUnpopulated(eventsFileContent []byte) bool {
 // probeAttachOnlyFeasibility is run and, on success, a ModeAttachOnly result
 // is returned with the original unavailable reason preserved so the caller can
 // understand why nested/top-level failed.
-//
-// parentDir is the directory to use as the attach root; topLevelSliceDir is
-// the slice directory if one was reached (may be empty).
-func maybeUpgradeToAttachOnly(fs cgroupFS, res *CgroupProbeResult, err error, own, topLevelSliceDir string, permitAttachOnly bool) (*CgroupProbeResult, error) {
+func maybeUpgradeToAttachOnly(fs cgroupFS, res *CgroupProbeResult, err error, own string, permitAttachOnly bool) (*CgroupProbeResult, error) {
 	if err != nil || res == nil || res.Mode != ModeUnavailable || !permitAttachOnly {
 		return res, err
 	}
 	parentDir := own
-	if topLevelSliceDir != "" {
-		parentDir = topLevelSliceDir
-	}
 	feasible, feasibleErr := probeAttachOnlyFeasibility(fs, parentDir)
 	if feasible {
 		return &CgroupProbeResult{
 			Mode:      ModeAttachOnly,
 			Reason:    res.Reason,
 			OwnCgroup: own,
-			SliceDir:  topLevelSliceDir,
 		}, nil
 	}
 	// Attach-only also infeasible — extend the reason for the Unavailable return.
-	res.Reason = res.Reason + "; attach-only also infeasible: " + feasibleErr.Error()
+	res.Reason = fmt.Sprintf("%s; attach-only also infeasible: %v", res.Reason, feasibleErr)
 	return res, nil
 }
 
@@ -486,9 +479,17 @@ func maybeUpgradeToAttachOnly(fs cgroupFS, res *CgroupProbeResult, err error, ow
 // To avoid leaking probe-test cgroups, the helper writes the probe process's
 // PID into the test cgroup, then writes it back into the parent's cgroup.procs
 // to release the test cgroup, then rmdirs the test directory.
+//
+// The probe name combines PID and a nanosecond timestamp to make collisions
+// against any stale leftover directory vanishingly unlikely. EEXIST is NOT
+// treated as success — an existing directory is stale evidence (perms may
+// have changed since it was created, cleanup may have failed for unrelated
+// reasons), so we fail closed in that case rather than falsely claim
+// feasibility.
 func probeAttachOnlyFeasibility(fs cgroupFS, parentDir string) (bool, error) {
-	testDir := filepath.Join(parentDir, "agentsh.probe")
-	if err := fs.Mkdir(testDir, 0o755); err != nil && !errors.Is(err, syscall.EEXIST) {
+	name := fmt.Sprintf("agentsh.attach-probe-%d-%d", os.Getpid(), time.Now().UnixNano())
+	testDir := filepath.Join(parentDir, name)
+	if err := fs.Mkdir(testDir, 0o755); err != nil {
 		return false, fmt.Errorf("mkdir %s: %w", testDir, err)
 	}
 	pid := strconv.Itoa(os.Getpid())

@@ -623,3 +623,31 @@ func TestProbe_AttachOnly_FilteredWhenNotPermitted(t *testing.T) {
 		t.Fatalf("mode: got %q, want %q (reason=%q)", res.Mode, ModeUnavailable, res.Reason)
 	}
 }
+
+// TestProbe_AttachOnly_FilteredWhenFeasibilityFails verifies that when
+// permitAttachOnly=true but the attach-only feasibility probe itself fails
+// (e.g. mkdir under own is denied), the result is ModeUnavailable and the
+// reason explains that attach-only was also infeasible.
+func TestProbe_AttachOnly_FilteredWhenFeasibilityFails(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	// Make the subtree_control write fail so nested/top-level both fail.
+	f.failSubtreeWrite(own+"/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
+	f.failSubtreeWrite("/sys/fs/cgroup/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
+	// Block mkdir under own so the attach-only feasibility probe also fails.
+	f.mkdirErrUnder[own] = syscall.EACCES
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own, true /*permitAttachOnly*/)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeUnavailable {
+		t.Fatalf("mode: got %q, want %q (reason=%q)", res.Mode, ModeUnavailable, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "attach-only also infeasible") {
+		t.Fatalf("reason should contain 'attach-only also infeasible': %q", res.Reason)
+	}
+}
