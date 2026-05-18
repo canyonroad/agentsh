@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/landlock"
+	"github.com/agentsh/agentsh/internal/limits"
 	"github.com/agentsh/agentsh/internal/policy"
 	seccomppkg "github.com/agentsh/agentsh/internal/seccomp"
 	"github.com/agentsh/agentsh/internal/session"
@@ -842,7 +844,31 @@ func defaultWrapCgroupSetupForNotify(ctx context.Context, a *App, s *session.Ses
 	}
 	cmdID := "wrap-" + uuid.NewString()
 	em := storeEmitter{store: a.store, broker: a.broker}
-	return applyCgroupV2(ctx, em, a, sessionID, cmdID, wrapperPID, lim, a.metrics, engine)
+	cleanup, err := applyCgroupV2(ctx, em, a, sessionID, cmdID, wrapperPID, lim, a.metrics, engine)
+	if err != nil {
+		var unavail *limits.CgroupUnavailableError
+		var limUnavail *limits.CgroupResourceLimitsUnavailableError
+		switch {
+		case errors.As(err, &limUnavail):
+			// Operator asked for resource limits in a host that can only do
+			// attach-only (ModeAttachOnly). Surface the contradiction.
+			return nil, err
+		case errors.As(err, &unavail):
+			// Cgroup enforcement is unavailable entirely. Soft-fail unless
+			// the operator has marked ebpf as required.
+			if a.cfg.Sandbox.Network.EBPF.Required {
+				return nil, err
+			}
+			slog.Warn("ebpf: wrap cgroup setup unavailable, continuing without enforcement",
+				"reason", unavail.Reason,
+				"session_id", sessionID,
+			)
+			return func() error { return nil }, nil
+		default:
+			return nil, err
+		}
+	}
+	return cleanup, nil
 }
 
 // acceptSignalFD listens on the Unix socket for a single connection from the CLI,
