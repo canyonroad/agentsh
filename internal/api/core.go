@@ -1269,6 +1269,10 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 
 	m, err := fs.Mount(fsCfg)
 	if err != nil {
+		// Mount failed: no FUSE server is attached to eventChan, so the
+		// processIOEvents goroutine started above would block on its
+		// receive forever. Close the channel here so it exits cleanly.
+		close(eventChan)
 		fields := map[string]any{
 			"mount_point":    mountPoint,
 			"error":          err.Error(),

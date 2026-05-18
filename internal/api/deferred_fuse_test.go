@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,10 +27,10 @@ type mockFSMount struct {
 	closed     atomic.Bool
 }
 
-func (m *mockFSMount) Path() string                { return m.path }
-func (m *mockFSMount) SourcePath() string           { return m.sourcePath }
-func (m *mockFSMount) Stats() platform.FSStats      { return platform.FSStats{} }
-func (m *mockFSMount) Close() error                 { m.closed.Store(true); return nil }
+func (m *mockFSMount) Path() string            { return m.path }
+func (m *mockFSMount) SourcePath() string      { return m.sourcePath }
+func (m *mockFSMount) Stats() platform.FSStats { return platform.FSStats{} }
+func (m *mockFSMount) Close() error            { m.closed.Store(true); return nil }
 
 type mockFilesystem struct {
 	available      atomic.Bool
@@ -75,11 +76,11 @@ func (m *mockPlatform) Filesystem() platform.FilesystemInterceptor {
 	}
 	return m.fs
 }
-func (m *mockPlatform) Network() platform.NetworkInterceptor      { return nil }
-func (m *mockPlatform) Sandbox() platform.SandboxManager          { return nil }
-func (m *mockPlatform) Resources() platform.ResourceLimiter       { return nil }
+func (m *mockPlatform) Network() platform.NetworkInterceptor                  { return nil }
+func (m *mockPlatform) Sandbox() platform.SandboxManager                      { return nil }
+func (m *mockPlatform) Resources() platform.ResourceLimiter                   { return nil }
 func (m *mockPlatform) Initialize(_ context.Context, _ platform.Config) error { return nil }
-func (m *mockPlatform) Shutdown(_ context.Context) error          { return nil }
+func (m *mockPlatform) Shutdown(_ context.Context) error                      { return nil }
 
 // --- helpers ---
 
@@ -253,6 +254,56 @@ func TestEnsureFUSEMount_MountError(t *testing.T) {
 	if s.WorkspaceMount != s.Workspace {
 		t.Fatalf("expected WorkspaceMount unchanged after mount error (%q), got %q", s.Workspace, s.WorkspaceMount)
 	}
+}
+
+// TestEnsureFUSEMount_MountError_NoEventChanLeak is a regression test for the
+// processIOEvents goroutine leak on the fs.Mount() error path in
+// mountFUSEForSession. Before the fix, the function created eventChan and
+// spawned a processIOEvents goroutine to consume from it, then returned early
+// on mount failure without closing the channel -- so the goroutine blocked
+// on the receive forever. Repeated failed mounts (any deployment where FUSE
+// is unavailable or permission-denied) would leak a goroutine and a 1000-slot
+// channel per attempt. The fix is to close(eventChan) on the mount-error path
+// before returning.
+func TestEnsureFUSEMount_MountError_NoEventChanLeak(t *testing.T) {
+	st := newSQLiteStore(t)
+	store := composite.New(st, st)
+	mgr := session.NewManager(10)
+	s := newDeferredTestSession(t, mgr)
+
+	app := newDeferredTestApp(t, mgr, store)
+	mfs := &mockFilesystem{}
+	mfs.available.Store(true)
+	mfs.mountErr = errors.New("fuse: permission denied")
+	app.SetPlatformForTest(&mockPlatform{fs: mfs})
+
+	// Settle the goroutine count before capturing baseline -- earlier
+	// subtests in the package may still have transient goroutines in flight.
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	before := runtime.NumGoroutine()
+
+	app.ensureFUSEMount(context.Background(), s)
+
+	if mfs.mountCalls.Load() != 1 {
+		t.Fatalf("expected 1 mount call, got %d", mfs.mountCalls.Load())
+	}
+
+	// processIOEvents exits when its eventChan is closed. Poll-wait for the
+	// goroutine count to drop back to baseline. With the leak, it stays at
+	// before+1 forever.
+	deadline := time.Now().Add(2 * time.Second)
+	var after int
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		after = runtime.NumGoroutine()
+		if after <= before {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("processIOEvents goroutine leaked after mount error: before=%d after=%d "+
+		"(eventChan was not closed on fs.Mount() error path)", before, after)
 }
 
 func TestEnsureFUSEMount_Idempotent(t *testing.T) {
