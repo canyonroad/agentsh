@@ -190,31 +190,3 @@ func TestManagerApply_AttachOnly_WithLimits_Refuses(t *testing.T) {
 		t.Errorf("AttachOnly+limits refusal should not create the cgroup")
 	}
 }
-
-func TestManagerApply_AttachOnly_CloseRemovesCgroup(t *testing.T) {
-	f := newFakeCgroupFS()
-	seedHealthyRoot(f)
-	own := "/sys/fs/cgroup/system.slice/agentsh.service"
-	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
-	f.seedFile(own+"/cgroup.subtree_control", "")
-	f.failSubtreeWrite(own+"/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
-	f.failSubtreeWrite("/sys/fs/cgroup/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
-
-	m, _ := newCgroupManagerFS(context.Background(), f, own, true)
-	cg, err := m.Apply("agentsh-sess-cmd", 4242, CgroupV2Limits{})
-	if err != nil {
-		t.Fatalf("apply: %v", err)
-	}
-	if err := cg.Close(context.Background()); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	// Close uses os.Remove; the cgroup directory should no longer be present in
-	// the fake FS internal map after Close removes it from the real path
-	// (which returns ENOENT, tolerated). Verify the path was set correctly so
-	// the removal target is deterministic.
-	if _, statErr := f.Stat(cg.Path); statErr == nil {
-		// In unit tests, Close calls os.Remove (not m.fs.Remove), so the fake
-		// FS entry is not actually removed. We only verify Close returned nil.
-		// The real removal is covered by the integration test.
-	}
-}
