@@ -122,20 +122,29 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		slog.Warn("real_paths enabled but enforce_without_fuse is false: outside-workspace file access will be audit-only (not blocked)")
 	}
 
-	// EBPF activation depends on sandbox.cgroups.enabled (see
-	// internal/api/wrap.go wrapNeedsCgroupBeforeAck and
-	// internal/api/cgroups.go applyCgroupV2 — both short-circuit when
-	// cgroups are not enabled). Without this warning, an operator
-	// enabling sandbox.network.ebpf.{enabled,enforce} without also
-	// enabling sandbox.cgroups.enabled gets zero enforcement and zero
-	// feedback. (The Required=true case is already a hard error in
-	// wrap.go; only the Enabled/Enforce case is silent.) See issue #345.
-	if (cfg.Sandbox.Network.EBPF.Enabled || cfg.Sandbox.Network.EBPF.Enforce) && !cfg.Sandbox.Cgroups.Enabled {
-		slog.Warn("ebpf: enforcement configured but inactive — requires sandbox.cgroups.enabled=true",
-			"ebpf.enabled", cfg.Sandbox.Network.EBPF.Enabled,
-			"ebpf.enforce", cfg.Sandbox.Network.EBPF.Enforce,
-			"cgroups.enabled", cfg.Sandbox.Cgroups.Enabled,
-		)
+	// Mode-aware startup log for EBPF config. When cgroupMgr is nil, no
+	// cgroup-related feature was requested so there is nothing to report.
+	// ModeNested / ModeTopLevel are silent success paths.
+	// Replaces the prior #346 WARN-only block (issue #346 / #347).
+	if cgroupMgr != nil && (cfg.Sandbox.Network.EBPF.Enabled || cfg.Sandbox.Network.EBPF.Enforce || cfg.Sandbox.Network.EBPF.Required) {
+		mode := cgroupMgr.Probe().Mode
+		reason := cgroupMgr.Probe().Reason
+		switch mode {
+		case limits.ModeAttachOnly:
+			slog.Info("ebpf: attach-only mode active (resource limits unavailable)",
+				"reason", reason,
+				"ebpf.enabled", cfg.Sandbox.Network.EBPF.Enabled,
+				"ebpf.enforce", cfg.Sandbox.Network.EBPF.Enforce,
+			)
+		case limits.ModeUnavailable:
+			slog.Warn("ebpf: enforcement configured but unavailable (check CAP_BPF and /sys/fs/bpf)",
+				"reason", reason,
+				"ebpf.enabled", cfg.Sandbox.Network.EBPF.Enabled,
+				"ebpf.enforce", cfg.Sandbox.Network.EBPF.Enforce,
+				"cgroups.enabled", cfg.Sandbox.Cgroups.Enabled,
+			)
+		}
+		// ModeNested / ModeTopLevel: success path, no log (silent success).
 	}
 
 	var appCgroupMgr cgroupManager

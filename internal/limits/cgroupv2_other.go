@@ -29,6 +29,7 @@ type CgroupMode string
 const (
 	ModeNested      CgroupMode = "nested"
 	ModeTopLevel    CgroupMode = "top-level"
+	ModeAttachOnly  CgroupMode = "attach-only"
 	ModeUnavailable CgroupMode = "unavailable"
 )
 
