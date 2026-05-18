@@ -125,26 +125,23 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 	// Mode-aware startup log for EBPF config. When cgroupMgr is nil, no
 	// cgroup-related feature was requested so there is nothing to report.
 	// ModeNested / ModeTopLevel are silent success paths.
-	// Replaces the prior #346 WARN-only block (issue #346 / #347).
 	if cgroupMgr != nil && (cfg.Sandbox.Network.EBPF.Enabled || cfg.Sandbox.Network.EBPF.Enforce || cfg.Sandbox.Network.EBPF.Required) {
-		mode := cgroupMgr.Probe().Mode
-		reason := cgroupMgr.Probe().Reason
-		switch mode {
+		probe := cgroupMgr.Probe()
+		switch probe.Mode {
 		case limits.ModeAttachOnly:
 			slog.Info("ebpf: attach-only mode active (resource limits unavailable)",
-				"reason", reason,
+				"reason", probe.Reason,
 				"ebpf.enabled", cfg.Sandbox.Network.EBPF.Enabled,
 				"ebpf.enforce", cfg.Sandbox.Network.EBPF.Enforce,
 			)
 		case limits.ModeUnavailable:
 			slog.Warn("ebpf: enforcement configured but unavailable (check CAP_BPF and /sys/fs/bpf)",
-				"reason", reason,
+				"reason", probe.Reason,
 				"ebpf.enabled", cfg.Sandbox.Network.EBPF.Enabled,
 				"ebpf.enforce", cfg.Sandbox.Network.EBPF.Enforce,
 				"cgroups.enabled", cfg.Sandbox.Cgroups.Enabled,
 			)
 		}
-		// ModeNested / ModeTopLevel: success path, no log (silent success).
 	}
 
 	var appCgroupMgr cgroupManager
