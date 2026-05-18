@@ -834,9 +834,6 @@ func defaultWrapCgroupSetupForNotify(ctx context.Context, a *App, s *session.Ses
 	if wrapperPID <= 0 {
 		return nil, fmt.Errorf("wrap cgroup setup requires wrapper pid")
 	}
-	if !a.cfg.Sandbox.Cgroups.Enabled {
-		return nil, nil
-	}
 
 	engine := a.policyEngineFor(s)
 	lim := policy.Limits{}
