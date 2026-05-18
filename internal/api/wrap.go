@@ -812,15 +812,13 @@ func wrapNeedsCgroupBeforeAck(a *App, s *session.Session) bool {
 	if a == nil || a.cfg == nil {
 		return false
 	}
-	if a.cfg.Sandbox.Network.EBPF.Required {
+	if a.cfg.Sandbox.Cgroups.Enabled ||
+		a.cfg.Sandbox.Network.EBPF.Enabled ||
+		a.cfg.Sandbox.Network.EBPF.Enforce ||
+		a.cfg.Sandbox.Network.EBPF.Required {
 		return true
 	}
-	if !a.cfg.Sandbox.Cgroups.Enabled {
-		return false
-	}
-	if a.cfg.Sandbox.Network.EBPF.Enabled || a.cfg.Sandbox.Network.EBPF.Enforce {
-		return true
-	}
+	// Per-policy resource-limits check unchanged.
 	engine := a.policyEngineFor(s)
 	if engine == nil {
 		return false
@@ -835,9 +833,6 @@ func defaultWrapCgroupSetupForNotify(ctx context.Context, a *App, s *session.Ses
 	}
 	if wrapperPID <= 0 {
 		return nil, fmt.Errorf("wrap cgroup setup requires wrapper pid")
-	}
-	if a.cfg.Sandbox.Network.EBPF.Required && !a.cfg.Sandbox.Cgroups.Enabled {
-		return nil, fmt.Errorf("ebpf required but sandbox.cgroups.enabled=false")
 	}
 	if !a.cfg.Sandbox.Cgroups.Enabled {
 		return nil, nil
