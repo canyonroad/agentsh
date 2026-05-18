@@ -34,7 +34,7 @@ func NewCgroupManager(ctx context.Context, ownHint string) (*CgroupManager, erro
 
 // newCgroupManagerFS is the FS-injectable form used by unit tests.
 func newCgroupManagerFS(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupManager, error) {
-	probe, err := ProbeCgroupsV2(ctx, fs, ownHint)
+	probe, err := ProbeCgroupsV2(ctx, fs, ownHint, false /*permitAttachOnly*/)
 	if err != nil {
 		return nil, fmt.Errorf("probe cgroups v2: %w", err)
 	}

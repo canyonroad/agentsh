@@ -23,7 +23,7 @@ func TestProbe_NestedAlreadyDelegated(t *testing.T) {
 	f.seedFile(own+"/cgroup.controllers", "cpu io memory pids")
 	f.seedFile(own+"/cgroup.subtree_control", "cpu io memory pids")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestProbe_NestedEnableSucceeds(t *testing.T) {
 	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
 	f.seedFile(own+"/cgroup.subtree_control", "")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestProbe_EnableEBUSY_FallbackToTopLevel(t *testing.T) {
 	// controller files, so we prepopulate the file at the expected path).
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestProbe_EnableEACCES_FallbackToTopLevel(t *testing.T) {
 	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EACCES
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestProbe_TopLevelMissingMemoryController(t *testing.T) {
 	f.seedFile(own+"/cgroup.controllers", "cpu pids")
 	f.seedFile(own+"/cgroup.subtree_control", "")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestProbe_TopLevelSliceMissingControllerFiles(t *testing.T) {
 	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
 	// Do NOT seed agentsh.slice/memory.max — our fake mkdir won't auto-create it.
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestProbe_TopLevelOrphanReap(t *testing.T) {
 	// Orphan B is populated -> should be left alone.
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/orphan-B/cgroup.events", "populated 1\nfrozen 0\n")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestProbe_IOControllerOptional(t *testing.T) {
 	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
 	f.seedFile(own+"/cgroup.subtree_control", "cpu memory pids")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestProbe_AllOrphansPopulated(t *testing.T) {
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/child-A/cgroup.events", "populated 1\nfrozen 0\n")
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/child-B/cgroup.events", "populated 1\nfrozen 0\n")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestProbe_LeafMove_EBUSYSucceeds(t *testing.T) {
 	// Seed cgroup.procs so the leaf-move write (WriteFile) succeeds.
 	f.seedFile(own+"/cgroup.procs", "1234")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestProbe_LeafMove_MkdirFails_FallbackTopLevel(t *testing.T) {
 	f.writeErrs[own+"/agentsh.leaf/cgroup.procs"] = syscall.EACCES
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestProbe_LeafMove_RetryEnableFails_FallbackTopLevel(t *testing.T) {
 	f.seedFile(own+"/cgroup.procs", "1234")
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestProbe_EACCES_NoLeafMove(t *testing.T) {
 	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EACCES
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestProbe_LeafMove_IdempotentSecondProbe(t *testing.T) {
 	f.seedFile(own+"/cgroup.procs", "1234")
 
 	// First probe: triggers leaf-move.
-	res1, err := ProbeCgroupsV2(context.Background(), f, own)
+	res1, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe 1: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestProbe_LeafMove_IdempotentSecondProbe(t *testing.T) {
 
 	// Second probe: same ownHint (parent). Subtree_control was enabled by
 	// probe 1, so this should see "already delegated" immediately.
-	res2, err := ProbeCgroupsV2(context.Background(), f, own)
+	res2, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe 2: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestProbe_AlreadyDelegated_EEXISTTreatedAsFailure(t *testing.T) {
 	f.mkdirErrUnder[own] = syscall.EEXIST
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestProbe_ExplicitLeafHintNotStripped(t *testing.T) {
 	f.seedFile(leafPath+"/cgroup.controllers", "cpu memory pids")
 	f.seedFile(leafPath+"/cgroup.subtree_control", "cpu memory pids")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, leafPath)
+	res, err := ProbeCgroupsV2(context.Background(), f, leafPath, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestProbe_AlreadyDelegated_MkdirDeniedFallsBack(t *testing.T) {
 	// Top-level slice mkdir should also fail (mirrors OC posture).
 	f.mkdirErrUnder["/sys/fs/cgroup"] = syscall.EACCES
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -477,7 +477,7 @@ func TestProbe_AlreadyDelegated_MkdirDeniedFallsToTopLevel(t *testing.T) {
 	// Top-level slice mkdir works; pre-seed memory.max so the slice probe passes.
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -498,7 +498,7 @@ func TestProbe_AlreadyDelegated_MkdirSucceeds_ProbeCleanedUp(t *testing.T) {
 	f.seedFile(own+"/cgroup.controllers", "cpu io memory pids")
 	f.seedFile(own+"/cgroup.subtree_control", "cpu io memory pids")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -530,7 +530,7 @@ func TestProbe_EnabledByProbe_MkdirDeniedFallsBack(t *testing.T) {
 	f.mkdirErrUnder[own] = syscall.EACCES
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestProbe_LeafMove_MkdirDeniedFallsBack(t *testing.T) {
 	// it (which would also be blocked by mkdirErrUnder[own]).
 	f.seedDir(own + "/agentsh.leaf")
 
-	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -576,5 +576,50 @@ func TestProbe_LeafMove_MkdirDeniedFallsBack(t *testing.T) {
 	}
 	if !strings.Contains(res.Reason, "child cgroup mkdir denied") {
 		t.Fatalf("reason should mention the writability failure: %q", res.Reason)
+	}
+}
+
+func TestProbe_AttachOnly_ReachedWhenPermitted(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	// Own cgroup advertises controllers but rejects subtree_control writes
+	// for memory — mirrors the stock-Docker scope-cgroup symptom.
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.failSubtreeWrite(own+"/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
+	// Top-level slice also refuses controller enable so the probe doesn't
+	// fall back to that path.
+	f.failSubtreeWrite("/sys/fs/cgroup/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
+	// Seed cgroup.procs in own so the attach-only feasibility probe can write there.
+	f.seedFile(own+"/cgroup.procs", "")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own, true /*permitAttachOnly*/)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeAttachOnly {
+		t.Fatalf("mode: got %q, want %q (reason=%q)", res.Mode, ModeAttachOnly, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "memory") {
+		t.Errorf("reason should name the failed controller: %q", res.Reason)
+	}
+}
+
+func TestProbe_AttachOnly_FilteredWhenNotPermitted(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.failSubtreeWrite(own+"/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
+	f.failSubtreeWrite("/sys/fs/cgroup/cgroup.subtree_control", "+memory", syscall.ENOTSUP)
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false /*permitAttachOnly*/)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeUnavailable {
+		t.Fatalf("mode: got %q, want %q (reason=%q)", res.Mode, ModeUnavailable, res.Reason)
 	}
 }
