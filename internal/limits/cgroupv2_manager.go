@@ -65,6 +65,26 @@ func (m *CgroupManager) Apply(name string, pid int, lim CgroupV2Limits) (*Cgroup
 		return nil, nil
 	}
 
+	if m.probe.Mode == ModeAttachOnly {
+		if !lim.IsEmpty() {
+			return nil, &CgroupResourceLimitsUnavailableError{
+				Reason: m.probe.Reason,
+				Limits: lim,
+			}
+		}
+		parent := m.parentDir()
+		safe := sanitizeCgroupName(name)
+		dir := filepath.Join(parent, safe)
+
+		if err := m.fs.Mkdir(dir, 0o755); err != nil && !errors.Is(err, syscall.EEXIST) {
+			return nil, fmt.Errorf("mkdir cgroup (mode=%s, dir=%s): %w", m.probe.Mode, dir, err)
+		}
+		if err := m.fs.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0o644); err != nil {
+			return nil, fmt.Errorf("attach pid (mode=%s, dir=%s): %w", m.probe.Mode, dir, err)
+		}
+		return &CgroupV2{Path: dir}, nil
+	}
+
 	parent := m.parentDir()
 	safe := sanitizeCgroupName(name)
 	dir := filepath.Join(parent, safe)
