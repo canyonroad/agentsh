@@ -1730,7 +1730,16 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	// If user set enabled: false, respect that — forcing it on causes EACCES
 	// on shared library opens because the handler denies read-only opens
 	// that don't match policy paths.
-	if cfg.Sandbox.Seccomp.Enabled && cfg.Sandbox.Seccomp.FileMonitor.Enabled == nil {
+	//
+	// Also skip auto-enable when socket_rules are configured: the operator
+	// is using seccomp for socket-level enforcement only, and auto-installing
+	// file-notify rules on top deadlocks the unixwrap during seccomp setup
+	// because file syscalls in the setup path block on a notifFD that
+	// hasn't been forwarded to the server yet (issue #304). Operators who
+	// want both can still opt in explicitly with file_monitor.enabled: true.
+	if cfg.Sandbox.Seccomp.Enabled &&
+		cfg.Sandbox.Seccomp.FileMonitor.Enabled == nil &&
+		len(cfg.Sandbox.Seccomp.SocketRules) == 0 {
 		cfg.Sandbox.Seccomp.FileMonitor.Enabled = boolPtr(true)
 	}
 
