@@ -351,3 +351,29 @@ sandbox:
 		FileMonitorBoolWithDefault(cfg.Sandbox.Seccomp.FileMonitor.Enabled, false),
 		"effective file_monitor.enabled must be false")
 }
+
+func TestFileMonitorAutoEnable_ExplicitTrueWithSocketRulesRespected(t *testing.T) {
+	// The auto-enable gate only governs the implicit default path.
+	// Explicit `file_monitor.enabled: true` must still be respected
+	// even when socket_rules are configured (operator opt-in).
+	yamlData := []byte(`
+sandbox:
+  seccomp:
+    enabled: true
+    file_monitor:
+      enabled: true
+    socket_rules:
+      - name: block-rxrpc
+        family: AF_RXRPC
+        action: errno
+`)
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal(yamlData, &cfg))
+
+	applyDefaults(&cfg)
+
+	require.NotNil(t, cfg.Sandbox.Seccomp.FileMonitor.Enabled,
+		"explicit true must survive applyDefaults")
+	require.True(t, *cfg.Sandbox.Seccomp.FileMonitor.Enabled,
+		"explicit true must remain true")
+}
