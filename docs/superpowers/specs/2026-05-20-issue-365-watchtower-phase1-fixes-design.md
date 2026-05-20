@@ -121,9 +121,18 @@ AppActivityCgroupMode uint32 = 151
 {Key: "mode",         Transform: AsString, DestPath: "enrichments.mode"},
 {Key: "own_cgroup",   Transform: AsString, DestPath: "enrichments.own_cgroup"},
 {Key: "slice_dir",    Transform: AsString, DestPath: "enrichments.slice_dir"},
-{Key: "io_available", Transform: AsBool,   DestPath: "enrichments.io_available"},
-{Key: "leaf_moved",   Transform: AsBool,   DestPath: "enrichments.leaf_moved"},
+{Key: "io_available", Transform: AsString, DestPath: "enrichments.io_available"},
+{Key: "leaf_moved",   Transform: AsString, DestPath: "enrichments.leaf_moved"},
 ```
+
+All five transforms are `AsString` because `appProjector`'s
+enrichments map is `map[string]string` — values that aren't
+strings (or that fail the `s != ""` guard) are silently dropped.
+`AsString` stringifies bools as `"true"` / `"false"`, which is the
+existing convention used elsewhere in this projector. There is no
+`AsBool` transform in `internal/ocsf/mapping.go` today, and adding
+one would not change rendering because the consumer is the
+string-typed enrichments map.
 
 `infraAllow` is shared across all 22 infra events. Keyed lookups mean
 events without these fields simply don't populate them — no
@@ -242,7 +251,7 @@ classification paths:
 | `cfg.AgentID` set + `os.Hostname()` would error | Override takes effect; hostname never consulted. |
 | `cfg.AgentID = ""` + `os.Hostname()` errors | Resolves to `"unknown"` (existing behaviour). |
 | `cgroup_mode` event omits one of the new fields | Allowlist transform silently drops it; `enrichments` map omits the key. No error. |
-| `cgroup_mode` event has a wrong-typed field (e.g. `io_available: "yes"`) | `AsBool` rejects the cast; key omitted. No error. |
+| `cgroup_mode` event has a wrong-typed field | `AsString` accepts `string`, `[]byte`, all integer types, `bool`, and floats; only unusual types (e.g. structs, slices) are rejected — in which case the key is omitted. No error. |
 | Scanner sees `string(events.EventX)` where `EventX` is not in `events/types.go` | Lookup miss → call is skipped silently. If the typo also appears as a bare literal elsewhere, the exhaustiveness test still fails on that path. |
 | Scanner pre-pass: const declared in `events/types.go` but not of type `EventType` | Filtered out by the typed-spec check; ignored. |
 | Scanner pre-pass: const declared but never referenced in any emit site | Harmless; lookup entry never consulted. |
