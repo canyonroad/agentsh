@@ -33,6 +33,36 @@ func (c *typeCaptureEmitter) snapshot() []string {
 	return append([]string(nil), c.types...)
 }
 
+func fuseBackingAllowPolicy(backing string) *policy.Policy {
+	return &policy.Policy{
+		Version: 1,
+		Name:    "allow-all",
+		FileRules: []policy.FileRule{
+			{
+				Name:       "allow-backing-workspace",
+				Paths:      []string{backing, filepath.Join(backing, "**")},
+				Operations: []string{"*"},
+				Decision:   "allow",
+			},
+		},
+	}
+}
+
+func TestFUSEBackingAllowPolicyAllowsResolvedPath(t *testing.T) {
+	backing := t.TempDir()
+	engine, err := policy.NewEngine(fuseBackingAllowPolicy(backing), false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolvedPath := filepath.Join(backing, "a.txt")
+	dec := engine.CheckFile(resolvedPath, "write")
+	if dec.EffectiveDecision != types.DecisionAllow {
+		t.Fatalf("FUSE test policy denied resolved backing path %q: decision=%s rule=%s",
+			resolvedPath, dec.EffectiveDecision, dec.Rule)
+	}
+}
+
 // NOTE: this test mounts a real FUSE filesystem; it will skip if /dev/fuse is unavailable.
 func TestFUSE_InterceptsExtraOps(t *testing.T) {
 	if _, err := os.Stat("/dev/fuse"); err != nil {
@@ -42,14 +72,7 @@ func TestFUSE_InterceptsExtraOps(t *testing.T) {
 	backing := t.TempDir()
 	mountPoint := filepath.Join(t.TempDir(), "mnt")
 
-	pol := &policy.Policy{
-		Version: 1,
-		Name:    "allow-all",
-		FileRules: []policy.FileRule{
-			{Name: "allow-workspace", Paths: []string{"/workspace", "/workspace/**"}, Operations: []string{"*"}, Decision: "allow"},
-		},
-	}
-	engine, err := policy.NewEngine(pol, false, true)
+	engine, err := policy.NewEngine(fuseBackingAllowPolicy(backing), false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

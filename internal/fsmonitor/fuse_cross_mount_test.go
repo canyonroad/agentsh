@@ -23,14 +23,7 @@ func TestFUSE_CrossMountIntoWorkspaceEmitsCreate(t *testing.T) {
 	backing := t.TempDir()
 	mountPoint := filepath.Join(t.TempDir(), "mnt")
 
-	pol := &policy.Policy{
-		Version: 1,
-		Name:    "allow-all",
-		FileRules: []policy.FileRule{
-			{Name: "allow-workspace", Paths: []string{"/workspace", "/workspace/**"}, Operations: []string{"*"}, Decision: "allow"},
-		},
-	}
-	engine, err := policy.NewEngine(pol, false, true)
+	engine, err := policy.NewEngine(fuseBackingAllowPolicy(backing), false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
