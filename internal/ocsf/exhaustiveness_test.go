@@ -133,6 +133,80 @@ func isEventCompositeLit(c *ast.CompositeLit) bool {
 	return false
 }
 
+// loadEventConstants parses internal/events/types.go and returns a map
+// of EventType-constant-name -> string-value (e.g.
+// "EventCgroupMode" -> "cgroup_mode"). Used by scanTypeLiterals to
+// resolve `Type: string(events.EventX)` and `Type: string(EventX)`
+// forms — these are *ast.CallExpr conversions, not *ast.BasicLit
+// strings, so the original walker missed them.
+//
+// The function is conservative: it only records const specs whose
+// declared type is the identifier "EventType" and whose RHS is a
+// single *ast.BasicLit of kind STRING. Other constants in the same
+// file (or const block with no explicit type) are skipped.
+func loadEventConstants(t *testing.T, rootDir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	path := filepath.Join(rootDir, "internal", "events", "types.go")
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			// Require an explicit declared type named "EventType".
+			typeIdent, ok := vs.Type.(*ast.Ident)
+			if !ok || typeIdent.Name != "EventType" {
+				continue
+			}
+			// Require a single BasicLit string value.
+			if len(vs.Names) != 1 || len(vs.Values) != 1 {
+				continue
+			}
+			lit, ok := vs.Values[0].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				continue
+			}
+			s, err := strconv.Unquote(lit.Value)
+			if err != nil || s == "" {
+				continue
+			}
+			out[vs.Names[0].Name] = s
+		}
+	}
+	return out
+}
+
+// TestLoadEventConstants_FindsEventCgroupMode verifies the const-
+// resolver finds the const that motivated this work.
+func TestLoadEventConstants_FindsEventCgroupMode(t *testing.T) {
+	got := loadEventConstants(t, repoRoot(t))
+	if got["EventCgroupMode"] != "cgroup_mode" {
+		t.Errorf("EventCgroupMode -> %q, want %q", got["EventCgroupMode"], "cgroup_mode")
+	}
+	// Spot-check a few siblings to confirm the walker isn't accidentally
+	// over-narrow.
+	wantSamples := map[string]string{
+		"EventCgroupMode":              "cgroup_mode",
+		"EventCgroupOrphansReaped":     "cgroup_orphans_reaped",
+		"EventCgroupUnavailableRefusal": "cgroup_unavailable_refusal",
+	}
+	for name, want := range wantSamples {
+		if got[name] != want {
+			t.Errorf("%s -> %q, want %q", name, got[name], want)
+		}
+	}
+}
+
 // TestExhaustiveness_AllEventTypesRegistered walks the source tree and
 // asserts every distinct ev.Type string literal is in registry,
 // pendingTypes, or skiplist. Reports the file:line of the first
