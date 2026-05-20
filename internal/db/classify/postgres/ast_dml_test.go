@@ -105,6 +105,44 @@ func TestClassifyUpdate_Smoke(t *testing.T) {
 	}
 }
 
+func TestClassifyUpdate_HasWhere(t *testing.T) {
+	cs := classifyOne(t, "UPDATE users SET active = false WHERE id = 1", SessionState{})
+	prim, _ := cs.Primary()
+	if prim.Group != effects.GroupModify {
+		t.Fatalf("primary group: got %v want modify", prim.Group)
+	}
+	if !prim.HasWhere {
+		t.Fatalf("UPDATE with WHERE should set HasWhere on primary effect: %+v", prim)
+	}
+}
+
+func TestClassifyUpdate_NoWhere(t *testing.T) {
+	cs := classifyOne(t, "UPDATE users SET active = false", SessionState{})
+	prim, _ := cs.Primary()
+	if prim.Group != effects.GroupModify {
+		t.Fatalf("primary group: got %v want modify", prim.Group)
+	}
+	if prim.HasWhere {
+		t.Fatalf("UPDATE without WHERE should not set HasWhere: %+v", prim)
+	}
+}
+
+func TestClassifyUpdate_HasWhereOnlyOnModifyEffect(t *testing.T) {
+	cs := classifyOne(t, "UPDATE users SET active = false FROM logins WHERE users.id = logins.user_id", SessionState{})
+	if len(cs.Effects) != 2 {
+		t.Fatalf("effects count: got %d want 2: %+v", len(cs.Effects), cs.Effects)
+	}
+	if !cs.Effects[0].HasWhere {
+		t.Fatalf("primary modify effect should have HasWhere: %+v", cs.Effects[0])
+	}
+	if cs.Effects[1].Group != effects.GroupRead {
+		t.Fatalf("secondary effect group = %v want read", cs.Effects[1].Group)
+	}
+	if cs.Effects[1].HasWhere {
+		t.Fatalf("secondary read effect should not inherit HasWhere: %+v", cs.Effects[1])
+	}
+}
+
 func TestClassifyUpdate_FromClauseAddsRead(t *testing.T) {
 	cs := classifyOne(t, "UPDATE users SET active = false FROM logins WHERE users.id = logins.user_id", SessionState{})
 	if len(cs.Effects) != 2 {
@@ -126,6 +164,28 @@ func TestClassifyDelete_Smoke(t *testing.T) {
 	prim, _ := cs.Primary()
 	if prim.Group != effects.GroupDelete {
 		t.Fatalf("primary group: got %v want delete", prim.Group)
+	}
+}
+
+func TestClassifyDelete_HasWhere(t *testing.T) {
+	cs := classifyOne(t, "DELETE FROM users WHERE id = 1", SessionState{})
+	prim, _ := cs.Primary()
+	if prim.Group != effects.GroupDelete {
+		t.Fatalf("primary group: got %v want delete", prim.Group)
+	}
+	if !prim.HasWhere {
+		t.Fatalf("DELETE with WHERE should set HasWhere on primary effect: %+v", prim)
+	}
+}
+
+func TestClassifyDelete_NoWhere(t *testing.T) {
+	cs := classifyOne(t, "DELETE FROM users", SessionState{})
+	prim, _ := cs.Primary()
+	if prim.Group != effects.GroupDelete {
+		t.Fatalf("primary group: got %v want delete", prim.Group)
+	}
+	if prim.HasWhere {
+		t.Fatalf("DELETE without WHERE should not set HasWhere: %+v", prim)
 	}
 }
 

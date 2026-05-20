@@ -110,6 +110,7 @@ func classifyUpdate(cs *effects.ClassifiedStatement, s *pg_query.UpdateStmt, ses
 		Group:      effects.GroupModify,
 		Objects:    []effects.ObjectRef{tgt},
 		Resolution: tgtRes,
+		HasWhere:   s.WhereClause != nil,
 	})
 	rels, res := walkRangeRelations(s.FromClause, sess)
 	if len(rels) > 0 {
@@ -136,6 +137,7 @@ func classifyDelete(cs *effects.ClassifiedStatement, s *pg_query.DeleteStmt, ses
 		Group:      effects.GroupDelete,
 		Objects:    []effects.ObjectRef{tgt},
 		Resolution: tgtRes,
+		HasWhere:   s.WhereClause != nil,
 	})
 	if hasReturningList(s.ReturningList) {
 		cs.Effects = append(cs.Effects, effects.Effect{
