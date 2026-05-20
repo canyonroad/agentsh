@@ -350,6 +350,103 @@ func TestSeccompWrapperDisabled(t *testing.T) {
 	}
 }
 
+// TestSeccompWrapperDisabled_WrapInitRefuses is the integration-level
+// regression guard for issue #361. With the config that secure-sandbox
+// auto-generates for hosted runtimes (seccomp.enabled=false,
+// unix_sockets.enabled=false), the server's wrap-init endpoint MUST
+// refuse to engage the wrapper. Before this fix, wrap-init succeeded and
+// the shim-launched wrapper hung trying to forward a notify FD to a
+// server with no handler — `secured.exec("curl ...")` failed with empty
+// stdout and exit 1. The unit tests in internal/api cover the gate in
+// isolation; this test pins the same contract end-to-end through a real
+// HTTP server with the exact config that triggered the regression.
+func TestSeccompWrapperDisabled_WrapInitRefuses(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	agentshBin, unixwrapBin := buildSeccompBinaries(t)
+
+	temp := t.TempDir()
+
+	policiesDir := filepath.Join(temp, "policies")
+	mustMkdir(t, policiesDir)
+	writeFile(t, filepath.Join(policiesDir, "default.yaml"), seccompTestPolicyYAML)
+
+	keysPath := filepath.Join(temp, "keys.yaml")
+	writeFile(t, keysPath, testAPIKeysYAML)
+
+	configPath := filepath.Join(temp, "config.yaml")
+	writeFile(t, configPath, seccompDisabledConfigYAML)
+
+	workspace := filepath.Join(temp, "workspace")
+	mustMkdir(t, workspace)
+
+	endpoint, cleanup := startSeccompServerContainer(t, ctx, agentshBin, unixwrapBin, configPath, policiesDir, workspace)
+	t.Cleanup(cleanup)
+
+	cli := client.New(endpoint, "test-key")
+
+	sess, err := createSessionWithRetry(ctx, cli, "/workspace", "default")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	t.Logf("Session created: %s", sess.ID)
+
+	// 1. wrap-init in shim mode must be refused with 503. The shim's
+	//    ModeAuto branch interprets this as "fall through to running the
+	//    command unwrapped", which restores the v0.19.3 contract.
+	//
+	//    We call it directly via the client because that is the path the
+	//    shim's kernelinstall.Install takes — and the path the bug lived
+	//    on. A successful wrap-init with WrapperBinary populated here
+	//    would mean the regression is back.
+	_, wrapErr := cli.WrapInit(ctx, sess.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		AgentArgs:    []string{"hello"},
+		CallerUID:    0,
+		Mode:         "shim",
+	})
+	if wrapErr == nil {
+		t.Fatal("wrap-init succeeded with unix_sockets.enabled=false; expected 503 (regression #361)")
+	}
+	var httpErr *client.HTTPError
+	if !errors.As(wrapErr, &httpErr) {
+		t.Fatalf("expected *client.HTTPError, got %T: %v", wrapErr, wrapErr)
+	}
+	if httpErr.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected status 503, got %d (body=%q)", httpErr.StatusCode, httpErr.Body)
+	}
+	if !strings.Contains(httpErr.Body, "unix_sockets.enabled is false") {
+		t.Errorf("expected error body to mention unix_sockets.enabled, got %q", httpErr.Body)
+	}
+
+	// 2. Exec must still succeed end-to-end. The exec path also has its
+	//    own gate (core.go::setupSeccompWrapper) that drops the wrapper
+	//    when unix_sockets is disabled, so /bin/echo runs directly. If
+	//    this regresses, exec would either fail with the same handshake
+	//    error or produce empty stdout.
+	execCtx, execCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer execCancel()
+	result, err := cli.Exec(execCtx, sess.ID, types.ExecRequest{
+		Command:    "/bin/echo",
+		Args:       []string{"hello", "from", "unwrapped"},
+		WorkingDir: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if result.Result.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d (stderr=%q)", result.Result.ExitCode, result.Result.Stderr)
+	}
+	if want := "hello from unwrapped\n"; result.Result.Stdout != want {
+		t.Errorf("expected stdout %q, got %q", want, result.Result.Stdout)
+	}
+
+	if err := cli.DestroySession(ctx, sess.ID); err != nil {
+		t.Fatalf("DestroySession: %v", err)
+	}
+}
+
 func buildSeccompBinaries(t *testing.T) (agentsh, unixwrap string) {
 	t.Helper()
 
