@@ -447,6 +447,104 @@ func TestSeccompWrapperDisabled_WrapInitRefuses(t *testing.T) {
 	}
 }
 
+// TestSeccompWrapperDisabled_WrapInitRefuses_WithPolicyLimits covers the
+// follow-up to #361: the policy-limits bypass path through
+// wrapNeedsCgroupBeforeAck. secure-sandbox presets ship resource_limits
+// (max_memory_mb / cpu_quota_percent / pids_max) on every adapter; before
+// the follow-up fix, those non-zero limits forced wrapNeedsCgroupBeforeAck
+// to return true, which defeated the unix_sockets gate even on hosts
+// that disabled cgroups too. The wrapper engaged, applyCgroupV2 returned
+// CgroupResourceLimitsUnavailableError on the hosted kernels, and the
+// user's command silently died with empty stdout / exit 1 — the exact
+// symptom the gate was added to prevent.
+//
+// This test pins the contract end-to-end with the secure-sandbox
+// agentDefault() preset's limits in policy.yml and no cgroup enforcement
+// configured. The unit test
+// TestWrapNeedsCgroupBeforeAck_PolicyLimitsAloneInsufficient covers the
+// same path in isolation; this one proves the bypass is closed under a
+// real HTTP server with the exact config secure-sandbox emits.
+func TestSeccompWrapperDisabled_WrapInitRefuses_WithPolicyLimits(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	agentshBin, unixwrapBin := buildSeccompBinaries(t)
+
+	temp := t.TempDir()
+
+	policiesDir := filepath.Join(temp, "policies")
+	mustMkdir(t, policiesDir)
+	writeFile(t, filepath.Join(policiesDir, "default.yaml"), seccompTestPolicyWithResourceLimitsYAML)
+
+	keysPath := filepath.Join(temp, "keys.yaml")
+	writeFile(t, keysPath, testAPIKeysYAML)
+
+	configPath := filepath.Join(temp, "config.yaml")
+	writeFile(t, configPath, seccompDisabledConfigYAML)
+
+	workspace := filepath.Join(temp, "workspace")
+	mustMkdir(t, workspace)
+
+	endpoint, cleanup := startSeccompServerContainer(t, ctx, agentshBin, unixwrapBin, configPath, policiesDir, workspace)
+	t.Cleanup(cleanup)
+
+	cli := client.New(endpoint, "test-key")
+
+	sess, err := createSessionWithRetry(ctx, cli, "/workspace", "default")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	t.Logf("Session created: %s", sess.ID)
+
+	// 1. wrap-init in shim mode must still be refused with 503 even with
+	//    non-zero policy resource_limits, because no cgroup/eBPF
+	//    enforcement is configured. Before the fix this returned 200 with
+	//    a wrapper binary and the shim then crashed.
+	_, wrapErr := cli.WrapInit(ctx, sess.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		AgentArgs:    []string{"hello"},
+		CallerUID:    0,
+		Mode:         "shim",
+	})
+	if wrapErr == nil {
+		t.Fatal("wrap-init succeeded with unix_sockets.enabled=false and policy limits (no cgroup config); expected 503 (regression #361 follow-up)")
+	}
+	var httpErr *client.HTTPError
+	if !errors.As(wrapErr, &httpErr) {
+		t.Fatalf("expected *client.HTTPError, got %T: %v", wrapErr, wrapErr)
+	}
+	if httpErr.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected status 503, got %d (body=%q)", httpErr.StatusCode, httpErr.Body)
+	}
+	if !strings.Contains(httpErr.Body, "unix_sockets.enabled is false") {
+		t.Errorf("expected error body to mention unix_sockets.enabled, got %q", httpErr.Body)
+	}
+
+	// 2. Exec must still produce real output. Pre-fix, the wrapper
+	//    engaged via the policy-limits bypass, applyCgroupV2 hard-failed,
+	//    and Exec returned empty stdout / non-zero exit.
+	execCtx, execCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer execCancel()
+	result, err := cli.Exec(execCtx, sess.ID, types.ExecRequest{
+		Command:    "/bin/echo",
+		Args:       []string{"hello", "from", "unwrapped"},
+		WorkingDir: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if result.Result.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d (stderr=%q)", result.Result.ExitCode, result.Result.Stderr)
+	}
+	if want := "hello from unwrapped\n"; result.Result.Stdout != want {
+		t.Errorf("expected stdout %q, got %q", want, result.Result.Stdout)
+	}
+
+	if err := cli.DestroySession(ctx, sess.ID); err != nil {
+		t.Fatalf("DestroySession: %v", err)
+	}
+}
+
 func buildSeccompBinaries(t *testing.T) (agentsh, unixwrap string) {
 	t.Helper()
 
@@ -717,6 +815,34 @@ resource_limits:
   command_timeout: 30s
   session_timeout: 1h
   idle_timeout: 30m
+`
+
+// seccompTestPolicyWithResourceLimitsYAML mirrors the limits that
+// @agentsh/secure-sandbox's agentDefault() preset ships for every
+// adapter (max_memory_mb: 8192, cpu_quota_percent: 100, pids_max: 500).
+// Used by TestSeccompWrapperDisabled_WrapInitRefuses_WithPolicyLimits
+// to exercise the policy-limits branch of wrapNeedsCgroupBeforeAck that
+// originally bypassed the unix_sockets gate (#361 follow-up).
+const seccompTestPolicyWithResourceLimitsYAML = `
+version: 1
+name: default
+description: seccomp integration test policy with secure-sandbox-style resource limits
+command_rules:
+  - name: allow-all
+    commands: []
+    decision: allow
+file_rules:
+  - name: allow-all
+    paths: ["/**"]
+    operations: [read, write, delete]
+    decision: allow
+resource_limits:
+  command_timeout: 30s
+  session_timeout: 1h
+  idle_timeout: 30m
+  max_memory_mb: 8192
+  cpu_quota_percent: 100
+  pids_max: 500
 `
 
 const seccompTestConfigYAML = `
