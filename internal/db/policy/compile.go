@@ -18,6 +18,7 @@ type compiledStatementRule struct {
 	verb          DecisionVerb
 	groups        map[effects.Group]struct{}
 	subtypes      map[effects.Subtype]struct{} // empty = all subtypes match
+	requireWhere  bool
 	resolution    resolutionMatcher
 	schemas       []glob.Glob // empty = all schemas match
 	objects       []glob.Glob // syntactic object selectors
@@ -116,6 +117,7 @@ func compileStatementRule(r *StatementRule) (*compiledStatementRule, error) {
 		src:           r,
 		groups:        map[effects.Group]struct{}{},
 		subtypes:      map[effects.Subtype]struct{}{},
+		requireWhere:  r.RequireWhere,
 		serviceFilter: serviceFilter{service: ServiceID(r.DBService), family: r.DBFamily, dialect: r.DBDialect},
 	}
 	switch r.Decision {

@@ -214,3 +214,31 @@ func TestClassifiedStatement_BulkOp_OmitNone(t *testing.T) {
 		t.Fatalf("bulk_op should be omitted for BulkOpNone: %s", bs)
 	}
 }
+
+func TestEffect_HasWhere_JSON(t *testing.T) {
+	in := ClassifiedStatement{
+		Effects: []Effect{{Group: GroupModify, HasWhere: true}},
+		RawVerb: "UPDATE",
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(bs), `"has_where":true`) {
+		t.Fatalf("has_where missing: %s", bs)
+	}
+}
+
+func TestEffect_HasWhere_OmitFalse(t *testing.T) {
+	in := ClassifiedStatement{
+		Effects: []Effect{{Group: GroupModify}},
+		RawVerb: "UPDATE",
+	}
+	bs, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(bs), "has_where") {
+		t.Fatalf("has_where should be omitted when false: %s", bs)
+	}
+}

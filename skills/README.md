@@ -6,10 +6,10 @@ AI-assistant skills for creating and editing AgentSH security policies. Works in
 
 | Skill | Description |
 |-------|-------------|
-| **agentsh-policy-create** | Create new policies from built-in templates (default, dev-safe, ci-strict, agent-sandbox) |
-| **agentsh-policy-edit** | Add, remove, or update rules in existing policies with first-match-wins ordering awareness |
+| **agentsh-policy-create** | Create new policies from built-in templates, including agent sandbox, CI, HTTP service, and Postgres-family DB policy use cases |
+| **agentsh-policy-edit** | Add, remove, or update rules in existing policies with rule-ordering and DB coverage awareness |
 
-Both skills reference a shared schema in `agentsh-policy-shared/schema-reference.md` covering all 17 rule categories.
+Both skills reference a shared schema in `agentsh-policy-shared/schema-reference.md` covering core policy rule categories plus declared HTTP services, secret providers, and Postgres-family database policy blocks.
 
 ## Installation
 

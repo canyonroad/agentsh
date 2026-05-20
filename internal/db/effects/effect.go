@@ -11,6 +11,10 @@ type Effect struct {
 	ResolvedObjects []ResolvedObjectRef `json:"resolved_objects,omitempty"`
 	Resolution      Resolution
 
+	// HasWhere is observed statement-shape metadata. It is set only on
+	// mutation effects whose owning statement has a top-level WHERE clause.
+	HasWhere bool `json:"has_where,omitempty"`
+
 	// FunctionOID is populated for procedural effects with Subtype
 	// SubtypeFunctionCallProtocol (the Postgres 'F' FunctionCall frame) or
 	// SubtypeEscalatedFunctionCall (when classifier escalation produced

@@ -16,6 +16,7 @@ name: "policy-name"           # Required. Alphanumeric, hyphens, underscores.
 description: |                # Required. Multi-line description.
   What this policy does.
 
+metadata: []                  # Optional non-enforcing rule metadata
 file_rules: []                # File operation rules
 network_rules: []             # Network connection rules
 command_rules: []             # Command execution rules
@@ -24,6 +25,12 @@ registry_rules: []            # Windows registry rules
 signal_rules: []              # Signal sending rules
 dns_redirects: []             # DNS redirect rules
 connect_redirects: []         # TCP connect redirect rules
+providers: {}                 # Secret provider declarations for http_services
+http_services: []             # Declared HTTP API gateway services
+db_services: {}               # Declared database upstreams (Postgres-family only today)
+database_rules: []            # Database statement rules
+database_connection_rules: [] # Database connection/cancel/replication rules
+policies: {}                  # Opaque policy sub-blocks, currently policies.db
 resource_limits: {}           # Resource limits
 env_policy: {}                # Environment variable policy
 audit: {}                     # Audit settings
@@ -38,6 +45,18 @@ transparent_commands: {}      # Override transparent command set
 ---
 
 ## Rule Types
+
+### metadata[]
+
+Metadata is non-enforcing. AgentSH-generated policy bundles use it to correlate generic rule names back to higher-level sources such as DB unavoidability.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| rule_name | string | yes | Name of the rule this metadata describes |
+| source | string | yes | Metadata producer, e.g. `db_unavoidability` |
+| db_service | string | no | Related DB service name |
+| bypass_mode | string | no | Bypass class such as `tcp_direct`, `unix_socket`, `dns_alias`, `port_forward_tool`, `custom_tunnel` |
+| destination | string | no | Related destination tuple or local socket class |
 
 ### file_rules[]
 
@@ -179,11 +198,14 @@ Default (if omitted): all depths (`min_depth: 0`, `max_depth: -1`).
 |-------|------|----------|-------------|
 | name | string | yes | Rule identifier |
 | match | string | yes | Regex pattern for `host:port` |
-| redirect_to | string | yes | New `host:port` destination |
+| redirect_to | string | conditional | New TCP `host:port` destination |
+| redirect_to_unix | string | conditional | Unix socket path destination |
 | tls | object | no | `{mode, sni?}`. Modes: `passthrough`, `rewrite_sni` |
 | visibility | string | no | `silent`, `audit_only`, `warn` |
 | message | string | no | Human-readable message |
 | on_failure | string | no | `fail_closed`, `fail_open`, `retry_original` |
+
+Exactly one of `redirect_to` or `redirect_to_unix` is required. DB unavoidability bundles use `redirect_to_unix` to route direct Postgres TCP attempts through the per-session DB proxy socket.
 
 **connect_redirects[].tls object:**
 
@@ -191,6 +213,155 @@ Default (if omitted): all depths (`min_depth: 0`, `max_depth: -1`).
 |-------|------|-------------|
 | mode | string | `passthrough` or `rewrite_sni` |
 | sni | string | Required when mode is `rewrite_sni` |
+
+### providers{}
+
+`providers` is a map keyed by provider name. Each entry must include `type`; provider-specific fields are decoded by the secrets subsystem. `http_services[].secret.ref` schemes must match one declared provider type.
+
+Supported provider types: `keyring`, `vault`, `aws-sm`, `gcp-sm`, `azure-kv`, `op`.
+
+Common reference URI examples:
+
+```yaml
+providers:
+  local_keyring:
+    type: keyring
+  corp_vault:
+    type: vault
+    address: https://vault.internal
+    token_ref: keyring://agentsh/vault_token
+```
+
+### http_services[]
+
+Declared HTTP services expose selected upstream API paths to child processes through the AgentSH proxy as `/svc/<name>/...`. Use this when the policy needs method/path control, approval gates, credential substitution, or audited HTTP service traffic. Use `network_rules` instead for simple host/port access.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| name | string | yes | URL-safe service name (`[A-Za-z0-9._-]+`) |
+| upstream | string | yes | HTTPS base URL |
+| expose_as | string | no | Env var name for service URL. Default is `<NAME>_API_URL` |
+| aliases | string[] | no | Extra upstream host aliases for direct-access blocking |
+| allow_direct | bool | no | Escape hatch; default false blocks direct upstream access |
+| default | string | no | `allow` or `deny`; default is fail-closed when rules exist |
+| rules | object[] | no | Method/path rules, evaluated first-match-wins |
+| secret | object | no | Credential substitution config `{ref, format}` |
+| inject | object | no | Request injection config, currently `{header: {name, template}}` |
+| scrub_response | bool | no | Whether to scrub fake/real credentials from responses |
+
+**http_services[].rules[]:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| name | string | yes | Rule identifier |
+| methods | string[] | no | HTTP methods; empty or `*` means any |
+| paths | string[] | yes | `/`-separated glob patterns |
+| decision | string | yes | `allow`, `deny`, `approve`, `audit` |
+| message | string | no | Human-readable message |
+| timeout | duration | no | Approval timeout |
+
+**Credential substitution:**
+
+```yaml
+http_services:
+  - name: github
+    upstream: https://api.github.com
+    secret:
+      ref: vault://kv/data/github#token
+      format: ghp_{rand:36}
+    inject:
+      header:
+        name: Authorization
+        template: Bearer {{secret}}
+    rules:
+      - name: allow-read-issues
+        methods: [GET]
+        paths: ["/repos/*/*/issues*"]
+        decision: allow
+```
+
+If `secret` is present, `providers` must declare a matching provider type. `inject.header.template` must contain `{{secret}}`. The old top-level `services:` key is invalid; use `http_services:`.
+
+### db_services{} (Postgres-family only)
+
+`db_services` is a map keyed by service name. Current runtime database support is Postgres-family only: `family` must be `postgres`; supported dialect values are `postgres`, `aurora_postgres`, `redshift`, and `cockroachdb`. MySQL, MongoDB, Snowflake, BigQuery, Databricks, ClickHouse, MSSQL, Cassandra, Redis, and Oracle are not current runtime targets.
+
+```yaml
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: pg.internal:5432
+    tls_mode: terminate_reissue
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| family | string | yes | Must be `postgres` today |
+| dialect | string | yes | `postgres`, `aurora_postgres`, `redshift`, or `cockroachdb` |
+| upstream | string | yes | Upstream `host:port` |
+| tls_mode | string | yes | `terminate_reissue`, `terminate_plaintext_upstream`, or `passthrough` |
+| trusted_network | bool | no | Required for unsafe plaintext upstreams |
+| allow_function_call_protocol | bool | no | Opt into PostgreSQL FunctionCall protocol forwarding; default denies it |
+| allow_gss_encryption | bool | no | Opt into GSS encryption passthrough with degraded statement visibility |
+
+### database_rules[]
+
+Statement-level database rules apply after the Postgres proxy classifies a statement into effects. Strict coverage applies: every object slot in an effect must be covered by a non-deny rule, and any matching deny wins.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| name | string | yes | Rule identifier |
+| db_service | string | no | Match one `db_services` entry |
+| db_family | string | no | Currently `postgres` |
+| db_dialect | string | no | Match one Postgres-family dialect |
+| operations | string[] | yes | Operation groups or aliases, e.g. `read`, `write`, `modify`, `delete`, `session`, `transaction`, `bulk_export`, `unknown`, `READ`, `MUTATE`, `*` |
+| subtypes | string[] | no | Operation subtype filters |
+| objects | string[] | no | Syntactic object-name globs |
+| schemas | string[] | no | Schema-name globs |
+| relations | string[] | no | Catalog-resolved relation selectors, formatted as `schema.name` |
+| functions | string[] | no | Catalog-resolved function selectors, formatted as `schema.name(identity_args)`; `schema.name(*)` matches overloads |
+| match_object_resolution | string | no | Resolution tag such as `catalog_resolved`, `qualified_syntactic`, `unqualified_syntactic`, `catalog_unresolved`, or `*` |
+| require_where | bool | no | For Postgres `modify`/`delete` rules only: require the top-level `UPDATE` or `DELETE` statement to include a syntactic `WHERE` clause |
+| decision | string | yes | `allow`, `deny`, `approve`, `audit`, or statement-level `redirect` |
+| message | string | no | Template shown on deny/approve paths |
+| timeout | duration | no | Approval timeout |
+| deny_mode_in_tx | string | no | For deny rules in transactions: `terminate` or `rollback_then_continue` |
+| acknowledge_audit_on_dangerous | bool | no | Required to silence warnings for `audit` on high-risk operations |
+| redirect | object | no | Required for `decision: redirect`; see below |
+
+Operation groups are lowercase canonical names: `read`, `write`, `modify`, `delete`, `bulk_load`, `bulk_export`, `schema_create`, `schema_alter`, `schema_destroy`, `privilege`, `transaction`, `session`, `maintenance`, `lock`, `notify`, `procedural`, `unsafe_io`, `unknown`.
+
+Uppercase aliases are also supported: `READ`, `INSERT`, `UPDATE`, `DELETE`, `REMOVE`, `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `EXPORT`, `LOAD`, `MUTATE`, `SCHEMA`, `MAINTENANCE`, `LOCK_TABLES`, `LISTEN_NOTIFY`, `DANGEROUS`. `*` expands to all known groups except `unknown`.
+
+`require_where: true` is valid only when `operations` expands exclusively to `modify` and/or `delete`; `MUTATE` is rejected because it also includes `write`. The guard is syntactic only, so `WHERE true` satisfies it. It is a matcher on that rule only; another unguarded non-deny rule can still cover the same effect.
+
+`decision: redirect` is Postgres-only and supports safe read-only relation replacement. It requires `operations` that expand only to read, exactly one canonical `relations` source selector, `match_object_resolution: catalog_resolved`, an eligible terminate-mode Postgres service, and `redirect.relation`.
+
+**database_rules[].redirect object:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| relation | string | Canonical target relation formatted as `schema.name` |
+
+### database_connection_rules[]
+
+Connection-level database rules apply to Postgres StartupMessage, CancelRequest, and replication-request handling.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| name | string | yes | Rule identifier |
+| db_service | string | no | Match one `db_services` entry |
+| match_kind | string | no | `connect` (default), `cancel`, or `replication` |
+| db_user | string[] | no | Startup user globs; unavailable under passthrough |
+| database | string | no | Startup database name; unavailable under passthrough |
+| application_name | string | no | Startup application name; unavailable under passthrough |
+| client_identity | string | no | AgentSH client identity selector |
+| decision | string | yes | `allow`, `deny`, `approve`, or `audit`; `redirect` is invalid here |
+| message | string | no | Message returned to the client where protocol mode allows it |
+| timeout | duration | no | Approval timeout; invalid for `match_kind: cancel` |
+
+Rules that match a `passthrough` service cannot use `db_user`, `database`, or `application_name`, because AgentSH cannot inspect StartupMessage fields through passthrough TLS. `approve` is invalid for `match_kind: cancel`. `redirect` is invalid for all connection rules.
 
 ---
 
@@ -254,6 +425,19 @@ env_inject:
 | server_policy | string | Server list policy |
 | version_pinning | object | `{enabled, on_change?, auto_trust_first?}` |
 | cross_server | object | `{enabled, read_then_send?: {enabled}}` |
+
+### policies.db
+
+Database runtime settings live under `policies.db`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| unavoidability | string | `off`, `observe`, or `enforce`; `enforce` blocks direct access to declared DB upstreams from governed processes |
+| log_statements | string | `none`, `parameters_redacted` (default), or `full` |
+| approval_statement_preview | string | `none`, `redacted` (default), or `full` |
+| approval_statement_preview_chars | int | Max preview length, default 200 |
+| escalate_unknown_functions | bool | Treat unknown function calls in SELECT as `procedural` unless allowlisted |
+| safe_function_allowlist | string[] | Function names that remain read-safe when escalation is enabled |
 
 ### package_rules[]
 
@@ -334,7 +518,9 @@ Each platform object accepts arrays of patterns:
 
 ## Evaluation Semantics
 
-- **First match wins**: Rules within each category are evaluated top-to-bottom. The first rule whose pattern matches determines the decision. Order matters.
+- **First match wins**: File, network, command, unix socket, registry, signal, DNS redirect, connect redirect, HTTP service, and package rules are evaluated top-to-bottom within their category. The first matching rule determines the decision. Order matters.
+- **DB statement rules**: `database_rules` are not simple first-match-wins. Any matching deny wins. Otherwise every object slot in each classified effect must be covered by at least one matching `allow`, `audit`, `redirect`, or `approve` rule; uncovered objects fail closed as implicit deny.
+- **DB connection rules**: all matching `database_connection_rules` are considered and the most restrictive decision wins: `deny > approve > audit > allow`.
 - **Default deny**: Convention is to end each rule category with a catch-all deny rule (e.g., `paths: ["**"]`, `domains: ["*"]`).
 - **Variable expansion**: `${PROJECT_ROOT}`, `${HOME}`, `${GIT_ROOT}` are expanded at load time.
 - **Glob syntax**: `*` matches any characters except `/`. `**` matches any characters including `/`. `?` matches one character.
@@ -386,4 +572,71 @@ Each platform object accepts arrays of patterns:
   redirect_to:
     command: echo
     args: ["rm -rf blocked. Use targeted deletes instead."]
+```
+
+**Declare an HTTP service with credential substitution:**
+```yaml
+providers:
+  local_keyring:
+    type: keyring
+
+http_services:
+  - name: stripe
+    upstream: https://api.stripe.com
+    secret:
+      ref: keyring://agentsh/stripe_api_key
+      format: sk_live_{rand:32}
+    inject:
+      header:
+        name: Authorization
+        template: Bearer {{secret}}
+    rules:
+      - name: allow-read-customers
+        methods: [GET]
+        paths: ["/v1/customers*"]
+        decision: allow
+      - name: approve-writes
+        methods: [POST, DELETE]
+        paths: ["/v1/**"]
+        decision: approve
+```
+
+**Declare Postgres DB policy with redacted logging:**
+```yaml
+db_services:
+  appdb:
+    family: postgres
+    dialect: postgres
+    upstream: db.internal:5432
+    tls_mode: terminate_reissue
+
+policies:
+  db:
+    unavoidability: enforce
+    log_statements: parameters_redacted
+    approval_statement_preview: redacted
+    approval_statement_preview_chars: 200
+
+database_connection_rules:
+  - name: allow-app-user
+    db_service: appdb
+    db_user: [app_agent]
+    database: app
+    decision: allow
+  - name: deny-replication
+    db_service: appdb
+    match_kind: replication
+    decision: deny
+
+database_rules:
+  - name: allow-public-reads
+    db_service: appdb
+    operations: [READ]
+    relations: ["public.*"]
+    match_object_resolution: catalog_resolved
+    decision: allow
+  - name: deny-dangerous
+    db_service: appdb
+    operations: [DANGEROUS]
+    decision: deny
 ```
