@@ -140,3 +140,50 @@ func TestWatchtowerTLSConfig_InsecureField_Default(t *testing.T) {
 		t.Fatal("WatchtowerTLSConfig.Insecure should default to false (TLS on by default)")
 	}
 }
+
+// TestResolveAgentID_ExplicitOverride verifies the config field takes
+// precedence over os.Hostname(). Regression test for issue #365.
+func TestResolveAgentID_ExplicitOverride(t *testing.T) {
+	cfg := config.AuditWatchtowerConfig{AgentID: "agent-edge-001"}
+	got := server.ResolveAgentIDForTest(cfg)
+	if got != "agent-edge-001" {
+		t.Errorf("ResolveAgentIDForTest = %q, want %q", got, "agent-edge-001")
+	}
+}
+
+// TestResolveAgentID_EmptyFallsBackToHostname verifies the empty
+// string triggers the os.Hostname() fallback.
+func TestResolveAgentID_EmptyFallsBackToHostname(t *testing.T) {
+	cfg := config.AuditWatchtowerConfig{AgentID: ""}
+	got := server.ResolveAgentIDForTest(cfg)
+	hostname, _ := os.Hostname()
+	// Accept either the host name (normal path) or "unknown" (Hostname
+	// returned an error). Both are documented behaviours.
+	if got == "" {
+		t.Errorf("ResolveAgentIDForTest returned empty; want hostname (%q) or \"unknown\"", hostname)
+	}
+	if hostname != "" && got != hostname {
+		t.Errorf("ResolveAgentIDForTest = %q, want %q (os.Hostname)", got, hostname)
+	}
+}
+
+// TestResolveAgentID_WhitespaceTreatedAsEmpty verifies whitespace-only
+// values fall back to the hostname.
+func TestResolveAgentID_WhitespaceTreatedAsEmpty(t *testing.T) {
+	cfg := config.AuditWatchtowerConfig{AgentID: "   "}
+	got := server.ResolveAgentIDForTest(cfg)
+	hostname, _ := os.Hostname()
+	if hostname != "" && got != hostname {
+		t.Errorf("ResolveAgentIDForTest(whitespace) = %q, want hostname %q", got, hostname)
+	}
+}
+
+// TestResolveAgentID_TrimsLeadingTrailingWhitespace verifies a
+// well-formed-but-padded value is trimmed before use.
+func TestResolveAgentID_TrimsLeadingTrailingWhitespace(t *testing.T) {
+	cfg := config.AuditWatchtowerConfig{AgentID: "  agent-x  "}
+	got := server.ResolveAgentIDForTest(cfg)
+	if got != "agent-x" {
+		t.Errorf("ResolveAgentIDForTest = %q, want %q (trimmed)", got, "agent-x")
+	}
+}

@@ -46,6 +46,29 @@ func resolveLogGoawayMessage(cfgVal *bool, logger *slog.Logger) bool {
 	}
 }
 
+// resolveAgentID returns the agent identifier the WTP store should
+// advertise on the wire. Precedence:
+//
+//  1. TrimSpace(cfg.AgentID) if non-empty.
+//  2. os.Hostname() if it succeeds.
+//  3. "unknown" as a last-resort sentinel — matches the prior behaviour
+//     for the Hostname-error case.
+//
+// This is called from buildWatchtowerStore. Keeping it as a small
+// pure function lets us unit-test the three rungs independently of
+// the surrounding KMS/transport machinery.
+func resolveAgentID(cfg config.AuditWatchtowerConfig) string {
+	id := strings.TrimSpace(cfg.AgentID)
+	if id != "" {
+		return id
+	}
+	h, err := os.Hostname()
+	if err != nil || h == "" {
+		return "unknown"
+	}
+	return h
+}
+
 // buildWatchtowerStore constructs a watchtower.Store from the daemon
 // AuditWatchtowerConfig. Returns (nil, nil) when disabled.
 //
@@ -53,9 +76,9 @@ func resolveLogGoawayMessage(cfgVal *bool, logger *slog.Logger) bool {
 // Chain key source (file, env, or cloud KMS). HMACKeyID is derived
 // from the key fingerprint so the WAL identity and SessionInit agree.
 //
-// AgentID: derived from os.Hostname() when not overridable from config
-// (AuditWatchtowerConfig carries no explicit agent_id field in Phase 1).
-// This gives a stable, human-readable per-host identity.
+// AgentID: cfg.AgentID takes precedence; empty/whitespace-only falls
+// back to os.Hostname(); a Hostname() error falls back to "unknown".
+// See resolveAgentID.
 func buildWatchtowerStore(
 	ctx context.Context,
 	cfg config.AuditWatchtowerConfig,
@@ -87,11 +110,7 @@ func buildWatchtowerStore(
 		return nil, fmt.Errorf("watchtower: resolve auth token: %w", err)
 	}
 
-	// AgentID is not in AuditWatchtowerConfig (Phase 1 gap); derive from hostname.
-	agentID, err := os.Hostname()
-	if err != nil {
-		agentID = "unknown"
-	}
+	agentID := resolveAgentID(cfg)
 
 	// Auto-generate SessionID when config field is empty. Config docs say
 	// session_id is optional; an empty value must not cause a startup failure.
@@ -279,4 +298,11 @@ func ResolveLogGoawayMessageForTest(cfg config.AuditWatchtowerConfig) (resolved 
 // unit tests. Production callers use the unexported resolveAuthBearer.
 func ResolveAuthBearerForTest(auth config.WatchtowerAuthConfig) (string, error) {
 	return resolveAuthBearer(auth)
+}
+
+// ResolveAgentIDForTest is a thin export of resolveAgentID for unit
+// tests. Production callers use the unexported resolveAgentID inline
+// in buildWatchtowerStore.
+func ResolveAgentIDForTest(cfg config.AuditWatchtowerConfig) string {
+	return resolveAgentID(cfg)
 }
