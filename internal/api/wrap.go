@@ -283,6 +283,30 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		}, http.StatusOK, nil
 	}
 
+	// Mirror the exec-path gate at setupSeccompWrapper (core.go): when the
+	// operator has explicitly disabled sandbox.unix_sockets.enabled, the
+	// seccomp wrapper must not engage. Without this gate, the shim's
+	// kernel-install path launches agentsh-unixwrap, which loads its
+	// seccomp filter and tries to forward the notify FD to a server that
+	// has no live handler registered for it — the handshake aborts and the
+	// user's command silently exits with empty stdout / exit 1.
+	//
+	// Treat nil as "default true" (matches applyDefaults) so tests that
+	// build bare configs are unaffected; only an explicit false disengages.
+	// Returning 503 makes the shim's ModeAuto branch fall through to
+	// running the command unwrapped (issue #361 regression vs v0.19.3).
+	//
+	// Exception: when pre-ACK cgroup/eBPF setup is required, the wrapper
+	// MUST run regardless of the unix_sockets toggle — the server forces
+	// a user-notify rule below at line ~390 specifically to keep the
+	// handoff alive long enough to attach eBPF before exec. Skipping the
+	// wrapper in that case would silently disable eBPF enforcement.
+	if a.cfg.Sandbox.UnixSockets.Enabled != nil && !*a.cfg.Sandbox.UnixSockets.Enabled &&
+		!wrapNeedsCgroupBeforeAck(a, s) {
+		return types.WrapInitResponse{}, http.StatusServiceUnavailable,
+			fmt.Errorf("wrap-init: sandbox.unix_sockets.enabled is false; wrapper disabled")
+	}
+
 	// Resolve wrapper binary
 	wrapperBin := strings.TrimSpace(a.cfg.Sandbox.UnixSockets.WrapperBin)
 	if wrapperBin == "" {

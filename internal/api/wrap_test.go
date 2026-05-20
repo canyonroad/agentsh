@@ -301,6 +301,124 @@ func TestWrapInit_NotLinux(t *testing.T) {
 	}
 }
 
+// TestWrapInit_UnixSocketsExplicitlyDisabled covers issue #361
+// (v0.20.0-rc1 regression): when the operator sets
+// sandbox.unix_sockets.enabled=false, wrap-init must refuse to engage
+// rather than returning a wrapper binary that the shim then launches
+// against a server with no notify-fd handler — which manifests as
+// "server rejected wrap setup" on Vercel/Daytona with empty stdout
+// and exit 1. Mirrors the exec-path gate in core.go::setupSeccompWrapper.
+func TestWrapInit_UnixSocketsExplicitlyDisabled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	cfg := &config.Config{}
+	disabled := false
+	cfg.Sandbox.UnixSockets.Enabled = &disabled
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		AgentArgs:    []string{"hello"},
+	})
+
+	if err == nil {
+		t.Fatal("expected error when unix_sockets.enabled is false")
+	}
+	if code != http.StatusServiceUnavailable {
+		t.Errorf("expected status 503, got %d", code)
+	}
+	if !strings.Contains(err.Error(), "unix_sockets.enabled is false") {
+		t.Errorf("expected error to mention unix_sockets.enabled, got %q", err.Error())
+	}
+	if resp.WrapperBinary != "" || resp.NotifySocket != "" {
+		t.Errorf("expected empty WrapperBinary/NotifySocket on refusal, got %+v", resp)
+	}
+}
+
+// TestWrapInit_UnixSocketsNilDefaultsToEnabled verifies that the gate
+// added for #361 only fires on an explicit false. A nil Enabled (which
+// applyDefaults sets to true in production) must NOT short-circuit
+// wrap-init — otherwise every test that builds a bare Config would
+// regress.
+func TestWrapInit_UnixSocketsNilDefaultsToEnabled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	cfg := &config.Config{}
+	// Sandbox.UnixSockets.Enabled is left nil (the pre-applyDefaults state).
+	cfg.Sandbox.UnixSockets.WrapperBin = "nonexistent-wrapper-binary-xyz-12345"
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		AgentArgs:    []string{"hello"},
+	})
+
+	// Should fall through to wrapper-resolution (errWrapperNotFound, 503),
+	// NOT the unix_sockets gate.
+	if err == nil {
+		t.Fatal("expected wrapper-not-found error")
+	}
+	if code != http.StatusServiceUnavailable {
+		t.Errorf("expected status 503, got %d", code)
+	}
+	if strings.Contains(err.Error(), "unix_sockets.enabled is false") {
+		t.Errorf("nil Enabled must not trigger the unix_sockets gate, got %q", err.Error())
+	}
+}
+
+// TestWrapInit_UnixSocketsDisabledButEBPFRequiresWrapper covers the
+// override branch of the #361 gate: when pre-ACK cgroup/eBPF setup is
+// required (Network.EBPF.Required, Cgroups.Enabled, etc.), the wrapper
+// must still engage even with sandbox.unix_sockets.enabled=false, because
+// the user-notify handoff is what keeps the wrapper alive long enough to
+// attach eBPF before exec. Skipping in that case would silently disable
+// eBPF enforcement.
+//
+// This is closely related to TestWrapInit_ForcesNotifyHandoffWhenEBPFRequiresPreAckCgroup
+// but documents the gate from the unix_sockets side rather than the
+// notify-handoff side.
+func TestWrapInit_UnixSocketsDisabledButEBPFRequiresWrapper(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	disabled := false
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &disabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	cfg.Sandbox.Network.EBPF.Required = true
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != http.StatusOK {
+		t.Errorf("expected status 200 (eBPF override), got %d", code)
+	}
+}
+
 func TestWrapInit_WrapperNotFound(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("wrap is Linux-only")
