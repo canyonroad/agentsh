@@ -15,6 +15,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/metrics"
+	"github.com/agentsh/agentsh/internal/ocsf"
 	"github.com/agentsh/agentsh/internal/store/watchtower"
 	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
@@ -258,6 +259,7 @@ func TestStore_AppendEvent_PopulatesIntegrityRecord(t *testing.T) {
 	wantCtx, err := chain.ComputeContextDigest(chain.SessionContext{
 		SessionID:      opts.SessionID,
 		AgentID:        opts.AgentID,
+		OCSFVersion:    ocsf.SchemaVersion,
 		FormatVersion:  uint32(audit.IntegrityFormatVersion),
 		Algorithm:      opts.HMACAlgorithm,
 		KeyFingerprint: opts.KeyFingerprint,
@@ -576,6 +578,7 @@ func TestStore_TransportSessionInitUsesConfiguredAlgorithm(t *testing.T) {
 	wantCtx, err := chain.ComputeContextDigest(chain.SessionContext{
 		SessionID:      opts.SessionID,
 		AgentID:        opts.AgentID,
+		OCSFVersion:    ocsf.SchemaVersion,
 		FormatVersion:  uint32(audit.IntegrityFormatVersion),
 		Algorithm:      opts.HMACAlgorithm,
 		KeyFingerprint: opts.KeyFingerprint,

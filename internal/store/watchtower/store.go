@@ -13,6 +13,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/metrics"
+	"github.com/agentsh/agentsh/internal/ocsf"
 	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport/compress"
@@ -288,6 +289,7 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	ctxDigest, err := chain.ComputeContextDigest(chain.SessionContext{
 		SessionID:      opts.SessionID,
 		AgentID:        opts.AgentID,
+		OCSFVersion:    ocsf.SchemaVersion,
 		FormatVersion:  uint32(audit.IntegrityFormatVersion),
 		Algorithm:      algo,
 		KeyFingerprint: opts.KeyFingerprint,
@@ -391,6 +393,7 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		// handshake that doesn't match the integrity chain it's about
 		// to verify. (roborev #5945 High)
 		FormatVersion:           uint32(audit.IntegrityFormatVersion),
+		OcsfVersion:             ocsf.SchemaVersion,
 		Algorithm:               tpAlgo,
 		KeyFingerprint:          opts.KeyFingerprint,
 		ContextDigest:           ctxDigest,

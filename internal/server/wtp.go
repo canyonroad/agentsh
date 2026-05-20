@@ -157,6 +157,7 @@ func buildWatchtowerStore(
 		Allocator:               audit.NewSequenceAllocator(),
 		AgentID:                 agentID,
 		SessionID:               sessionID,
+		KeyFingerprint:          hmacKeyID,
 		HMACKeyID:               hmacKeyID,
 		HMACSecret:              hmacKey,
 		HMACAlgorithm:           cfg.Chain.Algorithm,

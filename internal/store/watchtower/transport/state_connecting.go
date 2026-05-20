@@ -58,6 +58,17 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 
 	ack := msg.GetSessionAck()
 	if ack == nil {
+		// If the server sent a Goaway as the first frame, surface the
+		// code/message so operators see WHY the handshake was rejected.
+		// Bare "unexpected message" hides the most useful diagnostic.
+		if g := msg.GetGoaway(); g != nil {
+			t.opts.Logger.LogAttrs(ctx, slog.LevelWarn,
+				"wtp: SessionInit rejected (Goaway as first frame)",
+				slog.String("goaway_code", g.GetCode().String()),
+				slog.String("goaway_message", g.GetMessage()),
+				slog.Bool("retry_immediately", g.GetRetryImmediately()),
+				slog.String("session_id", t.opts.SessionID))
+		}
 		_ = conn.Close()
 		t.conn = nil
 		t.metrics.IncSessionInitFailures(metrics.WTPSessionFailureReasonUnexpectedMessage)
