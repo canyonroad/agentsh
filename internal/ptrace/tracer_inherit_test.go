@@ -53,7 +53,7 @@ func TestSeedChildStateFromParent_CopiesAllEnforcementFields(t *testing.T) {
 		SessionlessPIDAttach:     true,
 	}
 
-	child := seedChildStateFromParent(parent, 200, 200)
+	child := seedChildStateFromParent(parent, 200, 200, true)
 	if child == nil {
 		t.Fatal("seedChildStateFromParent returned nil")
 	}
@@ -66,7 +66,7 @@ func TestSeedChildStateFromParent_CopiesAllEnforcementFields(t *testing.T) {
 		t.Errorf("ParentPID = %d, want %d", child.ParentPID, parent.TGID)
 	}
 	if !child.SuppressInitialStop {
-		t.Error("SuppressInitialStop must be true on a freshly-seeded child")
+		t.Error("SuppressInitialStop must reflect the suppressInitialStop arg (true here)")
 	}
 
 	// Enforcement state copied
@@ -109,7 +109,7 @@ func TestSeedChildStateFromParent_PendingPrefilterPropagatedWhenParentLacksFilte
 		TID: 100, TGID: 100,
 		SessionID: "sess-A", HasPrefilter: false, PendingPrefilter: true,
 	}
-	child := seedChildStateFromParent(parent, 200, 200)
+	child := seedChildStateFromParent(parent, 200, 200, true)
 	if child.HasPrefilter {
 		t.Error("child HasPrefilter must mirror parent (false here)")
 	}
@@ -118,12 +118,34 @@ func TestSeedChildStateFromParent_PendingPrefilterPropagatedWhenParentLacksFilte
 	}
 }
 
+// TestSeedChildStateFromParent_SuppressInitialStopFalse verifies the
+// fallback-path contract: when called with suppressInitialStop=false,
+// the resulting TraceeState must have SuppressInitialStop=false. The
+// handleStop()/handleEventStop() minimal-state fallbacks are dispatched
+// in response to the child's initial SIGSTOP, so the helper must not
+// leave the flag set — otherwise the tracer would silently swallow the
+// next external SIGSTOP delivered to the process.
+func TestSeedChildStateFromParent_SuppressInitialStopFalse(t *testing.T) {
+	parent := &TraceeState{TID: 100, TGID: 100, SessionID: "sess-A"}
+
+	child := seedChildStateFromParent(parent, 200, 200, false)
+	if child.SuppressInitialStop {
+		t.Error("SuppressInitialStop must be false when caller passes false (fallback path)")
+	}
+
+	// Sanity: nil-parent variant honors the same arg.
+	childNil := seedChildStateFromParent(nil, 200, 200, false)
+	if childNil.SuppressInitialStop {
+		t.Error("SuppressInitialStop must be false even when parent is nil")
+	}
+}
+
 // TestSeedChildStateFromParent_NilParent verifies the helper returns a
 // state with defaults only (no enforcement inheritance) when the parent
 // is not known to the tracer. This path is hit on the very first
 // fork-attach race before any tracee state exists.
 func TestSeedChildStateFromParent_NilParent(t *testing.T) {
-	child := seedChildStateFromParent(nil, 200, 200)
+	child := seedChildStateFromParent(nil, 200, 200, true)
 	if child == nil {
 		t.Fatal("seedChildStateFromParent(nil, ...) returned nil")
 	}

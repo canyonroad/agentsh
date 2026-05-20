@@ -352,13 +352,19 @@ func findParentByTGID(tracees map[int]*TraceeState, parentTGID int) *TraceeState
 // handleNewChild.
 //
 // Used by:
-//   - handleNewChild's else branch (the normal create path).
-//   - The two run()/PTRACE_EVENT_STOP minimal-state fallbacks, where a
-//     child stop arrives before the parent's PTRACE_EVENT_FORK and we
-//     must create state immediately. Without inheritance, the child's
-//     SessionID stays "" until the fork event fires; if it execve's in
-//     that window, HandleExecve previously denied with EACCES, which
-//     raced ld.so on the new ELF and crashed the tracee.
+//   - handleNewChild's else branch (the normal create path) — passes
+//     suppressInitialStop=true because state is created on the parent's
+//     PTRACE_EVENT_FORK, BEFORE the child's initial SIGSTOP arrives;
+//     the upcoming stop must be swallowed.
+//   - The two handleStop()/handleEventStop() PTRACE_EVENT_STOP
+//     minimal-state fallbacks — pass suppressInitialStop=false because
+//     the child's initial stop has ALREADY been received (that's what
+//     dispatched the fallback); setting the flag here would leave it
+//     stale and silently swallow the next external SIGSTOP. Without
+//     state inheritance via this helper, the child's SessionID would
+//     stay "" until the fork event fires; if it execve's in that
+//     window, HandleExecve previously denied with EACCES, which raced
+//     ld.so on the new ELF and crashed the tracee.
 //
 // Copied (in addition to bookkeeping): SessionID, HasPrefilter,
 // PendingPrefilter (skipped when parent already has the filter installed
@@ -371,7 +377,7 @@ func findParentByTGID(tracees map[int]*TraceeState, parentTGID int) *TraceeState
 // populated.
 //
 // Caller must hold t.mu.
-func seedChildStateFromParent(parent *TraceeState, childTID, childTGID int) *TraceeState {
+func seedChildStateFromParent(parent *TraceeState, childTID, childTGID int, suppressInitialStop bool) *TraceeState {
 	st := &TraceeState{
 		TID:                 childTID,
 		TGID:                childTGID,
@@ -380,7 +386,7 @@ func seedChildStateFromParent(parent *TraceeState, childTID, childTGID int) *Tra
 		MemFD:               -1,
 		PendingExecStubFD:   -1,
 		PendingExecSavedFD:  -1,
-		SuppressInitialStop: true,
+		SuppressInitialStop: suppressInitialStop,
 	}
 	if parent == nil {
 		return st
@@ -827,7 +833,11 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 					t.mu.Lock()
 					if _, exists := t.tracees[tid]; !exists {
 						parent := findParentByTGID(t.tracees, parentPID)
-						t.tracees[tid] = seedChildStateFromParent(parent, tid, childTGID)
+						// suppressInitialStop=false: the child's initial
+						// SIGSTOP has already arrived (it's what dispatched
+						// us into this branch); leaving the flag true
+						// would silently swallow the next external SIGSTOP.
+						t.tracees[tid] = seedChildStateFromParent(parent, tid, childTGID, false)
 						t.metrics.SetTraceeCount(len(t.tracees))
 					}
 					t.mu.Unlock()
@@ -1467,9 +1477,11 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 		existing.Attached = time.Now()
 	} else {
 		// Shared with the two minimal-state fallback paths in
-		// run()/handleEventStop() so a child created via either path
-		// is byte-identical in enforcement state.
-		t.tracees[tid] = seedChildStateFromParent(parent, tid, childTGID)
+		// handleStop()/handleEventStop() so a child created via either
+		// path is byte-identical in enforcement state. The normal-
+		// path child here is created on the parent's PTRACE_EVENT_FORK
+		// before the child's initial SIGSTOP arrives, so suppress it.
+		t.tracees[tid] = seedChildStateFromParent(parent, tid, childTGID, true)
 	}
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
@@ -1722,8 +1734,9 @@ func (t *Tracer) handleEventStop(tid int) {
 	if !hasState {
 		// Create minimal state so the child doesn't get lost. Seed full
 		// enforcement state from the parent via seedChildStateFromParent
-		// (see the matching block higher up in run() and the helper
-		// doc for the full rationale).
+		// (see the matching block higher up in handleStop() and the
+		// helper doc for the full rationale). suppressInitialStop=false
+		// because the initial stop has already been dispatched here.
 		childTGID, _ := readTGID(tid)
 		if childTGID == 0 {
 			childTGID = tid
@@ -1732,7 +1745,7 @@ func (t *Tracer) handleEventStop(tid int) {
 		t.mu.Lock()
 		if _, exists := t.tracees[tid]; !exists {
 			parent := findParentByTGID(t.tracees, parentPID)
-			t.tracees[tid] = seedChildStateFromParent(parent, tid, childTGID)
+			t.tracees[tid] = seedChildStateFromParent(parent, tid, childTGID, false)
 			t.metrics.SetTraceeCount(len(t.tracees))
 		}
 		t.mu.Unlock()
