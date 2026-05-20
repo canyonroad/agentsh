@@ -105,6 +105,52 @@ func TestClassifyUpdate_Smoke(t *testing.T) {
 	}
 }
 
+func TestClassifyUpdate_HasWhere(t *testing.T) {
+	cs := classifyOne(t, "UPDATE users SET active = false WHERE id = 1", SessionState{})
+	prim, _ := cs.Primary()
+	if prim.Group != effects.GroupModify {
+		t.Fatalf("primary group: got %v want modify", prim.Group)
+	}
+	if !prim.HasWhere {
+		t.Fatalf("UPDATE with WHERE should set HasWhere on primary effect: %+v", prim)
+	}
+}
+
+func TestClassifyUpdate_NoWhere(t *testing.T) {
+	cs := classifyOne(t, "UPDATE users SET active = false", SessionState{})
+	prim, _ := cs.Primary()
+	if prim.Group != effects.GroupModify {
+		t.Fatalf("primary group: got %v want modify", prim.Group)
+	}
+	if prim.HasWhere {
+		t.Fatalf("UPDATE without WHERE should not set HasWhere: %+v", prim)
+	}
+}
+
+func TestClassifyUpdate_HasWhereOnlyOnModifyEffect(t *testing.T) {
+	cs := classifyOne(t, "UPDATE users SET active = false FROM logins WHERE users.id = logins.user_id", SessionState{})
+	if len(cs.Effects) != 2 {
+		t.Fatalf("effects count: got %d want 2: %+v", len(cs.Effects), cs.Effects)
+	}
+	if !cs.Effects[0].HasWhere {
+		t.Fatalf("primary modify effect should have HasWhere: %+v", cs.Effects[0])
+	}
+	if cs.Effects[1].Group != effects.GroupRead {
+		t.Fatalf("secondary effect group = %v want read", cs.Effects[1].Group)
+	}
+	if cs.Effects[1].HasWhere {
+		t.Fatalf("secondary read effect should not inherit HasWhere: %+v", cs.Effects[1])
+	}
+}
+
+func TestClassifyUpdate_HasWhereWithCTE(t *testing.T) {
+	cs := classifyOne(t, "WITH r AS (SELECT id FROM logins) UPDATE users SET active = false WHERE id IN (SELECT id FROM r)", SessionState{})
+	e := requireEffectGroup(t, cs, effects.GroupModify)
+	if !e.HasWhere {
+		t.Fatalf("top-level UPDATE with CTE and WHERE should set HasWhere: %+v", e)
+	}
+}
+
 func TestClassifyUpdate_FromClauseAddsRead(t *testing.T) {
 	cs := classifyOne(t, "UPDATE users SET active = false FROM logins WHERE users.id = logins.user_id", SessionState{})
 	if len(cs.Effects) != 2 {
@@ -126,6 +172,52 @@ func TestClassifyDelete_Smoke(t *testing.T) {
 	prim, _ := cs.Primary()
 	if prim.Group != effects.GroupDelete {
 		t.Fatalf("primary group: got %v want delete", prim.Group)
+	}
+}
+
+func TestClassifyDelete_HasWhere(t *testing.T) {
+	cs := classifyOne(t, "DELETE FROM users WHERE id = 1", SessionState{})
+	prim, _ := cs.Primary()
+	if prim.Group != effects.GroupDelete {
+		t.Fatalf("primary group: got %v want delete", prim.Group)
+	}
+	if !prim.HasWhere {
+		t.Fatalf("DELETE with WHERE should set HasWhere on primary effect: %+v", prim)
+	}
+}
+
+func TestClassifyDelete_NoWhere(t *testing.T) {
+	cs := classifyOne(t, "DELETE FROM users", SessionState{})
+	prim, _ := cs.Primary()
+	if prim.Group != effects.GroupDelete {
+		t.Fatalf("primary group: got %v want delete", prim.Group)
+	}
+	if prim.HasWhere {
+		t.Fatalf("DELETE without WHERE should not set HasWhere: %+v", prim)
+	}
+}
+
+func TestClassifyPrepare_UpdateHasWhereNestedOnly(t *testing.T) {
+	cs := classifyOne(t, "PREPARE q AS UPDATE users SET active = false WHERE id = 1", SessionState{})
+	e := requireEffectGroup(t, cs, effects.GroupModify)
+	if e.HasWhere {
+		t.Fatalf("nested PREPARE UPDATE should not set HasWhere: %+v", e)
+	}
+}
+
+func TestClassifyWithUpdateHasWhereNestedOnly(t *testing.T) {
+	cs := classifyOne(t, "WITH u AS (UPDATE users SET active = false WHERE id = 1 RETURNING id) SELECT * FROM u", SessionState{})
+	e := requireEffectGroup(t, cs, effects.GroupModify)
+	if e.HasWhere {
+		t.Fatalf("data-modifying CTE UPDATE should not set HasWhere: %+v", e)
+	}
+}
+
+func TestClassifyCopyQueryDeleteHasWhereNestedOnly(t *testing.T) {
+	cs := classifyOne(t, "COPY (DELETE FROM users WHERE id = 1 RETURNING *) TO STDOUT", SessionState{})
+	e := requireEffectGroup(t, cs, effects.GroupDelete)
+	if e.HasWhere {
+		t.Fatalf("COPY query DELETE should not set HasWhere: %+v", e)
 	}
 }
 
@@ -324,4 +416,15 @@ func TestClassifyDeallocate_All(t *testing.T) {
 	if got[0].PreparedName != "" {
 		t.Fatalf("PreparedName=%q want \"\" for DEALLOCATE ALL", got[0].PreparedName)
 	}
+}
+
+func requireEffectGroup(t *testing.T, cs effects.ClassifiedStatement, group effects.Group) effects.Effect {
+	t.Helper()
+	for _, e := range cs.Effects {
+		if e.Group == group {
+			return e
+		}
+	}
+	t.Fatalf("missing effect group %v in %+v", group, cs.Effects)
+	return effects.Effect{}
 }

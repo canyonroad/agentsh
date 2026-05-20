@@ -82,6 +82,7 @@ Create new AgentSH security policies from built-in templates, customized to the 
 - Do not invent runtime support for non-Postgres databases. Current DB enforcement is Postgres-family only.
 - For `http_services`, prefer path/method rules over broad network allows when the user needs audited API surface control.
 - For `database_rules`, remember DB evaluation is not simple first-match-wins: any matching deny wins, non-deny rules must cover every object slot, and uncovered objects fail closed.
+- For Postgres `UPDATE`/`DELETE` access to sensitive relations, ask whether accidental full-table mutation should be blocked. Use `require_where: true` only on rules whose `operations` expand exclusively to `modify` and/or `delete`; explain that it is syntactic, `WHERE true` still satisfies it, and another unguarded non-deny rule can still cover the same effect.
 - For DB `redirect`, only author safe read-only Postgres relation replacement: one canonical source in `relations`, `match_object_resolution: catalog_resolved`, and `redirect.relation`.
 
 ## Schema Reference

@@ -118,6 +118,7 @@ type StatementRule struct {
 	Operations                  []string        `yaml:"operations"`
 	Subtypes                    []string        `yaml:"subtypes,omitempty"`
 	MatchObjectResolution       string          `yaml:"match_object_resolution,omitempty"`
+	RequireWhere                bool            `yaml:"require_where,omitempty"`
 	Decision                    string          `yaml:"decision"`
 	Message                     string          `yaml:"message,omitempty"`
 	Timeout                     time.Duration   `yaml:"timeout,omitempty"`

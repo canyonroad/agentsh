@@ -433,6 +433,25 @@ When transparent unwrapping occurs, audit events include additional fields:
 
 These fields help detect bypass attempts in audit logs.
 
+## Database Policies
+
+### Require WHERE For Sensitive Mutations
+
+Use `require_where: true` on narrow mutation rules when accidental full-table updates or deletes are the main risk:
+
+```yaml
+database_rules:
+  - name: allow-scoped-user-mutations
+    db_service: appdb
+    operations: [modify, delete]
+    relations: ["public.users"]
+    match_object_resolution: catalog_resolved
+    require_where: true
+    decision: allow
+```
+
+This rule allows `UPDATE public.users SET disabled = true WHERE id = 123` when the relation selector matches, but it does not cover `UPDATE public.users SET disabled = true`. The guard checks only that a top-level `WHERE` exists; it does not prove the predicate is selective or tenant-safe. It is also only a rule matcher: if another unguarded `allow`, `audit`, or `approve` rule covers the same `modify` or `delete` effect, a no-WHERE mutation can still be permitted.
+
 ## HTTP Services
 
 `http_services:` declares named HTTP upstreams that child processes can reach through the proxy gateway. Declaring a service also blocks direct HTTP/HTTPS connections to its upstream host (and any aliases) from the child process — traffic must flow through the gateway where the declared rules are enforced.

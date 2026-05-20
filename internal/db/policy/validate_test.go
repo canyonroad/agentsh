@@ -819,3 +819,65 @@ database_rules:
 		t.Fatalf("unexpected err: %v", err)
 	}
 }
+
+func TestValidate_RequireWhereAllowsModifyAndDeleteOnly(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	cases := []struct {
+		name string
+		ops  []string
+	}{
+		{name: "modify", ops: []string{"modify"}},
+		{name: "delete", ops: []string{"delete"}},
+		{name: "modify_delete", ops: []string{"modify", "delete"}},
+		{name: "UPDATE_alias", ops: []string{"UPDATE"}},
+		{name: "DELETE_alias", ops: []string{"DELETE"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stmt := []*StatementRule{{
+				Name:         "guarded",
+				DBService:    "appdb",
+				Operations:   tc.ops,
+				Decision:     "allow",
+				RequireWhere: true,
+			}}
+			if _, err := helperValidate(t, svcs, stmt, nil); err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidate_RequireWhereRejectsUnsupportedOperations(t *testing.T) {
+	svcs := map[ServiceID]*DBService{
+		"appdb": {Name: "appdb", Family: "postgres", Dialect: "postgres", Upstream: "x:1", TLSMode: "terminate_reissue"},
+	}
+	cases := []struct {
+		name string
+		ops  []string
+	}{
+		{name: "read", ops: []string{"read"}},
+		{name: "star", ops: []string{"*"}},
+		{name: "read_delete", ops: []string{"read", "delete"}},
+		{name: "MUTATE_includes_write", ops: []string{"MUTATE"}},
+		{name: "transaction", ops: []string{"transaction"}},
+		{name: "schema_destroy", ops: []string{"schema_destroy"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stmt := []*StatementRule{{
+				Name:         "guarded",
+				DBService:    "appdb",
+				Operations:   tc.ops,
+				Decision:     "allow",
+				RequireWhere: true,
+			}}
+			_, err := helperValidate(t, svcs, stmt, nil)
+			if err == nil || !strings.Contains(err.Error(), "rule_require_where_invalid_operation") {
+				t.Fatalf("want rule_require_where_invalid_operation, got %v", err)
+			}
+		})
+	}
+}

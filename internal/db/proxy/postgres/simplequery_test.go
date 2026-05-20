@@ -520,6 +520,79 @@ database_rules:
 `)
 }
 
+func requireWhereRuleSet(t *testing.T) *policy.RuleSet {
+	t.Helper()
+	return loadRuleSet(t, `version: 1
+name: test
+db_services:
+  test:
+    family: postgres
+    dialect: postgres
+    upstream: 127.0.0.1:5432
+    tls_mode: terminate_reissue
+database_rules:
+  - name: allow-where-updates
+    db_service: test
+    operations: [modify]
+    objects: [users]
+    require_where: true
+    decision: allow
+`)
+}
+
+func TestHandleQuery_RequireWhere_DeniesNoWhereBeforeForward(t *testing.T) {
+	pc, clientFE, sink := newSimpleQueryFixture(t)
+	pc.state.smState.LastUpstreamRFQ = 'I'
+	pc.srv.SetPolicy(requireWhereRuleSet(t))
+
+	upClient, upServer := net.Pipe()
+	t.Cleanup(func() { _ = upClient.Close(); _ = upServer.Close() })
+	pc.state.upstream = upServer
+	pc.state.upstreamFE = pgproto3.NewFrontend(upServer, upServer)
+	upBackend := pgproto3.NewBackend(upClient, upClient)
+	drainClientBackendMessages(clientFE)
+
+	upRecv := make(chan pgproto3.FrontendMessage, 1)
+	go func() {
+		msg, err := upBackend.Receive()
+		if err == nil {
+			upRecv <- msg
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- pc.handleQuery(context.Background(), &pgproto3.Query{String: "UPDATE users SET active = false"})
+	}()
+
+	select {
+	case msg := <-upRecv:
+		t.Fatalf("upstream received no-WHERE mutation: %T", msg)
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("handleQuery returned transport error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("handleQuery did not return")
+	}
+
+	var evs []events.DBEvent
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		evs = sink.DrainStatements()
+		if len(evs) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("statement events = %+v", evs)
+	}
+	if evs[0].Decision.Verb != "deny" || evs[0].Decision.RuleName != "" {
+		t.Fatalf("decision = %+v, want implicit deny", evs[0].Decision)
+	}
+}
+
 func TestHandleQuery_DenyPath_PreTx(t *testing.T) {
 	pc, clientFE, sink, _ := allowPathFixture(t)
 	pc.state.smState.LastUpstreamRFQ = 'I'

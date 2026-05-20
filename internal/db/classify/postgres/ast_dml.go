@@ -98,7 +98,7 @@ func classifyInsert(cs *effects.ClassifiedStatement, s *pg_query.InsertStmt, ses
 	}
 }
 
-func classifyUpdate(cs *effects.ClassifiedStatement, s *pg_query.UpdateStmt, sess SessionState, opts Options) {
+func classifyUpdate(cs *effects.ClassifiedStatement, s *pg_query.UpdateStmt, sess SessionState, opts Options, topLevel bool) {
 	cs.RawVerb = "UPDATE"
 	if s == nil {
 		cs.Effects = []effects.Effect{{Group: effects.GroupUnknown, Resolution: effects.ResolutionUnresolved}}
@@ -110,6 +110,7 @@ func classifyUpdate(cs *effects.ClassifiedStatement, s *pg_query.UpdateStmt, ses
 		Group:      effects.GroupModify,
 		Objects:    []effects.ObjectRef{tgt},
 		Resolution: tgtRes,
+		HasWhere:   topLevel && s.WhereClause != nil,
 	})
 	rels, res := walkRangeRelations(s.FromClause, sess)
 	if len(rels) > 0 {
@@ -124,7 +125,7 @@ func classifyUpdate(cs *effects.ClassifiedStatement, s *pg_query.UpdateStmt, ses
 	}
 }
 
-func classifyDelete(cs *effects.ClassifiedStatement, s *pg_query.DeleteStmt, sess SessionState, opts Options) {
+func classifyDelete(cs *effects.ClassifiedStatement, s *pg_query.DeleteStmt, sess SessionState, opts Options, topLevel bool) {
 	cs.RawVerb = "DELETE"
 	if s == nil {
 		cs.Effects = []effects.Effect{{Group: effects.GroupUnknown, Resolution: effects.ResolutionUnresolved}}
@@ -136,6 +137,7 @@ func classifyDelete(cs *effects.ClassifiedStatement, s *pg_query.DeleteStmt, ses
 		Group:      effects.GroupDelete,
 		Objects:    []effects.ObjectRef{tgt},
 		Resolution: tgtRes,
+		HasWhere:   topLevel && s.WhereClause != nil,
 	})
 	if hasReturningList(s.ReturningList) {
 		cs.Effects = append(cs.Effects, effects.Effect{
@@ -208,7 +210,7 @@ func classifyExplain(cs *effects.ClassifiedStatement, s *pg_query.ExplainStmt, s
 	}
 	if analyze && s.Query != nil {
 		// EXPLAIN ANALYZE <inner> matches inner statement.
-		inner := classifyRawStmt(DialectPostgres, &pg_query.RawStmt{Stmt: s.Query}, sess, opts, cs.ParserBackend)
+		inner := classifyNestedRawStmt(DialectPostgres, &pg_query.RawStmt{Stmt: s.Query}, sess, opts, cs.ParserBackend)
 		cs.RawVerb = "EXPLAIN_ANALYZE"
 		cs.Effects = inner.Effects
 		// Inherit the inner statement's diagnostic Error (if any) so callers
@@ -230,7 +232,7 @@ func classifyPrepare(cs *effects.ClassifiedStatement, s *pg_query.PrepareStmt, s
 		return
 	}
 	cs.PreparedName = s.Name
-	inner := classifyRawStmt(DialectPostgres, &pg_query.RawStmt{Stmt: s.Query}, sess, opts, cs.ParserBackend)
+	inner := classifyNestedRawStmt(DialectPostgres, &pg_query.RawStmt{Stmt: s.Query}, sess, opts, cs.ParserBackend)
 	cs.Effects = inner.Effects
 	if inner.RawVerb != "" {
 		cs.RawVerb = "PREPARE_" + inner.RawVerb
@@ -370,7 +372,7 @@ func appendCTEEffects(cs *effects.ClassifiedStatement, with *pg_query.WithClause
 		if !ok || cn.CommonTableExpr == nil || cn.CommonTableExpr.Ctequery == nil {
 			continue
 		}
-		inner := classifyRawStmt(DialectPostgres, &pg_query.RawStmt{Stmt: cn.CommonTableExpr.Ctequery}, sess, opts, cs.ParserBackend)
+		inner := classifyNestedRawStmt(DialectPostgres, &pg_query.RawStmt{Stmt: cn.CommonTableExpr.Ctequery}, sess, opts, cs.ParserBackend)
 		cs.Effects = append(cs.Effects, inner.Effects...)
 	}
 }
