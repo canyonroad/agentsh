@@ -99,6 +99,7 @@ const (
 	AppActivityEBPFUnavailable          uint32 = 148
 	AppActivityLLMProxyFailed           uint32 = 149
 	AppActivityNetProxyFailed           uint32 = 150
+	AppActivityCgroupMode               uint32 = 151
 	AppActivityMCPToolChanged           uint32 = 153
 	AppActivitySecretAccess             uint32 = 155
 )
