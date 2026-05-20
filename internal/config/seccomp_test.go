@@ -320,3 +320,60 @@ func TestSandboxSeccompSocketFamily_AcceptsNumericFamily(t *testing.T) {
 		t.Errorf("numeric family should be accepted; got %v", err)
 	}
 }
+
+func TestFileMonitorAutoEnable_SkippedWhenSocketRulesPresent(t *testing.T) {
+	// When seccomp is enabled and socket_rules are configured but
+	// file_monitor is omitted, applyDefaults must NOT auto-enable
+	// file_monitor — doing so installs file-notify rules that deadlock
+	// the unixwrap during seccomp setup (issue #304).
+	yamlData := []byte(`
+sandbox:
+  seccomp:
+    enabled: true
+    socket_rules:
+      - name: block-rxrpc
+        family: AF_RXRPC
+        action: errno
+`)
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal(yamlData, &cfg))
+
+	require.Nil(t, cfg.Sandbox.Seccomp.FileMonitor.Enabled,
+		"precondition: omitted field must parse as nil")
+	require.Len(t, cfg.Sandbox.Seccomp.SocketRules, 1,
+		"precondition: socket_rules must parse")
+
+	applyDefaults(&cfg)
+
+	require.Nil(t, cfg.Sandbox.Seccomp.FileMonitor.Enabled,
+		"applyDefaults must NOT auto-enable file_monitor when socket_rules are set")
+	require.False(t,
+		FileMonitorBoolWithDefault(cfg.Sandbox.Seccomp.FileMonitor.Enabled, false),
+		"effective file_monitor.enabled must be false")
+}
+
+func TestFileMonitorAutoEnable_ExplicitTrueWithSocketRulesRespected(t *testing.T) {
+	// The auto-enable gate only governs the implicit default path.
+	// Explicit `file_monitor.enabled: true` must still be respected
+	// even when socket_rules are configured (operator opt-in).
+	yamlData := []byte(`
+sandbox:
+  seccomp:
+    enabled: true
+    file_monitor:
+      enabled: true
+    socket_rules:
+      - name: block-rxrpc
+        family: AF_RXRPC
+        action: errno
+`)
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal(yamlData, &cfg))
+
+	applyDefaults(&cfg)
+
+	require.NotNil(t, cfg.Sandbox.Seccomp.FileMonitor.Enabled,
+		"explicit true must survive applyDefaults")
+	require.True(t, *cfg.Sandbox.Seccomp.FileMonitor.Enabled,
+		"explicit true must remain true")
+}
