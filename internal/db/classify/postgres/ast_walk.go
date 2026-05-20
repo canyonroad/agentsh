@@ -23,6 +23,14 @@ import (
 // with the unknown sentinel + a diagnostic Error; Order canonicalises the
 // resulting slice in-place before return.
 func classifyRawStmt(d Dialect, raw *pg_query.RawStmt, sess SessionState, opts Options, backend effects.ParserBackend) effects.ClassifiedStatement {
+	return classifyRawStmtWithContext(d, raw, sess, opts, backend, true)
+}
+
+func classifyNestedRawStmt(d Dialect, raw *pg_query.RawStmt, sess SessionState, opts Options, backend effects.ParserBackend) effects.ClassifiedStatement {
+	return classifyRawStmtWithContext(d, raw, sess, opts, backend, false)
+}
+
+func classifyRawStmtWithContext(d Dialect, raw *pg_query.RawStmt, sess SessionState, opts Options, backend effects.ParserBackend, topLevel bool) effects.ClassifiedStatement {
 	if raw == nil || raw.Stmt == nil {
 		return unknownStatement(backend, "unmapped form: nil RawStmt")
 	}
@@ -36,9 +44,9 @@ func classifyRawStmt(d Dialect, raw *pg_query.RawStmt, sess SessionState, opts O
 	case *pg_query.Node_InsertStmt:
 		classifyInsert(&cs, n.InsertStmt, sess, opts)
 	case *pg_query.Node_UpdateStmt:
-		classifyUpdate(&cs, n.UpdateStmt, sess, opts)
+		classifyUpdate(&cs, n.UpdateStmt, sess, opts, topLevel)
 	case *pg_query.Node_DeleteStmt:
-		classifyDelete(&cs, n.DeleteStmt, sess, opts)
+		classifyDelete(&cs, n.DeleteStmt, sess, opts, topLevel)
 	case *pg_query.Node_MergeStmt:
 		classifyMerge(&cs, n.MergeStmt, sess, opts)
 	case *pg_query.Node_ExplainStmt:

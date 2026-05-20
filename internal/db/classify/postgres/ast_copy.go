@@ -154,7 +154,7 @@ func appendCopyQueryEffects(cs *effects.ClassifiedStatement, s *pg_query.CopyStm
 	if s.Query == nil {
 		return
 	}
-	inner := classifyRawStmt(DialectPostgres, &pg_query.RawStmt{Stmt: s.Query}, sess, opts, cs.ParserBackend)
+	inner := classifyNestedRawStmt(DialectPostgres, &pg_query.RawStmt{Stmt: s.Query}, sess, opts, cs.ParserBackend)
 	cs.Effects = append(cs.Effects, inner.Effects...)
 }
 
