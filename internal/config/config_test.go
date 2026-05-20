@@ -1655,6 +1655,61 @@ audit:
 	}
 }
 
+// TestAuditWatchtowerConfig_AgentIDRoundtrip verifies the new
+// audit.watchtower.agent_id YAML field survives load. Regression test
+// for issue #365 (Phase 1 wiring: agent_id was hardcoded to hostname).
+func TestAuditWatchtowerConfig_AgentIDRoundtrip(t *testing.T) {
+	yaml := `
+audit:
+  watchtower:
+    enabled: true
+    endpoint: "localhost:9090"
+    agent_id: "agent-edge-001"
+    tls:
+      insecure: true
+    auth:
+      token_env: "AGENTSH_TEST_TOKEN"
+    chain:
+      algorithm: hmac-sha256
+      key_source: env
+      key_env: AGENTSH_TEST_CHAIN_KEY
+`
+	cfg, err := loadFromString(t, yaml)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.Audit.Watchtower.AgentID; got != "agent-edge-001" {
+		t.Errorf("AgentID = %q, want %q", got, "agent-edge-001")
+	}
+}
+
+// TestAuditWatchtowerConfig_AgentIDOptional verifies omitting the
+// field gives the zero string — the buildWatchtowerStore-side
+// hostname-fallback is exercised in internal/server tests.
+func TestAuditWatchtowerConfig_AgentIDOptional(t *testing.T) {
+	yaml := `
+audit:
+  watchtower:
+    enabled: true
+    endpoint: "localhost:9090"
+    tls:
+      insecure: true
+    auth:
+      token_env: "AGENTSH_TEST_TOKEN"
+    chain:
+      algorithm: hmac-sha256
+      key_source: env
+      key_env: AGENTSH_TEST_CHAIN_KEY
+`
+	cfg, err := loadFromString(t, yaml)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.Audit.Watchtower.AgentID; got != "" {
+		t.Errorf("AgentID = %q, want empty (omitted)", got)
+	}
+}
+
 func TestAuditWatchtowerConfig_EmitExtendedLossReasons_DefaultsFalse(t *testing.T) {
 	yamlIn := `
 audit:

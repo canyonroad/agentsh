@@ -886,6 +886,15 @@ type AuditWatchtowerConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	Endpoint      string `yaml:"endpoint"`   // host:port
 	SessionID     string `yaml:"session_id"` // optional; auto-generated ULID if empty
+	// AgentID is the operator-visible identifier for this agent on the
+	// Watchtower wire. When empty (the default), buildWatchtowerStore
+	// falls back to os.Hostname() — preserving pre-existing behaviour
+	// from before this field existed.
+	//
+	// Mirrors SessionID: optional in YAML, resolved at store-construction
+	// time (NOT in applyDefaults — non-daemon CLI subcommands like
+	// `agentsh config show` must not trigger hostname lookup).
+	AgentID       string `yaml:"agent_id"`
 	StateDir      string `yaml:"state_dir"`  // default GetUserStateDir() + "/wtp"; per-OS path differs (XDG_STATE_HOME on Linux, LOCALAPPDATA on Windows). See defaultWatchtowerStateDir.
 	EphemeralMode bool   `yaml:"ephemeral_mode"`
 
