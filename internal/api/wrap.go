@@ -283,6 +283,33 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		}, http.StatusOK, nil
 	}
 
+	// Refuse wrap-init when sandbox.unix_sockets.enabled has been explicitly
+	// set to false. Without this gate, the shim's kernel-install path
+	// launches agentsh-unixwrap, which loads its seccomp filter and tries
+	// to forward the notify FD to a server that has no live handler — the
+	// handshake aborts and the user's command silently exits with empty
+	// stdout / exit 1. Returning 503 makes the shim's ModeAuto branch fall
+	// through to running the command unwrapped (issue #361 regression vs
+	// v0.19.3).
+	//
+	// Nil is treated as "default true" via unixSocketsConfigEnabled, which
+	// matches applyDefaults' production behavior and keeps bare-config tests
+	// working. The exec-path gate in core.go::setupSeccompWrapper uses a
+	// stricter "nil → disabled" check; in production that distinction is
+	// invisible because applyDefaults always populates the pointer, so the
+	// two paths agree on every real config. Pre-applyDefaults divergence is
+	// documented and intentional pending broader cleanup.
+	//
+	// Exception: when wrapNeedsCgroupBeforeAck reports true, the wrapper
+	// must still engage even with unix_sockets disabled — the
+	// forceNotifyForPreAckCgroup branch below forces a user-notify rule
+	// specifically to keep the wrapper alive long enough to attach eBPF
+	// before exec. Skipping it here would silently disable eBPF enforcement.
+	if !unixSocketsConfigEnabled(a.cfg) && !wrapNeedsCgroupBeforeAck(a, s) {
+		return types.WrapInitResponse{}, http.StatusServiceUnavailable,
+			fmt.Errorf("wrap-init: sandbox.unix_sockets.enabled is false; wrapper disabled")
+	}
+
 	// Resolve wrapper binary
 	wrapperBin := strings.TrimSpace(a.cfg.Sandbox.UnixSockets.WrapperBin)
 	if wrapperBin == "" {
@@ -808,6 +835,24 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 	if err := writeNotifyStatusForWrap(unixConn, true); err != nil {
 		slog.Debug("wrap: failed to write notify setup status", "session_id", sessionID, "error", err)
 	}
+}
+
+// unixSocketsConfigEnabled reports whether sandbox.unix_sockets.enabled
+// is on for the purposes of wrap-init. Nil is treated as true to match
+// applyDefaults' production behavior (the field defaults to true when
+// unset). Only an explicit false short-circuits.
+//
+// Callers that need the *exec-path* semantics ("nil → disabled") should
+// continue to use the inline check in core.go::setupSeccompWrapper —
+// see the comment in wrapInitCore explaining the documented divergence.
+func unixSocketsConfigEnabled(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.Sandbox.UnixSockets.Enabled == nil {
+		return true
+	}
+	return *cfg.Sandbox.UnixSockets.Enabled
 }
 
 func wrapNeedsCgroupBeforeAck(a *App, s *session.Session) bool {
