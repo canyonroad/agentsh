@@ -408,7 +408,7 @@ func TestWrapInit_UnixSocketsDisabledButEBPFRequiresWrapper(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	_, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
 		AgentCommand: "/bin/echo",
 	})
 	if err != nil {
@@ -416,6 +416,17 @@ func TestWrapInit_UnixSocketsDisabledButEBPFRequiresWrapper(t *testing.T) {
 	}
 	if code != http.StatusOK {
 		t.Errorf("expected status 200 (eBPF override), got %d", code)
+	}
+	// Pin the assertion to the post-gate path: a 200 here could otherwise
+	// come from an earlier branch (ptrace, etc.) that would also bypass
+	// the gate accidentally. WrapperBinary is populated only in the main
+	// path that follows the unix_sockets gate, so a non-empty value
+	// uniquely proves the override branch was taken.
+	if resp.WrapperBinary == "" {
+		t.Errorf("expected WrapperBinary set (override branch must produce a wrapper), got empty")
+	}
+	if resp.NotifySocket == "" {
+		t.Errorf("expected NotifySocket set (override branch must produce a socket), got empty")
 	}
 }
 
