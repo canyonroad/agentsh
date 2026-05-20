@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,30 +152,35 @@ func TestResolveAgentID_ExplicitOverride(t *testing.T) {
 	}
 }
 
-// TestResolveAgentID_EmptyFallsBackToHostname verifies the empty
-// string triggers the os.Hostname() fallback.
-func TestResolveAgentID_EmptyFallsBackToHostname(t *testing.T) {
+// TestResolveAgentID_EmptyFallsBackToHostnamePID verifies the empty
+// string triggers the "<hostname>-<pid>" fallback. The PID suffix
+// disambiguates multiple agentsh processes co-resident on the same
+// host.
+func TestResolveAgentID_EmptyFallsBackToHostnamePID(t *testing.T) {
 	cfg := config.AuditWatchtowerConfig{AgentID: ""}
 	got := server.ResolveAgentIDForTest(cfg)
-	hostname, _ := os.Hostname()
-	// Accept either the host name (normal path) or "unknown" (Hostname
-	// returned an error). Both are documented behaviours.
-	if got == "" {
-		t.Errorf("ResolveAgentIDForTest returned empty; want hostname (%q) or \"unknown\"", hostname)
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "unknown"
 	}
-	if hostname != "" && got != hostname {
-		t.Errorf("ResolveAgentIDForTest = %q, want %q (os.Hostname)", got, hostname)
+	want := fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	if got != want {
+		t.Errorf("ResolveAgentIDForTest = %q, want %q", got, want)
 	}
 }
 
 // TestResolveAgentID_WhitespaceTreatedAsEmpty verifies whitespace-only
-// values fall back to the hostname.
+// values fall back to the hostname-PID identity (same path as empty).
 func TestResolveAgentID_WhitespaceTreatedAsEmpty(t *testing.T) {
 	cfg := config.AuditWatchtowerConfig{AgentID: "   "}
 	got := server.ResolveAgentIDForTest(cfg)
-	hostname, _ := os.Hostname()
-	if hostname != "" && got != hostname {
-		t.Errorf("ResolveAgentIDForTest(whitespace) = %q, want hostname %q", got, hostname)
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "unknown"
+	}
+	want := fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	if got != want {
+		t.Errorf("ResolveAgentIDForTest(whitespace) = %q, want %q", got, want)
 	}
 }
 

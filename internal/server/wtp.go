@@ -50,13 +50,13 @@ func resolveLogGoawayMessage(cfgVal *bool, logger *slog.Logger) bool {
 // advertise on the wire. Precedence:
 //
 //  1. TrimSpace(cfg.AgentID) if non-empty.
-//  2. os.Hostname() if it succeeds.
-//  3. "unknown" as a last-resort sentinel — matches the prior behaviour
-//     for the Hostname-error case.
+//  2. os.Hostname() + "-" + os.Getpid() — disambiguates multiple
+//     agentsh processes on the same host. A Hostname() error
+//     substitutes "unknown" for the host portion.
 //
 // This is called from buildWatchtowerStore. Keeping it as a small
-// pure function lets us unit-test the three rungs independently of
-// the surrounding KMS/transport machinery.
+// pure function lets us unit-test the resolution rungs independently
+// of the surrounding KMS/transport machinery.
 func resolveAgentID(cfg config.AuditWatchtowerConfig) string {
 	id := strings.TrimSpace(cfg.AgentID)
 	if id != "" {
@@ -64,9 +64,9 @@ func resolveAgentID(cfg config.AuditWatchtowerConfig) string {
 	}
 	h, err := os.Hostname()
 	if err != nil || h == "" {
-		return "unknown"
+		h = "unknown"
 	}
-	return h
+	return fmt.Sprintf("%s-%d", h, os.Getpid())
 }
 
 // buildWatchtowerStore constructs a watchtower.Store from the daemon
@@ -77,8 +77,9 @@ func resolveAgentID(cfg config.AuditWatchtowerConfig) string {
 // from the key fingerprint so the WAL identity and SessionInit agree.
 //
 // AgentID: cfg.AgentID takes precedence; empty/whitespace-only falls
-// back to os.Hostname(); a Hostname() error falls back to "unknown".
-// See resolveAgentID.
+// back to "<hostname>-<pid>" so multiple agentsh processes on the same
+// host receive distinct identities. A Hostname() error substitutes
+// "unknown" for the host portion. See resolveAgentID.
 func buildWatchtowerStore(
 	ctx context.Context,
 	cfg config.AuditWatchtowerConfig,
