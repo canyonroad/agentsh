@@ -91,6 +91,9 @@ func validateStatementRule(r *StatementRule, svcs map[ServiceID]*DBService) ([]e
 			errs = append(errs, fmt.Errorf("rule_unknown_operation: database_rules[%q]: unknown operations token %q", r.Name, op))
 		}
 	}
+	if r.RequireWhere && !groupsOnlyModifyDelete(groups) {
+		errs = append(errs, fmt.Errorf("rule_require_where_invalid_operation: database_rules[%q]: require_where is supported only for modify/delete operations", r.Name))
+	}
 	for _, st := range r.Subtypes {
 		if _, ok := effects.ParseSubtype(st); !ok {
 			errs = append(errs, fmt.Errorf("rule_unknown_subtype: database_rules[%q]: unknown subtypes token %q", r.Name, st))
@@ -321,6 +324,18 @@ func groupsOnlyRead(groups map[effects.Group]struct{}) bool {
 	}
 	_, ok := groups[effects.GroupRead]
 	return ok
+}
+
+func groupsOnlyModifyDelete(groups map[effects.Group]struct{}) bool {
+	if len(groups) == 0 {
+		return false
+	}
+	for g := range groups {
+		if g != effects.GroupModify && g != effects.GroupDelete {
+			return false
+		}
+	}
+	return true
 }
 
 func allGroupsObjectless(groups map[effects.Group]struct{}) bool {

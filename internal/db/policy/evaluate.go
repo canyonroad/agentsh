@@ -515,6 +515,9 @@ func ruleMatchesEffectMeta(r *compiledStatementRule, e effects.Effect) bool {
 	if _, ok := r.groups[e.Group]; !ok {
 		return false
 	}
+	if r.requireWhere && !e.HasWhere {
+		return false
+	}
 	if len(r.subtypes) > 0 {
 		if _, ok := r.subtypes[e.Subtype]; !ok {
 			return false
