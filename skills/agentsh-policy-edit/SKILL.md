@@ -74,7 +74,7 @@ DB policy evaluation is different from file/network/command ordering:
 - `passthrough` DB services can use connection rules only; statement rules are unavailable because AgentSH cannot inspect SQL.
 - `decision: redirect` is statement-level only. It requires read-only operations, exactly one canonical `relations` source selector, `match_object_resolution: catalog_resolved`, and `redirect.relation` as a canonical `schema.name` target.
 - `policies.db.unavoidability: enforce` should be paired with declared `db_services`; it blocks direct DB egress from governed processes and routes through AgentSH-generated DB proxy redirects.
-- When editing mutation allow/approve/audit rules, preserve or add `require_where: true` for sensitive Postgres `modify`/`delete` rules when the operator wants no-WHERE mutations to fail closed. Do not add it to `MUTATE`, `*`, `read`, DDL, session, transaction, or procedural rules.
+- When editing mutation allow/approve/audit rules, preserve or add `require_where: true` for sensitive Postgres `modify`/`delete` rules when the operator wants no-WHERE mutations to fail closed. Do not add it to `MUTATE`, `*`, `read`, DDL, session, transaction, or procedural rules. Check for overlapping unguarded non-deny rules, because `require_where` only constrains the rule it appears on.
 
 When editing DB rules, prefer adding narrow denies for risky operations and explicit non-deny coverage for intended objects. Avoid broad `allow` rules across all services unless the user explicitly asks for that posture.
 

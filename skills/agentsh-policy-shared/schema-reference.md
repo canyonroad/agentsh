@@ -334,7 +334,7 @@ Operation groups are lowercase canonical names: `read`, `write`, `modify`, `dele
 
 Uppercase aliases are also supported: `READ`, `INSERT`, `UPDATE`, `DELETE`, `REMOVE`, `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `EXPORT`, `LOAD`, `MUTATE`, `SCHEMA`, `MAINTENANCE`, `LOCK_TABLES`, `LISTEN_NOTIFY`, `DANGEROUS`. `*` expands to all known groups except `unknown`.
 
-`require_where: true` is valid only when `operations` expands exclusively to `modify` and/or `delete`; `MUTATE` is rejected because it also includes `write`. The guard is syntactic only, so `WHERE true` satisfies it.
+`require_where: true` is valid only when `operations` expands exclusively to `modify` and/or `delete`; `MUTATE` is rejected because it also includes `write`. The guard is syntactic only, so `WHERE true` satisfies it. It is a matcher on that rule only; another unguarded non-deny rule can still cover the same effect.
 
 `decision: redirect` is Postgres-only and supports safe read-only relation replacement. It requires `operations` that expand only to read, exactly one canonical `relations` source selector, `match_object_resolution: catalog_resolved`, an eligible terminate-mode Postgres service, and `redirect.relation`.
 

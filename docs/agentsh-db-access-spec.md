@@ -775,6 +775,7 @@ Connection rules evaluate **before** any statement is classified. A connection-l
 - Rule referencing a `db_service` that does not exist → load error.
 - Statement rule with malformed `decision: redirect` shape → load error. Connection-rule redirect remains invalid.
 - Rule with `subtypes` referencing a non-existent subtype → load error.
+- Rule with `require_where: true` paired with operations that do not expand exclusively to `modify` and/or `delete` → `rule_require_where_invalid_operation` load error.
 - Rule with no `db_service` and no `db_family` and `decision: allow` and `operations: ["*"]` → load error (too broad).
 - Service with `tls_mode: terminate_plaintext_upstream` to a non-RFC1918, non-loopback destination without `trusted_network: true` → load error.
 - Connection rule with `match_kind: cancel` and `decision: approve` → load error. Cancel is a real-time signal that cannot be held for human approval (§15.2, R19).

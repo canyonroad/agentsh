@@ -450,7 +450,7 @@ database_rules:
     decision: allow
 ```
 
-This allows `UPDATE public.users SET disabled = true WHERE id = 123` when the relation selector matches, but it does not cover `UPDATE public.users SET disabled = true`. The guard checks only that a top-level `WHERE` exists; it does not prove the predicate is selective or tenant-safe.
+This rule allows `UPDATE public.users SET disabled = true WHERE id = 123` when the relation selector matches, but it does not cover `UPDATE public.users SET disabled = true`. The guard checks only that a top-level `WHERE` exists; it does not prove the predicate is selective or tenant-safe. It is also only a rule matcher: if another unguarded `allow`, `audit`, or `approve` rule covers the same `modify` or `delete` effect, a no-WHERE mutation can still be permitted.
 
 ## HTTP Services
 
