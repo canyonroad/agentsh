@@ -1474,6 +1474,12 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 		existing.NeedsWriteEscalation = parent.NeedsWriteEscalation
 		existing.ThreadHasReadEscalation = parent.ThreadHasReadEscalation
 		existing.ThreadHasWriteEscalation = parent.ThreadHasWriteEscalation
+		// Overwrite the marker the procfs fallback may have inferred:
+		// findParentByTGID + readPPID is best-effort and can land on the
+		// wrong tracee. The kernel-authoritative parent from the fork
+		// event always wins so a stale SessionlessPIDAttach=true cannot
+		// turn HandleExecve into a silent allow for a real session bug.
+		existing.SessionlessPIDAttach = parent.SessionlessPIDAttach
 		existing.Attached = time.Now()
 	} else {
 		// Shared with the two minimal-state fallback paths in
