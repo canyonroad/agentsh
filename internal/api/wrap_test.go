@@ -430,6 +430,115 @@ func TestWrapInit_UnixSocketsDisabledButEBPFRequiresWrapper(t *testing.T) {
 	}
 }
 
+// TestWrapInit_UnixSocketsDisabledWithPolicyLimitsButNoCgroup covers the
+// follow-up regression reported in #361 after the initial 093e1852 fix.
+// secure-sandbox presets ship policy resource_limits (max_memory_mb /
+// cpu_quota_percent / pids_max) for every adapter. Before this fix,
+// wrapNeedsCgroupBeforeAck returned true whenever ANY policy limit was
+// non-zero, which forced the wrapper to engage on hosts that disabled
+// BOTH unix_sockets AND cgroups — defeating the unix_sockets gate. The
+// wrapper then loaded its seccomp filter, the server tried to apply
+// cgroups, applyCgroupV2 returned CgroupResourceLimitsUnavailableError
+// (no soft-fail), and the user's command silently died (empty stdout,
+// exit 1) — the same symptom this issue is supposed to prevent.
+//
+// With policy limits but no cgroup/eBPF enforcement configured, the
+// limits cannot be enforced anyway, so the wrapper must NOT engage and
+// the gate must fire.
+func TestWrapInit_UnixSocketsDisabledWithPolicyLimitsButNoCgroup(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	cfg := &config.Config{}
+	disabled := false
+	cfg.Sandbox.UnixSockets.Enabled = &disabled
+	// Explicitly leave Cgroups / Network.EBPF unconfigured — mirrors the
+	// Vercel/Daytona/Firecracker server config from secure-sandbox.
+
+	mgr := session.NewManager(5)
+	store := composite.New(mockEventStore{}, nil)
+	broker := events.NewBroker()
+	engine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "test",
+		ResourceLimits: policy.ResourceLimits{
+			MaxMemoryMB:     8192,
+			CPUQuotaPercent: 100,
+			PidsMax:         500,
+		},
+		CommandRules: []policy.CommandRule{
+			{Name: "allow-all", Commands: []string{}, Decision: "allow"},
+		},
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, code, wrapErr := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		AgentArgs:    []string{"hello"},
+	})
+	if wrapErr == nil {
+		t.Fatal("expected wrap-init to refuse engagement when unix_sockets is disabled and no cgroup/eBPF enforcement is configured")
+	}
+	if code != http.StatusServiceUnavailable {
+		t.Errorf("expected status 503, got %d", code)
+	}
+	if !strings.Contains(wrapErr.Error(), "unix_sockets.enabled is false") {
+		t.Errorf("expected unix_sockets gate to fire, got %q", wrapErr.Error())
+	}
+}
+
+// TestWrapNeedsCgroupBeforeAck_PolicyLimitsAloneInsufficient is the unit
+// counterpart for the #361 follow-up: pins the contract that policy
+// limits, on their own, are not enough to force the pre-ACK cgroup
+// engagement path. Without cgroups/eBPF configured, the limits cannot be
+// enforced anyway — keeping the wrapper alive would only lead to
+// applyCgroupV2 failing with CgroupResourceLimitsUnavailableError.
+func TestWrapNeedsCgroupBeforeAck_PolicyLimitsAloneInsufficient(t *testing.T) {
+	cfg := &config.Config{}
+	mgr := session.NewManager(5)
+	store := composite.New(mockEventStore{}, nil)
+	broker := events.NewBroker()
+	engine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "test",
+		ResourceLimits: policy.ResourceLimits{
+			MaxMemoryMB:     1024,
+			CPUQuotaPercent: 50,
+			PidsMax:         100,
+		},
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if wrapNeedsCgroupBeforeAck(app, s) {
+		t.Fatal("wrapNeedsCgroupBeforeAck must return false when policy has limits but no cgroup/eBPF enforcement is configured")
+	}
+
+	// Sanity: enabling cgroups must flip the result so the original
+	// pre-ACK engagement contract still holds for operators who actually
+	// configured enforcement.
+	cfg.Sandbox.Cgroups.Enabled = true
+	if !wrapNeedsCgroupBeforeAck(app, s) {
+		t.Fatal("wrapNeedsCgroupBeforeAck must return true when cgroups is enabled")
+	}
+}
+
 func TestWrapInit_WrapperNotFound(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("wrap is Linux-only")

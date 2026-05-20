@@ -865,13 +865,24 @@ func wrapNeedsCgroupBeforeAck(a *App, s *session.Session) bool {
 		a.cfg.Sandbox.Network.EBPF.Required {
 		return true
 	}
-	// Per-policy resource-limits check unchanged.
-	engine := a.policyEngineFor(s)
-	if engine == nil {
-		return false
-	}
-	lim := engine.Limits()
-	return lim.MaxMemoryMB > 0 || lim.CPUQuotaPercent > 0 || lim.PidsMax > 0
+	// Policy resource-limits ONLY justify engaging the wrapper when there
+	// is a cgroup/eBPF enforcement path available — otherwise the wrapper
+	// engages, the server tries to apply cgroups, applyCgroupV2 returns
+	// CgroupResourceLimitsUnavailableError (no soft-fail path), and the
+	// wrapper aborts the user's command with empty stdout / exit 1.
+	//
+	// This is the policy-limits arm of the #361 regression: secure-sandbox
+	// presets ship maxMemoryMb/cpuQuotaPercent/pidsMax for every adapter,
+	// which used to land here unconditionally and forced wrap to engage
+	// even on hosts that disabled both cgroups AND unix_sockets in their
+	// server config (Vercel Firecracker, Daytona). With no enforcement
+	// infrastructure configured, the limits cannot be enforced anyway —
+	// keeping the wrapper alive only to fail in applyCgroupV2 is strictly
+	// worse than not engaging at all. The first branch above already
+	// returns true when cgroups OR any eBPF flag is enabled, so reaching
+	// this point means "policy has limits but no enforcement is wired" —
+	// nothing to attach, nothing to gain by holding the handshake open.
+	return false
 }
 
 func defaultWrapCgroupSetupForNotify(ctx context.Context, a *App, s *session.Session, sessionID string, wrapperPID int) (func() error, error) {
