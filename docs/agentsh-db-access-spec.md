@@ -704,6 +704,7 @@ database_rules:
 | `operations` | yes | Group names or aliases. Rule matches an effect whose `group` is in the list. |
 | `subtypes` | no | If specified, rule matches only effects whose `operation_subtype` is in the list. |
 | `match_object_resolution` | no | One of the resolution tags or `*`. Matches against the effect's per-effect resolution tag. |
+| `require_where` | no | Boolean. When true, this rule covers Postgres `modify`/`delete` effects only if the top-level `UPDATE` or `DELETE` statement has a syntactic `WHERE` clause. Valid only when `operations` expands exclusively to `modify` and/or `delete`. |
 | `decision` | yes | `allow`, `deny`, `approve`, `audit`, `redirect`. `redirect` is statement-level only and requires `redirect.relation`, `relations`, `match_object_resolution: catalog_resolved`, read-only operations, and an eligible terminate-mode Postgres service. |
 | `redirect.relation` | only for `decision: redirect` | Canonical target relation formatted as `schema.name`. Plan 11 supports one source relation selected by a canonical `relations` entry and one target relation. Runtime execution is wired in DB Plan 12. |
 | `message` | no | Template with `{{.Operation}}, {{.Subtype}}, {{.Schema}}, {{.Object}}, {{.Verb}}, {{.StatementPreview}}`. |
@@ -711,6 +712,8 @@ database_rules:
 | `acknowledge_audit_on_dangerous` | no | Required `true` to silence the load-time warning emitted when `decision: audit` is paired with operations of risk tier ≥ high (§9.4, R13). |
 
 `objects` remains syntactic-only. `relations` and `functions` are catalog selectors and do not match unresolved or unavailable catalog metadata. Strict object coverage still applies: every object slot in an effect must be covered by an allow/audit/redirect/approve rule, and any matching deny rule still wins.
+
+`require_where: true` is a syntactic mutation guard for Postgres `UPDATE` and `DELETE`. It does not prove predicate selectivity; `WHERE true` satisfies the guard. Operators who need tenant, primary-key, or row-count constraints must enforce those separately with database-native controls or a future predicate-aware policy feature.
 
 ### DB policy explain
 

@@ -322,6 +322,7 @@ Statement-level database rules apply after the Postgres proxy classifies a state
 | relations | string[] | no | Catalog-resolved relation selectors, formatted as `schema.name` |
 | functions | string[] | no | Catalog-resolved function selectors, formatted as `schema.name(identity_args)`; `schema.name(*)` matches overloads |
 | match_object_resolution | string | no | Resolution tag such as `catalog_resolved`, `qualified_syntactic`, `unqualified_syntactic`, `catalog_unresolved`, or `*` |
+| require_where | bool | no | For Postgres `modify`/`delete` rules only: require the top-level `UPDATE` or `DELETE` statement to include a syntactic `WHERE` clause |
 | decision | string | yes | `allow`, `deny`, `approve`, `audit`, or statement-level `redirect` |
 | message | string | no | Template shown on deny/approve paths |
 | timeout | duration | no | Approval timeout |
@@ -332,6 +333,8 @@ Statement-level database rules apply after the Postgres proxy classifies a state
 Operation groups are lowercase canonical names: `read`, `write`, `modify`, `delete`, `bulk_load`, `bulk_export`, `schema_create`, `schema_alter`, `schema_destroy`, `privilege`, `transaction`, `session`, `maintenance`, `lock`, `notify`, `procedural`, `unsafe_io`, `unknown`.
 
 Uppercase aliases are also supported: `READ`, `INSERT`, `UPDATE`, `DELETE`, `REMOVE`, `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `EXPORT`, `LOAD`, `MUTATE`, `SCHEMA`, `MAINTENANCE`, `LOCK_TABLES`, `LISTEN_NOTIFY`, `DANGEROUS`. `*` expands to all known groups except `unknown`.
+
+`require_where: true` is valid only when `operations` expands exclusively to `modify` and/or `delete`; `MUTATE` is rejected because it also includes `write`. The guard is syntactic only, so `WHERE true` satisfies it.
 
 `decision: redirect` is Postgres-only and supports safe read-only relation replacement. It requires `operations` that expand only to read, exactly one canonical `relations` source selector, `match_object_resolution: catalog_resolved`, an eligible terminate-mode Postgres service, and `redirect.relation`.
 
