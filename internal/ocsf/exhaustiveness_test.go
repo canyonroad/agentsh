@@ -13,14 +13,110 @@ import (
 	"testing"
 )
 
+// walkEventTypeLiterals walks an already-parsed *ast.File and records
+// every event Type literal found into `out` (keyed by string value,
+// valued by position string). Pulled out of scanTypeLiterals so the
+// CallExpr branch can be unit-tested against in-memory sources.
+func walkEventTypeLiterals(f *ast.File, fset *token.FileSet, consts map[string]string, out map[string]string) {
+	addLit := func(s string, pos token.Pos) {
+		if s == "" {
+			return
+		}
+		if _, seen := out[s]; !seen {
+			out[s] = fset.Position(pos).String()
+		}
+	}
+	// resolveCall returns the string value the call expression resolves
+	// to, if it is `string(events.EventX)` or `string(EventX)` and EventX
+	// is in consts. Returns ("", false) otherwise.
+	resolveCall := func(call *ast.CallExpr) (string, bool) {
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok || ident.Name != "string" {
+			return "", false
+		}
+		if len(call.Args) != 1 {
+			return "", false
+		}
+		switch arg := call.Args[0].(type) {
+		case *ast.SelectorExpr:
+			// Qualified: events.EventX
+			pkgIdent, ok := arg.X.(*ast.Ident)
+			if !ok || pkgIdent.Name != "events" {
+				return "", false
+			}
+			if v, ok := consts[arg.Sel.Name]; ok {
+				return v, true
+			}
+		case *ast.Ident:
+			// Bare: EventX (same-package use)
+			if v, ok := consts[arg.Name]; ok {
+				return v, true
+			}
+		}
+		return "", false
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CompositeLit:
+			if !isEventCompositeLit(x) {
+				return true
+			}
+			for _, elt := range x.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				ident, ok := kv.Key.(*ast.Ident)
+				if !ok || ident.Name != "Type" {
+					continue
+				}
+				switch v := kv.Value.(type) {
+				case *ast.BasicLit:
+					if v.Kind == token.STRING {
+						if s, err := strconv.Unquote(v.Value); err == nil {
+							addLit(s, v.Pos())
+						}
+					}
+				case *ast.CallExpr:
+					if s, ok := resolveCall(v); ok {
+						addLit(s, v.Pos())
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			if len(x.Lhs) != 1 || len(x.Rhs) != 1 {
+				return true
+			}
+			sel, ok := x.Lhs[0].(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Type" {
+				return true
+			}
+			switch v := x.Rhs[0].(type) {
+			case *ast.BasicLit:
+				if v.Kind == token.STRING {
+					if s, err := strconv.Unquote(v.Value); err == nil {
+						addLit(s, v.Pos())
+					}
+				}
+			case *ast.CallExpr:
+				if s, ok := resolveCall(v); ok {
+					addLit(s, v.Pos())
+				}
+			}
+		}
+		return true
+	})
+}
+
 // scanTypeLiterals walks rootDir for .go files (excluding vendor/,
 // .gomodcache/, build/, bin/, dist/, etc.) and collects every string
 // literal passed as the Type field of a types.Event composite literal
 // or assigned to ev.Type.
 //
 // LIMITATION: the AST walker matches only literal `Type: "..."` or
-// `ev.Type = "..."` assignments. Emitters that call a helper function
-// and then assign its return value — for example:
+// `ev.Type = "..."` assignments, plus `Type: string(events.EventX)`
+// conversions. Emitters that call a helper function and then assign
+// its return value — for example:
 //
 //	n.emitFileEvent(ctx, "dir_list", ...)
 //
@@ -40,6 +136,7 @@ func scanTypeLiterals(t *testing.T, rootDir string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
 	fset := token.NewFileSet()
+	consts := loadEventConstants(t, rootDir)
 	skip := map[string]bool{
 		"vendor": true, ".gomodcache": true, "build": true, "bin": true, "dist": true,
 		"node_modules": true, ".git": true, ".claude": true, "tmp": true, "examples": true,
@@ -66,52 +163,7 @@ func scanTypeLiterals(t *testing.T, rootDir string) map[string]string {
 			t.Logf("parse %s: %v (skipping)", path, err)
 			return nil
 		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.CompositeLit:
-				if !isEventCompositeLit(x) {
-					return true
-				}
-				for _, elt := range x.Elts {
-					kv, ok := elt.(*ast.KeyValueExpr)
-					if !ok {
-						continue
-					}
-					ident, ok := kv.Key.(*ast.Ident)
-					if !ok || ident.Name != "Type" {
-						continue
-					}
-					if lit, ok := kv.Value.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-						s, err := strconv.Unquote(lit.Value)
-						if err == nil && s != "" {
-							pos := fset.Position(lit.Pos())
-							if _, seen := out[s]; !seen {
-								out[s] = pos.String()
-							}
-						}
-					}
-				}
-			case *ast.AssignStmt:
-				// ev.Type = "foo"
-				if len(x.Lhs) != 1 || len(x.Rhs) != 1 {
-					return true
-				}
-				sel, ok := x.Lhs[0].(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "Type" {
-					return true
-				}
-				if lit, ok := x.Rhs[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					s, err := strconv.Unquote(lit.Value)
-					if err == nil && s != "" {
-						pos := fset.Position(lit.Pos())
-						if _, seen := out[s]; !seen {
-							out[s] = pos.String()
-						}
-					}
-				}
-			}
-			return true
-		})
+		walkEventTypeLiterals(f, fset, consts, out)
 		return nil
 	})
 	if walkErr != nil {
@@ -261,4 +313,100 @@ func repoRoot(t *testing.T) string {
 		}
 		dir = parent
 	}
+}
+
+// TestExhaustiveness_DetectsStringConversionForm verifies the AST
+// walker recognises Type: string(events.EventX) and Type: string(EventX)
+// forms — the gap that let "cgroup_mode" reach production without
+// tripping TestExhaustiveness_AllEventTypesRegistered. Regression test
+// for issue #365.
+func TestExhaustiveness_DetectsStringConversionForm(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "qualified events.EventX in composite literal",
+			src: `package x
+import (
+	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/pkg/types"
+)
+var _ = types.Event{Type: string(events.EventCgroupMode)}
+`,
+			want: "cgroup_mode",
+		},
+		{
+			name: "qualified events.EventX in ev.Type assignment",
+			src: `package x
+import (
+	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/pkg/types"
+)
+func f(ev *types.Event) { ev.Type = string(events.EventCgroupMode) }
+`,
+			want: "cgroup_mode",
+		},
+		{
+			name: "bare EventX inside events package",
+			src: `package events
+type EventType string
+const EventCgroupMode EventType = "cgroup_mode"
+type Event struct{ Type string }
+var _ = Event{Type: string(EventCgroupMode)}
+`,
+			want: "cgroup_mode",
+		},
+	}
+	rootDir := repoRoot(t)
+	consts := loadEventConstants(t, rootDir)
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := scanFromSource(t, tc.src, consts)
+			if _, ok := got[tc.want]; !ok {
+				t.Fatalf("scanner did not find %q in %s; found = %v", tc.want, tc.name, keysOf(got))
+			}
+		})
+	}
+}
+
+// TestExhaustiveness_DoesNotOverDetect verifies non-string-conversion
+// references (e.g. a bare events.EventX used as a value, not wrapped
+// in `string(...)`) are NOT recorded by the conversion-form branch.
+func TestExhaustiveness_DoesNotOverDetect(t *testing.T) {
+	src := `package x
+import "github.com/agentsh/agentsh/internal/events"
+var _ = events.EventCgroupMode
+`
+	consts := loadEventConstants(t, repoRoot(t))
+	got := scanFromSource(t, src, consts)
+	if _, ok := got["cgroup_mode"]; ok {
+		t.Fatalf("scanner over-detected cgroup_mode from a bare reference; found = %v", keysOf(got))
+	}
+}
+
+// scanFromSource is a test helper that runs the walker over a single
+// in-memory source string. It mirrors scanTypeLiterals' AST walk but
+// against a string rather than disk.
+func scanFromSource(t *testing.T, src string, consts map[string]string) map[string]string {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "in_memory.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse in-memory source: %v", err)
+	}
+	out := map[string]string{}
+	walkEventTypeLiterals(f, fset, consts, out)
+	return out
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
