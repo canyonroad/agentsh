@@ -19,6 +19,31 @@ import (
 
 var updateGoldens = flag.Bool("update", false, "regenerate golden files")
 
+// TestMap_CgroupModeRegistered verifies the cgroup_mode startup event
+// has an OCSF projector. Regression test for issue #365.
+func TestMap_CgroupModeRegistered(t *testing.T) {
+	m := New()
+	ev := types.Event{
+		ID:        "ev-cgroup-mode-probe",
+		Type:      "cgroup_mode",
+		Timestamp: time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC),
+		Fields: map[string]any{
+			"mode":   "user_namespace",
+			"reason": "no_root_cgroup_writable",
+		},
+	}
+	mapped, err := m.Map(ev)
+	if err != nil {
+		t.Fatalf("Map(cgroup_mode) error: %v", err)
+	}
+	if mapped.OCSFClassUID != ClassApplicationActivity {
+		t.Errorf("ClassUID = %d, want %d", mapped.OCSFClassUID, ClassApplicationActivity)
+	}
+	if mapped.OCSFActivityID != AppActivityCgroupMode {
+		t.Errorf("ActivityID = %d, want %d", mapped.OCSFActivityID, AppActivityCgroupMode)
+	}
+}
+
 func TestMap_UnmappedTypeReturnsErrUnmappedType(t *testing.T) {
 	m := New()
 	ev := types.Event{Type: "definitely_not_in_registry_xyz", Timestamp: time.Unix(0, 0)}
@@ -389,6 +414,15 @@ func goldenSampleEvents() []types.Event {
 		{ID: "ev-secret-access-1", Type: "secret_access", Timestamp: t0, Fields: map[string]any{"secret_name": "github_pat", "provider": "vault"}},
 		// Infra
 		{ID: "ev-cgroup-applied-1", Type: "cgroup_applied", Timestamp: t0},
+		{ID: "ev-cgroup-mode-1", Type: "cgroup_mode", Timestamp: t0,
+			Fields: map[string]any{
+				"mode":         "user_namespace",
+				"reason":       "no_root_cgroup_writable",
+				"own_cgroup":   "/user.slice/user-1000.slice/agentsh",
+				"slice_dir":    "/user.slice/user-1000.slice",
+				"io_available": true,
+				"leaf_moved":   false,
+			}},
 		{ID: "ev-cgroup-fail-1", Type: "cgroup_apply_failed", Timestamp: t0, Fields: map[string]any{"reason": "permission denied"}},
 		{ID: "ev-cgroup-cleanup-1", Type: "cgroup_cleanup_failed", Timestamp: t0, Fields: map[string]any{"reason": "busy"}},
 		{ID: "ev-fuse-mounted-1", Type: "fuse_mounted", Timestamp: t0},

@@ -91,6 +91,7 @@ func init() {
 		"cgroup_applied":              AppActivityCgroupApplied,
 		"cgroup_apply_failed":         AppActivityCgroupApplyFailed,
 		"cgroup_cleanup_failed":       AppActivityCgroupCleanupFailed,
+		"cgroup_mode":                 AppActivityCgroupMode,
 		"fuse_mounted":                AppActivityFUSEMounted,
 		"fuse_mount_failed":           AppActivityFUSEMountFailed,
 		"ebpf_attached":               AppActivityEBPFAttached,
@@ -115,6 +116,11 @@ func init() {
 		{Key: "reason", Transform: AsString, DestPath: "enrichments.reason"},
 		{Key: "policy_name", Transform: AsString, DestPath: "enrichments.policy_name"},
 		{Key: "rotation_reason", Transform: AsString, DestPath: "enrichments.rotation_reason"},
+		{Key: "mode", Transform: AsString, DestPath: "enrichments.mode"},
+		{Key: "own_cgroup", Transform: AsString, DestPath: "enrichments.own_cgroup"},
+		{Key: "slice_dir", Transform: AsString, DestPath: "enrichments.slice_dir"},
+		{Key: "io_available", Transform: AsString, DestPath: "enrichments.io_available"},
+		{Key: "leaf_moved", Transform: AsString, DestPath: "enrichments.leaf_moved"},
 	}
 	for t, activity := range infraMappings {
 		register(t, Mapping{
