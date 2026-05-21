@@ -404,3 +404,108 @@ func TestMakePolicyInstallHook_IdempotentReinstall(t *testing.T) {
 		}
 	})
 }
+
+// TestMakePolicyInstallHook_ReloadChangesDecisions is the load-bearing
+// behavioral test: it proves that a PolicyPush actually changes the
+// running agent's policy decisions, not just that bytes land on disk
+// and SwapPolicy is invoked.
+//
+// Setup:
+//   - Construct an *api.App with engine P1 compiled from a YAML that
+//     allows `safe-tool` and denies `dangerous-tool`.
+//   - Sanity-check: app.Policy().CheckCommand exhibits the P1 decisions.
+//
+// Reload:
+//   - Sign and push a P2 YAML that flips the rules: deny `safe-tool`,
+//     allow `dangerous-tool`.
+//   - Invoke the install hook with the P2 payload.
+//
+// Behavioral assertion:
+//   - app.Policy().CheckCommand for the same two commands now returns
+//     the OPPOSITE decisions. Same App pointer, same getter — only
+//     the engine underneath has been swapped by the hook.
+//
+// This is the test that proves the reload "works" end-to-end. If
+// SwapPolicy were broken, the file would still land on disk but
+// decisions would not change.
+func TestMakePolicyInstallHook_ReloadChangesDecisions(t *testing.T) {
+	const policyP1YAML = `version: 1
+name: demo
+command_rules:
+  - name: allow-safe-tool
+    commands: ["safe-tool"]
+    decision: allow
+  - name: deny-dangerous-tool
+    commands: ["dangerous-tool"]
+    decision: deny
+`
+	const policyP2YAML = `version: 1
+name: demo
+command_rules:
+  - name: deny-safe-tool
+    commands: ["safe-tool"]
+    decision: deny
+  - name: allow-dangerous-tool
+    commands: ["dangerous-tool"]
+    decision: allow
+`
+
+	f := newInstallHookFixture(t)
+
+	// Compile P1 into a fresh engine.
+	p1, err := policy.LoadFromBytes([]byte(policyP1YAML))
+	if err != nil {
+		t.Fatalf("LoadFromBytes P1: %v", err)
+	}
+	engineP1, err := policy.NewEngine(p1, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine P1: %v", err)
+	}
+
+	// Construct a minimal App holding P1. SwapPolicy only touches
+	// policyMu + policy fields; the rest of the App graph stays at
+	// zero/nil.
+	app := api.NewApp(
+		&config.Config{},
+		session.NewManager(1),
+		composite.New(memEventStore{}, nil),
+		engineP1,
+		events.NewBroker(),
+		nil, nil, nil, nil, nil, nil,
+	)
+	f.appHolder.Store(app)
+
+	// Sanity: under P1, safe-tool allowed, dangerous-tool denied.
+	if dec := app.Policy().CheckCommand("safe-tool", nil); dec.EffectiveDecision != types.DecisionAllow {
+		t.Fatalf("P1 sanity: safe-tool = %s, want allow", dec.EffectiveDecision)
+	}
+	if dec := app.Policy().CheckCommand("dangerous-tool", nil); dec.EffectiveDecision != types.DecisionDeny {
+		t.Fatalf("P1 sanity: dangerous-tool = %s, want deny", dec.EffectiveDecision)
+	}
+
+	// Sign and push P2.
+	hook := f.hookFor()
+	if hook == nil {
+		t.Fatal("hook returned nil")
+	}
+	content := []byte(policyP2YAML)
+	sig, hashWire := f.sign(content)
+	hook(transport.PolicyPushed{
+		PolicyID:      "demo",
+		PolicyVersion: 2,
+		ContentHash:   hashWire,
+		Content:       content,
+		Signature:     sig,
+		SignerKeyID:   "ed25519:" + f.keyID,
+	})
+
+	// Behavioral assertion: P2 is now in effect. Same app, same
+	// getter, decisions have flipped because SwapPolicy installed the
+	// new engine.
+	if dec := app.Policy().CheckCommand("safe-tool", nil); dec.EffectiveDecision != types.DecisionDeny {
+		t.Errorf("P2 reload: safe-tool = %s, want deny (rule flipped)", dec.EffectiveDecision)
+	}
+	if dec := app.Policy().CheckCommand("dangerous-tool", nil); dec.EffectiveDecision != types.DecisionAllow {
+		t.Errorf("P2 reload: dangerous-tool = %s, want allow (rule flipped)", dec.EffectiveDecision)
+	}
+}
