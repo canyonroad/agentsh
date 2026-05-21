@@ -78,6 +78,11 @@ const (
 	// generation per the WTP client design.
 	ReasonSessionUpdateGenerationInvalid ValidationReason = "session_update_generation_invalid"
 
+	// ReasonPolicyPushInvalid is returned by ValidatePolicyPush when the
+	// inbound PolicyPush is nil, missing required fields, or contains
+	// invalid content hashes.
+	ReasonPolicyPushInvalid ValidationReason = "policy_push_invalid"
+
 	// ReasonUnknown is the schema-drift reason. It covers two
 	// failure classes that share one operator response ("investigate
 	// the proto schema delta"):
@@ -154,6 +159,7 @@ var allValidationReasons = []ValidationReason{
 	ReasonPayloadTooLarge,
 	ReasonGoawayCodeUnspecified,
 	ReasonSessionUpdateGenerationInvalid,
+	ReasonPolicyPushInvalid,
 	ReasonUnknown,
 }
 
@@ -377,27 +383,45 @@ func ValidateServerHeartbeat(hb *ServerHeartbeat) error {
 //     for unsigned-policy dev deployments)
 func ValidatePolicyPush(p *PolicyPush) error {
 	if p == nil {
-		return fmt.Errorf("policy_push: nil")
+		return &ValidationError{
+			Reason: ReasonPolicyPushInvalid,
+			Inner:  fmt.Errorf("%w: policy_push is nil", ErrInvalidFrame),
+		}
 	}
 	if p.PolicyId == "" {
 		return nil
 	}
 	if p.PolicyVersion == 0 {
-		return fmt.Errorf("policy_push: policy_version must be > 0 when policy_id is set")
+		return &ValidationError{
+			Reason: ReasonPolicyPushInvalid,
+			Inner:  fmt.Errorf("%w: policy_push policy_version must be > 0 when policy_id is set", ErrInvalidFrame),
+		}
 	}
 	if len(p.PolicyContent) == 0 {
-		return fmt.Errorf("policy_push: policy_content required when policy_id is set")
+		return &ValidationError{
+			Reason: ReasonPolicyPushInvalid,
+			Inner:  fmt.Errorf("%w: policy_push policy_content required when policy_id is set", ErrInvalidFrame),
+		}
 	}
 	const hashPrefix = "sha256:"
 	if !strings.HasPrefix(p.PolicyContentHash, hashPrefix) {
-		return fmt.Errorf("policy_push: policy_content_hash must start with %q (got %q)", hashPrefix, p.PolicyContentHash)
+		return &ValidationError{
+			Reason: ReasonPolicyPushInvalid,
+			Inner:  fmt.Errorf("%w: policy_push policy_content_hash must start with %q (got %q)", ErrInvalidFrame, hashPrefix, p.PolicyContentHash),
+		}
 	}
 	hexPart := p.PolicyContentHash[len(hashPrefix):]
 	if len(hexPart) != 64 {
-		return fmt.Errorf("policy_push: policy_content_hash hex part must be 64 chars, got %d", len(hexPart))
+		return &ValidationError{
+			Reason: ReasonPolicyPushInvalid,
+			Inner:  fmt.Errorf("%w: policy_push policy_content_hash hex part must be 64 chars, got %d", ErrInvalidFrame, len(hexPart)),
+		}
 	}
 	if _, err := hex.DecodeString(hexPart); err != nil {
-		return fmt.Errorf("policy_push: policy_content_hash is not valid hex: %w", err)
+		return &ValidationError{
+			Reason: ReasonPolicyPushInvalid,
+			Inner:  fmt.Errorf("%w: policy_push policy_content_hash is not valid hex: %v", ErrInvalidFrame, err),
+		}
 	}
 	return nil
 }

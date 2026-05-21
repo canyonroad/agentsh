@@ -302,3 +302,14 @@ func TestValidatePolicyPush_NonHex(t *testing.T) {
 		t.Fatal("non-hex chars should be rejected")
 	}
 }
+
+func TestValidatePolicyPush_ReturnsValidationError(t *testing.T) {
+	err := ValidatePolicyPush(nil)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected *ValidationError, got %T (%v)", err, err)
+	}
+	if ve.Reason != ReasonPolicyPushInvalid {
+		t.Fatalf("got reason %q, want %q", ve.Reason, ReasonPolicyPushInvalid)
+	}
+}
