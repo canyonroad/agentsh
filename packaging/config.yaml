@@ -110,6 +110,9 @@ dlp:
 policies:
   dir: "/etc/agentsh/policies"
   default: "default"
+  # symlink's target that evaluate to outside the workspace
+  # get evaluated (against file_rule) or flat out denied.
+  symlink_escape: "evaluate"   # Options: evaluate, deny
 
 # Approvals configuration
 approvals:

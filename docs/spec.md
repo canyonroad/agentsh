@@ -2307,6 +2307,7 @@ Key fields:
     - `enabled` (bool, default false)
     - `wrapper_bin` (path override, default `agentsh-unixwrap` in `$PATH`)
 - `policies.*`
+  - `policies.symlink_escape`: `"evaluate"` (default) | `"deny"`. Controls FUSE-layer handling of workspace symlinks whose targets lie outside the workspace root, for operations whose policy subject is the target (open/read/write/exec). `evaluate` resolves the symlink and evaluates the resolved outside path against the normal `file_rules`, letting Python venvs (`venv/bin/python -> /usr/bin/python3`) work out of the box; operators express deny via a regular rule on `/usr/bin/**` etc. `deny` restores the historical blanket `workspace-escape` deny — any symlink target outside the workspace is refused regardless of `file_rules`. Leaf-only operations (`stat`, `readlink`, `delete`, `rmdir`) are always checked against the symlink path itself and are unaffected by this setting.
 - `approvals.*`
 
 ### 15.2 Policy Configuration

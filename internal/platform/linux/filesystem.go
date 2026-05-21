@@ -267,8 +267,9 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 			sessionID:     cfg.SessionID,
 			commandIDFunc: cfg.CommandIDFunc,
 		},
-		TraceContextFunc: cfg.TraceContextFunc,
-		MaxBackground:    cfg.MaxBackground,
+		TraceContextFunc:  cfg.TraceContextFunc,
+		MaxBackground:     cfg.MaxBackground,
+		SymlinkEscapeDeny: cfg.SymlinkEscapeDeny,
 	}
 
 	// Set up trash/soft-delete if configured

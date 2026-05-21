@@ -803,6 +803,14 @@ type PoliciesConfig struct {
 	ReloadInterval    string          `yaml:"reload_interval"`
 	DetectProjectRoot *bool           `yaml:"detect_project_root"` // nil means true (default enabled)
 	ProjectMarkers    []string        `yaml:"project_markers"`     // Override default markers
+	SymlinkEscape     string          `yaml:"symlink_escape"`      // "evaluate"/"deny"
+}
+
+// SymlinkEscapeDeny reports whether the workspace-escape blanket deny
+// is in effect (i.e. the user set "deny"). Default is "evaluate" --
+// any value other than literal "deny" returns false.
+func (c *PoliciesConfig) SymlinkEscapeDeny() bool {
+	return c.SymlinkEscape == "deny"
 }
 
 // ShouldDetectProjectRoot returns whether project root detection is enabled.
@@ -2125,6 +2133,12 @@ func validateConfig(cfg *Config) error {
 	case "monitor", "soft_block", "soft_delete", "strict":
 	default:
 		return fmt.Errorf("invalid sandbox.fuse.audit.mode %q", cfg.Sandbox.FUSE.Audit.Mode)
+	}
+	switch cfg.Policies.SymlinkEscape {
+	case "", "evaluate", "deny":
+		// "" gets normalized to "evaluate" by SymlinkEscapeDeny().
+	default:
+		return fmt.Errorf("invalid policies.symlink_escape %q: must be one of \"evaluate\" or \"deny\"", cfg.Policies.SymlinkEscape)
 	}
 	switch cfg.Sandbox.Seccomp.Syscalls.OnBlock {
 	case "", "errno", "kill", "log", "log_and_kill":

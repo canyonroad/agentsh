@@ -28,15 +28,16 @@ type Emitter interface {
 }
 
 type Hooks struct {
-	SessionID        string
-	Session          *session.Session
-	Policy           *policy.Engine
-	Approvals        *approvals.Manager
-	Emit             Emitter
-	FUSEAudit        *FUSEAuditHooks
-	TraceContextFunc func() (traceID, spanID, traceFlags string)
-	VirtualRoot      string // "/workspace" or real path
-	MaxBackground int
+	SessionID         string
+	Session           *session.Session
+	Policy            *policy.Engine
+	Approvals         *approvals.Manager
+	Emit              Emitter
+	FUSEAudit         *FUSEAuditHooks
+	TraceContextFunc  func() (traceID, spanID, traceFlags string)
+	VirtualRoot       string // "/workspace" or real path
+	MaxBackground     int
+	SymlinkEscapeDeny bool
 }
 
 func NewMonitoredLoopbackRoot(realRoot string, hooks *Hooks) (fs.InodeEmbedder, error) {
@@ -432,7 +433,21 @@ func (f *fileHandle) Lseek(ctx context.Context, off uint64, whence uint32) (uint
 }
 
 func (n *node) check(ctx context.Context, virtPath string, op string) policy.Decision {
-	mustExist := op != "create" && op != "mkdir"
+	// Operations whose policy subject is the path itself, not what a
+	// leaf symlink points to: stat, readlink, delete, rmdir. For these,
+	// treat the path like create/mkdir for the resolver -- only resolve
+	// the parent directory, leave the leaf symlink alone.
+	//
+	// Without this, an lstat/unlink on a workspace symlink whose target
+	// lies outside the workspace (e.g. venv/bin/python -> /usr/bin/python3,
+	// or venv/lib64 -> lib) re-routes the policy check to the target,
+	// which the per-session policy may not allow, surfacing as EACCES
+	// for a perfectly normal operation on a symlink the agent itself
+	// just created. unlink/rmdir remove the symlink; the target is
+	// untouched, so checking the target is the wrong subject.
+	mustExist := op != "create" && op != "mkdir" &&
+		op != "stat" && op != "readlink" &&
+		op != "delete" && op != "rmdir"
 	return n.checkWithExist(ctx, virtPath, op, mustExist)
 }
 
@@ -466,14 +481,41 @@ func (n *node) checkWithExist(_ context.Context, virtPath string, op string, mus
 	if realRoot != "" {
 		resolved, err := resolveRealPathUnderRoot(realRoot, virtPath, mustExist, n.vroot())
 		if err != nil {
-			return policy.Decision{
-				PolicyDecision:    types.DecisionDeny,
-				EffectiveDecision: types.DecisionDeny,
-				Rule:              "workspace-escape",
-				Message:           err.Error(),
+			// When resolveRealPathUnderRoot fails because a symlink in the
+			// workspace points to a real path outside the workspace root
+			// (Python venvs do this with /usr/bin/python3 by default), the
+			// default behavior is to fall through to evaluate the policy on
+			// the resolved outside path instead of an automatic deny.
+			// Operators who want to block system symlinks can express that
+			// as a regular file_rule deny on the relevant paths.
+			//
+			// Deployments that prefer the historical blanket deny can opt
+			// back in via policies.symlink_escape: "deny" (in that mode
+			// we skip the fallthrough and return the workspace-escape rule
+			// for any symlink target outside the workspace root).
+			//
+			// "..":-style escapes (paths above the workspace root) and
+			// resolution failures (broken link, missing parent) remain a
+			// hard deny in both modes since there is no useful real path
+			// to evaluate.
+			escapeDeny := n.hooks != nil && n.hooks.SymlinkEscapeDeny
+			var escaped string
+			if !escapeDeny {
+				escaped = evalEscapedSymlink(realRoot, virtPath, n.vroot())
 			}
+			if escaped != "" {
+				policyPath = escaped
+			} else {
+				return policy.Decision{
+					PolicyDecision:    types.DecisionDeny,
+					EffectiveDecision: types.DecisionDeny,
+					Rule:              "workspace-escape",
+					Message:           err.Error(),
+				}
+			}
+		} else {
+			policyPath = resolved
 		}
-		policyPath = resolved
 	}
 
 	if n.hooks == nil || n.hooks.Policy == nil {
