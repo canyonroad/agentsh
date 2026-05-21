@@ -200,6 +200,7 @@ const (
 	GoawayCode_GOAWAY_CODE_OVERLOAD    GoawayCode = 2 // server overloaded; reconnect with backoff.
 	GoawayCode_GOAWAY_CODE_UPGRADE     GoawayCode = 3 // server upgrade in progress; reconnect after delay.
 	GoawayCode_GOAWAY_CODE_AUTH        GoawayCode = 4 // authentication/authorization failed; do not auto-retry.
+	GoawayCode_GOAWAY_CODE_POLICY      GoawayCode = 5 // policy snapshot in SessionInit was rejected
 )
 
 // Enum value maps for GoawayCode.
@@ -210,6 +211,7 @@ var (
 		2: "GOAWAY_CODE_OVERLOAD",
 		3: "GOAWAY_CODE_UPGRADE",
 		4: "GOAWAY_CODE_AUTH",
+		5: "GOAWAY_CODE_POLICY",
 	}
 	GoawayCode_value = map[string]int32{
 		"GOAWAY_CODE_UNSPECIFIED": 0,
@@ -217,6 +219,7 @@ var (
 		"GOAWAY_CODE_OVERLOAD":    2,
 		"GOAWAY_CODE_UPGRADE":     3,
 		"GOAWAY_CODE_AUTH":        4,
+		"GOAWAY_CODE_POLICY":      5,
 	}
 )
 
@@ -600,8 +603,25 @@ type SessionInit struct {
 	AgentId             string                 `protobuf:"bytes,9,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
 	AgentVersion        string                 `protobuf:"bytes,10,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
 	TotalChained        uint64                 `protobuf:"varint,11,opt,name=total_chained,json=totalChained,proto3" json:"total_chained,omitempty"` // count of records sink has chained
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Policy snapshot the agent is enforcing locally. The server upserts
+	// (tenant_id, policy_id, version) into the policies table on first
+	// sight; subsequent sessions with the same (policy_id, version)
+	// re-use the stored row. Version is monotonic per policy_id: a
+	// SessionInit with version < stored max is rejected with
+	// Goaway.code=GOAWAY_CODE_POLICY (reason: policy_version_regression).
+	// Empty policy_id means the agent has no policy and the server should
+	// not attempt to upsert.
+	//
+	// When the agent's policy or overlay set changes mid-session, the
+	// agent MUST close the WTP session and reopen — overlays/policies do
+	// not change inside a session.
+	PolicyId          string   `protobuf:"bytes,12,opt,name=policy_id,json=policyId,proto3" json:"policy_id,omitempty"`
+	PolicyVersion     uint32   `protobuf:"varint,13,opt,name=policy_version,json=policyVersion,proto3" json:"policy_version,omitempty"`
+	PolicyContentHash string   `protobuf:"bytes,14,opt,name=policy_content_hash,json=policyContentHash,proto3" json:"policy_content_hash,omitempty"` // "sha256:<hex>"
+	PolicyContent     []byte   `protobuf:"bytes,15,opt,name=policy_content,json=policyContent,proto3" json:"policy_content,omitempty"`               // canonical YAML bytes
+	OverlayIds        []string `protobuf:"bytes,16,rep,name=overlay_ids,json=overlayIds,proto3" json:"overlay_ids,omitempty"`                        // active overlay IDs, lex-sorted
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *SessionInit) Reset() {
@@ -709,6 +729,41 @@ func (x *SessionInit) GetTotalChained() uint64 {
 		return x.TotalChained
 	}
 	return 0
+}
+
+func (x *SessionInit) GetPolicyId() string {
+	if x != nil {
+		return x.PolicyId
+	}
+	return ""
+}
+
+func (x *SessionInit) GetPolicyVersion() uint32 {
+	if x != nil {
+		return x.PolicyVersion
+	}
+	return 0
+}
+
+func (x *SessionInit) GetPolicyContentHash() string {
+	if x != nil {
+		return x.PolicyContentHash
+	}
+	return ""
+}
+
+func (x *SessionInit) GetPolicyContent() []byte {
+	if x != nil {
+		return x.PolicyContent
+	}
+	return nil
+}
+
+func (x *SessionInit) GetOverlayIds() []string {
+	if x != nil {
+		return x.OverlayIds
+	}
+	return nil
 }
 
 type SessionAck struct {
@@ -1553,7 +1608,7 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\x10server_heartbeat\x18\x03 \x01(\v2\".canyonroad.wtp.v1.ServerHeartbeatH\x00R\x0fserverHeartbeat\x123\n" +
 	"\x06goaway\x18\x04 \x01(\v2\x19.canyonroad.wtp.v1.GoawayH\x00R\x06goaway\x12G\n" +
 	"\rserver_update\x18\x05 \x01(\v2 .canyonroad.wtp.v1.SessionUpdateH\x00R\fserverUpdateB\x05\n" +
-	"\x03msg\"\xc0\x03\n" +
+	"\x03msg\"\xfc\x04\n" +
 	"\vSessionInit\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12!\n" +
@@ -1569,7 +1624,13 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\bagent_id\x18\t \x01(\tR\aagentId\x12#\n" +
 	"\ragent_version\x18\n" +
 	" \x01(\tR\fagentVersion\x12#\n" +
-	"\rtotal_chained\x18\v \x01(\x04R\ftotalChained\"\xa2\x01\n" +
+	"\rtotal_chained\x18\v \x01(\x04R\ftotalChained\x12\x1b\n" +
+	"\tpolicy_id\x18\f \x01(\tR\bpolicyId\x12%\n" +
+	"\x0epolicy_version\x18\r \x01(\rR\rpolicyVersion\x12.\n" +
+	"\x13policy_content_hash\x18\x0e \x01(\tR\x11policyContentHash\x12%\n" +
+	"\x0epolicy_content\x18\x0f \x01(\fR\rpolicyContent\x12\x1f\n" +
+	"\voverlay_ids\x18\x10 \x03(\tR\n" +
+	"overlayIds\"\xa2\x01\n" +
 	"\n" +
 	"SessionAck\x123\n" +
 	"\x16ack_high_watermark_seq\x18\x01 \x01(\x04R\x13ackHighWatermarkSeq\x12\x1e\n" +
@@ -1662,14 +1723,15 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"'TRANSPORT_LOSS_REASON_INVALID_TIMESTAMP\x10\x05\x12&\n" +
 	"\"TRANSPORT_LOSS_REASON_INVALID_UTF8\x10\x06\x12+\n" +
 	"'TRANSPORT_LOSS_REASON_SEQUENCE_OVERFLOW\x10\a\x121\n" +
-	"-TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC\x10\b*\x8c\x01\n" +
+	"-TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC\x10\b*\xa4\x01\n" +
 	"\n" +
 	"GoawayCode\x12\x1b\n" +
 	"\x17GOAWAY_CODE_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14GOAWAY_CODE_DRAINING\x10\x01\x12\x18\n" +
 	"\x14GOAWAY_CODE_OVERLOAD\x10\x02\x12\x17\n" +
 	"\x13GOAWAY_CODE_UPGRADE\x10\x03\x12\x14\n" +
-	"\x10GOAWAY_CODE_AUTH\x10\x04*\xab\x01\n" +
+	"\x10GOAWAY_CODE_AUTH\x10\x04\x12\x16\n" +
+	"\x12GOAWAY_CODE_POLICY\x10\x05*\xab\x01\n" +
 	"\x14ClientShutdownReason\x12&\n" +
 	"\"CLIENT_SHUTDOWN_REASON_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dCLIENT_SHUTDOWN_REASON_NORMAL\x10\x01\x12&\n" +

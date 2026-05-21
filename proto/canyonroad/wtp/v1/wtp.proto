@@ -54,6 +54,24 @@ message SessionInit {
   string         agent_id                = 9;
   string         agent_version           = 10;
   uint64         total_chained           = 11;  // count of records sink has chained
+
+  // Policy snapshot the agent is enforcing locally. The server upserts
+  // (tenant_id, policy_id, version) into the policies table on first
+  // sight; subsequent sessions with the same (policy_id, version)
+  // re-use the stored row. Version is monotonic per policy_id: a
+  // SessionInit with version < stored max is rejected with
+  // Goaway.code=GOAWAY_CODE_POLICY (reason: policy_version_regression).
+  // Empty policy_id means the agent has no policy and the server should
+  // not attempt to upsert.
+  //
+  // When the agent's policy or overlay set changes mid-session, the
+  // agent MUST close the WTP session and reopen — overlays/policies do
+  // not change inside a session.
+  string         policy_id               = 12;
+  uint32         policy_version          = 13;
+  string         policy_content_hash     = 14;  // "sha256:<hex>"
+  bytes          policy_content          = 15;  // canonical YAML bytes
+  repeated string overlay_ids            = 16;  // active overlay IDs, lex-sorted
 }
 
 enum HashAlgorithm {
@@ -192,6 +210,9 @@ enum GoawayCode {
   GOAWAY_CODE_OVERLOAD    = 2;   // server overloaded; reconnect with backoff.
   GOAWAY_CODE_UPGRADE     = 3;   // server upgrade in progress; reconnect after delay.
   GOAWAY_CODE_AUTH        = 4;   // authentication/authorization failed; do not auto-retry.
+  GOAWAY_CODE_POLICY      = 5;   // policy snapshot in SessionInit was rejected
+                                 // (e.g. version regressed, content hash mismatch
+                                 // for an existing (policy_id, version)).
 }
 
 message ClientShutdown {

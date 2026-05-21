@@ -46,7 +46,6 @@ const (
 //	110 = Integrity Chain Rotated
 //	111 = Wrap Init
 //	112 = FSEvents Error
-//	113 = Transparent Net Setup
 //	120 = Policy Created
 //	121 = Policy Updated
 //	122 = Policy Deleted
@@ -65,8 +64,6 @@ const (
 //	148 = EBPF Unavailable
 //	149 = LLM Proxy Failed
 //	150 = Net Proxy Failed
-//	151 = Transparent Net Ready
-//	152 = Transparent Net Failed
 //	153 = MCP Tool Changed
 type ApplicationActivity struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`

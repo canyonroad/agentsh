@@ -170,6 +170,20 @@ type Options struct {
 	// Running count from chain.SinkChain; supplied by sink integration.
 	TotalChained uint64
 
+	// Policy snapshot the agent is enforcing locally. Sent in SessionInit
+	// so the server can upsert it into its `policies` table. PolicyID
+	// "" means "no policy" — the four policy fields and OverlayIDs are
+	// then ignored. Setting these requires a fresh session: the server
+	// rejects with GOAWAY_CODE_POLICY if PolicyVersion regresses or
+	// PolicyContentHash conflicts with the stored row at the same
+	// version, so the agent MUST close+reopen the WTP session when its
+	// loaded policy or overlay set changes.
+	PolicyID          string
+	PolicyVersion     uint32
+	PolicyContentHash string
+	PolicyContent     []byte
+	OverlayIDs        []string
+
 	// InitialAckTuple seeds persistedAck/remoteReplayCursor at construction.
 	// Populated by the Task 27 wiring layer from wal.ReadMeta. nil ⇒
 	// persistedAckPresent=false (first-apply path: next server tuple is
@@ -668,6 +682,11 @@ func (t *Transport) sessionInit() *wtpv1.ClientMessage {
 				AgentId:             t.opts.AgentID,
 				AgentVersion:        t.opts.AgentVersion,
 				TotalChained:        t.opts.TotalChained,
+				PolicyId:            t.opts.PolicyID,
+				PolicyVersion:       t.opts.PolicyVersion,
+				PolicyContentHash:   t.opts.PolicyContentHash,
+				PolicyContent:       t.opts.PolicyContent,
+				OverlayIds:          t.opts.OverlayIDs,
 			},
 		},
 	}
