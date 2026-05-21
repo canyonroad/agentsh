@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -356,10 +357,45 @@ func makePolicyInstallHook(
 	if dir == "" || trustDir == "" {
 		return nil
 	}
+	// Watchtower re-sends the bound policy in EVERY SessionAck, including
+	// reconnects where the policy has not changed. Without dedup the
+	// hook re-runs the full install (write YAML, write sig, Manager.Reload,
+	// NewEngine, SwapPolicy) on every reconnect — wasteful at best, and
+	// in tight reconnect loops it generates enough disk churn / engine-
+	// swap pressure to be a candidate cause of the loop itself.
+	//
+	// Keyed by (policy_id, content_hash) — content_hash is the wire's
+	// sha256 of the bytes, so a hash match means we already have THESE
+	// EXACT bytes installed. policy_version alone would be ambiguous
+	// across tenants pushing different content under the same number.
+	//
+	// engineSwapped tracks whether SwapPolicy has been called on the
+	// current appHolder.Load() value. The first install after a process
+	// restart must always run the engine swap even if the file on disk
+	// already matches (cold-start does NOT pre-populate the engine from
+	// disk via this hook). engineSwapped resets to false on every fresh
+	// callback closure construction (i.e. per buildWatchtowerStore).
+	var (
+		installMu     sync.Mutex
+		lastID        string
+		lastHash      string
+		engineSwapped bool
+	)
 	return func(p transport.PolicyPushed) {
 		if p.PolicyID == "" || len(p.Content) == 0 {
 			return
 		}
+		// Idempotency fast-path: if the same (id, content_hash) has
+		// already been installed AND the engine swap ran at least once
+		// in this process, skip the entire install. Verification +
+		// disk write + Manager.Reload + NewEngine + SwapPolicy is the
+		// cycle we're avoiding here.
+		installMu.Lock()
+		if engineSwapped && p.PolicyID == lastID && p.ContentHash == lastHash {
+			installMu.Unlock()
+			return
+		}
+		installMu.Unlock()
 		// Reload the trust store on every receipt. The set is small
 		// and operators can rotate keys without bouncing agentsh.
 		ts, err := signing.LoadTrustStore(trustDir, false)
@@ -468,6 +504,14 @@ func makePolicyInstallHook(
 			"policy_id", p.PolicyID,
 			"policy_version", p.PolicyVersion,
 		)
+		// Record the installed identity so the next SessionAck carrying
+		// the same (policy_id, content_hash) short-circuits via the
+		// idempotency check at the top of this callback.
+		installMu.Lock()
+		lastID = p.PolicyID
+		lastHash = p.ContentHash
+		engineSwapped = true
+		installMu.Unlock()
 	}
 }
 
