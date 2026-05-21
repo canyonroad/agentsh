@@ -81,13 +81,23 @@ func baseInvalidFrameOpts(t *testing.T, srv *testserver.Server, c *metrics.Colle
 	}
 }
 
-// TestStore_InboundGoaway_CodeUnspecified drives the testserver to
-// inject a Goaway with Code=UNSPECIFIED immediately after SessionAck.
-// The recv multiplexer's Goaway arm runs ValidateGoaway, which the
-// classifier maps to wtp_dropped_invalid_frame_total
-// {reason="goaway_code_unspecified"}. The test asserts the counter
-// ticks at least once within the deadline; the watchtower may
-// reconnect and retry, so >= 1 (not == 1) is the contract.
+// TestStore_InboundGoaway_CodeUnspecified pins the contract that an
+// inbound Goaway with Code=UNSPECIFIED is NOT classified as an invalid
+// frame. ValidateGoaway accepts UNSPECIFIED because the proto contract
+// is "unknown; clients MUST treat as transient and reconnect" — i.e. a
+// valid wire value with well-defined semantics, not a malformed frame.
+// Watchtower also routes every Fatal-with-generic-reason (gen mismatch,
+// unexpected gap, stale stream, dedup failure) through Goaway with
+// UNSPECIFIED code; classifying that as invalid silently dropped every
+// such Goaway and caused a tight reconnect loop where the client never
+// observed the server's stated reason.
+//
+// Regression guard: assert wtp_dropped_invalid_frame_total
+// {reason="goaway_code_unspecified"} STAYS AT ZERO for at least 2 s
+// even while the recv loop sees the Goaway and tears the stream down.
+// The stream-teardown behavior itself is exercised by the recv-
+// multiplexer integration test
+// TestRecvMultiplexer_GoawaySurfacesFailClosedError.
 func TestStore_InboundGoaway_CodeUnspecified(t *testing.T) {
 	skipOnWindowsCI(t)
 
@@ -109,9 +119,11 @@ func TestStore_InboundGoaway_CodeUnspecified(t *testing.T) {
 	}
 	defer s.Close()
 
-	got, body := waitForInvalidFrameCounter(t, c, "goaway_code_unspecified", 1, 30*time.Second)
-	if got < 1 {
-		t.Fatalf("expected reason=goaway_code_unspecified counter >= 1 within 30s\nbody:\n%s", body)
+	// Let the recv loop process the Goaway + a few reconnect cycles.
+	time.Sleep(2 * time.Second)
+	got, body := waitForInvalidFrameCounter(t, c, "goaway_code_unspecified", 1, 1*time.Millisecond)
+	if got > 0 {
+		t.Fatalf("UNSPECIFIED Goaway must NOT increment wtp_dropped_invalid_frame_total{reason=goaway_code_unspecified}; got %d\nbody:\n%s", got, body)
 	}
 }
 
