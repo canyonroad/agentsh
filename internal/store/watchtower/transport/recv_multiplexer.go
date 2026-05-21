@@ -30,6 +30,11 @@ const (
 	// t.persistedAck.Generation) before this heartbeat reaches the
 	// dispatch site. See round-22 Finding 1.
 	recvAckEventHeartbeat
+	// recvAckEventPolicyPush wraps a *wtpv1.ServerMessage_PolicyPush
+	// demux. gen + seq are unused (PolicyPush carries no ack tuple);
+	// the wire frame itself is carried via the policyPush field so the
+	// main goroutine can hand it to OnPolicyPushed without re-decoding.
+	recvAckEventPolicyPush
 )
 
 // recvAckEvent is the single tagged-union event type the recv goroutine
@@ -47,6 +52,10 @@ type recvAckEvent struct {
 	kind recvAckEventKind
 	gen  uint32
 	seq  uint64
+	// policyPush is non-nil iff kind == recvAckEventPolicyPush. The
+	// wire frame is carried verbatim; the main goroutine converts it
+	// to the internal PolicyPushed shape via fromWirePolicyPush.
+	policyPush *wtpv1.PolicyPush
 }
 
 // recvSession bundles all per-connection recv-multiplexer state per
