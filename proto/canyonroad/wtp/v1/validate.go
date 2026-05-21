@@ -1,8 +1,10 @@
 package wtpv1
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // MaxCompressedPayloadBytes is the receiver-enforced cap on EventBatch
@@ -278,24 +280,24 @@ func ValidateSessionInit(s *SessionInit) error {
 	return nil
 }
 
-// ValidateGoaway returns ReasonGoawayCodeUnspecified when the inbound
-// Goaway has code == GOAWAY_CODE_UNSPECIFIED — wire-incompatible per
-// the proto's UNSPECIFIED contract. Returns ReasonUnknown for nil
-// messages (a structural failure).
+// ValidateGoaway returns ReasonUnknown for nil messages (a structural
+// failure). Goaway with code == GOAWAY_CODE_UNSPECIFIED is ACCEPTED:
+// the proto's UNSPECIFIED contract says "unknown; clients MUST treat
+// as transient and reconnect" — i.e. it IS a valid wire value with
+// well-defined semantics, not a malformed frame. Treating UNSPECIFIED
+// as invalid silently dropped every Fatal-with-generic-reason Goaway
+// watchtower sends (gen mismatch, unexpected gap, stale stream, dedup
+// failure all default to UNSPECIFIED), causing a tight reconnect loop
+// where the client never observes the server's stated reason.
 //
 // Other Goaway fields (message, retry_immediately) have no MUST-be-set
-// invariants the validator can enforce statelessly.
+// invariants the validator can enforce statelessly. The message field
+// carries the wtp.Reason* string and is the operator-facing diagnostic.
 func ValidateGoaway(g *Goaway) error {
 	if g == nil {
 		return &ValidationError{
 			Reason: ReasonUnknown,
 			Inner:  fmt.Errorf("%w: goaway is nil", ErrInvalidFrame),
-		}
-	}
-	if g.Code == GoawayCode_GOAWAY_CODE_UNSPECIFIED {
-		return &ValidationError{
-			Reason: ReasonGoawayCodeUnspecified,
-			Inner:  fmt.Errorf("%w: goaway code unspecified", ErrInvalidFrame),
 		}
 	}
 	return nil
@@ -363,6 +365,39 @@ func ValidateServerHeartbeat(hb *ServerHeartbeat) error {
 			Reason: ReasonUnknown,
 			Inner:  fmt.Errorf("%w: server_heartbeat is nil", ErrInvalidFrame),
 		}
+	}
+	return nil
+}
+
+// ValidatePolicyPush enforces the PolicyPush wire contract:
+//   - policy_id == "" is a valid "unbind" frame; all other fields MAY be empty
+//   - policy_id != "" REQUIRES policy_version > 0, non-empty policy_content,
+//     and a properly-prefixed policy_content_hash ("sha256:<64-hex>")
+//   - signature + signer_key_id are optional (matches SessionAck's posture
+//     for unsigned-policy dev deployments)
+func ValidatePolicyPush(p *PolicyPush) error {
+	if p == nil {
+		return fmt.Errorf("policy_push: nil")
+	}
+	if p.PolicyId == "" {
+		return nil
+	}
+	if p.PolicyVersion == 0 {
+		return fmt.Errorf("policy_push: policy_version must be > 0 when policy_id is set")
+	}
+	if len(p.PolicyContent) == 0 {
+		return fmt.Errorf("policy_push: policy_content required when policy_id is set")
+	}
+	const hashPrefix = "sha256:"
+	if !strings.HasPrefix(p.PolicyContentHash, hashPrefix) {
+		return fmt.Errorf("policy_push: policy_content_hash must start with %q (got %q)", hashPrefix, p.PolicyContentHash)
+	}
+	hexPart := p.PolicyContentHash[len(hashPrefix):]
+	if len(hexPart) != 64 {
+		return fmt.Errorf("policy_push: policy_content_hash hex part must be 64 chars, got %d", len(hexPart))
+	}
+	if _, err := hex.DecodeString(hexPart); err != nil {
+		return fmt.Errorf("policy_push: policy_content_hash is not valid hex: %w", err)
 	}
 	return nil
 }
