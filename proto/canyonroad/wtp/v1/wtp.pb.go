@@ -603,25 +603,8 @@ type SessionInit struct {
 	AgentId             string                 `protobuf:"bytes,9,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
 	AgentVersion        string                 `protobuf:"bytes,10,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
 	TotalChained        uint64                 `protobuf:"varint,11,opt,name=total_chained,json=totalChained,proto3" json:"total_chained,omitempty"` // count of records sink has chained
-	// Policy snapshot the agent is enforcing locally. The server upserts
-	// (tenant_id, policy_id, version) into the policies table on first
-	// sight; subsequent sessions with the same (policy_id, version)
-	// re-use the stored row. Version is monotonic per policy_id: a
-	// SessionInit with version < stored max is rejected with
-	// Goaway.code=GOAWAY_CODE_POLICY (reason: policy_version_regression).
-	// Empty policy_id means the agent has no policy and the server should
-	// not attempt to upsert.
-	//
-	// When the agent's policy or overlay set changes mid-session, the
-	// agent MUST close the WTP session and reopen — overlays/policies do
-	// not change inside a session.
-	PolicyId          string   `protobuf:"bytes,12,opt,name=policy_id,json=policyId,proto3" json:"policy_id,omitempty"`
-	PolicyVersion     uint32   `protobuf:"varint,13,opt,name=policy_version,json=policyVersion,proto3" json:"policy_version,omitempty"`
-	PolicyContentHash string   `protobuf:"bytes,14,opt,name=policy_content_hash,json=policyContentHash,proto3" json:"policy_content_hash,omitempty"` // "sha256:<hex>"
-	PolicyContent     []byte   `protobuf:"bytes,15,opt,name=policy_content,json=policyContent,proto3" json:"policy_content,omitempty"`               // canonical YAML bytes
-	OverlayIds        []string `protobuf:"bytes,16,rep,name=overlay_ids,json=overlayIds,proto3" json:"overlay_ids,omitempty"`                        // active overlay IDs, lex-sorted
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *SessionInit) Reset() {
@@ -731,49 +714,33 @@ func (x *SessionInit) GetTotalChained() uint64 {
 	return 0
 }
 
-func (x *SessionInit) GetPolicyId() string {
-	if x != nil {
-		return x.PolicyId
-	}
-	return ""
-}
-
-func (x *SessionInit) GetPolicyVersion() uint32 {
-	if x != nil {
-		return x.PolicyVersion
-	}
-	return 0
-}
-
-func (x *SessionInit) GetPolicyContentHash() string {
-	if x != nil {
-		return x.PolicyContentHash
-	}
-	return ""
-}
-
-func (x *SessionInit) GetPolicyContent() []byte {
-	if x != nil {
-		return x.PolicyContent
-	}
-	return nil
-}
-
-func (x *SessionInit) GetOverlayIds() []string {
-	if x != nil {
-		return x.OverlayIds
-	}
-	return nil
-}
-
 type SessionAck struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
 	AckHighWatermarkSeq uint64                 `protobuf:"varint,1,opt,name=ack_high_watermark_seq,json=ackHighWatermarkSeq,proto3" json:"ack_high_watermark_seq,omitempty"`
 	Generation          uint32                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
 	Accepted            bool                   `protobuf:"varint,3,opt,name=accepted,proto3" json:"accepted,omitempty"`
 	RejectReason        string                 `protobuf:"bytes,4,opt,name=reject_reason,json=rejectReason,proto3" json:"reject_reason,omitempty"` // empty when accepted=true
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Policy push: when an agent has a policy_bindings row for its
+	// tenant+agent_id, the server resolves the bound policy and ships
+	// it down with the SessionAck. The agent is expected to verify the
+	// signature against its locally-configured trust bundle and install
+	// the policy for any sessions admitted after this point.
+	//
+	// policy_id "" means no policy was resolved (no binding, or the
+	// binding's target policy is missing). In that case the agent
+	// falls back to its local file-based policy. policy_id MUST always
+	// appear with version + content + content_hash; signature MAY be
+	// empty for unsigned-policy deployments (the agent's verification
+	// posture decides whether to install).
+	PolicyId          string   `protobuf:"bytes,5,opt,name=policy_id,json=policyId,proto3" json:"policy_id,omitempty"`
+	PolicyVersion     uint32   `protobuf:"varint,6,opt,name=policy_version,json=policyVersion,proto3" json:"policy_version,omitempty"`
+	PolicyContentHash string   `protobuf:"bytes,7,opt,name=policy_content_hash,json=policyContentHash,proto3" json:"policy_content_hash,omitempty"`    // "sha256:<hex>"
+	PolicyContent     []byte   `protobuf:"bytes,8,opt,name=policy_content,json=policyContent,proto3" json:"policy_content,omitempty"`                  // raw policy bytes (YAML)
+	PolicySignature   []byte   `protobuf:"bytes,9,opt,name=policy_signature,json=policySignature,proto3" json:"policy_signature,omitempty"`            // raw signature over policy_content
+	PolicySignerKeyId string   `protobuf:"bytes,10,opt,name=policy_signer_key_id,json=policySignerKeyId,proto3" json:"policy_signer_key_id,omitempty"` // identifies the signing key in the agent's trust bundle
+	OverlayIds        []string `protobuf:"bytes,11,rep,name=overlay_ids,json=overlayIds,proto3" json:"overlay_ids,omitempty"`                          // overlay IDs the server expects this agent to apply, lex-sorted
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *SessionAck) Reset() {
@@ -832,6 +799,55 @@ func (x *SessionAck) GetRejectReason() string {
 		return x.RejectReason
 	}
 	return ""
+}
+
+func (x *SessionAck) GetPolicyId() string {
+	if x != nil {
+		return x.PolicyId
+	}
+	return ""
+}
+
+func (x *SessionAck) GetPolicyVersion() uint32 {
+	if x != nil {
+		return x.PolicyVersion
+	}
+	return 0
+}
+
+func (x *SessionAck) GetPolicyContentHash() string {
+	if x != nil {
+		return x.PolicyContentHash
+	}
+	return ""
+}
+
+func (x *SessionAck) GetPolicyContent() []byte {
+	if x != nil {
+		return x.PolicyContent
+	}
+	return nil
+}
+
+func (x *SessionAck) GetPolicySignature() []byte {
+	if x != nil {
+		return x.PolicySignature
+	}
+	return nil
+}
+
+func (x *SessionAck) GetPolicySignerKeyId() string {
+	if x != nil {
+		return x.PolicySignerKeyId
+	}
+	return ""
+}
+
+func (x *SessionAck) GetOverlayIds() []string {
+	if x != nil {
+		return x.OverlayIds
+	}
+	return nil
 }
 
 // SessionUpdate (§7.2): generation roll, key rotation, context change.
@@ -1608,7 +1624,7 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\x10server_heartbeat\x18\x03 \x01(\v2\".canyonroad.wtp.v1.ServerHeartbeatH\x00R\x0fserverHeartbeat\x123\n" +
 	"\x06goaway\x18\x04 \x01(\v2\x19.canyonroad.wtp.v1.GoawayH\x00R\x06goaway\x12G\n" +
 	"\rserver_update\x18\x05 \x01(\v2 .canyonroad.wtp.v1.SessionUpdateH\x00R\fserverUpdateB\x05\n" +
-	"\x03msg\"\xfc\x04\n" +
+	"\x03msg\"\xc0\x03\n" +
 	"\vSessionInit\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12!\n" +
@@ -1624,13 +1640,7 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\bagent_id\x18\t \x01(\tR\aagentId\x12#\n" +
 	"\ragent_version\x18\n" +
 	" \x01(\tR\fagentVersion\x12#\n" +
-	"\rtotal_chained\x18\v \x01(\x04R\ftotalChained\x12\x1b\n" +
-	"\tpolicy_id\x18\f \x01(\tR\bpolicyId\x12%\n" +
-	"\x0epolicy_version\x18\r \x01(\rR\rpolicyVersion\x12.\n" +
-	"\x13policy_content_hash\x18\x0e \x01(\tR\x11policyContentHash\x12%\n" +
-	"\x0epolicy_content\x18\x0f \x01(\fR\rpolicyContent\x12\x1f\n" +
-	"\voverlay_ids\x18\x10 \x03(\tR\n" +
-	"overlayIds\"\xa2\x01\n" +
+	"\rtotal_chained\x18\v \x01(\x04R\ftotalChained\"\xba\x03\n" +
 	"\n" +
 	"SessionAck\x123\n" +
 	"\x16ack_high_watermark_seq\x18\x01 \x01(\x04R\x13ackHighWatermarkSeq\x12\x1e\n" +
@@ -1638,7 +1648,16 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"generation\x18\x02 \x01(\rR\n" +
 	"generation\x12\x1a\n" +
 	"\baccepted\x18\x03 \x01(\bR\baccepted\x12#\n" +
-	"\rreject_reason\x18\x04 \x01(\tR\frejectReason\"\xc1\x01\n" +
+	"\rreject_reason\x18\x04 \x01(\tR\frejectReason\x12\x1b\n" +
+	"\tpolicy_id\x18\x05 \x01(\tR\bpolicyId\x12%\n" +
+	"\x0epolicy_version\x18\x06 \x01(\rR\rpolicyVersion\x12.\n" +
+	"\x13policy_content_hash\x18\a \x01(\tR\x11policyContentHash\x12%\n" +
+	"\x0epolicy_content\x18\b \x01(\fR\rpolicyContent\x12)\n" +
+	"\x10policy_signature\x18\t \x01(\fR\x0fpolicySignature\x12/\n" +
+	"\x14policy_signer_key_id\x18\n" +
+	" \x01(\tR\x11policySignerKeyId\x12\x1f\n" +
+	"\voverlay_ids\x18\v \x03(\tR\n" +
+	"overlayIds\"\xc1\x01\n" +
 	"\rSessionUpdate\x12%\n" +
 	"\x0enew_generation\x18\x01 \x01(\rR\rnewGeneration\x12.\n" +
 	"\x13new_key_fingerprint\x18\x02 \x01(\tR\x11newKeyFingerprint\x12,\n" +

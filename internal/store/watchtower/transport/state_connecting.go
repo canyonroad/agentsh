@@ -83,6 +83,33 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 		return StateShutdown, fmt.Errorf("session rejected: %s", ack.GetRejectReason())
 	}
 
+	// Surface the policy the server resolved for this agent, if any.
+	// The agent will install/verify the policy via the higher-level
+	// OnPolicyPushed callback (when wired) — for now we log the receipt
+	// so operators can confirm the wire end-to-end.
+	if pid := ack.GetPolicyId(); pid != "" {
+		t.opts.Logger.LogAttrs(ctx, slog.LevelInfo,
+			"wtp: SessionAck carried policy push",
+			slog.String("policy_id", pid),
+			slog.Uint64("policy_version", uint64(ack.GetPolicyVersion())),
+			slog.String("policy_content_hash", ack.GetPolicyContentHash()),
+			slog.Int("policy_content_len", len(ack.GetPolicyContent())),
+			slog.Int("policy_signature_len", len(ack.GetPolicySignature())),
+			slog.String("policy_signer_key_id", ack.GetPolicySignerKeyId()),
+			slog.String("session_id", t.opts.SessionID))
+		if cb := t.opts.OnPolicyPushed; cb != nil {
+			cb(PolicyPushed{
+				PolicyID:          pid,
+				PolicyVersion:     ack.GetPolicyVersion(),
+				ContentHash:       ack.GetPolicyContentHash(),
+				Content:           ack.GetPolicyContent(),
+				Signature:         ack.GetPolicySignature(),
+				SignerKeyID:       ack.GetPolicySignerKeyId(),
+				OverlayIDs:        ack.GetOverlayIds(),
+			})
+		}
+	}
+
 	t.ackSessionAck(ack)
 	// NOTE: starting the recv goroutine has been moved to the Run
 	// loop so RunOnce(StateConnecting) — used by transport-level

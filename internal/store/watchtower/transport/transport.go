@@ -135,6 +135,23 @@ type AckOutcome struct {
 // production wiring (a RunOnce dispatch table that selects per-state
 // handlers) lands in Task 22 after Task 17 (Live Batcher) and Task 18
 // (heartbeat) introduce the shared recv goroutine.
+// PolicyPushed is the post-SessionAck payload the transport hands to
+// the agent's higher-level policy-install hook (Options.OnPolicyPushed).
+// The transport itself does NOT verify Signature — it carries the bytes
+// verbatim from the wire so the caller can verify against its trust
+// bundle. An empty Signature means the operator did not sign the policy
+// (deployment opted out of signing); the caller decides whether to
+// install in that case.
+type PolicyPushed struct {
+	PolicyID      string
+	PolicyVersion uint32
+	ContentHash   string
+	Content       []byte
+	Signature     []byte
+	SignerKeyID   string
+	OverlayIDs    []string
+}
+
 type Options struct {
 	// Dialer establishes the underlying gRPC stream. Required.
 	Dialer Dialer
@@ -170,19 +187,13 @@ type Options struct {
 	// Running count from chain.SinkChain; supplied by sink integration.
 	TotalChained uint64
 
-	// Policy snapshot the agent is enforcing locally. Sent in SessionInit
-	// so the server can upsert it into its `policies` table. PolicyID
-	// "" means "no policy" — the four policy fields and OverlayIDs are
-	// then ignored. Setting these requires a fresh session: the server
-	// rejects with GOAWAY_CODE_POLICY if PolicyVersion regresses or
-	// PolicyContentHash conflicts with the stored row at the same
-	// version, so the agent MUST close+reopen the WTP session when its
-	// loaded policy or overlay set changes.
-	PolicyID          string
-	PolicyVersion     uint32
-	PolicyContentHash string
-	PolicyContent     []byte
-	OverlayIDs        []string
+	// OnPolicyPushed is invoked when the server's SessionAck carries a
+	// resolved policy (policy_id != ""). The callback runs synchronously
+	// on the connecting goroutine BEFORE the transport advances to
+	// Replaying, so it must be short — operator-facing verification +
+	// install is fine, expensive parsing is not. Nil callback disables
+	// the install path; the transport still logs the receipt.
+	OnPolicyPushed func(PolicyPushed)
 
 	// InitialAckTuple seeds persistedAck/remoteReplayCursor at construction.
 	// Populated by the Task 27 wiring layer from wal.ReadMeta. nil ⇒
@@ -682,11 +693,6 @@ func (t *Transport) sessionInit() *wtpv1.ClientMessage {
 				AgentId:             t.opts.AgentID,
 				AgentVersion:        t.opts.AgentVersion,
 				TotalChained:        t.opts.TotalChained,
-				PolicyId:            t.opts.PolicyID,
-				PolicyVersion:       t.opts.PolicyVersion,
-				PolicyContentHash:   t.opts.PolicyContentHash,
-				PolicyContent:       t.opts.PolicyContent,
-				OverlayIds:          t.opts.OverlayIDs,
 			},
 		},
 	}

@@ -359,7 +359,7 @@ func New(cfg *config.Config) (*Server, error) {
 		eventStores = append(eventStores, otelStore)
 	}
 	if cfg.Audit.Watchtower.Enabled {
-		wtpStore, err := buildWatchtowerStore(context.Background(), cfg.Audit.Watchtower, cfg.Policies, ocsf.New())
+		wtpStore, err := buildWatchtowerStore(context.Background(), cfg.Audit.Watchtower, ocsf.New())
 		if err != nil {
 			return nil, fmt.Errorf("build watchtower store: %w", err)
 		}

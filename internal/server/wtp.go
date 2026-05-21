@@ -2,17 +2,12 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/audit/kms"
@@ -88,7 +83,6 @@ func resolveAgentID(cfg config.AuditWatchtowerConfig) string {
 func buildWatchtowerStore(
 	ctx context.Context,
 	cfg config.AuditWatchtowerConfig,
-	policies config.PoliciesConfig,
 	mapper compact.Mapper,
 ) (store.EventStore, error) {
 	if !cfg.Enabled {
@@ -189,31 +183,6 @@ func buildWatchtowerStore(
 	}
 	transport.SetEncoderEmitExtendedReasons(opts.EmitExtendedLossReasons)
 
-	// Load the configured default policy so its content + version + hash
-	// can be sent in SessionInit. Failure to load is non-fatal: the
-	// transport just connects without a policy snapshot. We log the
-	// reason so operators can debug a missing snapshot without losing
-	// the rest of the WTP wiring.
-	if policies.Default != "" {
-		snap, perr := loadDefaultPolicySnapshot(policies)
-		if perr != nil {
-			slog.Warn("watchtower: policy snapshot not sent in SessionInit",
-				"reason", perr.Error(), "policy_id", policies.Default)
-		} else {
-			opts.PolicyID = snap.id
-			opts.PolicyVersion = snap.version
-			opts.PolicyContentHash = snap.hash
-			opts.PolicyContent = snap.content
-			slog.Info("watchtower: policy snapshot loaded for SessionInit",
-				"policy_id", snap.id,
-				"policy_version", snap.version,
-				"policy_content_hash", snap.hash,
-				"policy_content_len", len(snap.content))
-		}
-	} else {
-		slog.Info("watchtower: policies.default empty; no policy snapshot in SessionInit")
-	}
-
 	s, err := watchtower.New(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("watchtower: %w", err)
@@ -300,7 +269,7 @@ func resolveAuthBearer(auth config.WatchtowerAuthConfig) (string, error) {
 // BuildWatchtowerStoreForTest is a thin export of buildWatchtowerStore
 // for white-box tests. Production callers use buildWatchtowerStore.
 func BuildWatchtowerStoreForTest(ctx context.Context, cfg config.AuditWatchtowerConfig, m compact.Mapper) (store.EventStore, error) {
-	return buildWatchtowerStore(ctx, cfg, config.PoliciesConfig{}, m)
+	return buildWatchtowerStore(ctx, cfg, m)
 }
 
 // ResolveLogGoawayMessageForTest exports the three-state resolution logic
@@ -338,54 +307,4 @@ func ResolveAuthBearerForTest(auth config.WatchtowerAuthConfig) (string, error) 
 // in buildWatchtowerStore.
 func ResolveAgentIDForTest(cfg config.AuditWatchtowerConfig) string {
 	return resolveAgentID(cfg)
-}
-
-// policySnapshot is the minimal shape of a loaded policy file needed
-// to populate the WTP SessionInit policy fields.
-type policySnapshot struct {
-	id      string
-	version uint32
-	hash    string
-	content []byte
-}
-
-// loadDefaultPolicySnapshot reads the default-named policy file from
-// the configured policies dir, parses just the `version` field of the
-// YAML, and returns the snapshot plus a sha256 content hash. The
-// content_hash format ("sha256:<hex>") matches the wire field the
-// server expects.
-//
-// The loader does NOT validate the policy semantics — that is the
-// policy engine's job at execution time. Here we treat the file as
-// opaque content for the WTP wire protocol.
-func loadDefaultPolicySnapshot(cfg config.PoliciesConfig) (*policySnapshot, error) {
-	if cfg.Default == "" {
-		return nil, fmt.Errorf("policies.default is empty")
-	}
-	path := filepath.Join(cfg.Dir, cfg.Default+".yaml")
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	var head struct {
-		Version uint32 `yaml:"version"`
-		Name    string `yaml:"name"`
-	}
-	if uerr := yaml.Unmarshal(content, &head); uerr != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, uerr)
-	}
-	if head.Version == 0 {
-		head.Version = 1
-	}
-	sum := sha256.Sum256(content)
-	id := head.Name
-	if id == "" {
-		id = cfg.Default
-	}
-	return &policySnapshot{
-		id:      id,
-		version: head.Version,
-		hash:    "sha256:" + hex.EncodeToString(sum[:]),
-		content: content,
-	}, nil
 }

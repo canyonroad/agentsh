@@ -54,24 +54,6 @@ message SessionInit {
   string         agent_id                = 9;
   string         agent_version           = 10;
   uint64         total_chained           = 11;  // count of records sink has chained
-
-  // Policy snapshot the agent is enforcing locally. The server upserts
-  // (tenant_id, policy_id, version) into the policies table on first
-  // sight; subsequent sessions with the same (policy_id, version)
-  // re-use the stored row. Version is monotonic per policy_id: a
-  // SessionInit with version < stored max is rejected with
-  // Goaway.code=GOAWAY_CODE_POLICY (reason: policy_version_regression).
-  // Empty policy_id means the agent has no policy and the server should
-  // not attempt to upsert.
-  //
-  // When the agent's policy or overlay set changes mid-session, the
-  // agent MUST close the WTP session and reopen — overlays/policies do
-  // not change inside a session.
-  string         policy_id               = 12;
-  uint32         policy_version          = 13;
-  string         policy_content_hash     = 14;  // "sha256:<hex>"
-  bytes          policy_content          = 15;  // canonical YAML bytes
-  repeated string overlay_ids            = 16;  // active overlay IDs, lex-sorted
 }
 
 enum HashAlgorithm {
@@ -85,6 +67,26 @@ message SessionAck {
   uint32 generation             = 2;
   bool   accepted               = 3;
   string reject_reason          = 4;     // empty when accepted=true
+
+  // Policy push: when an agent has a policy_bindings row for its
+  // tenant+agent_id, the server resolves the bound policy and ships
+  // it down with the SessionAck. The agent is expected to verify the
+  // signature against its locally-configured trust bundle and install
+  // the policy for any sessions admitted after this point.
+  //
+  // policy_id "" means no policy was resolved (no binding, or the
+  // binding's target policy is missing). In that case the agent
+  // falls back to its local file-based policy. policy_id MUST always
+  // appear with version + content + content_hash; signature MAY be
+  // empty for unsigned-policy deployments (the agent's verification
+  // posture decides whether to install).
+  string         policy_id              = 5;
+  uint32         policy_version         = 6;
+  string         policy_content_hash    = 7;  // "sha256:<hex>"
+  bytes          policy_content         = 8;  // raw policy bytes (YAML)
+  bytes          policy_signature       = 9;  // raw signature over policy_content
+  string         policy_signer_key_id   = 10; // identifies the signing key in the agent's trust bundle
+  repeated string overlay_ids           = 11; // overlay IDs the server expects this agent to apply, lex-sorted
 }
 
 // SessionUpdate (§7.2): generation roll, key rotation, context change.

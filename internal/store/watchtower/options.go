@@ -182,18 +182,6 @@ type Options struct {
 	// renamed, refactored, or replaced without notice.
 	SinkChainOverrideForTests      chain.SinkChainAPI
 	AllowSinkChainOverrideForTests bool
-
-	// Policy snapshot the agent is enforcing. Sent verbatim in the
-	// SessionInit frame so the server can upsert it into its `policies`
-	// table for per-event attribution. Empty PolicyID disables the
-	// snapshot (no upsert at the server). When PolicyID is set the
-	// caller MUST also supply Version, ContentHash, and Content; the
-	// transport does not derive any of them.
-	PolicyID          string
-	PolicyVersion     uint32
-	PolicyContentHash string
-	PolicyContent     []byte
-	OverlayIDs        []string
 }
 
 // applyDefaults fills zero-valued fields with the spec's defaults.
