@@ -84,9 +84,9 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 	}
 
 	// Surface the policy the server resolved for this agent, if any.
-	// The agent will install/verify the policy via the higher-level
-	// OnPolicyPushed callback (when wired) — for now we log the receipt
-	// so operators can confirm the wire end-to-end.
+	// The agent installs/verifies via the OnPolicyPushed hook; the
+	// shared applyPushedPolicy helper is the single install path,
+	// also reached from the mid-session PolicyPush arm in state_live.
 	if pid := ack.GetPolicyId(); pid != "" {
 		t.opts.Logger.LogAttrs(ctx, slog.LevelInfo,
 			"wtp: SessionAck carried policy push",
@@ -97,17 +97,15 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 			slog.Int("policy_signature_len", len(ack.GetPolicySignature())),
 			slog.String("policy_signer_key_id", ack.GetPolicySignerKeyId()),
 			slog.String("session_id", t.opts.SessionID))
-		if cb := t.opts.OnPolicyPushed; cb != nil {
-			cb(PolicyPushed{
-				PolicyID:          pid,
-				PolicyVersion:     ack.GetPolicyVersion(),
-				ContentHash:       ack.GetPolicyContentHash(),
-				Content:           ack.GetPolicyContent(),
-				Signature:         ack.GetPolicySignature(),
-				SignerKeyID:       ack.GetPolicySignerKeyId(),
-				OverlayIDs:        ack.GetOverlayIds(),
-			})
-		}
+		t.applyPushedPolicy(ctx, PolicyPushed{
+			PolicyID:      pid,
+			PolicyVersion: ack.GetPolicyVersion(),
+			ContentHash:   ack.GetPolicyContentHash(),
+			Content:       ack.GetPolicyContent(),
+			Signature:     ack.GetPolicySignature(),
+			SignerKeyID:   ack.GetPolicySignerKeyId(),
+			OverlayIDs:    ack.GetOverlayIds(),
+		}, "session_ack")
 	}
 
 	t.ackSessionAck(ack)
