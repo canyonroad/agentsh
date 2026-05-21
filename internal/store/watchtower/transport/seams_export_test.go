@@ -208,10 +208,21 @@ func FrameForTest(ev recvAckEvent) string {
 		return "batch_ack"
 	case recvAckEventHeartbeat:
 		return "server_heartbeat"
+	case recvAckEventPolicyPush:
+		return "policy_push"
 	default:
 		return "unknown"
 	}
 }
+
+// IsPolicyPushEvent reports whether ev is a recvAckEventPolicyPush.
+// Test-only seam — production reads ev.kind directly.
+func IsPolicyPushEvent(ev recvAckEvent) bool { return ev.kind == recvAckEventPolicyPush }
+
+// PolicyPushFromEvent extracts the embedded wire frame from a
+// recvAckEventPolicyPush. Returns nil for any other kind. Test-only
+// seam exposing the unexported policyPush field for assertions.
+func PolicyPushFromEvent(ev recvAckEvent) *wtpv1.PolicyPush { return ev.policyPush }
 
 // GenForTest returns the event generation. For heartbeats this is zero
 // on the wire — production substitutes t.persistedAck.Generation at

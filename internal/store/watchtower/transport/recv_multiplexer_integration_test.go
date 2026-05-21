@@ -545,3 +545,87 @@ func TestRecvMultiplexer_SessionUpdateSurfacesFailClosedError(t *testing.T) {
 		t.Fatal("recv goroutine did not exit (Done channel still open) after ServerUpdate fail-closed")
 	}
 }
+
+// TestRecvMultiplexer_PolicyPush_Routed verifies the recv goroutine
+// demuxes a valid PolicyPush onto eventCh as a recvAckEventPolicyPush.
+// Mid-session policy update path (watchtower spec §7.6).
+func TestRecvMultiplexer_PolicyPush_Routed(t *testing.T) {
+	t.Parallel()
+
+	fc := newRecvFakeConn()
+	tr := newIntegrationTransport(t, fc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	h := transport.StartRecvForTest(tr, ctx)
+	defer transport.TeardownRecvForTest(tr)
+	defer fc.Close()
+
+	pp := &wtpv1.PolicyPush{
+		PolicyId:          "dev-safe",
+		PolicyVersion:     14,
+		PolicyContentHash: "sha256:" + strings.Repeat("a", 64),
+		PolicyContent:     []byte("name: dev-safe\n"),
+	}
+	fc.Push(&wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_PolicyPush{PolicyPush: pp},
+	})
+
+	select {
+	case ev := <-h.EventCh():
+		if !transport.IsPolicyPushEvent(ev) {
+			t.Fatalf("kind != recvAckEventPolicyPush; ev = %+v", ev)
+		}
+		got := transport.PolicyPushFromEvent(ev)
+		if got == nil || got.PolicyId != "dev-safe" || got.PolicyVersion != 14 {
+			t.Fatalf("unexpected policy_push payload: %+v", got)
+		}
+	case err := <-h.ErrCh():
+		t.Fatalf("unexpected errCh: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("no event delivered")
+	}
+}
+
+// TestRecvMultiplexer_PolicyPush_InvalidFailsClosed verifies that a
+// malformed PolicyPush (policy_id set without content) surfaces on
+// errCh and terminates the recv goroutine — mirroring the
+// Goaway/SessionUpdate fail-closed contract.
+func TestRecvMultiplexer_PolicyPush_InvalidFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	fc := newRecvFakeConn()
+	tr := newIntegrationTransport(t, fc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	h := transport.StartRecvForTest(tr, ctx)
+	defer transport.TeardownRecvForTest(tr)
+	defer fc.Close()
+
+	// policy_id set but content empty + hash invalid → ValidatePolicyPush rejects.
+	fc.Push(&wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_PolicyPush{PolicyPush: &wtpv1.PolicyPush{
+			PolicyId: "x", PolicyVersion: 1,
+		}},
+	})
+
+	select {
+	case err := <-h.ErrCh():
+		if err == nil {
+			t.Fatal("errCh delivered nil error")
+		}
+		if !strings.Contains(err.Error(), "PolicyPush") && !strings.Contains(err.Error(), "policy_push") {
+			t.Fatalf("error: got %q, want substring referring to PolicyPush", err.Error())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recv did not surface invalid PolicyPush as fail-closed error")
+	}
+	select {
+	case <-h.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("recv goroutine did not exit after PolicyPush fail-closed")
+	}
+}

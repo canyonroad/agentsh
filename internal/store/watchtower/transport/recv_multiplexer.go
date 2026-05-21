@@ -281,6 +281,29 @@ func (t *Transport) runRecv(rs *recvSession) {
 			case <-rs.ctx.Done():
 				return
 			}
+		case *wtpv1.ServerMessage_PolicyPush:
+			// Mid-session policy update (watchtower spec §7.6). The main
+			// goroutine hands the wire frame to OnPolicyPushed, which is
+			// idempotent — re-receiving the same (policy_id, hash) is a
+			// no-op. Delivery is best-effort: a malformed frame fails
+			// closed so the next SessionAck recovers the policy.
+			if err := wtpv1.ValidatePolicyPush(m.PolicyPush); err != nil {
+				ClassifyAndIncInvalidFrame(t.opts.Logger, t.metrics, err)
+				select {
+				case rs.errCh <- fmt.Errorf("recv: invalid PolicyPush: %w", err):
+				default:
+				}
+				return
+			}
+			ev := recvAckEvent{
+				kind:       recvAckEventPolicyPush,
+				policyPush: m.PolicyPush,
+			}
+			select {
+			case rs.eventCh <- ev:
+			case <-rs.ctx.Done():
+				return
+			}
 		case *wtpv1.ServerMessage_Goaway:
 			if err := wtpv1.ValidateGoaway(m.Goaway); err != nil {
 				ClassifyAndIncInvalidFrame(t.opts.Logger, t.metrics, err)
