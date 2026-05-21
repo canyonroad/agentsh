@@ -200,6 +200,7 @@ const (
 	GoawayCode_GOAWAY_CODE_OVERLOAD    GoawayCode = 2 // server overloaded; reconnect with backoff.
 	GoawayCode_GOAWAY_CODE_UPGRADE     GoawayCode = 3 // server upgrade in progress; reconnect after delay.
 	GoawayCode_GOAWAY_CODE_AUTH        GoawayCode = 4 // authentication/authorization failed; do not auto-retry.
+	GoawayCode_GOAWAY_CODE_POLICY      GoawayCode = 5 // policy snapshot in SessionInit was rejected
 )
 
 // Enum value maps for GoawayCode.
@@ -210,6 +211,7 @@ var (
 		2: "GOAWAY_CODE_OVERLOAD",
 		3: "GOAWAY_CODE_UPGRADE",
 		4: "GOAWAY_CODE_AUTH",
+		5: "GOAWAY_CODE_POLICY",
 	}
 	GoawayCode_value = map[string]int32{
 		"GOAWAY_CODE_UNSPECIFIED": 0,
@@ -217,6 +219,7 @@ var (
 		"GOAWAY_CODE_OVERLOAD":    2,
 		"GOAWAY_CODE_UPGRADE":     3,
 		"GOAWAY_CODE_AUTH":        4,
+		"GOAWAY_CODE_POLICY":      5,
 	}
 )
 
@@ -456,6 +459,7 @@ func (*ClientMessage_Shutdown) isClientMessage_Msg() {}
 //   - Goaway           — server requesting reconnect; carries an enum code.
 //   - server_update    — server-issued SessionUpdate (key/generation
 //     rotation initiated by the server).
+//   - policy_push      — mid-session policy update pushed to a live agent.
 type ServerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
@@ -465,6 +469,7 @@ type ServerMessage struct {
 	//	*ServerMessage_ServerHeartbeat
 	//	*ServerMessage_Goaway
 	//	*ServerMessage_ServerUpdate
+	//	*ServerMessage_PolicyPush
 	Msg           isServerMessage_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -552,6 +557,15 @@ func (x *ServerMessage) GetServerUpdate() *SessionUpdate {
 	return nil
 }
 
+func (x *ServerMessage) GetPolicyPush() *PolicyPush {
+	if x != nil {
+		if x, ok := x.Msg.(*ServerMessage_PolicyPush); ok {
+			return x.PolicyPush
+		}
+	}
+	return nil
+}
+
 type isServerMessage_Msg interface {
 	isServerMessage_Msg()
 }
@@ -576,6 +590,10 @@ type ServerMessage_ServerUpdate struct {
 	ServerUpdate *SessionUpdate `protobuf:"bytes,5,opt,name=server_update,json=serverUpdate,proto3,oneof"`
 }
 
+type ServerMessage_PolicyPush struct {
+	PolicyPush *PolicyPush `protobuf:"bytes,6,opt,name=policy_push,json=policyPush,proto3,oneof"`
+}
+
 func (*ServerMessage_SessionAck) isServerMessage_Msg() {}
 
 func (*ServerMessage_BatchAck) isServerMessage_Msg() {}
@@ -585,6 +603,8 @@ func (*ServerMessage_ServerHeartbeat) isServerMessage_Msg() {}
 func (*ServerMessage_Goaway) isServerMessage_Msg() {}
 
 func (*ServerMessage_ServerUpdate) isServerMessage_Msg() {}
+
+func (*ServerMessage_PolicyPush) isServerMessage_Msg() {}
 
 // SessionInit (§7.1)
 type SessionInit struct {
@@ -717,8 +737,27 @@ type SessionAck struct {
 	Generation          uint32                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
 	Accepted            bool                   `protobuf:"varint,3,opt,name=accepted,proto3" json:"accepted,omitempty"`
 	RejectReason        string                 `protobuf:"bytes,4,opt,name=reject_reason,json=rejectReason,proto3" json:"reject_reason,omitempty"` // empty when accepted=true
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Policy push: when an agent has a policy_bindings row for its
+	// tenant+agent_id, the server resolves the bound policy and ships
+	// it down with the SessionAck. The agent is expected to verify the
+	// signature against its locally-configured trust bundle and install
+	// the policy for any sessions admitted after this point.
+	//
+	// policy_id "" means no policy was resolved (no binding, or the
+	// binding's target policy is missing). In that case the agent
+	// falls back to its local file-based policy. policy_id MUST always
+	// appear with version + content + content_hash; signature MAY be
+	// empty for unsigned-policy deployments (the agent's verification
+	// posture decides whether to install).
+	PolicyId          string   `protobuf:"bytes,5,opt,name=policy_id,json=policyId,proto3" json:"policy_id,omitempty"`
+	PolicyVersion     uint32   `protobuf:"varint,6,opt,name=policy_version,json=policyVersion,proto3" json:"policy_version,omitempty"`
+	PolicyContentHash string   `protobuf:"bytes,7,opt,name=policy_content_hash,json=policyContentHash,proto3" json:"policy_content_hash,omitempty"`    // "sha256:<hex>"
+	PolicyContent     []byte   `protobuf:"bytes,8,opt,name=policy_content,json=policyContent,proto3" json:"policy_content,omitempty"`                  // raw policy bytes (YAML)
+	PolicySignature   []byte   `protobuf:"bytes,9,opt,name=policy_signature,json=policySignature,proto3" json:"policy_signature,omitempty"`            // raw signature over policy_content
+	PolicySignerKeyId string   `protobuf:"bytes,10,opt,name=policy_signer_key_id,json=policySignerKeyId,proto3" json:"policy_signer_key_id,omitempty"` // identifies the signing key in the agent's trust bundle
+	OverlayIds        []string `protobuf:"bytes,11,rep,name=overlay_ids,json=overlayIds,proto3" json:"overlay_ids,omitempty"`                          // overlay IDs the server expects this agent to apply, lex-sorted
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *SessionAck) Reset() {
@@ -777,6 +816,55 @@ func (x *SessionAck) GetRejectReason() string {
 		return x.RejectReason
 	}
 	return ""
+}
+
+func (x *SessionAck) GetPolicyId() string {
+	if x != nil {
+		return x.PolicyId
+	}
+	return ""
+}
+
+func (x *SessionAck) GetPolicyVersion() uint32 {
+	if x != nil {
+		return x.PolicyVersion
+	}
+	return 0
+}
+
+func (x *SessionAck) GetPolicyContentHash() string {
+	if x != nil {
+		return x.PolicyContentHash
+	}
+	return ""
+}
+
+func (x *SessionAck) GetPolicyContent() []byte {
+	if x != nil {
+		return x.PolicyContent
+	}
+	return nil
+}
+
+func (x *SessionAck) GetPolicySignature() []byte {
+	if x != nil {
+		return x.PolicySignature
+	}
+	return nil
+}
+
+func (x *SessionAck) GetPolicySignerKeyId() string {
+	if x != nil {
+		return x.PolicySignerKeyId
+	}
+	return ""
+}
+
+func (x *SessionAck) GetOverlayIds() []string {
+	if x != nil {
+		return x.OverlayIds
+	}
+	return nil
 }
 
 // SessionUpdate (§7.2): generation roll, key rotation, context change.
@@ -848,6 +936,112 @@ func (x *SessionUpdate) GetBoundarySequence() uint64 {
 	return 0
 }
 
+// PolicyPush (§7.6): mid-session policy update.
+//
+// Sent when an already-admitted agent's bound policy is edited (content
+// change) or rebound (policy_id change). Field semantics match the
+// policy_* fields embedded in SessionAck — receiving the same
+// (policy_id, policy_content_hash) twice is a no-op on the agent
+// because the install hook is idempotent.
+//
+// Delivery is best-effort. A lost PolicyPush is recovered on the next
+// reconnect via SessionAck.
+//
+// Sent ONLY after SessionAck has admitted the session. policy_id == ""
+// means "unbind — revert to local file policy"; in that case all
+// other fields MAY be empty.
+type PolicyPush struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	PolicyId          string                 `protobuf:"bytes,1,opt,name=policy_id,json=policyId,proto3" json:"policy_id,omitempty"`
+	PolicyVersion     uint32                 `protobuf:"varint,2,opt,name=policy_version,json=policyVersion,proto3" json:"policy_version,omitempty"`
+	PolicyContentHash string                 `protobuf:"bytes,3,opt,name=policy_content_hash,json=policyContentHash,proto3" json:"policy_content_hash,omitempty"` // "sha256:<hex>"
+	PolicyContent     []byte                 `protobuf:"bytes,4,opt,name=policy_content,json=policyContent,proto3" json:"policy_content,omitempty"`               // raw policy bytes (YAML)
+	PolicySignature   []byte                 `protobuf:"bytes,5,opt,name=policy_signature,json=policySignature,proto3" json:"policy_signature,omitempty"`         // raw signature over policy_content
+	PolicySignerKeyId string                 `protobuf:"bytes,6,opt,name=policy_signer_key_id,json=policySignerKeyId,proto3" json:"policy_signer_key_id,omitempty"`
+	OverlayIds        []string               `protobuf:"bytes,7,rep,name=overlay_ids,json=overlayIds,proto3" json:"overlay_ids,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *PolicyPush) Reset() {
+	*x = PolicyPush{}
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PolicyPush) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PolicyPush) ProtoMessage() {}
+
+func (x *PolicyPush) ProtoReflect() protoreflect.Message {
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PolicyPush.ProtoReflect.Descriptor instead.
+func (*PolicyPush) Descriptor() ([]byte, []int) {
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *PolicyPush) GetPolicyId() string {
+	if x != nil {
+		return x.PolicyId
+	}
+	return ""
+}
+
+func (x *PolicyPush) GetPolicyVersion() uint32 {
+	if x != nil {
+		return x.PolicyVersion
+	}
+	return 0
+}
+
+func (x *PolicyPush) GetPolicyContentHash() string {
+	if x != nil {
+		return x.PolicyContentHash
+	}
+	return ""
+}
+
+func (x *PolicyPush) GetPolicyContent() []byte {
+	if x != nil {
+		return x.PolicyContent
+	}
+	return nil
+}
+
+func (x *PolicyPush) GetPolicySignature() []byte {
+	if x != nil {
+		return x.PolicySignature
+	}
+	return nil
+}
+
+func (x *PolicyPush) GetPolicySignerKeyId() string {
+	if x != nil {
+		return x.PolicySignerKeyId
+	}
+	return ""
+}
+
+func (x *PolicyPush) GetOverlayIds() []string {
+	if x != nil {
+		return x.OverlayIds
+	}
+	return nil
+}
+
 // EventBatch (§7.3) — the unit of in-flight work between client and server.
 //
 // The batch body is mutually exclusive: a sender MUST populate exactly one
@@ -873,7 +1067,7 @@ type EventBatch struct {
 
 func (x *EventBatch) Reset() {
 	*x = EventBatch{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[5]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -885,7 +1079,7 @@ func (x *EventBatch) String() string {
 func (*EventBatch) ProtoMessage() {}
 
 func (x *EventBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[5]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -898,7 +1092,7 @@ func (x *EventBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventBatch.ProtoReflect.Descriptor instead.
 func (*EventBatch) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{5}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *EventBatch) GetFromSequence() uint64 {
@@ -981,7 +1175,7 @@ type UncompressedEvents struct {
 
 func (x *UncompressedEvents) Reset() {
 	*x = UncompressedEvents{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[6]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -993,7 +1187,7 @@ func (x *UncompressedEvents) String() string {
 func (*UncompressedEvents) ProtoMessage() {}
 
 func (x *UncompressedEvents) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[6]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1006,7 +1200,7 @@ func (x *UncompressedEvents) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UncompressedEvents.ProtoReflect.Descriptor instead.
 func (*UncompressedEvents) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{6}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *UncompressedEvents) GetEvents() []*CompactEvent {
@@ -1032,7 +1226,7 @@ type CompactEvent struct {
 
 func (x *CompactEvent) Reset() {
 	*x = CompactEvent{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[7]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1044,7 +1238,7 @@ func (x *CompactEvent) String() string {
 func (*CompactEvent) ProtoMessage() {}
 
 func (x *CompactEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[7]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1057,7 +1251,7 @@ func (x *CompactEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompactEvent.ProtoReflect.Descriptor instead.
 func (*CompactEvent) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{7}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *CompactEvent) GetSequence() uint64 {
@@ -1124,7 +1318,7 @@ type IntegrityRecord struct {
 
 func (x *IntegrityRecord) Reset() {
 	*x = IntegrityRecord{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[8]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1136,7 +1330,7 @@ func (x *IntegrityRecord) String() string {
 func (*IntegrityRecord) ProtoMessage() {}
 
 func (x *IntegrityRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[8]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1149,7 +1343,7 @@ func (x *IntegrityRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IntegrityRecord.ProtoReflect.Descriptor instead.
 func (*IntegrityRecord) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{8}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *IntegrityRecord) GetFormatVersion() uint32 {
@@ -1211,7 +1405,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[9]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1223,7 +1417,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[9]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1236,7 +1430,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{9}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Heartbeat) GetWalHighWatermarkSeq() uint64 {
@@ -1262,7 +1456,7 @@ type ServerHeartbeat struct {
 
 func (x *ServerHeartbeat) Reset() {
 	*x = ServerHeartbeat{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[10]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1274,7 +1468,7 @@ func (x *ServerHeartbeat) String() string {
 func (*ServerHeartbeat) ProtoMessage() {}
 
 func (x *ServerHeartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[10]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1287,7 +1481,7 @@ func (x *ServerHeartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerHeartbeat.ProtoReflect.Descriptor instead.
 func (*ServerHeartbeat) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{10}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ServerHeartbeat) GetAckHighWatermarkSeq() uint64 {
@@ -1307,7 +1501,7 @@ type BatchAck struct {
 
 func (x *BatchAck) Reset() {
 	*x = BatchAck{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[11]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1319,7 +1513,7 @@ func (x *BatchAck) String() string {
 func (*BatchAck) ProtoMessage() {}
 
 func (x *BatchAck) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[11]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1332,7 +1526,7 @@ func (x *BatchAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchAck.ProtoReflect.Descriptor instead.
 func (*BatchAck) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{11}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *BatchAck) GetAckHighWatermarkSeq() uint64 {
@@ -1362,7 +1556,7 @@ type TransportLoss struct {
 
 func (x *TransportLoss) Reset() {
 	*x = TransportLoss{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[12]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1374,7 +1568,7 @@ func (x *TransportLoss) String() string {
 func (*TransportLoss) ProtoMessage() {}
 
 func (x *TransportLoss) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[12]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1387,7 +1581,7 @@ func (x *TransportLoss) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransportLoss.ProtoReflect.Descriptor instead.
 func (*TransportLoss) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{12}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TransportLoss) GetFromSequence() uint64 {
@@ -1439,7 +1633,7 @@ type Goaway struct {
 
 func (x *Goaway) Reset() {
 	*x = Goaway{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[13]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1451,7 +1645,7 @@ func (x *Goaway) String() string {
 func (*Goaway) ProtoMessage() {}
 
 func (x *Goaway) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[13]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1464,7 +1658,7 @@ func (x *Goaway) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Goaway.ProtoReflect.Descriptor instead.
 func (*Goaway) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{13}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Goaway) GetCode() GoawayCode {
@@ -1497,7 +1691,7 @@ type ClientShutdown struct {
 
 func (x *ClientShutdown) Reset() {
 	*x = ClientShutdown{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[14]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1509,7 +1703,7 @@ func (x *ClientShutdown) String() string {
 func (*ClientShutdown) ProtoMessage() {}
 
 func (x *ClientShutdown) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[14]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1522,7 +1716,7 @@ func (x *ClientShutdown) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientShutdown.ProtoReflect.Descriptor instead.
 func (*ClientShutdown) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{14}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ClientShutdown) GetReason() ClientShutdownReason {
@@ -1545,14 +1739,16 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\theartbeat\x18\x04 \x01(\v2\x1c.canyonroad.wtp.v1.HeartbeatH\x00R\theartbeat\x12I\n" +
 	"\x0etransport_loss\x18\x05 \x01(\v2 .canyonroad.wtp.v1.TransportLossH\x00R\rtransportLoss\x12?\n" +
 	"\bshutdown\x18\x06 \x01(\v2!.canyonroad.wtp.v1.ClientShutdownH\x00R\bshutdownB\x05\n" +
-	"\x03msg\"\xe3\x02\n" +
+	"\x03msg\"\xa5\x03\n" +
 	"\rServerMessage\x12@\n" +
 	"\vsession_ack\x18\x01 \x01(\v2\x1d.canyonroad.wtp.v1.SessionAckH\x00R\n" +
 	"sessionAck\x12:\n" +
 	"\tbatch_ack\x18\x02 \x01(\v2\x1b.canyonroad.wtp.v1.BatchAckH\x00R\bbatchAck\x12O\n" +
 	"\x10server_heartbeat\x18\x03 \x01(\v2\".canyonroad.wtp.v1.ServerHeartbeatH\x00R\x0fserverHeartbeat\x123\n" +
 	"\x06goaway\x18\x04 \x01(\v2\x19.canyonroad.wtp.v1.GoawayH\x00R\x06goaway\x12G\n" +
-	"\rserver_update\x18\x05 \x01(\v2 .canyonroad.wtp.v1.SessionUpdateH\x00R\fserverUpdateB\x05\n" +
+	"\rserver_update\x18\x05 \x01(\v2 .canyonroad.wtp.v1.SessionUpdateH\x00R\fserverUpdate\x12@\n" +
+	"\vpolicy_push\x18\x06 \x01(\v2\x1d.canyonroad.wtp.v1.PolicyPushH\x00R\n" +
+	"policyPushB\x05\n" +
 	"\x03msg\"\xc0\x03\n" +
 	"\vSessionInit\x12\x1d\n" +
 	"\n" +
@@ -1569,7 +1765,7 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\bagent_id\x18\t \x01(\tR\aagentId\x12#\n" +
 	"\ragent_version\x18\n" +
 	" \x01(\tR\fagentVersion\x12#\n" +
-	"\rtotal_chained\x18\v \x01(\x04R\ftotalChained\"\xa2\x01\n" +
+	"\rtotal_chained\x18\v \x01(\x04R\ftotalChained\"\xba\x03\n" +
 	"\n" +
 	"SessionAck\x123\n" +
 	"\x16ack_high_watermark_seq\x18\x01 \x01(\x04R\x13ackHighWatermarkSeq\x12\x1e\n" +
@@ -1577,12 +1773,31 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"generation\x18\x02 \x01(\rR\n" +
 	"generation\x12\x1a\n" +
 	"\baccepted\x18\x03 \x01(\bR\baccepted\x12#\n" +
-	"\rreject_reason\x18\x04 \x01(\tR\frejectReason\"\xc1\x01\n" +
+	"\rreject_reason\x18\x04 \x01(\tR\frejectReason\x12\x1b\n" +
+	"\tpolicy_id\x18\x05 \x01(\tR\bpolicyId\x12%\n" +
+	"\x0epolicy_version\x18\x06 \x01(\rR\rpolicyVersion\x12.\n" +
+	"\x13policy_content_hash\x18\a \x01(\tR\x11policyContentHash\x12%\n" +
+	"\x0epolicy_content\x18\b \x01(\fR\rpolicyContent\x12)\n" +
+	"\x10policy_signature\x18\t \x01(\fR\x0fpolicySignature\x12/\n" +
+	"\x14policy_signer_key_id\x18\n" +
+	" \x01(\tR\x11policySignerKeyId\x12\x1f\n" +
+	"\voverlay_ids\x18\v \x03(\tR\n" +
+	"overlayIds\"\xc1\x01\n" +
 	"\rSessionUpdate\x12%\n" +
 	"\x0enew_generation\x18\x01 \x01(\rR\rnewGeneration\x12.\n" +
 	"\x13new_key_fingerprint\x18\x02 \x01(\tR\x11newKeyFingerprint\x12,\n" +
 	"\x12new_context_digest\x18\x03 \x01(\tR\x10newContextDigest\x12+\n" +
-	"\x11boundary_sequence\x18\x04 \x01(\x04R\x10boundarySequence\"\xba\x02\n" +
+	"\x11boundary_sequence\x18\x04 \x01(\x04R\x10boundarySequence\"\xa4\x02\n" +
+	"\n" +
+	"PolicyPush\x12\x1b\n" +
+	"\tpolicy_id\x18\x01 \x01(\tR\bpolicyId\x12%\n" +
+	"\x0epolicy_version\x18\x02 \x01(\rR\rpolicyVersion\x12.\n" +
+	"\x13policy_content_hash\x18\x03 \x01(\tR\x11policyContentHash\x12%\n" +
+	"\x0epolicy_content\x18\x04 \x01(\fR\rpolicyContent\x12)\n" +
+	"\x10policy_signature\x18\x05 \x01(\fR\x0fpolicySignature\x12/\n" +
+	"\x14policy_signer_key_id\x18\x06 \x01(\tR\x11policySignerKeyId\x12\x1f\n" +
+	"\voverlay_ids\x18\a \x03(\tR\n" +
+	"overlayIds\"\xba\x02\n" +
 	"\n" +
 	"EventBatch\x12#\n" +
 	"\rfrom_sequence\x18\x01 \x01(\x04R\ffromSequence\x12\x1f\n" +
@@ -1662,14 +1877,15 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"'TRANSPORT_LOSS_REASON_INVALID_TIMESTAMP\x10\x05\x12&\n" +
 	"\"TRANSPORT_LOSS_REASON_INVALID_UTF8\x10\x06\x12+\n" +
 	"'TRANSPORT_LOSS_REASON_SEQUENCE_OVERFLOW\x10\a\x121\n" +
-	"-TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC\x10\b*\x8c\x01\n" +
+	"-TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC\x10\b*\xa4\x01\n" +
 	"\n" +
 	"GoawayCode\x12\x1b\n" +
 	"\x17GOAWAY_CODE_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14GOAWAY_CODE_DRAINING\x10\x01\x12\x18\n" +
 	"\x14GOAWAY_CODE_OVERLOAD\x10\x02\x12\x17\n" +
 	"\x13GOAWAY_CODE_UPGRADE\x10\x03\x12\x14\n" +
-	"\x10GOAWAY_CODE_AUTH\x10\x04*\xab\x01\n" +
+	"\x10GOAWAY_CODE_AUTH\x10\x04\x12\x16\n" +
+	"\x12GOAWAY_CODE_POLICY\x10\x05*\xab\x01\n" +
 	"\x14ClientShutdownReason\x12&\n" +
 	"\"CLIENT_SHUTDOWN_REASON_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dCLIENT_SHUTDOWN_REASON_NORMAL\x10\x01\x12&\n" +
@@ -1692,7 +1908,7 @@ func file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP() []byte {
 }
 
 var file_canyonroad_wtp_v1_wtp_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_canyonroad_wtp_v1_wtp_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_canyonroad_wtp_v1_wtp_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_canyonroad_wtp_v1_wtp_proto_goTypes = []any{
 	(HashAlgorithm)(0),         // 0: canyonroad.wtp.v1.HashAlgorithm
 	(Compression)(0),           // 1: canyonroad.wtp.v1.Compression
@@ -1704,44 +1920,46 @@ var file_canyonroad_wtp_v1_wtp_proto_goTypes = []any{
 	(*SessionInit)(nil),        // 7: canyonroad.wtp.v1.SessionInit
 	(*SessionAck)(nil),         // 8: canyonroad.wtp.v1.SessionAck
 	(*SessionUpdate)(nil),      // 9: canyonroad.wtp.v1.SessionUpdate
-	(*EventBatch)(nil),         // 10: canyonroad.wtp.v1.EventBatch
-	(*UncompressedEvents)(nil), // 11: canyonroad.wtp.v1.UncompressedEvents
-	(*CompactEvent)(nil),       // 12: canyonroad.wtp.v1.CompactEvent
-	(*IntegrityRecord)(nil),    // 13: canyonroad.wtp.v1.IntegrityRecord
-	(*Heartbeat)(nil),          // 14: canyonroad.wtp.v1.Heartbeat
-	(*ServerHeartbeat)(nil),    // 15: canyonroad.wtp.v1.ServerHeartbeat
-	(*BatchAck)(nil),           // 16: canyonroad.wtp.v1.BatchAck
-	(*TransportLoss)(nil),      // 17: canyonroad.wtp.v1.TransportLoss
-	(*Goaway)(nil),             // 18: canyonroad.wtp.v1.Goaway
-	(*ClientShutdown)(nil),     // 19: canyonroad.wtp.v1.ClientShutdown
+	(*PolicyPush)(nil),         // 10: canyonroad.wtp.v1.PolicyPush
+	(*EventBatch)(nil),         // 11: canyonroad.wtp.v1.EventBatch
+	(*UncompressedEvents)(nil), // 12: canyonroad.wtp.v1.UncompressedEvents
+	(*CompactEvent)(nil),       // 13: canyonroad.wtp.v1.CompactEvent
+	(*IntegrityRecord)(nil),    // 14: canyonroad.wtp.v1.IntegrityRecord
+	(*Heartbeat)(nil),          // 15: canyonroad.wtp.v1.Heartbeat
+	(*ServerHeartbeat)(nil),    // 16: canyonroad.wtp.v1.ServerHeartbeat
+	(*BatchAck)(nil),           // 17: canyonroad.wtp.v1.BatchAck
+	(*TransportLoss)(nil),      // 18: canyonroad.wtp.v1.TransportLoss
+	(*Goaway)(nil),             // 19: canyonroad.wtp.v1.Goaway
+	(*ClientShutdown)(nil),     // 20: canyonroad.wtp.v1.ClientShutdown
 }
 var file_canyonroad_wtp_v1_wtp_proto_depIdxs = []int32{
 	7,  // 0: canyonroad.wtp.v1.ClientMessage.session_init:type_name -> canyonroad.wtp.v1.SessionInit
 	9,  // 1: canyonroad.wtp.v1.ClientMessage.session_update:type_name -> canyonroad.wtp.v1.SessionUpdate
-	10, // 2: canyonroad.wtp.v1.ClientMessage.event_batch:type_name -> canyonroad.wtp.v1.EventBatch
-	14, // 3: canyonroad.wtp.v1.ClientMessage.heartbeat:type_name -> canyonroad.wtp.v1.Heartbeat
-	17, // 4: canyonroad.wtp.v1.ClientMessage.transport_loss:type_name -> canyonroad.wtp.v1.TransportLoss
-	19, // 5: canyonroad.wtp.v1.ClientMessage.shutdown:type_name -> canyonroad.wtp.v1.ClientShutdown
+	11, // 2: canyonroad.wtp.v1.ClientMessage.event_batch:type_name -> canyonroad.wtp.v1.EventBatch
+	15, // 3: canyonroad.wtp.v1.ClientMessage.heartbeat:type_name -> canyonroad.wtp.v1.Heartbeat
+	18, // 4: canyonroad.wtp.v1.ClientMessage.transport_loss:type_name -> canyonroad.wtp.v1.TransportLoss
+	20, // 5: canyonroad.wtp.v1.ClientMessage.shutdown:type_name -> canyonroad.wtp.v1.ClientShutdown
 	8,  // 6: canyonroad.wtp.v1.ServerMessage.session_ack:type_name -> canyonroad.wtp.v1.SessionAck
-	16, // 7: canyonroad.wtp.v1.ServerMessage.batch_ack:type_name -> canyonroad.wtp.v1.BatchAck
-	15, // 8: canyonroad.wtp.v1.ServerMessage.server_heartbeat:type_name -> canyonroad.wtp.v1.ServerHeartbeat
-	18, // 9: canyonroad.wtp.v1.ServerMessage.goaway:type_name -> canyonroad.wtp.v1.Goaway
+	17, // 7: canyonroad.wtp.v1.ServerMessage.batch_ack:type_name -> canyonroad.wtp.v1.BatchAck
+	16, // 8: canyonroad.wtp.v1.ServerMessage.server_heartbeat:type_name -> canyonroad.wtp.v1.ServerHeartbeat
+	19, // 9: canyonroad.wtp.v1.ServerMessage.goaway:type_name -> canyonroad.wtp.v1.Goaway
 	9,  // 10: canyonroad.wtp.v1.ServerMessage.server_update:type_name -> canyonroad.wtp.v1.SessionUpdate
-	0,  // 11: canyonroad.wtp.v1.SessionInit.algorithm:type_name -> canyonroad.wtp.v1.HashAlgorithm
-	1,  // 12: canyonroad.wtp.v1.EventBatch.compression:type_name -> canyonroad.wtp.v1.Compression
-	11, // 13: canyonroad.wtp.v1.EventBatch.uncompressed:type_name -> canyonroad.wtp.v1.UncompressedEvents
-	12, // 14: canyonroad.wtp.v1.UncompressedEvents.events:type_name -> canyonroad.wtp.v1.CompactEvent
-	13, // 15: canyonroad.wtp.v1.CompactEvent.integrity:type_name -> canyonroad.wtp.v1.IntegrityRecord
-	2,  // 16: canyonroad.wtp.v1.TransportLoss.reason:type_name -> canyonroad.wtp.v1.TransportLossReason
-	3,  // 17: canyonroad.wtp.v1.Goaway.code:type_name -> canyonroad.wtp.v1.GoawayCode
-	4,  // 18: canyonroad.wtp.v1.ClientShutdown.reason:type_name -> canyonroad.wtp.v1.ClientShutdownReason
-	5,  // 19: canyonroad.wtp.v1.Watchtower.Stream:input_type -> canyonroad.wtp.v1.ClientMessage
-	6,  // 20: canyonroad.wtp.v1.Watchtower.Stream:output_type -> canyonroad.wtp.v1.ServerMessage
-	20, // [20:21] is the sub-list for method output_type
-	19, // [19:20] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	10, // 11: canyonroad.wtp.v1.ServerMessage.policy_push:type_name -> canyonroad.wtp.v1.PolicyPush
+	0,  // 12: canyonroad.wtp.v1.SessionInit.algorithm:type_name -> canyonroad.wtp.v1.HashAlgorithm
+	1,  // 13: canyonroad.wtp.v1.EventBatch.compression:type_name -> canyonroad.wtp.v1.Compression
+	12, // 14: canyonroad.wtp.v1.EventBatch.uncompressed:type_name -> canyonroad.wtp.v1.UncompressedEvents
+	13, // 15: canyonroad.wtp.v1.UncompressedEvents.events:type_name -> canyonroad.wtp.v1.CompactEvent
+	14, // 16: canyonroad.wtp.v1.CompactEvent.integrity:type_name -> canyonroad.wtp.v1.IntegrityRecord
+	2,  // 17: canyonroad.wtp.v1.TransportLoss.reason:type_name -> canyonroad.wtp.v1.TransportLossReason
+	3,  // 18: canyonroad.wtp.v1.Goaway.code:type_name -> canyonroad.wtp.v1.GoawayCode
+	4,  // 19: canyonroad.wtp.v1.ClientShutdown.reason:type_name -> canyonroad.wtp.v1.ClientShutdownReason
+	5,  // 20: canyonroad.wtp.v1.Watchtower.Stream:input_type -> canyonroad.wtp.v1.ClientMessage
+	6,  // 21: canyonroad.wtp.v1.Watchtower.Stream:output_type -> canyonroad.wtp.v1.ServerMessage
+	21, // [21:22] is the sub-list for method output_type
+	20, // [20:21] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_canyonroad_wtp_v1_wtp_proto_init() }
@@ -1763,8 +1981,9 @@ func file_canyonroad_wtp_v1_wtp_proto_init() {
 		(*ServerMessage_ServerHeartbeat)(nil),
 		(*ServerMessage_Goaway)(nil),
 		(*ServerMessage_ServerUpdate)(nil),
+		(*ServerMessage_PolicyPush)(nil),
 	}
-	file_canyonroad_wtp_v1_wtp_proto_msgTypes[5].OneofWrappers = []any{
+	file_canyonroad_wtp_v1_wtp_proto_msgTypes[6].OneofWrappers = []any{
 		(*EventBatch_Uncompressed)(nil),
 		(*EventBatch_CompressedPayload)(nil),
 	}
@@ -1774,7 +1993,7 @@ func file_canyonroad_wtp_v1_wtp_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_canyonroad_wtp_v1_wtp_proto_rawDesc), len(file_canyonroad_wtp_v1_wtp_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   15,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

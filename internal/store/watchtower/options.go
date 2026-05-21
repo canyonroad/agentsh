@@ -182,6 +182,15 @@ type Options struct {
 	// renamed, refactored, or replaced without notice.
 	SinkChainOverrideForTests      chain.SinkChainAPI
 	AllowSinkChainOverrideForTests bool
+
+	// OnPolicyPushed is forwarded to transport.Options.OnPolicyPushed.
+	// When the watchtower server resolves a policy for this agent and
+	// ships it down in SessionAck, the transport invokes this callback
+	// with the raw wire payload. The callback owns signature verification
+	// (against the agent's local trust bundle) and installation (writing
+	// the policy to disk + triggering a reload). Nil disables the
+	// install path; the transport still logs the receipt at INFO.
+	OnPolicyPushed func(transport.PolicyPushed)
 }
 
 // applyDefaults fills zero-valued fields with the spec's defaults.

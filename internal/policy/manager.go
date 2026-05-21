@@ -17,12 +17,12 @@ import (
 
 // Manager selects and loads a policy once, based on config and env.
 type Manager struct {
+	mu             sync.RWMutex
 	selectedName   string
 	dir            string
 	manifestPath   string
 	signingMode    string
 	trustStorePath string
-	once           sync.Once
 	policy         *Policy
 	err            error
 }
@@ -68,52 +68,82 @@ func (m *Manager) SetSigningConfig(mode, trustStorePath string) {
 
 // Get loads and returns the active policy, caching the result.
 func (m *Manager) Get() (*Policy, error) {
-	m.once.Do(func() {
-		path, err := ResolvePolicyPath(m.dir, m.selectedName)
-		if err != nil {
-			m.err = err
-			return
+	m.mu.RLock()
+	if m.policy != nil || m.err != nil {
+		p, e := m.policy, m.err
+		m.mu.RUnlock()
+		return p, e
+	}
+	m.mu.RUnlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.policy != nil || m.err != nil {
+		return m.policy, m.err
+	}
+	p, err := m.loadLocked()
+	m.policy = p
+	m.err = err
+	return p, err
+}
+
+// Reload forces the next Get() to re-read the policy file from disk.
+// Used when the policy has been replaced out-of-band (e.g. a fresh
+// snapshot was pushed by the operator via WTP SessionAck). Subsequent
+// Get() calls return the new policy; in-flight callers that already
+// captured a *Policy are unaffected.
+//
+// Returns the new policy or the parse/validate error. A Reload error
+// also installs itself as the cached err so subsequent Get() calls
+// surface the same failure without a re-read.
+func (m *Manager) Reload() (*Policy, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, err := m.loadLocked()
+	m.policy = p
+	m.err = err
+	return p, err
+}
+
+// loadLocked is the actual disk-read + verify + parse. Caller MUST
+// hold m.mu in write mode.
+func (m *Manager) loadLocked() (*Policy, error) {
+	path, err := ResolvePolicyPath(m.dir, m.selectedName)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read policy: %w", err)
+	}
+	if m.manifestPath != "" {
+		if err := verifyHash(path, data, m.manifestPath); err != nil {
+			return nil, err
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			m.err = fmt.Errorf("read policy: %w", err)
-			return
-		}
-		if m.manifestPath != "" {
-			if err := verifyHash(path, data, m.manifestPath); err != nil {
-				m.err = err
-				return
+	}
+	if m.signingMode != "" && m.signingMode != "off" {
+		if m.trustStorePath == "" {
+			if m.signingMode == "enforce" {
+				return nil, fmt.Errorf("signing verification: trust_store not configured")
 			}
-		}
-		if m.signingMode != "" && m.signingMode != "off" {
-			if m.trustStorePath == "" {
-				if m.signingMode == "enforce" {
-					m.err = fmt.Errorf("signing verification: trust_store not configured")
-					return
-				}
-				fmt.Fprintf(os.Stderr, "WARNING: signing mode is %q but trust_store not configured\n", m.signingMode)
-			} else if err := m.verifySigning(path, data); err != nil {
-				if m.signingMode == "enforce" {
-					m.err = fmt.Errorf("signing verification: %w", err)
-					return
-				}
-				fmt.Fprintf(os.Stderr, "WARNING: policy signing verification failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "WARNING: signing mode is %q but trust_store not configured\n", m.signingMode)
+		} else if err := m.verifySigning(path, data); err != nil {
+			if m.signingMode == "enforce" {
+				return nil, fmt.Errorf("signing verification: %w", err)
 			}
+			fmt.Fprintf(os.Stderr, "WARNING: policy signing verification failed: %v\n", err)
 		}
-		dec := yaml.NewDecoder(bytes.NewReader(data))
-		dec.KnownFields(true)
-		var p Policy
-		if err := dec.Decode(&p); err != nil {
-			m.err = fmt.Errorf("parse policy: %w", err)
-			return
-		}
-		if err := p.Validate(); err != nil {
-			m.err = fmt.Errorf("validate policy: %w", err)
-			return
-		}
-		m.policy = &p
-	})
-	return m.policy, m.err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	var p Policy
+	if err := dec.Decode(&p); err != nil {
+		return nil, fmt.Errorf("parse policy: %w", err)
+	}
+	if err := p.Validate(); err != nil {
+		return nil, fmt.Errorf("validate policy: %w", err)
+	}
+	return &p, nil
 }
 
 func (m *Manager) verifySigning(path string, data []byte) error {

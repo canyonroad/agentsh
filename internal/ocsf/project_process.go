@@ -17,7 +17,7 @@ import (
 // projector embeds a Process object (the child) and an Actor with the
 // parent (when ev.ParentPID > 0).
 func processProjector(activity uint32) Projector {
-	return func(ev types.Event, _ map[string]any) (proto.Message, error) {
+	return func(ev types.Event, allowed map[string]any) (proto.Message, error) {
 		msg := &ocsfpb.ProcessActivity{
 			ClassUid:    u32p(ClassProcessActivity),
 			ActivityId:  u32p(activity),
@@ -26,7 +26,7 @@ func processProjector(activity uint32) Projector {
 			Time:        u64p(uint64(ev.Timestamp.UTC().UnixNano())),
 			Severity:    strp(severityFromPolicy(ev.Policy)),
 			Metadata:    buildMetadata(ev),
-			Process:     buildProcess(ev),
+			Process:     buildProcess(ev, allowed),
 		}
 		if ev.ParentPID > 0 {
 			msg.Actor = &ocsfpb.Actor{
@@ -52,11 +52,24 @@ func processProjector(activity uint32) Projector {
 				msg.PolicyRule = strp(ev.Policy.Rule)
 			}
 		}
+		// Lifecycle events (command_started/finished/killed/executed)
+		// carry exit_code in ev.Fields. The allowlist transforms it to
+		// uint32; absent or negative codes leave ExitCode unset.
+		if ec, ok := allowed["exit_code"].(uint32); ok {
+			msg.ExitCode = u32p(ec)
+		}
 		return msg, nil
 	}
 }
 
-func buildProcess(ev types.Event) *ocsfpb.Process {
+// buildProcess builds the embedded Process. Typed event fields (PID,
+// Filename, Argv) are the primary source. For lifecycle events
+// (command_started/finished/killed) the kernel/syscall fields are
+// empty — the executable and args land in ev.Fields, projected through
+// the allowlist into `allowed`. When the typed source is empty we fall
+// back to the allowed map so process.file.path and process.cmd_line
+// are populated for those event types too.
+func buildProcess(ev types.Event, allowed map[string]any) *ocsfpb.Process {
 	p := &ocsfpb.Process{}
 	if ev.PID > 0 {
 		p.Pid = u64p(uint64(ev.PID))
@@ -64,16 +77,32 @@ func buildProcess(ev types.Event) *ocsfpb.Process {
 	if ev.ParentPID > 0 {
 		p.ParentPid = u64p(uint64(ev.ParentPID))
 	}
-	if ev.Filename != "" {
-		p.Name = strp(basename(ev.Filename))
+	filename := ev.Filename
+	if filename == "" {
+		if v, ok := allowed["command"].(string); ok {
+			filename = v
+		}
+	}
+	if filename != "" {
+		p.Name = strp(basename(filename))
 		p.File = &ocsfpb.File{
-			Path:    strp(ev.Filename),
-			Name:    strp(basename(ev.Filename)),
+			Path:    strp(filename),
+			Name:    strp(basename(filename)),
 			RawPath: strpOrNil(ev.RawFilename),
 		}
 	}
-	if len(ev.Argv) > 0 {
+	switch {
+	case len(ev.Argv) > 0:
 		p.CmdLine = strp(strings.Join(ev.Argv, " "))
+	case filename != "":
+		// argv was not in ev.Argv. Reconstruct cmd_line from the lifecycle
+		// command + args fallback. argv[0] convention is the executable;
+		// mirror that for OCSF cmd_line.
+		parts := []string{filename}
+		if args, ok := allowed["args"].([]string); ok {
+			parts = append(parts, args...)
+		}
+		p.CmdLine = strp(strings.Join(parts, " "))
 	}
 	if ev.Depth > 0 {
 		p.Depth = u32p(uint32(ev.Depth))
@@ -173,8 +202,27 @@ func init() {
 		register(t, Mapping{
 			ClassUID:        ClassProcessActivity,
 			ActivityID:      activity,
-			FieldsAllowlist: nil, // process events use only top-level Event columns
+			FieldsAllowlist: processFieldsAllowlistFor(t),
 			Project:         processProjector(activity),
 		})
 	}
+}
+
+// lifecycleProcessAllowlist projects ev.Fields keys carried by the
+// command_started / command_finished / command_killed / command_executed
+// emit sites in internal/api (exec_stream.go and core.go). Kernel-sourced
+// process events (execve, exec_intercept, exit, ...) populate the typed
+// ev.Filename / ev.Argv / ev.PID fields directly and don't need this.
+var lifecycleProcessAllowlist = []FieldRule{
+	{Key: "command", Transform: AsString, DestPath: "process.file.path, process.cmd_line"},
+	{Key: "args", Transform: AsStringSlice, DestPath: "process.cmd_line"},
+	{Key: "exit_code", Transform: AsUint32, DestPath: "exit_code"},
+}
+
+func processFieldsAllowlistFor(t string) []FieldRule {
+	switch t {
+	case "command_started", "command_finished", "command_killed", "command_executed":
+		return lifecycleProcessAllowlist
+	}
+	return nil
 }

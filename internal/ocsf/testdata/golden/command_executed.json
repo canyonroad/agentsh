@@ -17,6 +17,12 @@
   },
   "process": {
     "pid": "111",
+    "name": "ls",
+    "cmd_line": "/usr/bin/ls",
+    "file": {
+      "path": "/usr/bin/ls",
+      "name": "ls"
+    },
     "command_uid": "c1"
   }
 }

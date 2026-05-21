@@ -250,6 +250,15 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 						return StateConnecting, err
 					}
 				}
+			case recvAckEventPolicyPush:
+				// Mid-session policy update (watchtower spec §7.6).
+				// applyPushedPolicy hands the wire payload to
+				// OnPolicyPushed via the same install path the
+				// SessionAck arm uses; the hook is idempotent so a
+				// re-receive is a no-op. PolicyPush carries no ack
+				// tuple — cursors, inflight tracking, and the send
+				// path are all unaffected.
+				t.applyPushedPolicy(ctx, fromWirePolicyPush(ev.policyPush), "policy_push")
 			}
 		case err := <-recvErrCh:
 			// Recv goroutine surfaced a fatal stream error OR a fail-

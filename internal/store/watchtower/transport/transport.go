@@ -135,6 +135,23 @@ type AckOutcome struct {
 // production wiring (a RunOnce dispatch table that selects per-state
 // handlers) lands in Task 22 after Task 17 (Live Batcher) and Task 18
 // (heartbeat) introduce the shared recv goroutine.
+// PolicyPushed is the post-SessionAck payload the transport hands to
+// the agent's higher-level policy-install hook (Options.OnPolicyPushed).
+// The transport itself does NOT verify Signature — it carries the bytes
+// verbatim from the wire so the caller can verify against its trust
+// bundle. An empty Signature means the operator did not sign the policy
+// (deployment opted out of signing); the caller decides whether to
+// install in that case.
+type PolicyPushed struct {
+	PolicyID      string
+	PolicyVersion uint32
+	ContentHash   string
+	Content       []byte
+	Signature     []byte
+	SignerKeyID   string
+	OverlayIDs    []string
+}
+
 type Options struct {
 	// Dialer establishes the underlying gRPC stream. Required.
 	Dialer Dialer
@@ -169,6 +186,14 @@ type Options struct {
 	// TotalChained is the count of records the sink has chained so far.
 	// Running count from chain.SinkChain; supplied by sink integration.
 	TotalChained uint64
+
+	// OnPolicyPushed is invoked when the server's SessionAck carries a
+	// resolved policy (policy_id != ""). The callback runs synchronously
+	// on the connecting goroutine BEFORE the transport advances to
+	// Replaying, so it must be short — operator-facing verification +
+	// install is fine, expensive parsing is not. Nil callback disables
+	// the install path; the transport still logs the receipt.
+	OnPolicyPushed func(PolicyPushed)
 
 	// InitialAckTuple seeds persistedAck/remoteReplayCursor at construction.
 	// Populated by the Task 27 wiring layer from wal.ReadMeta. nil ⇒

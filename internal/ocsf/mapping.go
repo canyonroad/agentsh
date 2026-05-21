@@ -224,3 +224,45 @@ func AsUint64(v any) (any, error) {
 		return nil, fmt.Errorf("AsUint64: unsupported %T", v)
 	}
 }
+
+// AsStringSlice narrows array-like concrete types to []string. Accepts
+// the in-process []string form (from broker.Publish) and the []any form
+// (after a JSON round-trip via the store). Empty slices and nil are
+// dropped (returns nil, nil) so the projector treats them like an
+// absent key.
+func AsStringSlice(v any) (any, error) {
+	if v == nil {
+		return nil, nil
+	}
+	switch x := v.(type) {
+	case []string:
+		if len(x) == 0 {
+			return nil, nil
+		}
+		out := make([]string, len(x))
+		copy(out, x)
+		return out, nil
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, it := range x {
+			s, err := AsString(it)
+			if err != nil {
+				return nil, err
+			}
+			if s == nil {
+				continue
+			}
+			ss, ok := s.(string)
+			if !ok {
+				return nil, fmt.Errorf("AsStringSlice: AsString returned %T", s)
+			}
+			out = append(out, ss)
+		}
+		if len(out) == 0 {
+			return nil, nil
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("AsStringSlice: unsupported %T", v)
+	}
+}

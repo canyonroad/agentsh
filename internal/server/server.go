@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -164,6 +165,14 @@ func New(cfg *config.Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// appHolder is captured by the WTP policy install hook so it can
+	// swap the App's policy engine atomically after a verified push.
+	// The App itself doesn't exist yet — it's stored further down once
+	// constructed. Until that store, the hook installs the policy file
+	// + sig but skips the engine swap (the App's first Manager.Get on
+	// the new session picks up the freshly-written file).
+	appHolder := &atomic.Pointer[api.App]{}
 
 	// Threat feed (optional).
 	var threatStore *threatfeed.Store
@@ -359,7 +368,7 @@ func New(cfg *config.Config) (*Server, error) {
 		eventStores = append(eventStores, otelStore)
 	}
 	if cfg.Audit.Watchtower.Enabled {
-		wtpStore, err := buildWatchtowerStore(context.Background(), cfg.Audit.Watchtower, ocsf.New())
+		wtpStore, err := buildWatchtowerStore(context.Background(), cfg.Audit.Watchtower, cfg.Policies, pm, appHolder, enforceApprovals, ocsf.New())
 		if err != nil {
 			return nil, fmt.Errorf("build watchtower store: %w", err)
 		}
@@ -519,6 +528,10 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader, cgroupMgr)
+	// Publish to the WTP install hook so subsequent pushed-policy
+	// receipts can SwapPolicy in-process (next CheckCommand sees the
+	// new rules without an agentsh restart).
+	appHolder.Store(app)
 	appCloser := app.Close // ensure cleanup on error paths below
 	defer func() {
 		if appCloser != nil {

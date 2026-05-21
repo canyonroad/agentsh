@@ -2,6 +2,7 @@ package wtpv1
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -110,16 +111,16 @@ func TestValidateGoaway_Nil(t *testing.T) {
 }
 
 func TestValidateGoaway_CodeUnspecified(t *testing.T) {
+	// UNSPECIFIED is a valid wire value per the proto contract:
+	// "unknown; clients MUST treat as transient and reconnect."
+	// The validator MUST accept it so the recv multiplexer's Goaway
+	// branch can log the server's message and the run loop can
+	// gracefully reconnect. Rejecting UNSPECIFIED previously caused
+	// every Fatal-with-generic-reason Goaway from watchtower to be
+	// dropped before the operator could see why the stream closed.
 	err := ValidateGoaway(&Goaway{Code: GoawayCode_GOAWAY_CODE_UNSPECIFIED})
-	if err == nil {
-		t.Fatal("ValidateGoaway(code=UNSPECIFIED): want error, got nil")
-	}
-	var ve *ValidationError
-	if !errors.As(err, &ve) {
-		t.Fatalf("err type = %T; want *ValidationError", err)
-	}
-	if ve.Reason != ReasonGoawayCodeUnspecified {
-		t.Errorf("reason = %q; want %q", ve.Reason, ReasonGoawayCodeUnspecified)
+	if err != nil {
+		t.Fatalf("ValidateGoaway(code=UNSPECIFIED): want nil, got %v", err)
 	}
 }
 
@@ -232,5 +233,83 @@ func TestValidateServerHeartbeat_Nil(t *testing.T) {
 func TestValidateServerHeartbeat_HappyPath(t *testing.T) {
 	if err := ValidateServerHeartbeat(&ServerHeartbeat{AckHighWatermarkSeq: 42}); err != nil {
 		t.Errorf("ValidateServerHeartbeat: %v", err)
+	}
+}
+
+func TestValidatePolicyPush_Empty(t *testing.T) {
+	if err := ValidatePolicyPush(&PolicyPush{}); err != nil {
+		t.Fatalf("empty policy_id should be valid unbind frame: %v", err)
+	}
+}
+
+func TestValidatePolicyPush_Nil(t *testing.T) {
+	if err := ValidatePolicyPush(nil); err == nil {
+		t.Fatal("nil should return error")
+	}
+}
+
+func TestValidatePolicyPush_PartialFields(t *testing.T) {
+	pp := &PolicyPush{PolicyId: "dev-safe", PolicyVersion: 1}
+	if err := ValidatePolicyPush(pp); err == nil {
+		t.Fatal("partial fields with policy_id set should reject")
+	}
+}
+
+func TestValidatePolicyPush_AllFields(t *testing.T) {
+	pp := &PolicyPush{
+		PolicyId:          "dev-safe",
+		PolicyVersion:     14,
+		PolicyContentHash: "sha256:" + strings.Repeat("a", 64),
+		PolicyContent:     []byte("name: dev-safe\n"),
+	}
+	if err := ValidatePolicyPush(pp); err != nil {
+		t.Fatalf("complete frame should validate: %v", err)
+	}
+}
+
+func TestValidatePolicyPush_BadHashPrefix(t *testing.T) {
+	pp := &PolicyPush{
+		PolicyId:          "dev-safe",
+		PolicyVersion:     1,
+		PolicyContent:     []byte("x"),
+		PolicyContentHash: "md5:" + strings.Repeat("a", 32),
+	}
+	if err := ValidatePolicyPush(pp); err == nil {
+		t.Fatal("wrong prefix should be rejected")
+	}
+}
+
+func TestValidatePolicyPush_BadHashLength(t *testing.T) {
+	pp := &PolicyPush{
+		PolicyId:          "dev-safe",
+		PolicyVersion:     1,
+		PolicyContent:     []byte("x"),
+		PolicyContentHash: "sha256:" + strings.Repeat("a", 32),
+	}
+	if err := ValidatePolicyPush(pp); err == nil {
+		t.Fatal("wrong length should be rejected")
+	}
+}
+
+func TestValidatePolicyPush_NonHex(t *testing.T) {
+	pp := &PolicyPush{
+		PolicyId:          "dev-safe",
+		PolicyVersion:     1,
+		PolicyContent:     []byte("x"),
+		PolicyContentHash: "sha256:" + strings.Repeat("z", 64),
+	}
+	if err := ValidatePolicyPush(pp); err == nil {
+		t.Fatal("non-hex chars should be rejected")
+	}
+}
+
+func TestValidatePolicyPush_ReturnsValidationError(t *testing.T) {
+	err := ValidatePolicyPush(nil)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected *ValidationError, got %T (%v)", err, err)
+	}
+	if ve.Reason != ReasonPolicyPushInvalid {
+		t.Fatalf("got reason %q, want %q", ve.Reason, ReasonPolicyPushInvalid)
 	}
 }

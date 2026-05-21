@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport/compress"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
@@ -79,6 +80,10 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 				t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, ev.seq)
 			}
 		case err := <-recvErrCh:
+			t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+				"wtp: runReplaying exit (recv error)",
+				slog.String("err", err.Error()),
+				slog.String("session_id", t.opts.SessionID))
 			_ = t.conn.Close()
 			t.teardownRecv()
 			t.conn = nil
@@ -102,6 +107,10 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 		}
 		batch, done, err := r.NextBatch(ctx)
 		if err != nil {
+			t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+				"wtp: runReplaying exit (replayer.NextBatch)",
+				slog.String("err", err.Error()),
+				slog.String("session_id", t.opts.SessionID))
 			_ = t.conn.Close()
 			t.teardownRecv()
 			t.conn = nil
@@ -110,6 +119,11 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 		if len(batch.Records) > 0 {
 			msgs, err := buildEventBatchFn(batch.Records, t.emitExtendedLossReasons, t.compressor, t.compressMetrics)
 			if err != nil {
+				t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+					"wtp: runReplaying exit (buildEventBatch)",
+					slog.String("err", err.Error()),
+					slog.Int("records", len(batch.Records)),
+					slog.String("session_id", t.opts.SessionID))
 				_ = t.conn.Close()
 				t.teardownRecv()
 				t.conn = nil
@@ -117,6 +131,10 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 			}
 			for _, msg := range msgs {
 				if err := t.conn.Send(msg); err != nil {
+					t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+						"wtp: runReplaying exit (conn.Send)",
+						slog.String("err", err.Error()),
+						slog.String("session_id", t.opts.SessionID))
 					_ = t.conn.Close()
 					t.teardownRecv()
 					t.conn = nil

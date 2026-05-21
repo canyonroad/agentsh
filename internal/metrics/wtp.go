@@ -640,6 +640,7 @@ const (
 	WTPInvalidFrameReasonDecompressError                WTPInvalidFrameReason = "decompress_error"
 	WTPInvalidFrameReasonGoawayCodeUnspec          WTPInvalidFrameReason = "goaway_code_unspecified"
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid WTPInvalidFrameReason = "session_update_generation_invalid"
+	WTPInvalidFrameReasonPolicyPushInvalid         WTPInvalidFrameReason = "policy_push_invalid"
 	// WTPInvalidFrameReasonClassifierBypass is the metrics-only reason
 	// emitted by the receiver-side errors.As-false defense-in-depth
 	// guard AND by IncDroppedInvalidFrame's invalid-label collapse.
@@ -658,6 +659,7 @@ var wtpInvalidFrameReasonsValid = map[WTPInvalidFrameReason]struct{}{
 	WTPInvalidFrameReasonDecompressError:                {},
 	WTPInvalidFrameReasonGoawayCodeUnspec:          {},
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid: {},
+	WTPInvalidFrameReasonPolicyPushInvalid:         {},
 	WTPInvalidFrameReasonClassifierBypass:               {},
 	WTPInvalidFrameReasonUnknown:                        {},
 }
@@ -674,6 +676,7 @@ var wtpInvalidFrameReasonsEmitOrder = []WTPInvalidFrameReason{
 	WTPInvalidFrameReasonEventBatchCompressionUnspec,
 	WTPInvalidFrameReasonGoawayCodeUnspec,
 	WTPInvalidFrameReasonPayloadTooLarge,
+	WTPInvalidFrameReasonPolicyPushInvalid,
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid,
 	WTPInvalidFrameReasonUnknown,
@@ -694,6 +697,7 @@ var validationReasonsShared = []WTPInvalidFrameReason{
 	WTPInvalidFrameReasonPayloadTooLarge,
 	WTPInvalidFrameReasonGoawayCodeUnspec,
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid,
+	WTPInvalidFrameReasonPolicyPushInvalid,
 	WTPInvalidFrameReasonUnknown,
 }
 

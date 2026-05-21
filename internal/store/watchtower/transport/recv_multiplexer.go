@@ -30,6 +30,11 @@ const (
 	// t.persistedAck.Generation) before this heartbeat reaches the
 	// dispatch site. See round-22 Finding 1.
 	recvAckEventHeartbeat
+	// recvAckEventPolicyPush wraps a *wtpv1.ServerMessage_PolicyPush
+	// demux. gen + seq are unused (PolicyPush carries no ack tuple);
+	// the wire frame itself is carried via the policyPush field so the
+	// main goroutine can hand it to OnPolicyPushed without re-decoding.
+	recvAckEventPolicyPush
 )
 
 // recvAckEvent is the single tagged-union event type the recv goroutine
@@ -47,6 +52,10 @@ type recvAckEvent struct {
 	kind recvAckEventKind
 	gen  uint32
 	seq  uint64
+	// policyPush is non-nil iff kind == recvAckEventPolicyPush. The
+	// wire frame is carried verbatim; the main goroutine converts it
+	// to the internal PolicyPushed shape via fromWirePolicyPush.
+	policyPush *wtpv1.PolicyPush
 }
 
 // recvSession bundles all per-connection recv-multiplexer state per
@@ -266,6 +275,29 @@ func (t *Transport) runRecv(rs *recvSession) {
 				// gen left zero; main substitutes t.persistedAck.Generation
 				// at apply time per the FIFO-order invariant.
 				seq: h.GetAckHighWatermarkSeq(),
+			}
+			select {
+			case rs.eventCh <- ev:
+			case <-rs.ctx.Done():
+				return
+			}
+		case *wtpv1.ServerMessage_PolicyPush:
+			// Mid-session policy update (watchtower spec §7.6). The main
+			// goroutine hands the wire frame to OnPolicyPushed, which is
+			// idempotent — re-receiving the same (policy_id, hash) is a
+			// no-op. Delivery is best-effort: a malformed frame fails
+			// closed so the next SessionAck recovers the policy.
+			if err := wtpv1.ValidatePolicyPush(m.PolicyPush); err != nil {
+				ClassifyAndIncInvalidFrame(t.opts.Logger, t.metrics, err)
+				select {
+				case rs.errCh <- fmt.Errorf("recv: invalid PolicyPush: %w", err):
+				default:
+				}
+				return
+			}
+			ev := recvAckEvent{
+				kind:       recvAckEventPolicyPush,
+				policyPush: m.PolicyPush,
 			}
 			select {
 			case rs.eventCh <- ev:

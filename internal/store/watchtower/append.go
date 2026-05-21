@@ -134,10 +134,17 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	//    chain will produce; otherwise a first-record-of-new-
 	//    generation would serialise the prior generation's hash and
 	//    break cross-implementation replay / verification.
-	state := s.sink.State()
+	// 2. Build the WTP IntegrityRecord. prev_hash chains the wire
+	//    integrity stream that Watchtower verifies in spec §3.1.5: the
+	//    next event's prev_hash MUST equal this event's event_hash, OR
+	//    "" on the first event of a generation. This is DIFFERENT from
+	//    the audit.SinkChain's PrevHash (HMAC entry_hash used for local
+	//    tamper detection); using the chain's state.PrevHash here would
+	//    look like a chain_break to Watchtower for every event after
+	//    the first.
 	var prevForRecord string
-	if ev.Chain.Generation == state.Generation {
-		prevForRecord = state.PrevHash
+	if ev.Chain.Generation == s.lastEventGen {
+		prevForRecord = s.lastEventHash
 	}
 	integrityRec := chain.IntegrityRecord{
 		FormatVersion:  uint32(audit.IntegrityFormatVersion),
@@ -201,6 +208,11 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 		s.latchFatal(err)
 		return fmt.Errorf("chain commit: %w", err)
 	}
+
+	// 7. Advance the wire-chain anchor consumed by the next event's
+	//    IntegrityRecord.PrevHash (spec §3.1.5). Held under appendMu.
+	s.lastEventHash = eventHash
+	s.lastEventGen = ev.Chain.Generation
 	return nil
 }
 

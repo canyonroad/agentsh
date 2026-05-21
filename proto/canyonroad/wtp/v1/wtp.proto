@@ -31,6 +31,7 @@ message ClientMessage {
 //   * Goaway           — server requesting reconnect; carries an enum code.
 //   * server_update    — server-issued SessionUpdate (key/generation
 //                        rotation initiated by the server).
+//   * policy_push      — mid-session policy update pushed to a live agent.
 message ServerMessage {
   oneof msg {
     SessionAck       session_ack        = 1;
@@ -38,6 +39,7 @@ message ServerMessage {
     ServerHeartbeat  server_heartbeat   = 3;
     Goaway           goaway             = 4;
     SessionUpdate    server_update      = 5;
+    PolicyPush       policy_push        = 6;
   }
 }
 
@@ -67,6 +69,26 @@ message SessionAck {
   uint32 generation             = 2;
   bool   accepted               = 3;
   string reject_reason          = 4;     // empty when accepted=true
+
+  // Policy push: when an agent has a policy_bindings row for its
+  // tenant+agent_id, the server resolves the bound policy and ships
+  // it down with the SessionAck. The agent is expected to verify the
+  // signature against its locally-configured trust bundle and install
+  // the policy for any sessions admitted after this point.
+  //
+  // policy_id "" means no policy was resolved (no binding, or the
+  // binding's target policy is missing). In that case the agent
+  // falls back to its local file-based policy. policy_id MUST always
+  // appear with version + content + content_hash; signature MAY be
+  // empty for unsigned-policy deployments (the agent's verification
+  // posture decides whether to install).
+  string         policy_id              = 5;
+  uint32         policy_version         = 6;
+  string         policy_content_hash    = 7;  // "sha256:<hex>"
+  bytes          policy_content         = 8;  // raw policy bytes (YAML)
+  bytes          policy_signature       = 9;  // raw signature over policy_content
+  string         policy_signer_key_id   = 10; // identifies the signing key in the agent's trust bundle
+  repeated string overlay_ids           = 11; // overlay IDs the server expects this agent to apply, lex-sorted
 }
 
 // SessionUpdate (§7.2): generation roll, key rotation, context change.
@@ -75,6 +97,30 @@ message SessionUpdate {
   string new_key_fingerprint    = 2;
   string new_context_digest     = 3;
   uint64 boundary_sequence      = 4;     // last seq of prior generation
+}
+
+// PolicyPush (§7.6): mid-session policy update.
+//
+// Sent when an already-admitted agent's bound policy is edited (content
+// change) or rebound (policy_id change). Field semantics match the
+// policy_* fields embedded in SessionAck — receiving the same
+// (policy_id, policy_content_hash) twice is a no-op on the agent
+// because the install hook is idempotent.
+//
+// Delivery is best-effort. A lost PolicyPush is recovered on the next
+// reconnect via SessionAck.
+//
+// Sent ONLY after SessionAck has admitted the session. policy_id == ""
+// means "unbind — revert to local file policy"; in that case all
+// other fields MAY be empty.
+message PolicyPush {
+  string         policy_id              = 1;
+  uint32         policy_version         = 2;
+  string         policy_content_hash    = 3;  // "sha256:<hex>"
+  bytes          policy_content         = 4;  // raw policy bytes (YAML)
+  bytes          policy_signature       = 5;  // raw signature over policy_content
+  string         policy_signer_key_id   = 6;
+  repeated string overlay_ids           = 7;
 }
 
 // EventBatch (§7.3) — the unit of in-flight work between client and server.
@@ -192,6 +238,9 @@ enum GoawayCode {
   GOAWAY_CODE_OVERLOAD    = 2;   // server overloaded; reconnect with backoff.
   GOAWAY_CODE_UPGRADE     = 3;   // server upgrade in progress; reconnect after delay.
   GOAWAY_CODE_AUTH        = 4;   // authentication/authorization failed; do not auto-retry.
+  GOAWAY_CODE_POLICY      = 5;   // policy snapshot in SessionInit was rejected
+                                 // (e.g. version regressed, content hash mismatch
+                                 // for an existing (policy_id, version)).
 }
 
 message ClientShutdown {

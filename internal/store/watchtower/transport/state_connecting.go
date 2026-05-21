@@ -58,6 +58,17 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 
 	ack := msg.GetSessionAck()
 	if ack == nil {
+		// If the server sent a Goaway as the first frame, surface the
+		// code/message so operators see WHY the handshake was rejected.
+		// Bare "unexpected message" hides the most useful diagnostic.
+		if g := msg.GetGoaway(); g != nil {
+			t.opts.Logger.LogAttrs(ctx, slog.LevelWarn,
+				"wtp: SessionInit rejected (Goaway as first frame)",
+				slog.String("goaway_code", g.GetCode().String()),
+				slog.String("goaway_message", g.GetMessage()),
+				slog.Bool("retry_immediately", g.GetRetryImmediately()),
+				slog.String("session_id", t.opts.SessionID))
+		}
 		_ = conn.Close()
 		t.conn = nil
 		t.metrics.IncSessionInitFailures(metrics.WTPSessionFailureReasonUnexpectedMessage)
@@ -70,6 +81,31 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 		t.conn = nil
 		t.metrics.IncSessionInitFailures(metrics.WTPSessionFailureReasonRejected)
 		return StateShutdown, fmt.Errorf("session rejected: %s", ack.GetRejectReason())
+	}
+
+	// Surface the policy the server resolved for this agent, if any.
+	// The agent installs/verifies via the OnPolicyPushed hook; the
+	// shared applyPushedPolicy helper is the single install path,
+	// also reached from the mid-session PolicyPush arm in state_live.
+	if pid := ack.GetPolicyId(); pid != "" {
+		t.opts.Logger.LogAttrs(ctx, slog.LevelInfo,
+			"wtp: SessionAck carried policy push",
+			slog.String("policy_id", pid),
+			slog.Uint64("policy_version", uint64(ack.GetPolicyVersion())),
+			slog.String("policy_content_hash", ack.GetPolicyContentHash()),
+			slog.Int("policy_content_len", len(ack.GetPolicyContent())),
+			slog.Int("policy_signature_len", len(ack.GetPolicySignature())),
+			slog.String("policy_signer_key_id", ack.GetPolicySignerKeyId()),
+			slog.String("session_id", t.opts.SessionID))
+		t.applyPushedPolicy(ctx, PolicyPushed{
+			PolicyID:      pid,
+			PolicyVersion: ack.GetPolicyVersion(),
+			ContentHash:   ack.GetPolicyContentHash(),
+			Content:       ack.GetPolicyContent(),
+			Signature:     ack.GetPolicySignature(),
+			SignerKeyID:   ack.GetPolicySignerKeyId(),
+			OverlayIDs:    ack.GetOverlayIds(),
+		}, "session_ack")
 	}
 
 	t.ackSessionAck(ack)

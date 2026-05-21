@@ -500,3 +500,89 @@ func TestTransport_LogEmittedLossIfApplicable_NoLogForEventBatch(t *testing.T) {
 		t.Fatalf("expected no log for EventBatch; got %s", buf.String())
 	}
 }
+
+// TestRunLive_PolicyPushEvent_InvokesOnPolicyPushed verifies that a
+// recvAckEventPolicyPush delivered through recv.eventCh while runLive
+// is in its select loop reaches OnPolicyPushed via applyPushedPolicy.
+// This is the mid-session install path (watchtower spec §7.6) — no
+// reconnect, no SessionAck, the bound policy changes underfoot.
+func TestRunLive_PolicyPushEvent_InvokesOnPolicyPushed(t *testing.T) {
+	w, err := wal.Open(wal.Options{Dir: t.TempDir(), SegmentSize: 64 * 1024})
+	if err != nil {
+		t.Fatalf("wal.Open: %v", err)
+	}
+	defer w.Close()
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 1})
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	called := make(chan PolicyPushed, 1)
+	conn := newLiveDrainConn()
+	tr, err := New(Options{
+		Dialer: DialerFunc(func(context.Context) (Conn, error) {
+			return conn, nil
+		}),
+		AgentID:   "a",
+		SessionID: "s",
+		WAL:       w,
+		OnPolicyPushed: func(p PolicyPushed) {
+			called <- p
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr.conn = conn
+
+	// Plant a recvSession directly so runLive's recvEventCh arm is live.
+	// Production wires this via startRecv after a successful connect; the
+	// test skips Connecting and drives the eventCh directly. A phony recv
+	// goroutine that just closes rs.done on cancel satisfies teardownRecv,
+	// which would otherwise block forever on the missing done signal.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rs := newRecvSession(ctx)
+	tr.recv = rs
+	go func() {
+		<-rs.ctx.Done()
+		close(rs.done)
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := tr.runLive(ctx, rdr, LiveOptions{
+			Batcher:     BatcherOptions{MaxRecords: 8, MaxBytes: 64 * 1024, MaxAge: 20 * time.Millisecond},
+			MaxInflight: 8,
+		})
+		done <- runErr
+	}()
+
+	pp := &wtpv1.PolicyPush{
+		PolicyId:          "dev-safe",
+		PolicyVersion:     14,
+		PolicyContentHash: "sha256:" + strings.Repeat("a", 64),
+		PolicyContent:     []byte("name: dev-safe\n"),
+	}
+	select {
+	case rs.eventCh <- recvAckEvent{kind: recvAckEventPolicyPush, policyPush: pp}:
+	case <-time.After(time.Second):
+		t.Fatal("failed to push event onto eventCh")
+	}
+
+	select {
+	case got := <-called:
+		if got.PolicyID != "dev-safe" || got.PolicyVersion != 14 {
+			t.Fatalf("OnPolicyPushed payload = %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("OnPolicyPushed not invoked within 1s")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runLive did not exit after cancel")
+	}
+}

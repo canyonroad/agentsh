@@ -18,6 +18,7 @@
   "process": {
     "pid": "101",
     "name": "dangerous",
+    "cmd_line": "/bin/dangerous",
     "file": {
       "path": "/bin/dangerous",
       "name": "dangerous"
