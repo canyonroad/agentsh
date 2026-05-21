@@ -18,6 +18,7 @@
   "process": {
     "pid": "100",
     "name": "sh",
+    "cmd_line": "/bin/sh",
     "file": {
       "path": "/bin/sh",
       "name": "sh"

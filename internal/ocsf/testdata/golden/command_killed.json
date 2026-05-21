@@ -18,5 +18,6 @@
   "process": {
     "pid": "110",
     "command_uid": "c1"
-  }
+  },
+  "exit_code": 137
 }

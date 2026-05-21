@@ -18,6 +18,7 @@
   "process": {
     "pid": "103",
     "name": "ls",
+    "cmd_line": "/bin/ls",
     "file": {
       "path": "/bin/ls",
       "name": "ls"
