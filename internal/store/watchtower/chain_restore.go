@@ -24,143 +24,131 @@ import (
 // stamp IntegrityRecord.PrevHash="" even though the prior record had
 // advanced the chain — breaking cross-restart integrity continuity.
 //
-// Approach: read the last committed WAL record, reconstruct its
-// canonical IntegrityRecord, and replay it through an ephemeral chain
-// seeded at the record's own PrevHash/Generation. Commit on the
-// ephemeral chain yields the post-record state (Generation,
-// PrevHash=entry_hash). Restore that state onto the production chain.
+// Approach: walk every committed WAL record in order, replaying each
+// through an ephemeral chain (Compute+Commit). The final ephemeral
+// chain state is the post-last-commit HMAC prev_hash; restore that
+// onto the production chain.
+//
+// The old approach (seed the ephemeral chain from the last record's
+// IntegrityRecord.PrevHash, replay one record) assumed the wire
+// PrevHash field carried the HMAC chain's prev_hash. That assumption
+// was broken when IntegrityRecord.PrevHash was repurposed to carry
+// the previous event's event_hash per Watchtower spec §3.1.5 (wire
+// chain). The HMAC chain hash now must be re-derived from scratch.
 //
 // Generation 0 IS in scope for the scan: the common "no generation
 // roll has happened yet" case has every record in gen=0, and an early-
 // restart before the first roll MUST still restore continuity.
 //
-// Loss markers (wal.RecordLoss) are ignored when selecting the last
-// record to replay: loss markers advance the WAL tail but do NOT
-// advance the audit chain, so restoring off a trailing loss marker
-// would fall back to the fresh-chain default and break continuity
-// after any overflow/CRC-loss boundary.
-func restoreChainFromWAL(innerChain *audit.SinkChain, w *wal.WAL, opts Options) error {
+// Loss markers (wal.RecordLoss) are ignored when replaying: loss
+// markers advance the WAL tail but do NOT advance the audit chain.
+func restoreChainFromWAL(innerChain *audit.SinkChain, w *wal.WAL, opts Options) (lastEventHash string, lastEventGen uint32, err error) {
 	lastGen := w.HighGeneration()
 
-	// Scan from the highest generation DOWN TO AND INCLUDING gen=0
-	// to find the most recent generation that carries data records
-	// (header-only or loss-only segments don't advance the chain).
-	// Using int32 + signed comparison lets us probe gen=0 and stop
-	// without underflow.
+	// Find the highest generation that carries data records.
 	var (
 		targetGen uint32
-		targetSeq uint64
 		found     bool
 	)
 	for g := int64(lastGen); g >= 0; g-- {
-		seq, ok, err := w.WrittenDataHighWater(uint32(g))
-		if err != nil {
-			return fmt.Errorf("WrittenDataHighWater(gen=%d): %w", g, err)
+		_, ok, scanErr := w.WrittenDataHighWater(uint32(g))
+		if scanErr != nil {
+			return "", 0, fmt.Errorf("WrittenDataHighWater(gen=%d): %w", g, scanErr)
 		}
 		if ok {
-			targetGen, targetSeq, found = uint32(g), seq, true
+			targetGen, found = uint32(g), true
 			break
 		}
 	}
 	if !found {
 		// No data-carrying record exists anywhere in the WAL;
 		// fresh-chain default is correct.
-		return nil
+		return "", 0, nil
 	}
 
-	rdr, err := w.NewReader(wal.ReaderOptions{Generation: targetGen, Start: targetSeq})
+	// Build an ephemeral chain seeded at gen=targetGen, prev_hash="".
+	// Replaying every record in order advances it to the post-commit
+	// state of the last record.
+	temp, err := audit.NewSinkChain(opts.HMACSecret, opts.HMACAlgorithm)
 	if err != nil {
-		return fmt.Errorf("wal.NewReader(gen=%d, start=%d): %w", targetGen, targetSeq, err)
+		return "", 0, fmt.Errorf("ephemeral NewSinkChain: %w", err)
+	}
+	if err := temp.Restore(targetGen, "", false); err != nil {
+		return "", 0, fmt.Errorf("ephemeral Restore(gen=%d, prev=\"\"): %w", targetGen, err)
+	}
+
+	rdr, err := w.NewReader(wal.ReaderOptions{Generation: targetGen, Start: 0})
+	if err != nil {
+		return "", 0, fmt.Errorf("wal.NewReader(gen=%d, start=0): %w", targetGen, err)
 	}
 	defer rdr.Close()
 
-	// Advance to the last data record at/after targetSeq. Loss
-	// markers (wal.RecordLoss) advance the WAL tail but do NOT
-	// advance the audit chain, so they MUST be ignored when
-	// selecting the restore source — otherwise the unmarshal below
-	// would see an empty/non-event payload and silently fall back
-	// to the fresh-chain default, losing continuity across any
-	// overflow / CRC-loss boundary.
-	var lastRec *wal.Record
+	var (
+		replayed         int
+		lastSeenEventHash string
+		lastSeenGen      uint32
+	)
 	for {
 		rec, err := rdr.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("wal.Reader.Next: %w", err)
+			return "", 0, fmt.Errorf("wal.Reader.Next: %w", err)
 		}
 		if rec.Kind != wal.RecordData {
 			continue
 		}
-		recCopy := rec
-		lastRec = &recCopy
+
+		ce := &wtpv1.CompactEvent{}
+		if err := proto.Unmarshal(rec.Payload, ce); err != nil {
+			return "", 0, fmt.Errorf("unmarshal WAL record (seq=%d): %w", rec.Sequence, err)
+		}
+		ir := ce.GetIntegrity()
+		if ir == nil {
+			// Records pre-dating the integrity format don't carry an
+			// IntegrityRecord. Skip them (can't reproduce a hash chain
+			// link without inputs).
+			continue
+		}
+		canonIR, err := chain.EncodeCanonical(chain.IntegrityRecord{
+			FormatVersion:  ir.GetFormatVersion(),
+			Sequence:       ir.GetSequence(),
+			Generation:     ir.GetGeneration(),
+			PrevHash:       ir.GetPrevHash(),
+			EventHash:      ir.GetEventHash(),
+			ContextDigest:  ir.GetContextDigest(),
+			KeyFingerprint: ir.GetKeyFingerprint(),
+		})
+		if err != nil {
+			return "", 0, fmt.Errorf("EncodeCanonical(seq=%d): %w", ir.GetSequence(), err)
+		}
+		cr, err := temp.Compute(int(ir.GetFormatVersion()), int64(ir.GetSequence()), ir.GetGeneration(), canonIR)
+		if err != nil {
+			return "", 0, fmt.Errorf("ephemeral Compute(seq=%d): %w", ir.GetSequence(), err)
+		}
+		if err := temp.Commit(cr); err != nil {
+			return "", 0, fmt.Errorf("ephemeral Commit(seq=%d): %w", ir.GetSequence(), err)
+		}
+		// Track the most recent event_hash + generation seen so the
+		// caller can seed the wire-chain anchor (Store.lastEventHash /
+		// lastEventGen) post-restore. The wire chain feeds
+		// IntegrityRecord.PrevHash on the next AppendEvent per
+		// Watchtower spec §3.1.5.
+		lastSeenEventHash = ir.GetEventHash()
+		lastSeenGen = ir.GetGeneration()
+		replayed++
 	}
-	if lastRec == nil {
+	if replayed == 0 {
 		// Reader yielded no records despite WrittenDataHighWater
-		// reporting one. This is a WAL-scan inconsistency; treat
-		// as non-fatal and fall back to fresh chain.
-		return nil
+		// reporting one. Fall back to fresh chain.
+		return "", 0, nil
 	}
 
-	ce := &wtpv1.CompactEvent{}
-	if err := proto.Unmarshal(lastRec.Payload, ce); err != nil {
-		return fmt.Errorf("unmarshal last WAL record: %w", err)
-	}
-	ir := ce.GetIntegrity()
-	if ir == nil {
-		// Records pre-dating the integrity format (or corrupted)
-		// don't carry an IntegrityRecord. Fall back to fresh chain
-		// rather than invent a prev_hash.
-		return nil
-	}
-
-	// Reconstruct the canonical IntegrityRecord that was hashed into
-	// the chain when the prior process committed this record.
-	canonIR, err := chain.EncodeCanonical(chain.IntegrityRecord{
-		FormatVersion:  ir.GetFormatVersion(),
-		Sequence:       ir.GetSequence(),
-		Generation:     ir.GetGeneration(),
-		PrevHash:       ir.GetPrevHash(),
-		EventHash:      ir.GetEventHash(),
-		ContextDigest:  ir.GetContextDigest(),
-		KeyFingerprint: ir.GetKeyFingerprint(),
-	})
-	if err != nil {
-		return fmt.Errorf("EncodeCanonical(lastRecord): %w", err)
-	}
-
-	// Replay on an ephemeral chain to derive post-commit state.
-	// Using a separate instance keeps the production chain untouched
-	// until we know the restore succeeded; on error we return and
-	// the production chain stays at the fresh default (which Close
-	// will then roll back above).
-	temp, err := audit.NewSinkChain(opts.HMACSecret, opts.HMACAlgorithm)
-	if err != nil {
-		return fmt.Errorf("ephemeral NewSinkChain: %w", err)
-	}
-	// Seed the ephemeral chain with the last record's pre-commit
-	// state (its on-disk PrevHash + Generation). Compute+Commit
-	// then advances to the post-commit state.
-	if err := temp.Restore(ir.GetGeneration(), ir.GetPrevHash(), false); err != nil {
-		return fmt.Errorf("ephemeral Restore: %w", err)
-	}
-	cr, err := temp.Compute(int(ir.GetFormatVersion()), int64(ir.GetSequence()), ir.GetGeneration(), canonIR)
-	if err != nil {
-		return fmt.Errorf("ephemeral Compute: %w", err)
-	}
-	if err := temp.Commit(cr); err != nil {
-		return fmt.Errorf("ephemeral Commit: %w", err)
-	}
-
-	// Transfer the replayed state to the production chain. Fatal=false
-	// because a successful restart is the non-fatal case; if the prior
-	// process latched fatal, recovery is expected to quarantine the
-	// WAL out of the way (Task 14a identity quarantine) rather than
-	// hand a latched chain to the new process.
+	// Transfer the replayed state to the production chain.
 	state := temp.State()
 	if err := innerChain.Restore(state.Generation, state.PrevHash, false); err != nil {
-		return fmt.Errorf("production Restore: %w", err)
+		return "", 0, fmt.Errorf("production Restore: %w", err)
 	}
-	return nil
+	return lastSeenEventHash, lastSeenGen, nil
 }

@@ -231,6 +231,21 @@ type Store struct {
 	// / key rollover re-computation is follow-up work; today a Store
 	// binds exactly one context digest.
 	contextDigest string
+
+	// lastEventHash carries the wire-chain anchor consumed by the next
+	// AppendEvent: IntegrityRecord.PrevHash = lastEventHash (or "" on
+	// generation roll). Watchtower's spec §3.1.5 chains prev_hash →
+	// previous event's event_hash; the audit.SinkChain's PrevHash is a
+	// DIFFERENT hash (HMAC entry_hash) used for tamper detection and
+	// must not be confused with this wire field. Reset to "" when the
+	// next event arrives on a new generation. Guarded by appendMu.
+	lastEventHash string
+	// lastEventGen tracks which generation lastEventHash belongs to. On
+	// a generation roll (ev.Chain.Generation != lastEventGen), the wire
+	// chain restarts: PrevHash="" for the first event of the new
+	// generation, mirroring the HMAC-chain rollover rule in append.go's
+	// state.Generation check.
+	lastEventGen uint32
 }
 
 // New constructs a Store, validates options, opens the WAL, wires the
@@ -314,8 +329,12 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	// Skipped when SinkChainOverrideForTests is set: test overrides
 	// bring their own state and do not want the production restore
 	// path replaying records into them.
+	var restoredLastEventHash string
+	var restoredLastEventGen uint32
 	if opts.SinkChainOverrideForTests == nil {
-		if err := restoreChainFromWAL(innerChain, w, opts); err != nil {
+		var err error
+		restoredLastEventHash, restoredLastEventGen, err = restoreChainFromWAL(innerChain, w, opts)
+		if err != nil {
 			_ = w.Close()
 			return nil, fmt.Errorf("restore chain from WAL: %w", err)
 		}
@@ -419,6 +438,8 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		runCancel:     runCancel,
 		runDone:       make(chan error, 1),
 		contextDigest: ctxDigest,
+		lastEventHash: restoredLastEventHash,
+		lastEventGen:  restoredLastEventGen,
 	}
 	s.appendLossFn = s.w.AppendLoss
 

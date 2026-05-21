@@ -509,6 +509,25 @@ func TestStore_RestartRestoresChainState(t *testing.T) {
 	}
 	defer w.Close()
 
+	// Read seq=2 to capture its EventHash — that's what seq=3's
+	// IntegrityRecord.PrevHash MUST equal under the wire-chain
+	// semantic from Watchtower spec §3.1.5 (prev_hash chains
+	// previous event's event_hash, NOT the HMAC chain's entry_hash).
+	rdrPrev, err := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 2})
+	if err != nil {
+		t.Fatalf("wal.NewReader(start=2): %v", err)
+	}
+	rec2, err := rdrPrev.Next()
+	if err != nil {
+		t.Fatalf("Reader.Next(seq=2): %v", err)
+	}
+	rdrPrev.Close()
+	ce2 := &wtpv1.CompactEvent{}
+	if err := proto.Unmarshal(rec2.Payload, ce2); err != nil {
+		t.Fatalf("unmarshal seq=2: %v", err)
+	}
+	wantPrevForSeq3 := ce2.GetIntegrity().GetEventHash()
+
 	rdr, err := w.NewReader(wal.ReaderOptions{Generation: 1, Start: 3})
 	if err != nil {
 		t.Fatalf("wal.NewReader(start=3): %v", err)
@@ -522,9 +541,10 @@ func TestStore_RestartRestoresChainState(t *testing.T) {
 	if err := proto.Unmarshal(rec.Payload, ce); err != nil {
 		t.Fatalf("unmarshal seq=3: %v", err)
 	}
-	if got := ce.GetIntegrity().GetPrevHash(); got != prevBeforeClose {
-		t.Errorf("seq=3 IntegrityRecord.PrevHash = %q, want %q (chain restore failed)", got, prevBeforeClose)
+	if got := ce.GetIntegrity().GetPrevHash(); got != wantPrevForSeq3 {
+		t.Errorf("seq=3 IntegrityRecord.PrevHash = %q, want %q (wire chain not restored: should equal seq=2's EventHash)", got, wantPrevForSeq3)
 	}
+	_ = prevBeforeClose // HMAC chain restoration verified above by PeekPrevHash check.
 }
 
 // TestStore_TransportSessionInitUsesConfiguredAlgorithm regresses
