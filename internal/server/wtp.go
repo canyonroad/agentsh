@@ -2,16 +2,23 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/audit/kms"
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/policy/signing"
 	"github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/internal/store/eventfilter"
 	"github.com/agentsh/agentsh/internal/store/watchtower"
@@ -83,6 +90,7 @@ func resolveAgentID(cfg config.AuditWatchtowerConfig) string {
 func buildWatchtowerStore(
 	ctx context.Context,
 	cfg config.AuditWatchtowerConfig,
+	policies config.PoliciesConfig,
 	mapper compact.Mapper,
 ) (store.EventStore, error) {
 	if !cfg.Enabled {
@@ -183,6 +191,10 @@ func buildWatchtowerStore(
 	}
 	transport.SetEncoderEmitExtendedReasons(opts.EmitExtendedLossReasons)
 
+	// Wire the pushed-policy install path. Disabled when the operator
+	// hasn't configured a trust store; logging-only.
+	opts.OnPolicyPushed = makePolicyInstallHook(policies)
+
 	s, err := watchtower.New(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("watchtower: %w", err)
@@ -269,7 +281,7 @@ func resolveAuthBearer(auth config.WatchtowerAuthConfig) (string, error) {
 // BuildWatchtowerStoreForTest is a thin export of buildWatchtowerStore
 // for white-box tests. Production callers use buildWatchtowerStore.
 func BuildWatchtowerStoreForTest(ctx context.Context, cfg config.AuditWatchtowerConfig, m compact.Mapper) (store.EventStore, error) {
-	return buildWatchtowerStore(ctx, cfg, m)
+	return buildWatchtowerStore(ctx, cfg, config.PoliciesConfig{}, m)
 }
 
 // ResolveLogGoawayMessageForTest exports the three-state resolution logic
@@ -307,4 +319,114 @@ func ResolveAuthBearerForTest(auth config.WatchtowerAuthConfig) (string, error) 
 // in buildWatchtowerStore.
 func ResolveAgentIDForTest(cfg config.AuditWatchtowerConfig) string {
 	return resolveAgentID(cfg)
+}
+
+// makePolicyInstallHook returns the OnPolicyPushed callback that runs
+// when watchtower ships a policy down via SessionAck. Three responsibilities:
+//
+//  1. Verify ed25519(content, signature) against the agent's locally
+//     configured trust bundle, looked up by SignerKeyID. Empty trust
+//     store or unknown key → log WARN and skip the install.
+//  2. Confirm sha256(content) matches the wire's ContentHash. A mismatch
+//     means the wire was tampered with mid-flight or the operator
+//     mis-signed; either way refuse the install.
+//  3. Atomically write the policy YAML + companion .sig (in the format
+//     internal/policy/signing expects) into {policies.dir}/{policy_id}.yaml.
+//     The agent's Manager.Reload() (next session) picks up the new file.
+//
+// Returns nil when trust-store-based verification is impossible to
+// configure (no dir set). The transport then logs the receipt at INFO
+// but does NOT install anything — appropriate for deployments where
+// the agent enforces a hardcoded local policy and the watchtower
+// channel is observation-only.
+func makePolicyInstallHook(policies config.PoliciesConfig) func(transport.PolicyPushed) {
+	dir := policies.Dir
+	trustDir := policies.Signing.TrustStore
+	if dir == "" || trustDir == "" {
+		return nil
+	}
+	return func(p transport.PolicyPushed) {
+		if p.PolicyID == "" || len(p.Content) == 0 {
+			return
+		}
+		// Reload the trust store on every receipt. The set is small
+		// and operators can rotate keys without bouncing agentsh.
+		ts, err := signing.LoadTrustStore(trustDir, false)
+		if err != nil {
+			slog.Warn("policy install: load trust store",
+				"trust_store", trustDir, "err", err.Error())
+			return
+		}
+		// Wire-format key IDs use an "ed25519:" prefix; the
+		// agent's trust-store key IDs are bare hex (hex(sha256(pub))).
+		keyID := strings.TrimPrefix(p.SignerKeyID, "ed25519:")
+		kf, err := ts.FindKey(keyID)
+		if err != nil {
+			slog.Warn("policy install: unknown signer key",
+				"signer_key_id", p.SignerKeyID, "err", err.Error())
+			return
+		}
+		pub, err := base64.StdEncoding.DecodeString(kf.PublicKey)
+		if err != nil {
+			slog.Warn("policy install: decode trust-store public key",
+				"key_id", keyID, "err", err.Error())
+			return
+		}
+		if !ed25519.Verify(ed25519.PublicKey(pub), p.Content, p.Signature) {
+			slog.Warn("policy install: ed25519 verify failed",
+				"key_id", keyID, "policy_id", p.PolicyID)
+			return
+		}
+		// Content-hash double-check. The wire format is "sha256:<hex>".
+		want := strings.TrimPrefix(p.ContentHash, "sha256:")
+		got := sha256.Sum256(p.Content)
+		gotHex := hex.EncodeToString(got[:])
+		if !strings.EqualFold(want, gotHex) {
+			slog.Warn("policy install: content_hash mismatch",
+				"wire_hash", p.ContentHash, "computed_hash", "sha256:"+gotHex)
+			return
+		}
+
+		yamlPath := filepath.Join(dir, p.PolicyID+".yaml")
+		sigPath := yamlPath + ".sig"
+		sig := signing.SigFile{
+			Version:   1,
+			Algorithm: "ed25519",
+			KeyID:     keyID,
+			Signer:    "watchtower-push",
+			SignedAt:  time.Now().UTC().Format(time.RFC3339),
+			Signature: base64.StdEncoding.EncodeToString(p.Signature),
+		}
+		sigBytes, _ := json.Marshal(sig)
+		// Atomic-write both via tmp+rename so a crash mid-write can't
+		// leave the agent's policy dir half-updated.
+		if err := atomicWrite(yamlPath, p.Content, 0o644); err != nil {
+			slog.Warn("policy install: write policy yaml",
+				"path", yamlPath, "err", err.Error())
+			return
+		}
+		if err := atomicWrite(sigPath, sigBytes, 0o644); err != nil {
+			slog.Warn("policy install: write policy sig",
+				"path", sigPath, "err", err.Error())
+			return
+		}
+		slog.Info("policy install: signature verified, policy written",
+			"policy_id", p.PolicyID,
+			"policy_version", p.PolicyVersion,
+			"yaml_path", yamlPath,
+			"sig_path", sigPath,
+			"key_id", keyID,
+		)
+	}
+}
+
+// atomicWrite writes content to a sibling .tmp file and renames it
+// over the destination so concurrent readers see either the old bytes
+// or the new bytes — never a half-written file.
+func atomicWrite(path string, content []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, content, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
