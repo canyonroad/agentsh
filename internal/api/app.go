@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -49,6 +50,15 @@ type App struct {
 	cfg      *config.Config
 	sessions *session.Manager
 	store    *composite.Store
+	// policy is the process-global policy engine. Read via Policy() —
+	// SwapPolicy installs a new engine atomically (used when a verified
+	// policy push arrives from watchtower over WTP and Manager.Reload
+	// rebuilds the engine). All in-process consumers MUST read through
+	// the getter so they observe the swap. Direct field access is OK
+	// only for one-shot construction-time captures (e.g. handing the
+	// initial engine to a long-lived proxy that re-reads via a getter
+	// internally).
+	policyMu sync.RWMutex
 	policy   *policy.Engine
 	broker   *events.Broker
 	dbBypass *dbevents.BypassEmitter

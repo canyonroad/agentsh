@@ -13,11 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/api"
 	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/audit/kms"
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/policy/signing"
 	"github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/internal/store/eventfilter"
@@ -91,6 +94,9 @@ func buildWatchtowerStore(
 	ctx context.Context,
 	cfg config.AuditWatchtowerConfig,
 	policies config.PoliciesConfig,
+	pm *policy.Manager,
+	appHolder *atomic.Pointer[api.App],
+	enforceApprovals bool,
 	mapper compact.Mapper,
 ) (store.EventStore, error) {
 	if !cfg.Enabled {
@@ -193,7 +199,7 @@ func buildWatchtowerStore(
 
 	// Wire the pushed-policy install path. Disabled when the operator
 	// hasn't configured a trust store; logging-only.
-	opts.OnPolicyPushed = makePolicyInstallHook(policies)
+	opts.OnPolicyPushed = makePolicyInstallHook(policies, pm, appHolder, enforceApprovals)
 
 	s, err := watchtower.New(ctx, opts)
 	if err != nil {
@@ -281,7 +287,7 @@ func resolveAuthBearer(auth config.WatchtowerAuthConfig) (string, error) {
 // BuildWatchtowerStoreForTest is a thin export of buildWatchtowerStore
 // for white-box tests. Production callers use buildWatchtowerStore.
 func BuildWatchtowerStoreForTest(ctx context.Context, cfg config.AuditWatchtowerConfig, m compact.Mapper) (store.EventStore, error) {
-	return buildWatchtowerStore(ctx, cfg, config.PoliciesConfig{}, m)
+	return buildWatchtowerStore(ctx, cfg, config.PoliciesConfig{}, nil, nil, false, m)
 }
 
 // ResolveLogGoawayMessageForTest exports the three-state resolution logic
@@ -339,7 +345,12 @@ func ResolveAgentIDForTest(cfg config.AuditWatchtowerConfig) string {
 // but does NOT install anything — appropriate for deployments where
 // the agent enforces a hardcoded local policy and the watchtower
 // channel is observation-only.
-func makePolicyInstallHook(policies config.PoliciesConfig) func(transport.PolicyPushed) {
+func makePolicyInstallHook(
+	policies config.PoliciesConfig,
+	pm *policy.Manager,
+	appHolder *atomic.Pointer[api.App],
+	enforceApprovals bool,
+) func(transport.PolicyPushed) {
 	dir := policies.Dir
 	trustDir := policies.Signing.TrustStore
 	if dir == "" || trustDir == "" {
@@ -416,6 +427,46 @@ func makePolicyInstallHook(policies config.PoliciesConfig) func(transport.Policy
 			"yaml_path", yamlPath,
 			"sig_path", sigPath,
 			"key_id", keyID,
+		)
+
+		// Engine swap. Reload the Manager (re-reads {dir}/{policy_id}.yaml
+		// we just wrote), build a fresh Engine, install it on the App via
+		// SwapPolicy. policyEngineFor() on any subsequent
+		// CheckCommand/CheckFile/CheckExecve will observe the new rules.
+		//
+		// appHolder is nil until server.go finishes constructing the App
+		// and stores it; before that point we skip the swap and rely on
+		// the next agentsh restart (Manager.Get reads the file we just
+		// installed) to pick up the policy.
+		if pm == nil || appHolder == nil {
+			return
+		}
+		newPolicy, err := pm.Reload()
+		if err != nil {
+			slog.Warn("policy install: Manager.Reload failed; engine not swapped",
+				"policy_id", p.PolicyID, "err", err.Error())
+			return
+		}
+		newEngine, err := policy.NewEngine(newPolicy, enforceApprovals, true)
+		if err != nil {
+			slog.Warn("policy install: build new engine failed; engine not swapped",
+				"policy_id", p.PolicyID, "err", err.Error())
+			return
+		}
+		app := appHolder.Load()
+		if app == nil {
+			// App not yet constructed (early startup race). Next
+			// session creation will Manager.Get() from the freshly
+			// installed file, so the policy still takes effect — we
+			// just skip the in-flight engine swap.
+			slog.Info("policy install: app holder empty; deferring engine swap to next session",
+				"policy_id", p.PolicyID, "policy_version", p.PolicyVersion)
+			return
+		}
+		app.SwapPolicy(newEngine)
+		slog.Info("policy install: engine swapped",
+			"policy_id", p.PolicyID,
+			"policy_version", p.PolicyVersion,
 		)
 	}
 }
