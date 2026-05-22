@@ -639,6 +639,7 @@ const (
 	WTPInvalidFrameReasonPayloadTooLarge                WTPInvalidFrameReason = "payload_too_large"
 	WTPInvalidFrameReasonDecompressError                WTPInvalidFrameReason = "decompress_error"
 	WTPInvalidFrameReasonGoawayCodeUnspec          WTPInvalidFrameReason = "goaway_code_unspecified"
+	WTPInvalidFrameReasonHeartbeatGenerationInvalid WTPInvalidFrameReason = "heartbeat_generation_invalid"
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid WTPInvalidFrameReason = "session_update_generation_invalid"
 	WTPInvalidFrameReasonPolicyPushInvalid         WTPInvalidFrameReason = "policy_push_invalid"
 	// WTPInvalidFrameReasonClassifierBypass is the metrics-only reason
@@ -658,6 +659,7 @@ var wtpInvalidFrameReasonsValid = map[WTPInvalidFrameReason]struct{}{
 	WTPInvalidFrameReasonPayloadTooLarge:                {},
 	WTPInvalidFrameReasonDecompressError:                {},
 	WTPInvalidFrameReasonGoawayCodeUnspec:          {},
+	WTPInvalidFrameReasonHeartbeatGenerationInvalid: {},
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid: {},
 	WTPInvalidFrameReasonPolicyPushInvalid:         {},
 	WTPInvalidFrameReasonClassifierBypass:               {},
@@ -675,6 +677,7 @@ var wtpInvalidFrameReasonsEmitOrder = []WTPInvalidFrameReason{
 	WTPInvalidFrameReasonEventBatchCompressionMismatch,
 	WTPInvalidFrameReasonEventBatchCompressionUnspec,
 	WTPInvalidFrameReasonGoawayCodeUnspec,
+	WTPInvalidFrameReasonHeartbeatGenerationInvalid,
 	WTPInvalidFrameReasonPayloadTooLarge,
 	WTPInvalidFrameReasonPolicyPushInvalid,
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
@@ -696,6 +699,7 @@ var validationReasonsShared = []WTPInvalidFrameReason{
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
 	WTPInvalidFrameReasonPayloadTooLarge,
 	WTPInvalidFrameReasonGoawayCodeUnspec,
+	WTPInvalidFrameReasonHeartbeatGenerationInvalid,
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid,
 	WTPInvalidFrameReasonPolicyPushInvalid,
 	WTPInvalidFrameReasonUnknown,
