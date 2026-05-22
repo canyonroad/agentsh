@@ -1450,6 +1450,7 @@ func (x *Heartbeat) GetGeneration() uint32 {
 type ServerHeartbeat struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
 	AckHighWatermarkSeq uint64                 `protobuf:"varint,1,opt,name=ack_high_watermark_seq,json=ackHighWatermarkSeq,proto3" json:"ack_high_watermark_seq,omitempty"`
+	Generation          uint32                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -1487,6 +1488,13 @@ func (*ServerHeartbeat) Descriptor() ([]byte, []int) {
 func (x *ServerHeartbeat) GetAckHighWatermarkSeq() uint64 {
 	if x != nil {
 		return x.AckHighWatermarkSeq
+	}
+	return 0
+}
+
+func (x *ServerHeartbeat) GetGeneration() uint32 {
+	if x != nil {
+		return x.Generation
 	}
 	return 0
 }
@@ -1837,9 +1845,12 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\x16wal_high_watermark_seq\x18\x01 \x01(\x04R\x13walHighWatermarkSeq\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x02 \x01(\rR\n" +
-	"generation\"F\n" +
+	"generation\"f\n" +
 	"\x0fServerHeartbeat\x123\n" +
-	"\x16ack_high_watermark_seq\x18\x01 \x01(\x04R\x13ackHighWatermarkSeq\"_\n" +
+	"\x16ack_high_watermark_seq\x18\x01 \x01(\x04R\x13ackHighWatermarkSeq\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x02 \x01(\rR\n" +
+	"generation\"_\n" +
 	"\bBatchAck\x123\n" +
 	"\x16ack_high_watermark_seq\x18\x01 \x01(\x04R\x13ackHighWatermarkSeq\x12\x1e\n" +
 	"\n" +

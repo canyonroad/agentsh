@@ -183,6 +183,7 @@ message Heartbeat {
 
 message ServerHeartbeat {
   uint64 ack_high_watermark_seq = 1;
+  uint32 generation             = 2;
 }
 
 message BatchAck {
