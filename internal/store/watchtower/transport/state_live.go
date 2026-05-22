@@ -239,6 +239,11 @@ func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptio
 				// Medium round-4).
 				outcome := t.applyAckFromRecv("server_heartbeat", ev.gen, ev.seq)
 				if outcome == AckOutcomeAdopted {
+					// inflight.Release uses lexicographic (gen, seq) ordering
+					// (see inflight.go:38-42), so a wire-gen heartbeat with
+					// ev.gen > pending entries' gen correctly releases the
+					// older-gen entries; same-gen at or below seq follows the
+					// existing release contract.
 					inflight.Release(ev.gen, ev.seq)
 					if err := drainAvailable(); err != nil {
 						teardownForReconnect()

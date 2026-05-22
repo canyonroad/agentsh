@@ -638,10 +638,10 @@ const (
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec     WTPInvalidFrameReason = "session_init_algorithm_unspecified"
 	WTPInvalidFrameReasonPayloadTooLarge                WTPInvalidFrameReason = "payload_too_large"
 	WTPInvalidFrameReasonDecompressError                WTPInvalidFrameReason = "decompress_error"
-	WTPInvalidFrameReasonGoawayCodeUnspec          WTPInvalidFrameReason = "goaway_code_unspecified"
-	WTPInvalidFrameReasonHeartbeatGenerationInvalid WTPInvalidFrameReason = "heartbeat_generation_invalid"
+	WTPInvalidFrameReasonGoawayCodeUnspec               WTPInvalidFrameReason = "goaway_code_unspecified"
+	WTPInvalidFrameReasonHeartbeatGenerationInvalid     WTPInvalidFrameReason = "heartbeat_generation_invalid"
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid WTPInvalidFrameReason = "session_update_generation_invalid"
-	WTPInvalidFrameReasonPolicyPushInvalid         WTPInvalidFrameReason = "policy_push_invalid"
+	WTPInvalidFrameReasonPolicyPushInvalid              WTPInvalidFrameReason = "policy_push_invalid"
 	// WTPInvalidFrameReasonClassifierBypass is the metrics-only reason
 	// emitted by the receiver-side errors.As-false defense-in-depth
 	// guard AND by IncDroppedInvalidFrame's invalid-label collapse.
@@ -658,10 +658,10 @@ var wtpInvalidFrameReasonsValid = map[WTPInvalidFrameReason]struct{}{
 	WTPInvalidFrameReasonSessionInitAlgorithmUnspec:     {},
 	WTPInvalidFrameReasonPayloadTooLarge:                {},
 	WTPInvalidFrameReasonDecompressError:                {},
-	WTPInvalidFrameReasonGoawayCodeUnspec:          {},
-	WTPInvalidFrameReasonHeartbeatGenerationInvalid: {},
+	WTPInvalidFrameReasonGoawayCodeUnspec:               {},
+	WTPInvalidFrameReasonHeartbeatGenerationInvalid:     {},
 	WTPInvalidFrameReasonSessionUpdateGenerationInvalid: {},
-	WTPInvalidFrameReasonPolicyPushInvalid:         {},
+	WTPInvalidFrameReasonPolicyPushInvalid:              {},
 	WTPInvalidFrameReasonClassifierBypass:               {},
 	WTPInvalidFrameReasonUnknown:                        {},
 }
