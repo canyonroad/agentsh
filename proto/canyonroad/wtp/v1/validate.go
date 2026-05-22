@@ -363,13 +363,20 @@ func ValidateBatchAck(ack *BatchAck) error {
 	return nil
 }
 
-// ValidateServerHeartbeat rejects a nil ServerHeartbeat. No other
-// stateless invariants apply.
+// ValidateServerHeartbeat rejects a nil ServerHeartbeat or one whose
+// generation is zero. Generation is REQUIRED in WTP v0.5 — old v0.4.x
+// servers that omit it are not interoperable with v0.5 clients (issue #352).
 func ValidateServerHeartbeat(hb *ServerHeartbeat) error {
 	if hb == nil {
 		return &ValidationError{
 			Reason: ReasonUnknown,
 			Inner:  fmt.Errorf("%w: server_heartbeat is nil", ErrInvalidFrame),
+		}
+	}
+	if hb.GetGeneration() == 0 {
+		return &ValidationError{
+			Reason: ReasonUnknown,
+			Inner:  fmt.Errorf("%w: server_heartbeat.generation must be > 0", ErrInvalidFrame),
 		}
 	}
 	return nil

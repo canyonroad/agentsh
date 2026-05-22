@@ -231,8 +231,28 @@ func TestValidateServerHeartbeat_Nil(t *testing.T) {
 }
 
 func TestValidateServerHeartbeat_HappyPath(t *testing.T) {
-	if err := ValidateServerHeartbeat(&ServerHeartbeat{AckHighWatermarkSeq: 42}); err != nil {
+	if err := ValidateServerHeartbeat(&ServerHeartbeat{
+		AckHighWatermarkSeq: 42,
+		Generation:          1,
+	}); err != nil {
 		t.Errorf("ValidateServerHeartbeat: %v", err)
+	}
+}
+
+func TestValidateServerHeartbeat_ZeroGeneration(t *testing.T) {
+	err := ValidateServerHeartbeat(&ServerHeartbeat{
+		AckHighWatermarkSeq: 42,
+		Generation:          0,
+	})
+	if err == nil {
+		t.Fatal("ValidateServerHeartbeat(gen=0): want error, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Reason != ReasonUnknown {
+		t.Fatalf("err = %v; want *ValidationError with Reason=%q", err, ReasonUnknown)
+	}
+	if !errors.Is(err, ErrInvalidFrame) {
+		t.Fatalf("err = %v; want errors.Is(ErrInvalidFrame) true", err)
 	}
 }
 
