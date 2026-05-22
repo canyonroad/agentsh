@@ -74,10 +74,11 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 			case recvAckEventBatchAck:
 				t.applyAckFromRecv("batch_ack", ev.gen, ev.seq)
 			case recvAckEventHeartbeat:
-				// Heartbeat carries no gen on the wire; FIFO order
-				// guarantees any earlier BatchAck has already
-				// advanced t.persistedAck.Generation.
-				t.applyAckFromRecv("server_heartbeat", t.persistedAck.Generation, ev.seq)
+				// Heartbeat carries gen on the wire (issue #352);
+				// pass it through directly. Unlike state_live, no
+				// inflight.Release here — runReplaying is draining,
+				// not sending.
+				t.applyAckFromRecv("server_heartbeat", ev.gen, ev.seq)
 			}
 		case err := <-recvErrCh:
 			t.opts.Logger.LogAttrs(context.Background(), slog.LevelWarn,
