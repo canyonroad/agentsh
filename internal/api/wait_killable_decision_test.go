@@ -34,6 +34,7 @@ func TestDecideWaitKillable(t *testing.T) {
 	}{
 		{name: "config &true wins", cfg: configWithWait(compositionRisky, &tt), kernelSupports: true, probe: probeFail, wantDecision: true, wantSource: "config"},
 		{name: "config &false wins", cfg: configWithWait(compositionRisky, &ff), kernelSupports: true, probe: probeOK, wantDecision: false, wantSource: "config"},
+		{name: "config beats kernel<6", cfg: configWithWait(compositionRisky, &tt), kernelSupports: false, probe: probeFail, wantDecision: true, wantSource: "config"},
 		{name: "kernel <6 forces off", cfg: compositionRisky, kernelSupports: false, probe: probeOK, wantDecision: false, wantSource: "kernel_unsupported"},
 		{name: "safe composition skips probe", cfg: compositionSafe, kernelSupports: true, probe: probeFail, wantDecision: true, wantSource: "filter_composition_safe"},
 		{name: "probe pass", cfg: compositionRisky, kernelSupports: true, probe: probeOK, wantDecision: true, wantSource: "behavioral_probe"},
