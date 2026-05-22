@@ -37,13 +37,10 @@ const (
 // pushes onto recvSession.eventCh. The kind discriminator selects the
 // dispatch on the main goroutine; gen/seq carry the ack tuple.
 //
-// Wire-ordering invariant (round-22 Finding 1, load-bearing): events on
-// eventCh are processed in strict FIFO order on the main goroutine. The
-// recv goroutine pushes them in receive order; the main goroutine
-// selects one at a time and runs applyAckFromRecv to completion before
-// pulling the next. The heartbeat-generation substitution rule (see
-// recvAckEventHeartbeat) depends on this invariant — any change to the
-// recv-event ordering MUST be reviewed against the substitution rule.
+// Wire-ordering invariant: events on eventCh are processed in strict
+// FIFO order on the main goroutine. The recv goroutine pushes them in
+// receive order; the main goroutine selects one at a time and runs
+// applyAckFromRecv to completion before pulling the next.
 type recvAckEvent struct {
 	kind recvAckEventKind
 	gen  uint32

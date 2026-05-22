@@ -652,7 +652,7 @@ If `TestFlushLoop_PeriodicSync` (internal/store) or `TestStore_*EmitsTransportLo
 - [ ] **Step 4: Manual diff sanity check**
 
 Run: `git log --oneline main..HEAD` and review each commit.
-Expected: 6 focused commits (Tasks 1, 2, 3, 4, 5, 6, 7 each produced one — Task 8 has no commit).
+Expected: 7 focused commits (Tasks 1, 2, 3, 4, 5, 6, 7 each produced one — Task 8 has no commit).
 
 - [ ] **Step 5: Run roborev between tasks per project preference**
 

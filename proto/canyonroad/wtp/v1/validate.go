@@ -81,8 +81,8 @@ const (
 	// ReasonHeartbeatGenerationInvalid is returned by
 	// ValidateServerHeartbeat when the inbound ServerHeartbeat has
 	// generation == 0. Generation is REQUIRED in WTP v0.5 (issue #352);
-	// old v0.4.x servers that omit it are not interoperable with v0.5
-	// clients.
+	// no prior server version emitted ServerHeartbeat, so there is no
+	// compat path for unset generation.
 	ReasonHeartbeatGenerationInvalid ValidationReason = "heartbeat_generation_invalid"
 
 	// ReasonPolicyPushInvalid is returned by ValidatePolicyPush when the
@@ -373,8 +373,9 @@ func ValidateBatchAck(ack *BatchAck) error {
 
 // ValidateServerHeartbeat returns ReasonHeartbeatGenerationInvalid
 // when the inbound ServerHeartbeat has generation == 0 (issue #352:
-// generation is REQUIRED in WTP v0.5; old v0.4.x servers that omit it
-// are not interoperable with v0.5 clients). Returns ReasonUnknown for nil.
+// generation is REQUIRED in WTP v0.5; no prior server version emitted
+// ServerHeartbeat, so there is no compat path for unset generation).
+// Returns ReasonUnknown for nil.
 func ValidateServerHeartbeat(hb *ServerHeartbeat) error {
 	if hb == nil {
 		return &ValidationError{
