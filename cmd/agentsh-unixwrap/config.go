@@ -25,6 +25,13 @@ type WrapperConfig struct {
 	WriteOnlyOpens    bool `json:"write_only_opens,omitempty"`
 	BlockIOUring      bool `json:"block_io_uring,omitempty"`
 
+	// WaitKillable, when non-nil, forces SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
+	// on or off, bypassing the wrapper's legacy kernel-version probe. The
+	// server makes this decision (boot-time behavioral probe + optional
+	// config override) and forwards the result; nil means "fall back to
+	// ProbeWaitKillable()" for direct/test invocations. Issue #369.
+	WaitKillable *bool `json:"wait_killable,omitempty"`
+
 	// Landlock filesystem restrictions
 	LandlockEnabled bool     `json:"landlock_enabled,omitempty"`
 	LandlockABI     int      `json:"landlock_abi,omitempty"`
