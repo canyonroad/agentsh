@@ -109,6 +109,12 @@ type App struct {
 	// acceptNotifyFD so tests can observe its lifecycle. Production code
 	// passes nil and the goroutine is launched directly via `go fn()`.
 	acceptNotifyFDForTest func(fn func())
+
+	// waitKillableDecision is the server-process boot-time decision for
+	// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV. Populated once in NewApp
+	// and read by buildSeccompWrapperConfig on every exec. Issue #369.
+	waitKillableDecision bool
+	waitKillableSource   string
 }
 
 func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader, cgroupMgr *limits.CgroupManager) *App {
@@ -174,6 +180,18 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		platform:     plat,
 		policyLoader: policyLoader,
 	}
+
+	// Compute the server-process WAIT_KILLABLE_RECV decision once at
+	// startup. This drives buildSeccompWrapperConfig so every wrapper
+	// exec inherits the same boot-time choice. Issue #369.
+	decision, source := decideWaitKillable(context.Background(), waitKillableDeps{
+		cfg:            cfg.Sandbox.Seccomp,
+		kernelSupports: waitKillableKernelSupports,
+		probe:          waitKillableProbe,
+	})
+	app.waitKillableDecision = decision
+	app.waitKillableSource = source
+
 	app.initPtraceTracer()
 	return app
 }

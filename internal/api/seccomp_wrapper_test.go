@@ -442,3 +442,29 @@ func TestSeccompWrapperConfig_WaitKillable_JSON(t *testing.T) {
 }
 
 func boolPtrLocal(v bool) *bool { return &v }
+
+// TestBuildSeccompWrapperConfig_PropagatesWaitKillable asserts the
+// boot-time decision stored on App flows through to every wrapper
+// config. The test bypasses NewApp (and therefore the behavioral probe)
+// by constructing App directly — it covers only the propagation contract.
+// Issue #369.
+func TestBuildSeccompWrapperConfig_PropagatesWaitKillable(t *testing.T) {
+	app := &App{
+		cfg:                  &config.Config{},
+		waitKillableDecision: false,
+		waitKillableSource:   "behavioral_probe",
+	}
+	got := app.buildSeccompWrapperConfig(nil, seccompWrapperParams{})
+	if got.WaitKillable == nil {
+		t.Fatal("WaitKillable not set")
+	}
+	if *got.WaitKillable != false {
+		t.Fatalf("want false, got true")
+	}
+
+	app.waitKillableDecision = true
+	got = app.buildSeccompWrapperConfig(nil, seccompWrapperParams{})
+	if got.WaitKillable == nil || *got.WaitKillable != true {
+		t.Fatal("want &true after flipping decision")
+	}
+}

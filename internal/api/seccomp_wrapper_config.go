@@ -93,6 +93,10 @@ func (a *App) buildSeccompWrapperConfig(s *session.Session, p seccompWrapperPara
 	}
 	seccompCfg.BlockIOUring = config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.BlockIOUring, fmDefault)
 
+	// Pass the boot-time decision to every wrapper. The pointer is
+	// per-exec; the bool storage is the server-process App field. Issue #369.
+	seccompCfg.WaitKillable = &a.waitKillableDecision
+
 	if a.cfg.Landlock.Enabled {
 		llResult := capabilities.DetectLandlock()
 		if llResult.Available {
