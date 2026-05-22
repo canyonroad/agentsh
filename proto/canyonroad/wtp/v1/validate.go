@@ -78,6 +78,13 @@ const (
 	// generation per the WTP client design.
 	ReasonSessionUpdateGenerationInvalid ValidationReason = "session_update_generation_invalid"
 
+	// ReasonHeartbeatGenerationInvalid is returned by
+	// ValidateServerHeartbeat when the inbound ServerHeartbeat has
+	// generation == 0. Generation is REQUIRED in WTP v0.5 (issue #352);
+	// old v0.4.x servers that omit it are not interoperable with v0.5
+	// clients.
+	ReasonHeartbeatGenerationInvalid ValidationReason = "heartbeat_generation_invalid"
+
 	// ReasonPolicyPushInvalid is returned by ValidatePolicyPush when the
 	// inbound PolicyPush is nil, missing required fields, or contains
 	// invalid content hashes.
@@ -159,6 +166,7 @@ var allValidationReasons = []ValidationReason{
 	ReasonPayloadTooLarge,
 	ReasonGoawayCodeUnspecified,
 	ReasonSessionUpdateGenerationInvalid,
+	ReasonHeartbeatGenerationInvalid,
 	ReasonPolicyPushInvalid,
 	ReasonUnknown,
 }
@@ -363,9 +371,10 @@ func ValidateBatchAck(ack *BatchAck) error {
 	return nil
 }
 
-// ValidateServerHeartbeat rejects a nil ServerHeartbeat or one whose
-// generation is zero. Generation is REQUIRED in WTP v0.5 — old v0.4.x
-// servers that omit it are not interoperable with v0.5 clients (issue #352).
+// ValidateServerHeartbeat returns ReasonHeartbeatGenerationInvalid
+// when the inbound ServerHeartbeat has generation == 0 (issue #352:
+// generation is REQUIRED in WTP v0.5; old v0.4.x servers that omit it
+// are not interoperable with v0.5 clients). Returns ReasonUnknown for nil.
 func ValidateServerHeartbeat(hb *ServerHeartbeat) error {
 	if hb == nil {
 		return &ValidationError{
@@ -373,9 +382,9 @@ func ValidateServerHeartbeat(hb *ServerHeartbeat) error {
 			Inner:  fmt.Errorf("%w: server_heartbeat is nil", ErrInvalidFrame),
 		}
 	}
-	if hb.GetGeneration() == 0 {
+	if hb.Generation == 0 {
 		return &ValidationError{
-			Reason: ReasonUnknown,
+			Reason: ReasonHeartbeatGenerationInvalid,
 			Inner:  fmt.Errorf("%w: server_heartbeat.generation must be > 0", ErrInvalidFrame),
 		}
 	}

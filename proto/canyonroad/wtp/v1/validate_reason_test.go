@@ -170,6 +170,7 @@ func TestAllValidationReasons_ContainsCanonicalSet(t *testing.T) {
 		wtpv1.ReasonPayloadTooLarge:                  {},
 		wtpv1.ReasonGoawayCodeUnspecified:            {},
 		wtpv1.ReasonSessionUpdateGenerationInvalid:   {},
+		wtpv1.ReasonHeartbeatGenerationInvalid:       {},
 		wtpv1.ReasonPolicyPushInvalid:                {},
 		wtpv1.ReasonUnknown:                          {},
 	}

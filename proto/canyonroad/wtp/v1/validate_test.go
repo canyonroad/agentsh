@@ -248,8 +248,8 @@ func TestValidateServerHeartbeat_ZeroGeneration(t *testing.T) {
 		t.Fatal("ValidateServerHeartbeat(gen=0): want error, got nil")
 	}
 	var ve *ValidationError
-	if !errors.As(err, &ve) || ve.Reason != ReasonUnknown {
-		t.Fatalf("err = %v; want *ValidationError with Reason=%q", err, ReasonUnknown)
+	if !errors.As(err, &ve) || ve.Reason != ReasonHeartbeatGenerationInvalid {
+		t.Fatalf("err = %v; want *ValidationError with Reason=%q", err, ReasonHeartbeatGenerationInvalid)
 	}
 	if !errors.Is(err, ErrInvalidFrame) {
 		t.Fatalf("err = %v; want errors.Is(ErrInvalidFrame) true", err)
