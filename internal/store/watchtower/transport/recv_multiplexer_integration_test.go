@@ -101,13 +101,14 @@ func recvBatchAck(gen uint32, seq uint64) *wtpv1.ServerMessage {
 }
 
 // recvHeartbeat is a one-line constructor for a ServerHeartbeat server
-// message. The proto carries no generation field; the recv multiplexer
-// substitutes t.persistedAck.Generation at apply time.
-func recvHeartbeat(seq uint64) *wtpv1.ServerMessage {
+// message. Generation is REQUIRED on the wire in WTP v0.5 (issue #352);
+// the recv multiplexer surfaces it directly without substitution.
+func recvHeartbeat(gen uint32, seq uint64) *wtpv1.ServerMessage {
 	return &wtpv1.ServerMessage{
 		Msg: &wtpv1.ServerMessage_ServerHeartbeat{
 			ServerHeartbeat: &wtpv1.ServerHeartbeat{
 				AckHighWatermarkSeq: seq,
+				Generation:          gen,
 			},
 		},
 	}
@@ -170,9 +171,9 @@ func TestRecvMultiplexer_PreservesWireOrderingAcrossBatchAckAndHeartbeat(t *test
 	defer transport.TeardownRecvForTest(tr)
 	defer fc.Close()
 
-	// Wire-order push: BatchAck(1, 100), HB(99), BatchAck(1, 200), HB(150).
-	// Heartbeats keep gen=0 on the wire (the multiplexer leaves it zero
-	// and substitutes at apply time on the main goroutine).
+	// Wire-order push: BatchAck(1, 100), HB(1, 99), BatchAck(1, 200), HB(1, 150).
+	// Per issue #352, ServerHeartbeat now carries generation on the wire;
+	// the multiplexer surfaces it directly without substitution.
 	pushSeq := []struct {
 		frame string
 		gen   uint32
@@ -180,9 +181,9 @@ func TestRecvMultiplexer_PreservesWireOrderingAcrossBatchAckAndHeartbeat(t *test
 		msg   *wtpv1.ServerMessage
 	}{
 		{"batch_ack", 1, 100, recvBatchAck(1, 100)},
-		{"server_heartbeat", 0, 99, recvHeartbeat(99)},
+		{"server_heartbeat", 1, 99, recvHeartbeat(1, 99)},
 		{"batch_ack", 1, 200, recvBatchAck(1, 200)},
-		{"server_heartbeat", 0, 150, recvHeartbeat(150)},
+		{"server_heartbeat", 1, 150, recvHeartbeat(1, 150)},
 	}
 	for _, p := range pushSeq {
 		fc.Push(p.msg)

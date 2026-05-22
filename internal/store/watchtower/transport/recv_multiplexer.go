@@ -22,13 +22,9 @@ const (
 	// gen + seq are populated from the wire frame.
 	recvAckEventBatchAck recvAckEventKind = iota + 1
 	// recvAckEventHeartbeat wraps a *wtpv1.ServerMessage_ServerHeartbeat
-	// demux. Only seq is populated from the wire frame; gen is zero
-	// because the proto carries no generation field. The main goroutine
-	// substitutes t.persistedAck.Generation at apply time — safe ONLY
-	// because strict FIFO order on eventCh guarantees any earlier
-	// BatchAck has already been processed (and may have advanced
-	// t.persistedAck.Generation) before this heartbeat reaches the
-	// dispatch site. See round-22 Finding 1.
+	// demux. gen + seq are populated from the wire frame (issue #352);
+	// the discriminator distinguishes heartbeats from BatchAcks because
+	// state handlers apply different inflight/release semantics.
 	recvAckEventHeartbeat
 	// recvAckEventPolicyPush wraps a *wtpv1.ServerMessage_PolicyPush
 	// demux. gen + seq are unused (PolicyPush carries no ack tuple);
@@ -272,9 +268,8 @@ func (t *Transport) runRecv(rs *recvSession) {
 			h := m.ServerHeartbeat
 			ev := recvAckEvent{
 				kind: recvAckEventHeartbeat,
-				// gen left zero; main substitutes t.persistedAck.Generation
-				// at apply time per the FIFO-order invariant.
-				seq: h.GetAckHighWatermarkSeq(),
+				gen:  h.GetGeneration(),
+				seq:  h.GetAckHighWatermarkSeq(),
 			}
 			select {
 			case rs.eventCh <- ev:
