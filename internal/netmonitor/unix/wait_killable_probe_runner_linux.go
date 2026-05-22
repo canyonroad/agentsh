@@ -23,11 +23,15 @@ import (
 )
 
 const (
-	// probeChildEnv is set to a per-invocation random token by the parent
-	// and checked by the child's init(). A leaked or inherited "=1"-style
-	// sentinel would silently turn unrelated subprocesses into probe
-	// children; gating on a fresh random token written only by the
-	// immediate parent prevents that.
+	// probeChildEnv carries a per-invocation random token written by
+	// the parent and inspected by the child's init(). The gate is a
+	// length filter (>=16 chars), not a cryptographic match: the parent
+	// cannot share its in-process token with the child without writing
+	// it via this same env var. The defence is therefore against
+	// trivial sentinels like "1"/"true"/"yes" — a deliberate caller
+	// who knows the contract and supplies any 16+ char value can still
+	// invoke probe-child mode, which is acceptable (this is a private
+	// internal contract, not a security boundary).
 	probeChildEnv    = "AGENTSH_WAIT_KILLABLE_PROBE_CHILD"
 	probeChildSockFD = "AGENTSH_WAIT_KILLABLE_PROBE_SOCK"
 	probeBinaryPath  = "/bin/true"
@@ -215,10 +219,17 @@ func realRunProbeIteration(ctx context.Context) (IterationResult, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, binaryPath)
-	cmd.Env = []string{
-		probeChildEnv + "=" + ensureProbeChildToken(),
-		probeChildSockFD + "=3", // ExtraFiles index 0 = fd 3
-	}
+	// Inherit the parent's environment so loader-related variables
+	// (LD_LIBRARY_PATH, LD_PRELOAD, NixOS / Alpine / sanitizer
+	// RPATH-substitution env) survive into the child. A wholesale
+	// replacement would render the probe non-functional on those
+	// hosts. probeChildEnv is appended last so a pre-existing
+	// AGENTSH_WAIT_KILLABLE_PROBE_CHILD in the parent's environment
+	// cannot override our per-invocation token.
+	cmd.Env = append(os.Environ(),
+		probeChildEnv+"="+ensureProbeChildToken(),
+		probeChildSockFD+"=3", // ExtraFiles index 0 = fd 3
+	)
 	cmd.ExtraFiles = []*os.File{childFile}
 	// Capture child stderr (bounded) so operators can see why a probe
 	// child failed. Without this, classifyProbeExit returns a generic
@@ -239,7 +250,10 @@ func realRunProbeIteration(ctx context.Context) (IterationResult, error) {
 	notifyFD, err := recvProbeFD(parentSock)
 	if err != nil {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		// cmd.Wait() (not cmd.Process.Wait) drains os/exec's internal
+		// stderr-copy goroutine before returning, so stderrBuf is
+		// fully populated by the time we read it below.
+		_ = cmd.Wait()
 		return 0, fmt.Errorf("recv probe fd: %w (child stderr: %q)", err, stderrBuf.String())
 	}
 	// notifyFD ownership: closed below before we wait on `done`, so
@@ -341,9 +355,12 @@ func classifyProbeExit(err error, childStderr string) (IterationResult, error) {
 			if ws.Signaled() {
 				return IterKilled, nil
 			}
-			if ws.Exited() && ws.ExitStatus() == 0 {
-				return IterPass, nil
-			}
+			// cmd.Wait returns nil for status-0 exits, so an
+			// ExitError here implies a non-zero exit; treat any
+			// non-signaled failure as IterKilled (the child died
+			// before reaching exec or /bin/true returned non-zero
+			// — both indicate the iteration didn't cleanly survive
+			// the post-execve syscall storm).
 			return IterKilled, nil
 		}
 	}
