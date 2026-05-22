@@ -61,6 +61,9 @@ func TestFilterConfig_WithExecve(t *testing.T) {
 // Issue #369: the operator override path must not be subordinate to the
 // kernel-version probe.
 func TestInstallFilterWithConfig_WaitKillableOverride(t *testing.T) {
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify unsupported on this host: %v", err)
+	}
 	bt := true
 	bf := false
 	cases := []struct {
