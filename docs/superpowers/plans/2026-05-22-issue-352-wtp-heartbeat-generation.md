@@ -86,8 +86,8 @@ func TestValidateServerHeartbeat_ZeroGeneration(t *testing.T) {
 		t.Fatal("ValidateServerHeartbeat(gen=0): want error, got nil")
 	}
 	var ve *ValidationError
-	if !errors.As(err, &ve) || ve.Reason != ReasonUnknown {
-		t.Fatalf("err = %v; want *ValidationError with Reason=%q", err, ReasonUnknown)
+	if !errors.As(err, &ve) || ve.Reason != ReasonHeartbeatGenerationInvalid {
+		t.Fatalf("err = %v; want *ValidationError with Reason=%q", err, ReasonHeartbeatGenerationInvalid)
 	}
 	if !errors.Is(err, ErrInvalidFrame) {
 		t.Fatalf("err = %v; want errors.Is(ErrInvalidFrame) true", err)
@@ -146,9 +146,11 @@ func ValidateServerHeartbeat(hb *ServerHeartbeat) error {
 to:
 
 ```go
-// ValidateServerHeartbeat rejects a nil ServerHeartbeat or one whose
-// generation is zero. Generation is REQUIRED in WTP v0.5 — old v0.4.x
-// servers that omit it are not interoperable with v0.5 clients (issue #352).
+// ValidateServerHeartbeat returns ReasonHeartbeatGenerationInvalid
+// when the inbound ServerHeartbeat has generation == 0 (issue #352:
+// generation is REQUIRED in WTP v0.5; no prior server version emitted
+// ServerHeartbeat, so there is no compat path for unset generation).
+// Returns ReasonUnknown for nil.
 func ValidateServerHeartbeat(hb *ServerHeartbeat) error {
 	if hb == nil {
 		return &ValidationError{
@@ -156,9 +158,9 @@ func ValidateServerHeartbeat(hb *ServerHeartbeat) error {
 			Inner:  fmt.Errorf("%w: server_heartbeat is nil", ErrInvalidFrame),
 		}
 	}
-	if hb.GetGeneration() == 0 {
+	if hb.Generation == 0 {
 		return &ValidationError{
-			Reason: ReasonUnknown,
+			Reason: ReasonHeartbeatGenerationInvalid,
 			Inner:  fmt.Errorf("%w: server_heartbeat.generation must be > 0", ErrInvalidFrame),
 		}
 	}
@@ -511,7 +513,7 @@ Append to `internal/store/watchtower/transport/recv_multiplexer_failclosed_test.
 // #352) is rejected by ValidateServerHeartbeat, drives the errCh
 // sentinel, and tears down the recv session. The frame is
 // schema-valid (the wire decoded cleanly) but semantically invalid —
-// classified as ReasonUnknown / ErrInvalidFrame.
+// classified as ReasonHeartbeatGenerationInvalid / ErrInvalidFrame.
 func TestRecvMultiplexer_FailClosedHeartbeatZeroGeneration(t *testing.T) {
 	fc := newRecvFakeConn()
 	tr, _ := newFailClosedTransport(t, fc, false)
