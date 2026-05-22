@@ -195,6 +195,14 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 	})
 	app.waitKillableDecision = decision
 	app.waitKillableSource = source
+	if source != "behavioral_probe" && source != "behavioral_probe_error" {
+		// Probe paths emit their own per-iteration + final-decision lines.
+		// Non-probe paths (config, kernel_unsupported, filter_composition_safe)
+		// need a single line here so operators can grep one log point.
+		slog.Info("seccomp: wait_killable decision",
+			"value", decision,
+			"source", source)
+	}
 
 	app.initPtraceTracer()
 	return app

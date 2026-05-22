@@ -118,4 +118,31 @@ func TestWrapperConfig_WaitKillable_JSON(t *testing.T) {
 	}
 }
 
+// TestWrapperConfig_WaitKillableSource_JSON covers the diagnostic source
+// string the server forwards alongside the WaitKillable bool. Issue #369.
+func TestWrapperConfig_WaitKillableSource_JSON(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want string
+	}{
+		{name: "absent", json: `{"unix_socket_enabled":true}`, want: ""},
+		{name: "behavioral_probe", json: `{"unix_socket_enabled":true,"wait_killable_source":"behavioral_probe"}`, want: "behavioral_probe"},
+		{name: "config", json: `{"unix_socket_enabled":true,"wait_killable_source":"config"}`, want: "config"},
+		{name: "kernel_unsupported", json: `{"unix_socket_enabled":true,"wait_killable_source":"kernel_unsupported"}`, want: "kernel_unsupported"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENTSH_SECCOMP_CONFIG", tc.json)
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatalf("loadConfig: %v", err)
+			}
+			if cfg.WaitKillableSource != tc.want {
+				t.Fatalf("want %q got %q", tc.want, cfg.WaitKillableSource)
+			}
+		})
+	}
+}
+
 func boolPtr(v bool) *bool { return &v }

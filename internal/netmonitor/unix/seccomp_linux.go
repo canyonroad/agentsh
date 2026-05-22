@@ -257,6 +257,13 @@ type FilterConfig struct {
 	// legacy ProbeWaitKillable() fallback for direct/test invocations
 	// where the server hasn't computed a decision. Issue #369.
 	WaitKillable *bool
+
+	// WaitKillableSource is a stable string identifying why WaitKillable
+	// was chosen ("config", "kernel_unsupported", "filter_composition_safe",
+	// "behavioral_probe", "behavioral_probe_error"). Forwarded from the
+	// server so the per-exec "seccomp: filter loaded" log line can record
+	// it. Issue #369.
+	WaitKillableSource string
 }
 
 // DefaultFilterConfig returns config for unix socket monitoring only.
@@ -513,10 +520,17 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	// pass NEW_LISTENER (kernel returns the fd even for filters
 	// without ActNotify rules — it's just never readable).
 	libVer := libseccompRuntimeVersion()
+	// kernel_probe_supports reflects the raw kernel probe, independent of
+	// the resolved decision in wait_killable. Logging both lets an
+	// operator see why an exec saw a given flag (wait_killable_source)
+	// alongside what the kernel itself reports. ProbeWaitKillable is
+	// cheap (a Uname()+parse) so calling it twice per filter install is
+	// fine. Issue #369.
 	slog.Info("seccomp: filter loaded",
 		"fd", rawFd,
 		"wait_killable", gotWaitKill,
-		"kernel_probe_supports", wantWaitKill,
+		"wait_killable_source", cfg.WaitKillableSource,
+		"kernel_probe_supports", ProbeWaitKillable(),
 		"libseccomp_runtime", libVer)
 
 	if !filterConfigNeedsNotifyFD(cfg, blockListMap, blockedFamilyMap, socketRules) {

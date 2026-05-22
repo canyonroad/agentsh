@@ -32,6 +32,13 @@ type WrapperConfig struct {
 	// ProbeWaitKillable()" for direct/test invocations. Issue #369.
 	WaitKillable *bool `json:"wait_killable,omitempty"`
 
+	// WaitKillableSource records why WaitKillable was chosen
+	// ("config", "kernel_unsupported", "filter_composition_safe",
+	// "behavioral_probe", "behavioral_probe_error"). Forwarded into the
+	// per-exec "seccomp: filter loaded" log line so a single grep tells
+	// an operator why this exec saw a given flag value. Issue #369.
+	WaitKillableSource string `json:"wait_killable_source,omitempty"`
+
 	// Landlock filesystem restrictions
 	LandlockEnabled bool     `json:"landlock_enabled,omitempty"`
 	LandlockABI     int      `json:"landlock_abi,omitempty"`

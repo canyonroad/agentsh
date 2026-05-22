@@ -108,6 +108,7 @@ func main() {
 		SocketRules:        cfg.SocketRules,
 		OnBlockAction:      onBlock,
 		WaitKillable:       cfg.WaitKillable,
+		WaitKillableSource: cfg.WaitKillableSource,
 	}
 
 	// Install seccomp filter.
