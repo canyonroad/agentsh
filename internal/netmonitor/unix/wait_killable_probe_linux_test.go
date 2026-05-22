@@ -6,7 +6,9 @@ package unix
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
+	"time"
 )
 
 func TestProbeWaitKillableBehavior_AllPass(t *testing.T) {
@@ -121,5 +123,34 @@ func TestProbeWaitKillableBehavior_NegativeIterations(t *testing.T) {
 	_, err := ProbeWaitKillableBehavior(context.Background(), -1)
 	if err == nil {
 		t.Fatal("want error for iterations=-1")
+	}
+}
+
+func TestProbeWaitKillableBehavior_RealKernel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-fork probe test in short mode")
+	}
+	if _, err := os.Stat("/bin/true"); err != nil {
+		t.Skip("/bin/true missing on this host")
+	}
+	if !ProbeWaitKillable() {
+		t.Skip("kernel <6: WAIT_KILLABLE_RECV not supported on this host")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	start := time.Now()
+	ok, err := ProbeWaitKillableBehavior(ctx, 2)
+	dur := time.Since(start)
+	if err != nil {
+		t.Fatalf("probe error: %v", err)
+	}
+	t.Logf("probe result: ok=%v duration=%v", ok, dur)
+	if !ok {
+		t.Fatal("probe expected to succeed on stock CI kernel — if this fails, document the kernel posture")
+	}
+	if dur > 5*time.Second {
+		t.Errorf("probe took too long: %v (expected <5s)", dur)
 	}
 }
