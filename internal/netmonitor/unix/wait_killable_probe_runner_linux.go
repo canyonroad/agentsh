@@ -24,10 +24,12 @@ import (
 
 const (
 	// probeChildEnv carries a per-invocation random token written by
-	// the parent and inspected by the child's init(). The gate also
-	// requires probeChildArgvSentinel in argv[1]; both must match.
-	// Together they prevent stray inherited env or a lone misconfigured
-	// arg from hijacking the binary.
+	// the parent. The env var is length-validated (>=16 chars) to
+	// reject trivial sentinels like "1"/"true"/"yes"; only the argv[1]
+	// sentinel below is matched by string equality. Together they form
+	// a defence-in-depth gate, not a security boundary: a deliberate
+	// caller who knows the contract and supplies both factors can
+	// still invoke probe-child mode.
 	probeChildEnv    = "AGENTSH_WAIT_KILLABLE_PROBE_CHILD"
 	probeChildSockFD = "AGENTSH_WAIT_KILLABLE_PROBE_SOCK"
 	probeBinaryPath  = "/bin/true"
@@ -54,6 +56,12 @@ const (
 	// internally on libseccomp filter compilation and the seccomp(2)
 	// syscall, neither of which should ever exceed sub-second; 2s is
 	// generous headroom for slow CI VMs.
+	//
+	// Per-iteration worst case is therefore probeRecvTimeout +
+	// (post-handoff 1s timer in realRunProbeIteration) = ~3s. With
+	// the recommended 5 iterations the upper bound on probe latency
+	// is ~15s. The design spec's 5s figure is for the happy path
+	// (each iteration completes in tens of ms on healthy kernels).
 	probeRecvTimeout = 2 * time.Second
 )
 
@@ -165,6 +173,15 @@ func runProbeChild() {
 	// just a stat-miss — also covers e.g. /bin/true existing but being
 	// non-executable), fall back to /bin/echo. Only after both fail do
 	// we treat this as a setup failure.
+	//
+	// IMPORTANT: the seccomp filter is already installed by this point,
+	// so the second Exec attempt runs under the same filter as the
+	// first. If the kernel bug is present the first failed Exec may
+	// have already triggered the issue #369 kill-signal in the
+	// parent's classifier; the fallback is therefore not a pristine
+	// retry. This is acceptable because both candidates produce the
+	// same observable post-execve syscall storm (libc startup + a
+	// handful of trivial syscalls before exit).
 	candidates := []string{probeBinaryPath, "/bin/echo"}
 	var lastErr error
 	for _, bin := range candidates {

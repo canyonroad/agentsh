@@ -146,10 +146,13 @@ func TestProbeWaitKillableBehavior_RealKernel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("probe error: %v", err)
 	}
-	t.Logf("probe result: ok=%v duration=%v", ok, dur)
-	if !ok {
-		t.Fatal("probe expected to succeed on stock CI kernel — if this fails, document the kernel posture")
-	}
+	// Do NOT assert ok==true here: this test runs on real kernels, and
+	// on a host that genuinely exhibits the issue #369 kernel bug the
+	// probe will (correctly) return false. That outcome is the whole
+	// point of the probe — failing the test in that case would mean
+	// the test breaks precisely when the code works as designed. The
+	// real assertion is "no error, ran in reasonable time".
+	t.Logf("probe result: ok=%v duration=%v (note for triage if ok=false on this host)", ok, dur)
 	if dur > 5*time.Second {
 		t.Errorf("probe took too long: %v (expected <5s)", dur)
 	}
