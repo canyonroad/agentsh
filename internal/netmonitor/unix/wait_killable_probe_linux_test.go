@@ -116,3 +116,10 @@ func TestProbeWaitKillableBehavior_ZeroIterations(t *testing.T) {
 		t.Fatal("want error for iterations=0")
 	}
 }
+
+func TestProbeWaitKillableBehavior_NegativeIterations(t *testing.T) {
+	_, err := ProbeWaitKillableBehavior(context.Background(), -1)
+	if err == nil {
+		t.Fatal("want error for iterations=-1")
+	}
+}

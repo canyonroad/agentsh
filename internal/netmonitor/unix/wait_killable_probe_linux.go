@@ -9,19 +9,29 @@ import (
 	"fmt"
 )
 
-// IterationResult classifies one probe iteration.
+// IterationResult classifies one probe iteration's outcome. Issue #369:
+// the kernel bug manifests as the child being killed by signal during
+// its post-execve syscall storm, or as a notify-recv that never returns
+// (which the parent times out).
 type IterationResult int
 
 const (
+	// IterPass: child exec'd /bin/true and exited cleanly. The kernel
+	// did not exhibit the bug for this iteration.
 	IterPass IterationResult = iota
+	// IterKilled: child terminated by signal (WIFSIGNALED) instead of
+	// exiting normally. Strong signal of the issue #369 kernel bug.
 	IterKilled
+	// IterTimeout: child still alive after the per-iteration deadline.
+	// Treated as a failure mode equivalent to IterKilled — a wedged
+	// notify handshake is just as broken as an outright kill.
 	IterTimeout
 )
 
-// runProbeIteration runs a single probe iteration. Production
-// implementation lands in wait_killable_probe_runner_linux.go (Task 7).
-// Exposed as a package var so the decision-logic test can inject a
-// mocked runner.
+// runProbeIteration runs a single probe iteration. The real fork/exec
+// implementation lands in a follow-up task; this placeholder lets the
+// decision logic be tested in isolation. Exposed as a package var so
+// tests can inject a mocked runner.
 var runProbeIteration = func(ctx context.Context) (IterationResult, error) {
 	return 0, errors.New("runProbeIteration not implemented yet")
 }
