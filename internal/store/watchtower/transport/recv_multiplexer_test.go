@@ -716,6 +716,28 @@ func TestRecvMultiplexer_BatchAckReturnsOutcomeKind(t *testing.T) {
 			t.Fatalf("Adopted heartbeat ack: got outcome %v, want AckOutcomeAdopted", got)
 		}
 	})
+
+	t.Run("Heartbeat_with_higher_gen_applies_wire_gen", func(t *testing.T) {
+		// Issue #352: ServerHeartbeat now carries generation on the
+		// wire. applyAckFromRecv MUST be driven with the wire gen, not
+		// the persisted gen — otherwise a heartbeat that follows a
+		// roll-up to gen+1 (where the BatchAck that advanced the
+		// generation was dropped) would be silently mis-applied at the
+		// old generation.
+		env := newClampTestEnv(t, Options{
+			InitialAckTuple: &AckTuple{Sequence: 50, Generation: 1, Present: true},
+		})
+		SetAckAnomalyLimiterForTest(env.tr, permissiveLimiter())
+		appendDataInGen(t, env.w, 1, 2, 100)
+
+		got := env.tr.applyAckFromRecv("server_heartbeat", 2, 80)
+		if got != AckOutcomeAdopted {
+			t.Fatalf("applyAckFromRecv outcome: got %v, want AckOutcomeAdopted", got)
+		}
+		if persisted := PersistedAckForTest(env.tr); persisted.Generation != 2 {
+			t.Fatalf("persistedAck.Generation: got %d, want 2 (cross-gen adopt)", persisted.Generation)
+		}
+	})
 }
 
 // silence unused import warnings for wal package; the wal package is needed
