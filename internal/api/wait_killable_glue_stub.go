@@ -5,12 +5,12 @@ package api
 
 import "context"
 
-// Non-Linux (or linux-without-cgo): WAIT_KILLABLE_RECV doesn't exist on
-// these platforms, so the decision is always false regardless of config.
-// The decideWaitKillable switch handles this via the kernel_unsupported
-// branch (kernelSupports returns false, so the cfg override is the only
-// way to coerce true — which would be a config error on these targets,
-// but is intentionally honored as an explicit operator choice).
+// Non-Linux (or linux-without-cgo): the kernel feature WAIT_KILLABLE_RECV
+// is unavailable on these platforms by default, so kernelSupports
+// reports false and the decision lands on the kernel_unsupported branch
+// in decideWaitKillable. An explicit operator override via cfg still
+// wins per the switch's priority order — honored as an intentional
+// operator choice even though the underlying kernel constant is absent.
 func waitKillableKernelSupports() bool { return false }
 
 func waitKillableProbe(_ context.Context) (bool, error) { return false, nil }

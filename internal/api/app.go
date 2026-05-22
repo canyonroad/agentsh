@@ -114,7 +114,11 @@ type App struct {
 	// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV. Populated once in NewApp
 	// and read by buildSeccompWrapperConfig on every exec. Issue #369.
 	waitKillableDecision bool
-	waitKillableSource   string
+	// waitKillableSource records why waitKillableDecision was chosen
+	// ("config", "kernel_unsupported", "filter_composition_safe",
+	// "behavioral_probe", "behavioral_probe_error"). Consumed by the
+	// diagnostic log lines added in a later task.
+	waitKillableSource string
 }
 
 func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader, cgroupMgr *limits.CgroupManager) *App {
