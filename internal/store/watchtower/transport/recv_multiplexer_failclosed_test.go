@@ -486,5 +486,28 @@ func checkAttrBool(t *testing.T, attrs map[string]slog.Value, key string, want b
 	}
 }
 
+// TestRecvMultiplexer_FailClosedHeartbeatZeroGeneration verifies that a
+// ServerHeartbeat with generation=0 (an invalid v0.5 frame per issue
+// #352) is rejected by ValidateServerHeartbeat, drives the errCh
+// sentinel, and tears down the recv session. The frame is
+// schema-valid (the wire decoded cleanly) but semantically invalid —
+// classified as ReasonHeartbeatGenerationInvalid / ErrInvalidFrame.
+func TestRecvMultiplexer_FailClosedHeartbeatZeroGeneration(t *testing.T) {
+	fc := newRecvFakeConn()
+	tr, _ := newFailClosedTransport(t, fc, false)
+
+	msg := &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_ServerHeartbeat{
+			ServerHeartbeat: &wtpv1.ServerHeartbeat{
+				AckHighWatermarkSeq: 42,
+				// Generation deliberately omitted (zero value).
+			},
+		},
+	}
+	if err := driveFailClosed(t, tr, fc, msg); err == nil {
+		t.Fatal("expected errCh sentinel after fail-closed zero-gen heartbeat")
+	}
+}
+
 // silence unused-import linter if errors import drifts later.
 var _ = errors.New
