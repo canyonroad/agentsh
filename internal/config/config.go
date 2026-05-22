@@ -504,6 +504,14 @@ type SandboxSeccompConfig struct {
 	SocketRules           []SandboxSeccompSocketRuleConfig   `yaml:"socket_rules"`
 	MitigationSets        []string                           `yaml:"mitigation_sets"`
 	MitigationDirs        []string                           `yaml:"mitigation_dirs"`
+
+	// WaitKillable tri-states SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV:
+	//   nil   = auto-detect via boot-time behavioral probe
+	//   &true = force on (skip probe)
+	//   &false = force off (skip probe)
+	// Issue #369: kernels >=6 may accept the flag and then misbehave when
+	// the filter combines socket-family and file/metadata-family notify rules.
+	WaitKillable *bool `yaml:"wait_killable"`
 }
 
 // SandboxSeccompUnixConfig configures unix socket monitoring via seccomp.
