@@ -24,7 +24,8 @@ const (
 	// recvAckEventHeartbeat wraps a *wtpv1.ServerMessage_ServerHeartbeat
 	// demux. gen + seq are populated from the wire frame (issue #352);
 	// the discriminator distinguishes heartbeats from BatchAcks because
-	// state handlers apply different inflight/release semantics.
+	// state handlers apply different inflight/release semantics
+	// (state_live releases inflight on Adopted; state_replaying does not).
 	recvAckEventHeartbeat
 	// recvAckEventPolicyPush wraps a *wtpv1.ServerMessage_PolicyPush
 	// demux. gen + seq are unused (PolicyPush carries no ack tuple);
@@ -67,9 +68,9 @@ type recvAckEvent struct {
 type recvSession struct {
 	ctx      context.Context
 	cancelFn context.CancelFunc
-	// eventCh carries demuxed BatchAck and ServerHeartbeat events in
-	// strict wire order. Depth 4 absorbs steady-state burstiness; the
-	// recv goroutine blocks on send when the channel is full and
+	// eventCh carries demuxed BatchAck, ServerHeartbeat, and PolicyPush
+	// events in strict wire order. Depth 4 absorbs steady-state burstiness;
+	// the recv goroutine blocks on send when the channel is full and
 	// unblocks via ctx cancellation. Single-channel-FIFO design per
 	// round-22 Finding 1.
 	eventCh chan recvAckEvent
