@@ -24,29 +24,41 @@ import (
 
 const (
 	// probeChildEnv carries a per-invocation random token written by
-	// the parent and inspected by the child's init(). The gate is a
-	// length filter (>=16 chars), not a cryptographic match: the parent
-	// cannot share its in-process token with the child without writing
-	// it via this same env var. The defence is therefore against
-	// trivial sentinels like "1"/"true"/"yes" — a deliberate caller
-	// who knows the contract and supplies any 16+ char value can still
-	// invoke probe-child mode, which is acceptable (this is a private
-	// internal contract, not a security boundary).
+	// the parent and inspected by the child's init(). The gate also
+	// requires probeChildArgvSentinel in argv[1]; both must match.
+	// Together they prevent stray inherited env or a lone misconfigured
+	// arg from hijacking the binary.
 	probeChildEnv    = "AGENTSH_WAIT_KILLABLE_PROBE_CHILD"
 	probeChildSockFD = "AGENTSH_WAIT_KILLABLE_PROBE_SOCK"
 	probeBinaryPath  = "/bin/true"
+
+	// probeChildArgvSentinel is the marker the parent injects as argv[1]
+	// of the probe child. The child's init() requires this exact value
+	// before honouring the env-var token. A version suffix lets us bump
+	// the protocol later without colliding with old in-flight tests.
+	probeChildArgvSentinel = "--agentsh-internal-wait-killable-probe-child-v1"
 
 	// probeChildStderrCap bounds how much child stderr we propagate back
 	// to the parent on failure. Child diagnostics are short
 	// fmt.Fprintf(os.Stderr, ...) lines; 4 KiB is ample headroom.
 	probeChildStderrCap = 4096
+
+	// Exit codes used by the probe child. The parent's classifier
+	// treats these specifically so a setup failure does not look like
+	// a kernel-bug hit.
+	probeExitSetupFailure = 71 // any runProbeChild early-return (bad env, filter build, install, fd send, etc.)
+	probeExitFallback     = 70 // runProbeChild returned past the exec call without any explicit early-return (shouldn't happen)
+
+	// probeRecvTimeout caps how long the parent waits for the child to
+	// send its notify fd before giving up. The child only blocks
+	// internally on libseccomp filter compilation and the seccomp(2)
+	// syscall, neither of which should ever exceed sub-second; 2s is
+	// generous headroom for slow CI VMs.
+	probeRecvTimeout = 2 * time.Second
 )
 
 // probeChildToken is the per-process random token the parent uses to
-// authenticate probe-child invocations. It is generated lazily on first
-// use in the parent and matched against probeChildEnv in the child's
-// init(). A non-empty, well-formed token is required; the bare literal
-// "1" is not accepted.
+// authenticate probe-child invocations.
 var (
 	probeChildTokenOnce sync.Once
 	probeChildToken     string
@@ -68,40 +80,60 @@ func ensureProbeChildToken() string {
 	return probeChildToken
 }
 
+// isProbeChildInvocation reports whether the current process was
+// launched as a probe child. The gate is a two-factor check:
+//
+//   - argv[1] must equal probeChildArgvSentinel (a stable internal marker)
+//   - the probeChildEnv variable must be set to a value of length >= 16
+//
+// Either alone would be too permissive: a stray env export in a
+// developer shell could hijack arbitrary subprocesses (env-only), and
+// argv[0]/argv[1] inspection alone would miss the actual cross-check
+// the parent uses (argv-only). Requiring both narrows the gate to
+// invocations the parent itself constructed.
+func isProbeChildInvocation() bool {
+	if len(os.Args) < 2 || os.Args[1] != probeChildArgvSentinel {
+		return false
+	}
+	if tok := os.Getenv(probeChildEnv); len(tok) >= 16 {
+		return true
+	}
+	return false
+}
+
 // init wires the production runner and detects probe-child mode. When
 // invoked as a probe child the process never returns: it either execs
-// /bin/true (success path) or os.Exit(70)s. Otherwise it just installs
-// realRunProbeIteration over the placeholder from
-// wait_killable_probe_linux.go.
-//
-// Child detection requires probeChildEnv to be set to a well-formed
-// hex/identifier value (length >=16). A short value (e.g. "1") is
-// rejected so a stray export in a developer shell does not turn
-// arbitrary subprocesses into probe children.
+// /bin/true (success path) or exits with a setup-failure status.
+// Otherwise it installs realRunProbeIteration over the placeholder
+// from wait_killable_probe_linux.go.
 func init() {
-	if tok := os.Getenv(probeChildEnv); len(tok) >= 16 {
+	if isProbeChildInvocation() {
 		runProbeChild()
-		// runProbeChild never returns on success (it execs). If it does
-		// return, treat as fatal child-side error so the rest of the
-		// binary's init()s and main() never run.
-		os.Exit(70)
+		// runProbeChild never returns on success (it execs); any
+		// return is a setup failure that the parent decodes via
+		// probeExitSetupFailure.
+		os.Exit(probeExitFallback)
 	}
 	runProbeIteration = realRunProbeIteration
+}
+
+// childSetupFailure prints msg to stderr and exits with the
+// setup-failure status the parent's classifier recognises.
+func childSetupFailure(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "wait_killable probe child: "+format+"\n", args...)
+	os.Exit(probeExitSetupFailure)
 }
 
 func runProbeChild() {
 	sockStr := os.Getenv(probeChildSockFD)
 	sockFD, err := strconv.Atoi(sockStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "wait_killable probe child: bad %s=%q: %v\n",
-			probeChildSockFD, sockStr, err)
-		return
+		childSetupFailure("bad %s=%q: %v", probeChildSockFD, sockStr, err)
 	}
 
 	prog, err := buildProbeFilterBytes()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "wait_killable probe child: build filter: %v\n", err)
-		return
+		childSetupFailure("build filter: %v", err)
 	}
 
 	// loadRawFilter sets PR_SET_NO_NEW_PRIVS internally (see
@@ -109,14 +141,12 @@ func runProbeChild() {
 	// non-root probe child can install the filter without CAP_SYS_ADMIN.
 	notifyFD, err := loadRawFilter(prog, true)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "wait_killable probe child: install filter: %v\n", err)
-		return
+		childSetupFailure("install filter: %v", err)
 	}
 
 	// Hand notifyFD to the parent.
 	if err := sendProbeFD(sockFD, notifyFD); err != nil {
-		fmt.Fprintf(os.Stderr, "wait_killable probe child: send fd: %v\n", err)
-		return
+		childSetupFailure("send fd: %v", err)
 	}
 	_ = unix.Close(notifyFD)
 	_ = unix.Close(sockFD)
@@ -128,7 +158,7 @@ func runProbeChild() {
 		bin = "/bin/echo"
 	}
 	_ = syscall.Exec(bin, []string{bin}, []string{})
-	fmt.Fprintf(os.Stderr, "wait_killable probe child: exec failed\n")
+	childSetupFailure("exec %s failed", bin)
 }
 
 // buildProbeFilterBytes constructs the worst-case filter composition
@@ -203,15 +233,23 @@ func realRunProbeIteration(ctx context.Context) (IterationResult, error) {
 	// Wrap childSock immediately so the *os.File owns the fd: cmd.Start
 	// dups it into the child as fd 3, and we close our end via
 	// childFile.Close() (which clears the runtime finalizer). Calling
-	// unix.Close(childSock) directly here would double-close once the
-	// finalizer ran, potentially nuking an unrelated fd that took the
-	// number after the first close.
+	// unix.Close(childSock) directly would double-close once the
+	// finalizer ran, potentially nuking an unrelated fd.
+	//
+	// We do NOT defer childFile.Close(): the recvProbeFD path requires
+	// the parent's copy of the child socket to be CLOSED so the kernel
+	// can signal EOF if the child dies before sending. We close
+	// explicitly immediately after cmd.Start() succeeds and rely on a
+	// `closed` guard for the failure paths.
 	childFile := os.NewFile(uintptr(childSock), "probe-sock")
-	// Defensive: if we never reach a normal close path, the deferred
-	// Close still releases the fd exactly once. Close() on an already
-	// closed *os.File is a no-op modulo a returned EBADF that we
-	// deliberately ignore here.
-	defer childFile.Close()
+	childFileClosed := false
+	closeChild := func() {
+		if !childFileClosed {
+			_ = childFile.Close()
+			childFileClosed = true
+		}
+	}
+	defer closeChild()
 
 	binaryPath, err := os.Executable()
 	if err != nil {
@@ -219,6 +257,9 @@ func realRunProbeIteration(ctx context.Context) (IterationResult, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, binaryPath)
+	// argv[1] sentinel + per-invocation random env token form a
+	// two-factor gate for probe-child mode (see isProbeChildInvocation).
+	cmd.Args = []string{binaryPath, probeChildArgvSentinel}
 	// Inherit the parent's environment so loader-related variables
 	// (LD_LIBRARY_PATH, LD_PRELOAD, NixOS / Alpine / sanitizer
 	// RPATH-substitution env) survive into the child. A wholesale
@@ -243,9 +284,25 @@ func realRunProbeIteration(ctx context.Context) (IterationResult, error) {
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("start probe child: %w", err)
 	}
-	// The fd was duped into the child; close our end. Closing via the
-	// *os.File wrapper (not unix.Close) keeps ownership single-rooted.
-	_ = childFile.Close()
+	// The fd was duped into the child; close our end immediately so
+	// the kernel can signal EOF on parentSock if the child dies
+	// before reaching sendProbeFD. Without this, recvProbeFD would
+	// block indefinitely on an early child crash because we'd still
+	// be a writer on the socketpair.
+	closeChild()
+
+	// Apply a recv timeout to parentSock so a hung child (stuck inside
+	// loadRawFilter or before reaching sendProbeFD) cannot wedge the
+	// parent. The per-iteration 1-second timer below only arms after
+	// recvProbeFD returns, so without this the failure mode would be
+	// "parent hangs forever". SO_RCVTIMEO causes Recvmsg to return
+	// EAGAIN/EWOULDBLOCK when the timeout fires.
+	tv := unix.NsecToTimeval(probeRecvTimeout.Nanoseconds())
+	if err := unix.SetsockoptTimeval(parentSock, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+		// Non-fatal: log and continue. Worst case we lose the
+		// guard but keep the rest of the iteration.
+		slog.Debug("wait_killable probe: SO_RCVTIMEO failed", "error", err)
+	}
 
 	notifyFD, err := recvProbeFD(parentSock)
 	if err != nil {
@@ -343,8 +400,19 @@ func serviceProbeNotifications(ctx context.Context, notifyFD int) {
 
 // classifyProbeExit maps cmd.Wait()'s result to an IterationResult.
 // childStderr is the captured child stderr (bounded) and is included
-// in the error return for the "unclassified" case so operators can
-// see what the child actually printed before it died.
+// in the error returns for the setup-failure and unclassified cases.
+//
+// Exit-status decoding:
+//   - nil error                  → IterPass
+//   - WIFSIGNALED                → IterKilled (kernel bug suspect)
+//   - WIFEXITED status=71        → error (probe child setup failed before
+//     reaching exec; the kernel was never exercised, so reporting
+//     IterKilled would silently disable wait_killable on broken hosts)
+//   - WIFEXITED status=70        → error (runProbeChild returned past
+//     the exec call; shouldn't happen but treat as setup failure)
+//   - WIFEXITED other non-zero   → IterKilled (post-exec child exited
+//     non-zero, e.g. /bin/true returned 1 because the syscall storm
+//     was disrupted — counts as a kernel-bug hit)
 func classifyProbeExit(err error, childStderr string) (IterationResult, error) {
 	if err == nil {
 		return IterPass, nil
@@ -355,12 +423,20 @@ func classifyProbeExit(err error, childStderr string) (IterationResult, error) {
 			if ws.Signaled() {
 				return IterKilled, nil
 			}
-			// cmd.Wait returns nil for status-0 exits, so an
-			// ExitError here implies a non-zero exit; treat any
-			// non-signaled failure as IterKilled (the child died
-			// before reaching exec or /bin/true returned non-zero
-			// — both indicate the iteration didn't cleanly survive
-			// the post-execve syscall storm).
+			if ws.Exited() {
+				switch ws.ExitStatus() {
+				case probeExitSetupFailure, probeExitFallback:
+					return 0, fmt.Errorf("wait_killable probe: child setup failed (exit %d, stderr: %q)", ws.ExitStatus(), childStderr)
+				}
+			}
+			// Non-signaled, non-setup-failure exit: the child made
+			// it past the seccomp install and the exec call but
+			// exited non-zero. Treat as a kernel-bug-style failure
+			// (the post-execve syscall storm did not complete
+			// cleanly). Include stderr for triage.
+			if childStderr != "" {
+				slog.Debug("wait_killable probe: child exited non-zero", "stderr", childStderr)
+			}
 			return IterKilled, nil
 		}
 	}
