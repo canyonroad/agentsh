@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -410,3 +411,34 @@ seccomp:
 		t.Fatalf("AGENTSH_PTRACE_SYNC = %q, want 1", got)
 	}
 }
+
+func TestSeccompWrapperConfig_WaitKillable_JSON(t *testing.T) {
+	cases := []struct {
+		name       string
+		in         *bool
+		wantSubstr string
+		wantAbsent bool
+	}{
+		{name: "absent", in: nil, wantAbsent: true},
+		{name: "true", in: boolPtrLocal(true), wantSubstr: `"wait_killable":true`},
+		{name: "false", in: boolPtrLocal(false), wantSubstr: `"wait_killable":false`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := seccompWrapperConfig{WaitKillable: tc.in}
+			b, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			s := string(b)
+			if tc.wantAbsent && strings.Contains(s, "wait_killable") {
+				t.Fatalf("expected wait_killable to be omitted, got %s", s)
+			}
+			if !tc.wantAbsent && !strings.Contains(s, tc.wantSubstr) {
+				t.Fatalf("expected %q in %s", tc.wantSubstr, s)
+			}
+		})
+	}
+}
+
+func boolPtrLocal(v bool) *bool { return &v }

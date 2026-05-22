@@ -27,6 +27,11 @@ type seccompWrapperConfig struct {
 	WriteOnlyOpens    bool `json:"write_only_opens,omitempty"`
 	BlockIOUring      bool `json:"block_io_uring,omitempty"`
 
+	// WaitKillable forwards the server's wait_killable decision to the
+	// wrapper. nil only if the App somehow has no decision set (treated as
+	// "wrapper falls back to legacy probe"). Issue #369.
+	WaitKillable *bool `json:"wait_killable,omitempty"`
+
 	// Landlock filesystem restrictions
 	LandlockEnabled bool     `json:"landlock_enabled,omitempty"`
 	LandlockABI     int      `json:"landlock_abi,omitempty"`
