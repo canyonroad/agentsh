@@ -4,14 +4,17 @@
 package unix
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,18 +23,59 @@ import (
 )
 
 const (
+	// probeChildEnv is set to a per-invocation random token by the parent
+	// and checked by the child's init(). A leaked or inherited "=1"-style
+	// sentinel would silently turn unrelated subprocesses into probe
+	// children; gating on a fresh random token written only by the
+	// immediate parent prevents that.
 	probeChildEnv    = "AGENTSH_WAIT_KILLABLE_PROBE_CHILD"
 	probeChildSockFD = "AGENTSH_WAIT_KILLABLE_PROBE_SOCK"
 	probeBinaryPath  = "/bin/true"
+
+	// probeChildStderrCap bounds how much child stderr we propagate back
+	// to the parent on failure. Child diagnostics are short
+	// fmt.Fprintf(os.Stderr, ...) lines; 4 KiB is ample headroom.
+	probeChildStderrCap = 4096
 )
+
+// probeChildToken is the per-process random token the parent uses to
+// authenticate probe-child invocations. It is generated lazily on first
+// use in the parent and matched against probeChildEnv in the child's
+// init(). A non-empty, well-formed token is required; the bare literal
+// "1" is not accepted.
+var (
+	probeChildTokenOnce sync.Once
+	probeChildToken     string
+)
+
+func ensureProbeChildToken() string {
+	probeChildTokenOnce.Do(func() {
+		var b [16]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			// Fall back to a process-pid-derived token. Still
+			// per-invocation in the sense that crashed neighbours
+			// won't share it, and good enough since this is a
+			// defence-in-depth measure (not a security boundary).
+			probeChildToken = fmt.Sprintf("pid-%d-time-%d", os.Getpid(), time.Now().UnixNano())
+			return
+		}
+		probeChildToken = hex.EncodeToString(b[:])
+	})
+	return probeChildToken
+}
 
 // init wires the production runner and detects probe-child mode. When
 // invoked as a probe child the process never returns: it either execs
 // /bin/true (success path) or os.Exit(70)s. Otherwise it just installs
 // realRunProbeIteration over the placeholder from
 // wait_killable_probe_linux.go.
+//
+// Child detection requires probeChildEnv to be set to a well-formed
+// hex/identifier value (length >=16). A short value (e.g. "1") is
+// rejected so a stray export in a developer shell does not turn
+// arbitrary subprocesses into probe children.
 func init() {
-	if os.Getenv(probeChildEnv) == "1" {
+	if tok := os.Getenv(probeChildEnv); len(tok) >= 16 {
 		runProbeChild()
 		// runProbeChild never returns on success (it execs). If it does
 		// return, treat as fatal child-side error so the rest of the
@@ -56,6 +100,9 @@ func runProbeChild() {
 		return
 	}
 
+	// loadRawFilter sets PR_SET_NO_NEW_PRIVS internally (see
+	// seccomp_load_linux.go:121) before invoking seccomp(2), so a
+	// non-root probe child can install the filter without CAP_SYS_ADMIN.
 	notifyFD, err := loadRawFilter(prog, true)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "wait_killable probe child: install filter: %v\n", err)
@@ -149,62 +196,111 @@ func realRunProbeIteration(ctx context.Context) (IterationResult, error) {
 	parentSock, childSock := pair[0], pair[1]
 	defer unix.Close(parentSock)
 
+	// Wrap childSock immediately so the *os.File owns the fd: cmd.Start
+	// dups it into the child as fd 3, and we close our end via
+	// childFile.Close() (which clears the runtime finalizer). Calling
+	// unix.Close(childSock) directly here would double-close once the
+	// finalizer ran, potentially nuking an unrelated fd that took the
+	// number after the first close.
+	childFile := os.NewFile(uintptr(childSock), "probe-sock")
+	// Defensive: if we never reach a normal close path, the deferred
+	// Close still releases the fd exactly once. Close() on an already
+	// closed *os.File is a no-op modulo a returned EBADF that we
+	// deliberately ignore here.
+	defer childFile.Close()
+
 	binaryPath, err := os.Executable()
 	if err != nil {
-		unix.Close(childSock)
 		return 0, fmt.Errorf("os.Executable: %w", err)
 	}
 
 	cmd := exec.CommandContext(ctx, binaryPath)
 	cmd.Env = []string{
-		probeChildEnv + "=1",
+		probeChildEnv + "=" + ensureProbeChildToken(),
 		probeChildSockFD + "=3", // ExtraFiles index 0 = fd 3
 	}
-	cmd.ExtraFiles = []*os.File{os.NewFile(uintptr(childSock), "probe-sock")}
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	cmd.ExtraFiles = []*os.File{childFile}
+	// Capture child stderr (bounded) so operators can see why a probe
+	// child failed. Without this, classifyProbeExit returns a generic
+	// wrapper error and the real cause (bad filter, EPERM, missing
+	// /bin/true, etc.) is lost.
+	stderrBuf := &boundedBuffer{cap: probeChildStderrCap}
+	cmd.Stdout = nil
+	cmd.Stderr = stderrBuf
 	cmd.Stdin = nil
 
 	if err := cmd.Start(); err != nil {
-		unix.Close(childSock)
 		return 0, fmt.Errorf("start probe child: %w", err)
 	}
-	// The fd was duped into the child; close our end.
-	_ = unix.Close(childSock)
+	// The fd was duped into the child; close our end. Closing via the
+	// *os.File wrapper (not unix.Close) keeps ownership single-rooted.
+	_ = childFile.Close()
 
 	notifyFD, err := recvProbeFD(parentSock)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
-		return 0, fmt.Errorf("recv probe fd: %w", err)
+		return 0, fmt.Errorf("recv probe fd: %w (child stderr: %q)", err, stderrBuf.String())
 	}
-	defer unix.Close(notifyFD)
+	// notifyFD ownership: closed below before we wait on `done`, so
+	// the service goroutine's NotifReceive unblocks.
 
 	// Service notifications until the child exits.
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
 	serviceCtx, serviceCancel := context.WithCancel(ctx)
-	defer serviceCancel()
-	go serviceProbeNotifications(serviceCtx, notifyFD)
+	serviceDone := make(chan struct{})
+	go func() {
+		defer close(serviceDone)
+		serviceProbeNotifications(serviceCtx, notifyFD)
+	}()
 
 	timeout := time.NewTimer(time.Second)
 	defer timeout.Stop()
 
+	// finish performs the common cleanup of the service goroutine.
+	// Closing notifyFD wakes any in-flight seccomp.NotifReceive (the
+	// kernel returns EBADF/ENOENT), guaranteeing the goroutine exits
+	// even though it spends most of its time blocked inside a syscall
+	// that ignores serviceCancel.
+	finish := func() {
+		serviceCancel()
+		_ = unix.Close(notifyFD)
+		<-serviceDone
+	}
+
 	select {
-	case err := <-done:
-		serviceCancel()
-		return classifyProbeExit(err)
+	case waitErr := <-done:
+		finish()
+		// If the iteration was cancelled out from under us
+		// (ctx.Done before child exit), cmd.Wait()'s ExitError will
+		// show WIFSIGNALED because exec.CommandContext SIGKILLs the
+		// child on ctx-cancel. Treating that as IterKilled would
+		// silently flip the wait_killable decision to false because
+		// shutdown happened to race the probe. Propagate the ctx
+		// error instead.
+		if cerr := ctx.Err(); cerr != nil {
+			return 0, cerr
+		}
+		return classifyProbeExit(waitErr, stderrBuf.String())
 	case <-timeout.C:
-		serviceCancel()
 		_ = cmd.Process.Kill()
 		<-done
+		finish()
 		return IterTimeout, nil
 	}
 }
 
 // serviceProbeNotifications drains the notify fd and responds CONTINUE
 // to every notification until ctx is cancelled or the fd errors.
+//
+// Termination: seccomp.NotifReceive blocks inside an ioctl that does
+// NOT observe ctx. The goroutine is freed when the caller closes
+// notifyFD (the kernel returns an error and we exit). The ctx select
+// at the top of the loop only short-circuits the rare window between
+// notifications where the goroutine has already returned from
+// NotifReceive and is about to loop.
 //
 // Uses libseccomp-golang's seccomp.NotifReceive (the same call site as
 // internal/netmonitor/unix/handler.go:41) for receive, and the existing
@@ -232,7 +328,10 @@ func serviceProbeNotifications(ctx context.Context, notifyFD int) {
 }
 
 // classifyProbeExit maps cmd.Wait()'s result to an IterationResult.
-func classifyProbeExit(err error) (IterationResult, error) {
+// childStderr is the captured child stderr (bounded) and is included
+// in the error return for the "unclassified" case so operators can
+// see what the child actually printed before it died.
+func classifyProbeExit(err error, childStderr string) (IterationResult, error) {
 	if err == nil {
 		return IterPass, nil
 	}
@@ -248,5 +347,37 @@ func classifyProbeExit(err error) (IterationResult, error) {
 			return IterKilled, nil
 		}
 	}
+	if childStderr != "" {
+		return 0, fmt.Errorf("wait_killable probe: unclassified exit: %w (child stderr: %q)", err, childStderr)
+	}
 	return 0, fmt.Errorf("wait_killable probe: unclassified exit: %w", err)
+}
+
+// boundedBuffer is a write-only buffer that caps growth at `cap` bytes,
+// silently dropping later writes. Used to bound child stderr so a
+// pathological child can't blow up the parent's memory.
+type boundedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+	cap int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	remaining := b.cap - b.buf.Len()
+	if remaining <= 0 {
+		return len(p), nil // pretend success; data is dropped
+	}
+	if len(p) > remaining {
+		_, _ = b.buf.Write(p[:remaining])
+		return len(p), nil
+	}
+	return b.buf.Write(p)
+}
+
+func (b *boundedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
