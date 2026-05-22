@@ -90,6 +90,14 @@ func ProbeWaitKillableBehavior(ctx context.Context, iterations int) (bool, error
 				"iteration", i,
 				"duration_ms", iterDur.Milliseconds(),
 				"error", err.Error())
+			// Emit a final "probe complete" line on the error path too,
+			// so the probe-complete log is symmetric with the killed and
+			// timeout paths. Lets operators grep one line for the final
+			// decision regardless of which terminal branch fired.
+			slog.Info("seccomp: wait_killable probe complete",
+				"decision", false,
+				"reason", fmt.Sprintf("iteration %d error: %v", i, err),
+				"total_duration_ms", time.Since(probeStart).Milliseconds())
 			return false, err
 		}
 		slog.Info("seccomp: wait_killable iteration",
