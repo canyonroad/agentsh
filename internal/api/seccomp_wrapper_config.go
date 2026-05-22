@@ -27,6 +27,20 @@ type seccompWrapperConfig struct {
 	WriteOnlyOpens    bool `json:"write_only_opens,omitempty"`
 	BlockIOUring      bool `json:"block_io_uring,omitempty"`
 
+	// WaitKillable forwards the server's decision (boot-time probe +
+	// optional config override) to the wrapper, which uses it in place
+	// of its own ProbeWaitKillable() fallback. nil means the server made
+	// no decision and the wrapper should probe locally. Issue #369.
+	WaitKillable *bool `json:"wait_killable,omitempty"`
+
+	// WaitKillableSource records why the WaitKillable decision was made
+	// ("config", "kernel_unsupported", "filter_composition_safe",
+	// "behavioral_probe", "behavioral_probe_error"). Forwarded so the
+	// wrapper's per-exec "seccomp: filter loaded" log line can record the
+	// source — one grep tells an operator why this exec saw a given flag
+	// value. Issue #369.
+	WaitKillableSource string `json:"wait_killable_source,omitempty"`
+
 	// Landlock filesystem restrictions
 	LandlockEnabled bool     `json:"landlock_enabled,omitempty"`
 	LandlockABI     int      `json:"landlock_abi,omitempty"`
@@ -86,6 +100,11 @@ func (a *App) buildSeccompWrapperConfig(s *session.Session, p seccompWrapperPara
 		)
 	}
 	seccompCfg.BlockIOUring = config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.BlockIOUring, fmDefault)
+
+	// Pass the boot-time decision to every wrapper. The pointer is
+	// per-exec; the bool storage is the server-process App field. Issue #369.
+	seccompCfg.WaitKillable = &a.waitKillableDecision
+	seccompCfg.WaitKillableSource = a.waitKillableSource
 
 	if a.cfg.Landlock.Enabled {
 		llResult := capabilities.DetectLandlock()

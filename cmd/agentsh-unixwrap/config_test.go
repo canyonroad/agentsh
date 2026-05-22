@@ -88,3 +88,61 @@ func TestParseConfigJSON_OnBlock(t *testing.T) {
 		})
 	}
 }
+
+func TestWrapperConfig_WaitKillable_JSON(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want *bool
+	}{
+		{name: "absent", json: `{"unix_socket_enabled":true}`, want: nil},
+		{name: "true", json: `{"unix_socket_enabled":true,"wait_killable":true}`, want: boolPtr(true)},
+		{name: "false", json: `{"unix_socket_enabled":true,"wait_killable":false}`, want: boolPtr(false)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENTSH_SECCOMP_CONFIG", tc.json)
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatalf("loadConfig: %v", err)
+			}
+			switch {
+			case tc.want == nil && cfg.WaitKillable != nil:
+				t.Fatalf("want nil, got &%v", *cfg.WaitKillable)
+			case tc.want != nil && cfg.WaitKillable == nil:
+				t.Fatalf("want &%v, got nil", *tc.want)
+			case tc.want != nil && *cfg.WaitKillable != *tc.want:
+				t.Fatalf("want %v got %v", *tc.want, *cfg.WaitKillable)
+			}
+		})
+	}
+}
+
+// TestWrapperConfig_WaitKillableSource_JSON covers the diagnostic source
+// string the server forwards alongside the WaitKillable bool. Issue #369.
+func TestWrapperConfig_WaitKillableSource_JSON(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want string
+	}{
+		{name: "absent", json: `{"unix_socket_enabled":true}`, want: ""},
+		{name: "behavioral_probe", json: `{"unix_socket_enabled":true,"wait_killable_source":"behavioral_probe"}`, want: "behavioral_probe"},
+		{name: "config", json: `{"unix_socket_enabled":true,"wait_killable_source":"config"}`, want: "config"},
+		{name: "kernel_unsupported", json: `{"unix_socket_enabled":true,"wait_killable_source":"kernel_unsupported"}`, want: "kernel_unsupported"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENTSH_SECCOMP_CONFIG", tc.json)
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatalf("loadConfig: %v", err)
+			}
+			if cfg.WaitKillableSource != tc.want {
+				t.Fatalf("want %q got %q", tc.want, cfg.WaitKillableSource)
+			}
+		})
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }

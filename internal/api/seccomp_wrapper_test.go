@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -408,5 +409,103 @@ seccomp:
 	}
 	if got := result.extraCfg.envInject["AGENTSH_PTRACE_SYNC"]; got != "1" {
 		t.Fatalf("AGENTSH_PTRACE_SYNC = %q, want 1", got)
+	}
+}
+
+func TestSeccompWrapperConfig_WaitKillable_JSON(t *testing.T) {
+	cases := []struct {
+		name       string
+		in         *bool
+		wantSubstr string
+		wantAbsent bool
+	}{
+		{name: "absent", in: nil, wantAbsent: true},
+		{name: "true", in: boolPtrLocal(true), wantSubstr: `"wait_killable":true`},
+		{name: "false", in: boolPtrLocal(false), wantSubstr: `"wait_killable":false`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := seccompWrapperConfig{WaitKillable: tc.in}
+			b, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			s := string(b)
+			if tc.wantAbsent && strings.Contains(s, "wait_killable") {
+				t.Fatalf("expected wait_killable to be omitted, got %s", s)
+			}
+			if !tc.wantAbsent && !strings.Contains(s, tc.wantSubstr) {
+				t.Fatalf("expected %q in %s", tc.wantSubstr, s)
+			}
+		})
+	}
+}
+
+func boolPtrLocal(v bool) *bool { return &v }
+
+// TestSeccompWrapperConfig_WaitKillableSource_JSON covers the source
+// string field that travels alongside the WaitKillable bool to give
+// operators a one-line answer for why a given exec saw a given flag.
+// Issue #369.
+func TestSeccompWrapperConfig_WaitKillableSource_JSON(t *testing.T) {
+	cases := []struct {
+		name       string
+		in         string
+		wantSubstr string
+		wantAbsent bool
+	}{
+		{name: "absent", in: "", wantAbsent: true},
+		{name: "behavioral_probe", in: "behavioral_probe", wantSubstr: `"wait_killable_source":"behavioral_probe"`},
+		{name: "config", in: "config", wantSubstr: `"wait_killable_source":"config"`},
+		{name: "kernel_unsupported", in: "kernel_unsupported", wantSubstr: `"wait_killable_source":"kernel_unsupported"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := seccompWrapperConfig{WaitKillableSource: tc.in}
+			b, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			s := string(b)
+			if tc.wantAbsent && strings.Contains(s, "wait_killable_source") {
+				t.Fatalf("expected wait_killable_source to be omitted, got %s", s)
+			}
+			if !tc.wantAbsent && !strings.Contains(s, tc.wantSubstr) {
+				t.Fatalf("expected %q in %s", tc.wantSubstr, s)
+			}
+		})
+	}
+}
+
+// TestBuildSeccompWrapperConfig_PropagatesWaitKillable asserts the
+// boot-time decision stored on App flows through to every wrapper
+// config. The test bypasses NewApp (and therefore the behavioral probe)
+// by constructing App directly — it covers only the propagation contract.
+// Issue #369.
+func TestBuildSeccompWrapperConfig_PropagatesWaitKillable(t *testing.T) {
+	app := &App{
+		cfg:                  &config.Config{},
+		waitKillableDecision: false,
+		waitKillableSource:   "behavioral_probe",
+	}
+	got := app.buildSeccompWrapperConfig(nil, seccompWrapperParams{})
+	if got.WaitKillable == nil {
+		t.Fatal("WaitKillable not set")
+	}
+	if *got.WaitKillable != false {
+		t.Fatalf("want false, got true")
+	}
+	if got.WaitKillableSource != "behavioral_probe" {
+		t.Fatalf("WaitKillableSource = %q, want behavioral_probe", got.WaitKillableSource)
+	}
+
+	app.waitKillableDecision = true
+	app.waitKillableSource = "config"
+	got = app.buildSeccompWrapperConfig(nil, seccompWrapperParams{})
+	if got.WaitKillable == nil || *got.WaitKillable != true {
+		t.Fatal("want &true after flipping decision")
+	}
+	if got.WaitKillableSource != "config" {
+		t.Fatalf("WaitKillableSource = %q, want config", got.WaitKillableSource)
 	}
 }

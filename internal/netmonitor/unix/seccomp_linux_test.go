@@ -53,6 +53,60 @@ func TestFilterConfig_WithExecve(t *testing.T) {
 	require.True(t, cfg.UnixSocketEnabled)
 }
 
+// TestInstallFilterWithConfig_WaitKillableOverride asserts that
+// FilterConfig.WaitKillable, when non-nil, controls the
+// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV bit on the seccomp(2) flags
+// argument regardless of host kernel support.
+//
+// Issue #369: the operator override path must not be subordinate to the
+// kernel-version probe.
+func TestInstallFilterWithConfig_WaitKillableOverride(t *testing.T) {
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify unsupported on this host: %v", err)
+	}
+	bt := true
+	bf := false
+	cases := []struct {
+		name     string
+		cfgValue *bool
+		wantFlag bool
+	}{
+		{name: "explicit true", cfgValue: &bt, wantFlag: true},
+		{name: "explicit false", cfgValue: &bf, wantFlag: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			origLoad := loadFilterSyscall
+			origPrctl := prctlSetNoNewPrivs
+			t.Cleanup(func() {
+				loadFilterSyscall = origLoad
+				prctlSetNoNewPrivs = origPrctl
+			})
+
+			var capturedFlags uintptr
+			loadFilterSyscall = func(flags uintptr, _ *unix.SockFprog) (int, error) {
+				capturedFlags = flags
+				return 99, nil // pretend success, fd=99
+			}
+			prctlSetNoNewPrivs = func() error { return nil }
+
+			cfg := FilterConfig{
+				UnixSocketEnabled: true,
+				WaitKillable:      tc.cfgValue,
+			}
+			_, err := InstallFilterWithConfig(cfg)
+			if err != nil {
+				t.Fatalf("install: %v", err)
+			}
+			gotFlag := capturedFlags&unix.SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV != 0
+			if gotFlag != tc.wantFlag {
+				t.Fatalf("WAIT_KILLABLE_RECV bit: got %v want %v (flags=0x%x)",
+					gotFlag, tc.wantFlag, capturedFlags)
+			}
+		})
+	}
+}
+
 func TestInstallFilterWithConfig_OnBlockErrno(t *testing.T) {
 	if err := DetectSupport(); err != nil {
 		t.Skip("seccomp user-notify not supported:", err)
