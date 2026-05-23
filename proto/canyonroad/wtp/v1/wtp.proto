@@ -234,7 +234,10 @@ message Goaway {
 }
 
 enum GoawayCode {
-  GOAWAY_CODE_UNSPECIFIED = 0;   // unknown; clients MUST treat as transient and reconnect.
+  GOAWAY_CODE_UNSPECIFIED = 0;   // v0.4-legacy catch-all; clients MUST treat
+                                 // as transient and reconnect. v0.5+ servers
+                                 // SHOULD emit GOAWAY_CODE_PROTOCOL_ERROR for
+                                 // protocol-invariant violations instead.
   GOAWAY_CODE_DRAINING    = 1;   // graceful shutdown; reconnect to a different instance.
   GOAWAY_CODE_OVERLOAD    = 2;   // server overloaded; reconnect with backoff.
   GOAWAY_CODE_UPGRADE     = 3;   // server upgrade in progress; reconnect after delay.
@@ -242,6 +245,13 @@ enum GoawayCode {
   GOAWAY_CODE_POLICY      = 5;   // policy snapshot in SessionInit was rejected
                                  // (e.g. version regressed, content hash mismatch
                                  // for an existing (policy_id, version)).
+  GOAWAY_CODE_PROTOCOL_ERROR = 6; // server-detected protocol invariant violation
+                                  // (envelope inconsistent, unexpected gap,
+                                  // dedup mismatch, chain verification failure,
+                                  // session-update boundary mismatch, etc.).
+                                  // Agent reconnects with backoff; operators
+                                  // SHOULD investigate (server-side or
+                                  // agent-side bug). Issue #353.
 }
 
 message ClientShutdown {

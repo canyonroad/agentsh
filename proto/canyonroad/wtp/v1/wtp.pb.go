@@ -195,12 +195,18 @@ func (TransportLossReason) EnumDescriptor() ([]byte, []int) {
 type GoawayCode int32
 
 const (
-	GoawayCode_GOAWAY_CODE_UNSPECIFIED GoawayCode = 0 // unknown; clients MUST treat as transient and reconnect.
-	GoawayCode_GOAWAY_CODE_DRAINING    GoawayCode = 1 // graceful shutdown; reconnect to a different instance.
-	GoawayCode_GOAWAY_CODE_OVERLOAD    GoawayCode = 2 // server overloaded; reconnect with backoff.
-	GoawayCode_GOAWAY_CODE_UPGRADE     GoawayCode = 3 // server upgrade in progress; reconnect after delay.
-	GoawayCode_GOAWAY_CODE_AUTH        GoawayCode = 4 // authentication/authorization failed; do not auto-retry.
-	GoawayCode_GOAWAY_CODE_POLICY      GoawayCode = 5 // policy snapshot in SessionInit was rejected
+	GoawayCode_GOAWAY_CODE_UNSPECIFIED GoawayCode = 0 // v0.4-legacy catch-all; clients MUST treat
+	// as transient and reconnect. v0.5+ servers
+	// SHOULD emit GOAWAY_CODE_PROTOCOL_ERROR for
+	// protocol-invariant violations instead.
+	GoawayCode_GOAWAY_CODE_DRAINING GoawayCode = 1 // graceful shutdown; reconnect to a different instance.
+	GoawayCode_GOAWAY_CODE_OVERLOAD GoawayCode = 2 // server overloaded; reconnect with backoff.
+	GoawayCode_GOAWAY_CODE_UPGRADE  GoawayCode = 3 // server upgrade in progress; reconnect after delay.
+	GoawayCode_GOAWAY_CODE_AUTH     GoawayCode = 4 // authentication/authorization failed; do not auto-retry.
+	GoawayCode_GOAWAY_CODE_POLICY   GoawayCode = 5 // policy snapshot in SessionInit was rejected
+	// (e.g. version regressed, content hash mismatch
+	// for an existing (policy_id, version)).
+	GoawayCode_GOAWAY_CODE_PROTOCOL_ERROR GoawayCode = 6 // server-detected protocol invariant violation
 )
 
 // Enum value maps for GoawayCode.
@@ -212,14 +218,16 @@ var (
 		3: "GOAWAY_CODE_UPGRADE",
 		4: "GOAWAY_CODE_AUTH",
 		5: "GOAWAY_CODE_POLICY",
+		6: "GOAWAY_CODE_PROTOCOL_ERROR",
 	}
 	GoawayCode_value = map[string]int32{
-		"GOAWAY_CODE_UNSPECIFIED": 0,
-		"GOAWAY_CODE_DRAINING":    1,
-		"GOAWAY_CODE_OVERLOAD":    2,
-		"GOAWAY_CODE_UPGRADE":     3,
-		"GOAWAY_CODE_AUTH":        4,
-		"GOAWAY_CODE_POLICY":      5,
+		"GOAWAY_CODE_UNSPECIFIED":    0,
+		"GOAWAY_CODE_DRAINING":       1,
+		"GOAWAY_CODE_OVERLOAD":       2,
+		"GOAWAY_CODE_UPGRADE":        3,
+		"GOAWAY_CODE_AUTH":           4,
+		"GOAWAY_CODE_POLICY":         5,
+		"GOAWAY_CODE_PROTOCOL_ERROR": 6,
 	}
 )
 
@@ -1888,7 +1896,7 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"'TRANSPORT_LOSS_REASON_INVALID_TIMESTAMP\x10\x05\x12&\n" +
 	"\"TRANSPORT_LOSS_REASON_INVALID_UTF8\x10\x06\x12+\n" +
 	"'TRANSPORT_LOSS_REASON_SEQUENCE_OVERFLOW\x10\a\x121\n" +
-	"-TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC\x10\b*\xa4\x01\n" +
+	"-TRANSPORT_LOSS_REASON_ACK_REGRESSION_AFTER_GC\x10\b*\xc4\x01\n" +
 	"\n" +
 	"GoawayCode\x12\x1b\n" +
 	"\x17GOAWAY_CODE_UNSPECIFIED\x10\x00\x12\x18\n" +
@@ -1896,7 +1904,8 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\x14GOAWAY_CODE_OVERLOAD\x10\x02\x12\x17\n" +
 	"\x13GOAWAY_CODE_UPGRADE\x10\x03\x12\x14\n" +
 	"\x10GOAWAY_CODE_AUTH\x10\x04\x12\x16\n" +
-	"\x12GOAWAY_CODE_POLICY\x10\x05*\xab\x01\n" +
+	"\x12GOAWAY_CODE_POLICY\x10\x05\x12\x1e\n" +
+	"\x1aGOAWAY_CODE_PROTOCOL_ERROR\x10\x06*\xab\x01\n" +
 	"\x14ClientShutdownReason\x12&\n" +
 	"\"CLIENT_SHUTDOWN_REASON_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dCLIENT_SHUTDOWN_REASON_NORMAL\x10\x01\x12&\n" +
