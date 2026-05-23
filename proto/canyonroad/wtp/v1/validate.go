@@ -295,18 +295,22 @@ func ValidateSessionInit(s *SessionInit) error {
 }
 
 // ValidateGoaway returns ReasonUnknown for nil messages (a structural
-// failure). Goaway with code == GOAWAY_CODE_UNSPECIFIED is ACCEPTED:
-// the proto's UNSPECIFIED contract says "unknown; clients MUST treat
-// as transient and reconnect" — i.e. it IS a valid wire value with
-// well-defined semantics, not a malformed frame. Treating UNSPECIFIED
-// as invalid silently dropped every Fatal-with-generic-reason Goaway
-// watchtower sends (gen mismatch, unexpected gap, stale stream, dedup
-// failure all default to UNSPECIFIED), causing a tight reconnect loop
-// where the client never observes the server's stated reason.
+// failure). Any non-nil Goaway is accepted regardless of code:
 //
-// Other Goaway fields (message, retry_immediately) have no MUST-be-set
-// invariants the validator can enforce statelessly. The message field
-// carries the wtp.Reason* string and is the operator-facing diagnostic.
+//   - GOAWAY_CODE_PROTOCOL_ERROR (v0.5+) is the canonical code for
+//     server-detected protocol-invariant violations (envelope
+//     inconsistent, unexpected gap, dedup mismatch, chain verification
+//     failed, etc.). Operators triage from the code label.
+//
+//   - GOAWAY_CODE_UNSPECIFIED is preserved as a v0.4-legacy code for
+//     wire compatibility with older servers that pre-date
+//     PROTOCOL_ERROR. The validator MUST NOT reject it; doing so
+//     would silently drop every Goaway from a v0.4 watchtower and
+//     cause a tight reconnect loop where the client never observes
+//     the server's stated reason.
+//
+// Other Goaway fields (message, retry_immediately) have no
+// MUST-be-set invariants the validator can enforce statelessly.
 func ValidateGoaway(g *Goaway) error {
 	if g == nil {
 		return &ValidationError{
