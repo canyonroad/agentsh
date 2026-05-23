@@ -130,6 +130,8 @@ func TestValidateGoaway_HappyPath(t *testing.T) {
 		GoawayCode_GOAWAY_CODE_OVERLOAD,
 		GoawayCode_GOAWAY_CODE_UPGRADE,
 		GoawayCode_GOAWAY_CODE_AUTH,
+		GoawayCode_GOAWAY_CODE_POLICY,
+		GoawayCode_GOAWAY_CODE_PROTOCOL_ERROR,
 	}
 	for _, c := range cases {
 		t.Run(c.String(), func(t *testing.T) {

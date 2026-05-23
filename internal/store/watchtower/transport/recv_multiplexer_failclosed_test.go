@@ -509,5 +509,46 @@ func TestRecvMultiplexer_FailClosedHeartbeatZeroGeneration(t *testing.T) {
 	}
 }
 
+// TestRecvMultiplexer_FailClosedWarnLogGoawayProtocolError asserts the
+// recv-side structured WARN log surfaces GOAWAY_CODE_PROTOCOL_ERROR
+// verbatim in the goaway_code field when a v0.5 server sends
+// Goaway{Code: PROTOCOL_ERROR}. Mirrors the DRAINING test pattern
+// (above) and proves the operator-visible value of issue #353 — a
+// single grep on goaway_code= identifies the new code without needing
+// to parse the human-readable message field.
+//
+// RetryImmediately is asserted false: only DRAINING sets it true; for
+// PROTOCOL_ERROR the server is rejecting an invariant violation and
+// the agent should back off before reconnecting.
+func TestRecvMultiplexer_FailClosedWarnLogGoawayProtocolError(t *testing.T) {
+	fc := newRecvFakeConn()
+	tr, h := newFailClosedTransport(t, fc, false /* LogGoawayMessage */)
+
+	msg := &wtpv1.ServerMessage{
+		Msg: &wtpv1.ServerMessage_Goaway{
+			Goaway: &wtpv1.Goaway{
+				Code:             wtpv1.GoawayCode_GOAWAY_CODE_PROTOCOL_ERROR,
+				Message:          "envelope_inconsistent",
+				RetryImmediately: false,
+			},
+		},
+	}
+	if err := driveFailClosed(t, tr, fc, msg); err == nil {
+		t.Fatal("expected errCh sentinel after fail-closed Goaway")
+	}
+
+	rec := findOneWarn(t, h, "goaway_received")
+	attrs := attrMap(rec)
+	checkAttrEq(t, attrs, "frame", "recv_control")
+	checkAttrEq(t, attrs, "reason", "goaway_received")
+	checkAttrEq(t, attrs, "session_id", "sess-failclosed")
+	checkAttrEq(t, attrs, "goaway_code", "GOAWAY_CODE_PROTOCOL_ERROR")
+	checkAttrBool(t, attrs, "goaway_retry_immediately", false)
+	checkAttrBool(t, attrs, "goaway_message_present", true)
+	if _, present := attrs["goaway_message"]; present {
+		t.Fatalf("goaway_message must be ABSENT under conservative default; got %v", attrs["goaway_message"])
+	}
+}
+
 // silence unused-import linter if errors import drifts later.
 var _ = errors.New
