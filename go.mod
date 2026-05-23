@@ -22,7 +22,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.10
 	github.com/aws/smithy-go v1.24.2
-	github.com/canyonroad/wtp-protos/gen/go v0.0.0-20260523210301-c12deb16823c
+	github.com/canyonroad/wtp-protos/gen/go v0.1.0
 	github.com/cilium/ebpf v0.20.0
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/creack/pty v1.1.18
