@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+	wtpv1 "github.com/canyonroad/wtp-protos/gen/go/canyonroad/wtp/v1"
 )
 
 // HeartbeatSender is the subset of Conn that RunHeartbeat needs.

@@ -1,10 +1,11 @@
-package wtpv1
+package fixtures_test
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
 
+	wtpv1 "github.com/canyonroad/wtp-protos/gen/go/canyonroad/wtp/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -13,11 +14,11 @@ func TestWireGoldens_RoundTrip(t *testing.T) {
 		file string
 		make func() proto.Message
 	}{
-		{"compact_event.bin", func() proto.Message { return new(CompactEvent) }},
-		{"event_batch.bin", func() proto.Message { return new(EventBatch) }},
-		{"event_batch_zstd.bin", func() proto.Message { return new(EventBatch) }},
-		{"event_batch_gzip.bin", func() proto.Message { return new(EventBatch) }},
-		{"session_init.bin", func() proto.Message { return new(SessionInit) }},
+		{"compact_event.bin", func() proto.Message { return new(wtpv1.CompactEvent) }},
+		{"event_batch.bin", func() proto.Message { return new(wtpv1.EventBatch) }},
+		{"event_batch_zstd.bin", func() proto.Message { return new(wtpv1.EventBatch) }},
+		{"event_batch_gzip.bin", func() proto.Message { return new(wtpv1.EventBatch) }},
+		{"session_init.bin", func() proto.Message { return new(wtpv1.SessionInit) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {

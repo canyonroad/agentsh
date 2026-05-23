@@ -6,7 +6,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/agentsh/agentsh/pkg/types"
-	ocsfpb "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1/ocsf"
+	ocsfpb "github.com/canyonroad/wtp-protos/gen/go/canyonroad/wtp/v1/ocsf"
 )
 
 // appProjector handles class_uid 6005. Both standard MCP/proxy/secret

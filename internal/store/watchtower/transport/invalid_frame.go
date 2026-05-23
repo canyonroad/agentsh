@@ -6,7 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/agentsh/agentsh/internal/metrics"
-	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+	wtpv1 "github.com/canyonroad/wtp-protos/gen/go/canyonroad/wtp/v1"
 )
 
 // ClassifyAndIncInvalidFrame is the canonical receiver-side wrapper for
