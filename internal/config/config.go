@@ -926,7 +926,8 @@ type AuditWatchtowerConfig struct {
 	//           Store-construction emits a single WARN at startup
 	//           reminding the operator that this depends on the server-
 	//           side no-secrets contract documented at
-	//           proto/canyonroad/wtp/v1/wtp.proto Goaway.message.
+	//           proto/canyonroad/wtp/v1/wtp.proto (Goaway.message) in the
+	//           github.com/canyonroad/wtp-protos repo.
 	//
 	// This pointer-form is mandatory: a plain bool would collapse "unset"
 	// into "explicit false" before the daemon could distinguish them,

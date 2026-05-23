@@ -14,7 +14,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
-	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+	wtpv1 "github.com/canyonroad/wtp-protos/gen/go/canyonroad/wtp/v1"
 	"golang.org/x/time/rate"
 )
 

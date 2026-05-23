@@ -690,7 +690,8 @@ var wtpInvalidFrameReasonsEmitOrder = []WTPInvalidFrameReason{
 // wtpv1.AllValidationReasons() — i.e. the validator-emitted reasons
 // shared across the proto and metrics packages. Adding a new validator-
 // shared reason MUST also append it to allValidationReasons in
-// proto/canyonroad/wtp/v1/validate.go (Task 22b parity test catches
+// gen/go/canyonroad/wtp/v1/validate.go (in the
+// github.com/canyonroad/wtp-protos repo; Task 22b parity test catches
 // drift).
 var validationReasonsShared = []WTPInvalidFrameReason{
 	WTPInvalidFrameReasonEventBatchBodyUnset,

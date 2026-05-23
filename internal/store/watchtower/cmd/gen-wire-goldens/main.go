@@ -2,8 +2,9 @@
 //
 // CI does NOT run this tool — it only verifies the existing goldens
 // round-trip cleanly (TestWireGoldens_RoundTrip in
-// proto/canyonroad/wtp/v1/wire_roundtrip_test.go) and that the generator
-// still produces them byte-for-byte (TestWireGoldens_GeneratorReproducible).
+// internal/store/watchtower/cmd/gen-wire-goldens/fixtures/wire_roundtrip_test.go)
+// and that the generator still produces them byte-for-byte
+// (TestWireGoldens_GeneratorReproducible).
 //
 // Run manually after intentional schema changes:
 //
@@ -19,7 +20,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const outDir = "proto/canyonroad/wtp/v1/testdata"
+const outDir = "internal/store/watchtower/cmd/gen-wire-goldens/fixtures/testdata"
 
 func main() {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {

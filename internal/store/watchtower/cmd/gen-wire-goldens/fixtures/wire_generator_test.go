@@ -1,4 +1,4 @@
-package wtpv1_test
+package fixtures_test
 
 import (
 	"bytes"

@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/metrics"
-	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+	wtpv1 "github.com/canyonroad/wtp-protos/gen/go/canyonroad/wtp/v1"
 )
 
 // TestWTPInvalidFrameReason_ParityWithValidator locks the metrics-side
@@ -41,7 +41,7 @@ func TestWTPInvalidFrameReason_ParityWithValidator(t *testing.T) {
 	validatorDedup := make(map[wtpv1.ValidationReason]struct{}, len(validatorSlice))
 	for _, r := range validatorSlice {
 		if _, dup := validatorDedup[r]; dup {
-			t.Errorf("wtpv1.AllValidationReasons() contains duplicate reason %q — aliases are forbidden (see proto/canyonroad/wtp/v1/validate.go)", r)
+			t.Errorf("wtpv1.AllValidationReasons() contains duplicate reason %q — aliases are forbidden (see gen/go/canyonroad/wtp/v1/validate.go in the github.com/canyonroad/wtp-protos repo)", r)
 		}
 		validatorDedup[r] = struct{}{}
 	}
@@ -69,7 +69,7 @@ func TestWTPInvalidFrameReason_ParityWithValidator(t *testing.T) {
 	// pointing at one string value) that a map-based dedupe would
 	// silently mask. Either side gaining an alias fails the test.
 	if got, want := len(wtpv1.AllValidationReasons()), len(metrics.ValidationReasons()); got != want {
-		t.Errorf("len(wtpv1.AllValidationReasons())=%d vs len(metrics.ValidationReasons())=%d — alias duplication or drift between proto/canyonroad/wtp/v1/validate.go and internal/metrics/wtp.go", got, want)
+		t.Errorf("len(wtpv1.AllValidationReasons())=%d vs len(metrics.ValidationReasons())=%d — alias duplication or drift between gen/go/canyonroad/wtp/v1/validate.go (github.com/canyonroad/wtp-protos repo) and internal/metrics/wtp.go", got, want)
 	}
 
 	// 1. Forward: every validator reason must have a metrics constant in the shared set.
@@ -83,7 +83,7 @@ func TestWTPInvalidFrameReason_ParityWithValidator(t *testing.T) {
 	// 2. Reverse: every metrics shared reason must have a validator constant.
 	for r := range metricsShared {
 		if _, ok := validatorAll[wtpv1.ValidationReason(string(r))]; !ok {
-			t.Errorf("validator package is missing ValidationReason constant for metrics reason %q; add the constant to proto/canyonroad/wtp/v1/validate.go and append it to allValidationReasons (returned by AllValidationReasons())",
+			t.Errorf("validator package is missing ValidationReason constant for metrics reason %q; add the constant to gen/go/canyonroad/wtp/v1/validate.go (github.com/canyonroad/wtp-protos repo) and append it to allValidationReasons (returned by AllValidationReasons())",
 				r)
 		}
 	}
@@ -91,7 +91,7 @@ func TestWTPInvalidFrameReason_ParityWithValidator(t *testing.T) {
 	// 3. Disjoint: metrics-only reasons MUST NOT appear on the validator side.
 	for _, r := range metrics.MetricsOnlyReasons() {
 		if _, ok := validatorAll[wtpv1.ValidationReason(string(r))]; ok {
-			t.Errorf("metrics-only reason %q accidentally appears in wtpv1.AllValidationReasons() — the design contract is that classifier_bypass and decompress_error have NO proto-side counterpart; remove it from proto/canyonroad/wtp/v1/validate.go's allValidationReasons or remove it from internal/metrics/wtp.go's MetricsOnlyReasons() (whichever was added in error)",
+			t.Errorf("metrics-only reason %q accidentally appears in wtpv1.AllValidationReasons() — the design contract is that classifier_bypass and decompress_error have NO proto-side counterpart; remove it from gen/go/canyonroad/wtp/v1/validate.go's allValidationReasons (github.com/canyonroad/wtp-protos repo) or remove it from internal/metrics/wtp.go's MetricsOnlyReasons() (whichever was added in error)",
 				r)
 		}
 	}
