@@ -49,7 +49,7 @@ func resolveLogGoawayMessage(cfgVal *bool, logger *slog.Logger) bool {
 		return defaultV
 	case *cfgVal:
 		logger.Warn("watchtower: log_goaway_message=true; goaway_message text will be logged after client-side sanitization, depends on server-side no-secrets contract",
-			"see", "proto/canyonroad/wtp/v1/wtp.proto Goaway.message")
+			"see", "github.com/canyonroad/wtp-protos proto/canyonroad/wtp/v1/wtp.proto Goaway.message")
 		return true
 	default:
 		// explicit false — no log
