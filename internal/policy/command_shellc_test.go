@@ -525,7 +525,7 @@ func TestEngine_CheckCommand_ShellCDerive_BypassFailsClosed(t *testing.T) {
 		args    []string
 	}{
 		{"exec -a custom argv0", "/bin/sh", []string{"-c", "exec -a foo shutdown"}},
-		{"command -v (probe form)", "/bin/sh", []string{"-c", "command -v shutdown"}},
+		// command -v/-V is introspection (issue #377): removed from bypass table.
 		{"nohup --help", "/bin/sh", []string{"-c", "nohup --help shutdown"}},
 		{"nohup -x", "/bin/sh", []string{"-c", "nohup -x shutdown"}},
 		{"nice -n bogus (non-numeric)", "/bin/sh", []string{"-c", "nice -n bogus shutdown"}},
@@ -548,7 +548,7 @@ func TestEngine_CheckCommand_ShellCDerive_BypassFailsClosed(t *testing.T) {
 		// the assignment but the inner form is still unparsable).
 		{"assign + exec -a", "/bin/sh", []string{"-c", "VAR=x exec -a foo shutdown"}},
 		{"assign + nohup --preserve-status", "/bin/sh", []string{"-c", "PATH=/tmp nohup --preserve-status=1 shutdown"}},
-		{"assign + command -v", "/bin/sh", []string{"-c", "FOO=1 command -v shutdown"}},
+		// assign + command -v is introspection (issue #377): removed from bypass table.
 		// Env-assignment with a dirty VALUE (byte outside the narrow
 		// allowlist). The shell accepts these, but we can't safely
 		// parse-through, so fail closed.
