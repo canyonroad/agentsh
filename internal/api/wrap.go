@@ -280,6 +280,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			PtraceMode:            true,
 			SafeToBypassShellShim: true,
 			NotifySocket:          notifySocketPath,
+			EnvInject:             mergeEnvInject(a.cfg, a.policyEngineFor(s)),
 		}, http.StatusOK, nil
 	}
 
@@ -511,6 +512,11 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		NotifySocket:          notifySocketPath,
 		SignalSocket:          signalSocketPath,
 		WrapperEnv:            wrapperEnv,
+		// env_inject is delivered to the client for it to overlay onto the
+		// executed command's environment (the server does not spawn the
+		// process on this path). Operator-trusted; bypasses policy filtering,
+		// matching the server-spawned exec path. Issue #374.
+		EnvInject: mergeEnvInject(a.cfg, a.policyEngineFor(s)),
 	}, http.StatusOK, nil
 }
 

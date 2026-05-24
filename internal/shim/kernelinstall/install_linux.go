@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/client"
+	"github.com/agentsh/agentsh/internal/envinject"
 	"github.com/agentsh/agentsh/internal/wraphandoff"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
@@ -191,32 +192,12 @@ func runRelay(p InstallParams, resp types.WrapInitResponse) (Result, error) {
 		return Result{}, fmt.Errorf("fcntl clear cloexec: %w", errno)
 	}
 
-	// Build env: caller env + AGENTSH_NOTIFY_SOCK_FD=3 + filtered WrapperEnv.
-	// Strip AGENTSH_SIGNAL_SOCK_FD from p.Env AND WrapperEnv:
-	//  - from p.Env: a stale value inherited from a parent context (when the
-	//    shim runs inside an already-wrapped process) must not reach the wrapper.
-	//  - from WrapperEnv: shim mode does not replicate the signal-filter
-	//    socketpair, so the wrapper must not try to open that fd.
-	filteredBase := filterShimInternalEnv(p.Env)
-	env := make([]string, len(filteredBase))
-	copy(env, filteredBase)
-	env = append(env, "AGENTSH_NOTIFY_SOCK_FD=3")
-	// Plumb the original invocation name (e.g. "/bin/sh") through to the
-	// wrapper so it can override argv[0] when execve'ing the real shell.
-	// On Alpine, /bin/sh.real is a busybox binary; without this override,
-	// busybox derives applet name "sh.real" → "applet not found" → exit
-	// 127. The wrapper falls back to its os.Args[2] (the real shell path)
-	// when this is empty, which is correct on non-busybox systems.
-	if p.Argv0 != "" {
-		env = append(env, fmt.Sprintf("%s=%s", argv0EnvKey, p.Argv0))
-	}
-	for k, v := range resp.WrapperEnv {
-		if k == signalSockFDKey {
-			slog.Debug("kernelinstall: stripping signal sock fd from wrapper env (shim mode limitation)")
-			continue
-		}
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
-	}
+	// Build the wrapper child environment: caller env (shim-internal markers
+	// stripped) with sandbox.env_inject overlaid, then the internal AGENTSH_*
+	// markers (notify fd, argv0 override, wrapper config). See
+	// assembleWrapperEnv for the env_inject override and AGENTSH_SIGNAL_SOCK_FD
+	// stripping rationale (issue #374).
+	env := assembleWrapperEnv(filterShimInternalEnv(p.Env), p.Argv0, resp.WrapperEnv, resp.EnvInject)
 
 	// Build wrapper argv: wrapperBin -- realShell shellArgs...
 	// argv[0] is the wrapper binary's basename (conventional).
@@ -395,6 +376,39 @@ func filterSignalSockFD(env []string) []string {
 // empty); a stale inherited value from a re-entrant invocation would
 // otherwise silently win on Argv0=="" and contradict the documented
 // "empty falls back to the resolved real path" contract.
+// assembleWrapperEnv builds the environment for the agentsh-unixwrap child.
+// base is the caller environment with shim-internal markers already stripped
+// (filterShimInternalEnv). envInject overlays operator-configured
+// sandbox.env_inject values with override semantics — injected values win over
+// inherited ones, matching the server-spawned exec path (issue #374). The
+// internal AGENTSH_* markers (notify fd, argv0 override, wrapper config) are
+// appended afterward and remain authoritative. AGENTSH_SIGNAL_SOCK_FD from
+// wrapperEnv is dropped: shim mode does not replicate the signal-filter
+// socketpair, so the wrapper must not try to open that fd.
+func assembleWrapperEnv(base []string, argv0 string, wrapperEnv, envInject map[string]string) []string {
+	// Copy so appends never alias the caller's backing array (Apply may
+	// return base unchanged when envInject is empty).
+	env := append([]string(nil), envinject.Apply(base, envInject)...)
+	env = append(env, "AGENTSH_NOTIFY_SOCK_FD=3")
+	// Plumb the original invocation name (e.g. "/bin/sh") through to the
+	// wrapper so it can override argv[0] when execve'ing the real shell.
+	// On Alpine, /bin/sh.real is a busybox binary; without this override,
+	// busybox derives applet name "sh.real" → "applet not found" → exit
+	// 127. The wrapper falls back to its os.Args[2] (the real shell path)
+	// when this is empty, which is correct on non-busybox systems.
+	if argv0 != "" {
+		env = append(env, fmt.Sprintf("%s=%s", argv0EnvKey, argv0))
+	}
+	for k, v := range wrapperEnv {
+		if k == signalSockFDKey {
+			slog.Debug("kernelinstall: stripping signal sock fd from wrapper env (shim mode limitation)")
+			continue
+		}
+		env = append(env, fmt.Sprintf("%s=%s", k, v))
+	}
+	return env
+}
+
 func filterShimInternalEnv(env []string) []string {
 	out := make([]string, 0, len(env))
 	signalPrefix := signalSockFDKey + "="
