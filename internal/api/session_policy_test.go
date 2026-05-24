@@ -3,6 +3,7 @@ package api
 import (
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -90,5 +91,39 @@ func TestPolicyEngineFor_NilSessionFallsBackToGlobal(t *testing.T) {
 	got := app.policyEngineFor(nil)
 	if got != globalEngine {
 		t.Fatalf("expected global engine for nil session, got %p", got)
+	}
+}
+
+func TestExecveEnforcementActive(t *testing.T) {
+	tests := []struct {
+		name         string
+		seccomp      bool
+		unixDisabled bool // explicitly set unix_sockets.enabled=false
+		ptrace       bool // simulate a.ptraceTracer != nil
+		want         bool
+	}{
+		{"none", false, false, false, false},
+		{"seccomp execve, unix sockets default-on", true, false, false, true},
+		{"seccomp execve but unix sockets disabled", true, true, false, false},
+		{"ptrace", false, false, true, true},
+		{"both", true, false, true, true},
+		{"ptrace with unix sockets disabled still true", false, true, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Sandbox.Seccomp.Execve.Enabled = tt.seccomp
+			if tt.unixDisabled {
+				disabled := false
+				cfg.Sandbox.UnixSockets.Enabled = &disabled
+			}
+			a := &App{cfg: cfg}
+			if tt.ptrace {
+				a.ptraceTracer = struct{}{}
+			}
+			if got := a.execveEnforcementActive(); got != tt.want {
+				t.Errorf("execveEnforcementActive() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
