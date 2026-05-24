@@ -104,6 +104,7 @@ func TestExecveEnforcementActive(t *testing.T) {
 		{"none", false, false, false},
 		{"seccomp execve", true, false, true},
 		{"ptrace", false, true, true},
+		{"both", true, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
