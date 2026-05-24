@@ -64,3 +64,15 @@ func TestCheckCommand_OpaqueDeniedWhenNoExecveEnforcement(t *testing.T) {
 		t.Errorf("CheckCommand: got %s rule=%q, want deny shellc-opaque-script", dec2.PolicyDecision, dec2.Rule)
 	}
 }
+
+// Even with execve enforcement active, a genuinely-denied DERIVABLE command
+// (not opaque) must still be denied at pre-check — only the blunt opaque
+// pre-deny is relaxed, never real policy. This is the security invariant the
+// whole interception-aware change depends on (issue #375).
+func TestCheckCommand_DerivableDenyStillDeniedWhenExecveEnforced(t *testing.T) {
+	e := newInterceptionTestEngine(t)
+	dec := e.CheckCommandWithExecve("/bin/sh", []string{"-c", "shutdown now"}, true)
+	if dec.PolicyDecision != types.DecisionDeny || dec.Rule != "deny-shutdown" {
+		t.Fatalf("got %s rule=%q, want deny rule=deny-shutdown (derivable deny must survive execve relaxation)", dec.PolicyDecision, dec.Rule)
+	}
+}
