@@ -580,7 +580,24 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 	return dec
 }
 
+// CheckCommand evaluates a command against the policy with no assumption of
+// runtime execve interception (opaque shell-c scripts are pre-denied when a
+// restrictive command rule is present). See CheckCommandWithExecve for callers
+// on an execve-policed execution path.
 func (e *Engine) CheckCommand(command string, args []string) Decision {
+	return e.checkCommand(command, args, false)
+}
+
+// CheckCommandWithExecve is CheckCommand for callers whose execution path has
+// runtime execve interception active (seccomp USER_NOTIF or ptrace), so every
+// inner execve is policed by CheckExecve. When execveEnforcementActive is true
+// the opaque shell-c pre-deny is skipped — the script runs and its inner
+// commands are enforced precisely at exec time. Issue #375.
+func (e *Engine) CheckCommandWithExecve(command string, args []string, execveEnforcementActive bool) Decision {
+	return e.checkCommand(command, args, execveEnforcementActive)
+}
+
+func (e *Engine) checkCommand(command string, args []string, execveEnforcementActive bool) Decision {
 	result, _ := e.matchCommandRules(command, args)
 	// For `<shell> -c "<simple-cmd>"` invocations, also evaluate the
 	// underlying binary so a rule like `deny bin=shutdown` fires for
@@ -615,7 +632,7 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 					result = dec
 					resultStrictness = decisionStrictness(dec.PolicyDecision)
 				}
-			} else if e.hasRestrictiveCommandRule && shellparse.IsOpaqueShellC(cur, curArgs) {
+			} else if e.hasRestrictiveCommandRule && !execveEnforcementActive && shellparse.IsOpaqueShellC(cur, curArgs) {
 				// Opaque scripts (metachars, pipes, subshells, globs, …) can
 				// execute binaries we can't predict. With any restrictive
 				// command rule in the policy, silently falling through to
