@@ -27,7 +27,8 @@ var (
 var sessionIDRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
 
 type Session struct {
-	mu sync.Mutex
+	mu                sync.Mutex
+	cwdEscapeWarnOnce sync.Once // #377: latches the one-time symlink-cwd-escape diagnostic
 
 	ID             string
 	State          types.SessionState
@@ -949,6 +950,25 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 	}
 	// If EvalSymlinks fails (e.g., file doesn't exist), the lexical check above is sufficient
 	return virt, real, nil
+}
+
+// GetCwd returns the session's current virtual working directory. It is a
+// lightweight accessor (no env/history copy) for hot-path callers such as the
+// FUSE symlink-escape check (#377).
+func (s *Session) GetCwd() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Cwd
+}
+
+// FirstCwdEscapeWarn reports true exactly once per session. The FUSE layer uses
+// it to emit a single diagnostic when the process cwd is a symlink whose target
+// escapes the workspace mount under symlink_escape="deny" (#377), so the
+// otherwise-opaque "everything denied" failure is self-describing.
+func (s *Session) FirstCwdEscapeWarn() bool {
+	first := false
+	s.cwdEscapeWarnOnce.Do(func() { first = true })
+	return first
 }
 
 func (s *Session) GetCwdEnvHistory() (cwd string, env map[string]string, history []string) {
