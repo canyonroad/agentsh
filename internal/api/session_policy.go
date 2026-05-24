@@ -57,3 +57,12 @@ func (a *App) SwapPolicy(eng *policy.Engine) *policy.Engine {
 	a.policy = eng
 	return prev
 }
+
+// execveEnforcementActive reports whether inner execve calls will be policed at
+// runtime for sandboxed commands on this host: either seccomp execve
+// interception is enabled, or a ptrace tracer is attached. Used to relax the
+// opaque shell-c pre-deny (issue #375) — when true, CheckExecve enforces the
+// command policy on every inner exec, so the static pre-deny is redundant.
+func (a *App) execveEnforcementActive() bool {
+	return a.cfg.Sandbox.Seccomp.Execve.Enabled || a.ptraceTracer != nil
+}
