@@ -308,7 +308,9 @@ func TestIsShellCBypassAttempt(t *testing.T) {
 	}{
 		// Bypass — flag forms we refuse to parse.
 		{"exec -a NAME CMD", "sh", []string{"-c", "exec -a foo shutdown"}, true},
-		{"command -v CMD", "sh", []string{"-c", "command -v shutdown"}, true},
+		// command -v/-V is introspection (issue #377): prints whether NAME exists,
+		// does NOT execute it → not a bypass.
+		{"command -v CMD (introspection)", "sh", []string{"-c", "command -v shutdown"}, false},
 		{"command -p CMD", "sh", []string{"-c", "command -p shutdown"}, true},
 		{"nohup --help CMD", "sh", []string{"-c", "nohup --help shutdown"}, true},
 		{"nohup -x CMD", "sh", []string{"-c", "nohup -x shutdown"}, true},
@@ -351,7 +353,9 @@ func TestIsShellCBypassAttempt(t *testing.T) {
 		// Bypass — env-assignment prefix followed by a wrapper in an
 		// UNPARSABLE flag form (inner bypass survives the parse-through).
 		{"assign + exec -a", "sh", []string{"-c", "VAR=x exec -a foo shutdown"}, true},
-		{"assign + command -v", "sh", []string{"-c", "FOO=1 command -v shutdown"}, true},
+		// command -v is introspection (issue #377): not a bypass even with an
+		// env-assignment prefix, because command -v still doesn't execute NAME.
+		{"assign + command -v (introspection)", "sh", []string{"-c", "FOO=1 command -v shutdown"}, false},
 		{"assign + nohup --preserve-status", "sh", []string{"-c", "PATH=/tmp nohup --preserve-status=1 shutdown"}, true},
 
 		// Bypass — env-assignment with a VALUE byte outside the narrow

@@ -800,8 +800,10 @@ func isUnquotedAllowedByte(b byte) bool {
 //   - exec -a NAME CMD … : `-a` sets a custom argv0. We don't parse it
 //     (one could, but we'd need to validate NAME and the subsequent CMD
 //     shape), so any `-` after `exec` fails closed.
-//   - command -v / -V / -p : these print info or change the PATH; none
-//     are transparent forwarding.
+//   - command -p : executes NAME under a default PATH; bypass.
+//     command -v / -V : read-only introspection (prints whether NAME
+//     exists / its type). These are returned as-is (bypass=false) so the
+//     builtin classifier hands them to the outer shell rule (issue #377).
 //   - nohup -FLAG … : POSIX nohup has no options; GNU nohup only has
 //     --help / --version, neither of which runs a command. Any `-` is
 //     either a deliberate bypass or a no-op.
@@ -828,6 +830,15 @@ func stripWrappers(tokens []string) ([]string, bool) {
 		if wrapper == "nice" && next == "-n" && len(tokens) >= 3 && isNumericIncrement(tokens[2]) {
 			tokens = tokens[3:]
 			continue
+		}
+		// `command -v`/`-V NAME` is introspection: it prints whether NAME
+		// exists / its type and does NOT execute it. Stop stripping so the
+		// builtin classifier (isShellBuiltin("command")) hands this back to the
+		// outer shell rule rather than flagging a wrapper-bypass. `command -p`
+		// (which executes NAME under a default PATH) is intentionally excluded.
+		// Issue #377.
+		if wrapper == "command" && (next == "-v" || next == "-V") {
+			return tokens, false
 		}
 		return nil, true
 	}
@@ -995,10 +1006,12 @@ func hasShellCWithUnsafeOptions(shellArgs []string) bool {
 // `nohup` (a bare name with no rule) as the policy target and falling
 // through to the outer shell allow.
 //
-// Wrappers followed by any flag token (e.g. `exec -a`, `command -v`,
-// `nice -n 19`, `env -i`, `time -p`) are rejected by the caller — flag
-// parsing is wrapper-specific and out of scope; failing to derive at all
-// is the safe default.
+// Wrappers followed by any flag token are handled by the caller: most
+// are rejected (e.g. `exec -a`, `command -p`, `env -i`, `time -p`) as
+// bypass — flag parsing is wrapper-specific and out of scope; failing to
+// derive is the safe default. The exception is `command -v`/`-V`, which
+// is introspection (never executes NAME) and is returned as-is; see
+// stripWrappers (issue #377).
 func isTransparentWrapper(tok string) bool {
 	switch tok {
 	case "exec", "command", "nohup", "nice", "time", "env":
