@@ -140,6 +140,11 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 	}
 
+	// These config-schema invariants are also enforced by config.validateConfig
+	// (run by config.Load), so `agentsh config validate` catches them pre-deploy
+	// (issue #376). The calls here are defense-in-depth for any server built from
+	// a config that did not pass through config.Load. New config-schema invariants
+	// belong in config.validateConfig, not here.
 	if err := cfg.Sandbox.Validate(); err != nil {
 		return nil, fmt.Errorf("sandbox config: %w", err)
 	}

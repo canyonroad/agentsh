@@ -2438,5 +2438,16 @@ func validateConfig(cfg *Config) error {
 			"blocked_socket_families", loaded.BlockedSocketFamilies,
 			"syscalls", loaded.Syscalls)
 	}
+	// Config-schema cross-field invariants that the server also enforces at
+	// startup. Validated here so `agentsh config validate` (and the shim's
+	// auto-start path) catch them before deploy rather than surfacing as a
+	// generic "server unreachable" at runtime (issue #376). Host/environment
+	// checks (capabilities, etc.) intentionally stay at server startup.
+	if err := cfg.Sandbox.Validate(); err != nil {
+		return fmt.Errorf("sandbox config: %w", err)
+	}
+	if err := cfg.Policies.Signing.Validate(); err != nil {
+		return fmt.Errorf("signing config: %w", err)
+	}
 	return nil
 }
