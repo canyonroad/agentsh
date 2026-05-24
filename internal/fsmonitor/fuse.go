@@ -5,6 +5,7 @@ package fsmonitor
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/internal/pathutil"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/trash"
@@ -498,12 +500,36 @@ func (n *node) checkWithExist(_ context.Context, virtPath string, op string, mus
 			// resolution failures (broken link, missing parent) remain a
 			// hard deny in both modes since there is no useful real path
 			// to evaluate.
+			//
+			// In symlink_escape="deny" mode we normally blanket-deny any symlink
+			// whose target escapes the workspace mount. But when the process cwd is
+			// itself such a symlink (common in Daytona/devcontainer layouts where
+			// /workspace is a symlink), that blanket deny rejects EVERY command run
+			// from the cwd. Treat the cwd and its subtree like evaluate mode:
+			// resolve the escaped target and let file_rules decide. Escapes OUTSIDE
+			// the cwd subtree stay blanket-denied, so deny mode's core protection is
+			// preserved. (#377)
 			escapeDeny := n.hooks != nil && n.hooks.SymlinkEscapeDeny
+			inCwdSubtree := false
+			cwd := ""
+			if escapeDeny && n.hooks.Session != nil {
+				cwd = n.hooks.Session.GetCwd()
+				inCwdSubtree = pathutil.IsUnderRoot(virtPath, cwd)
+			}
 			var escaped string
-			if !escapeDeny {
+			if !escapeDeny || inCwdSubtree {
 				escaped = evalEscapedSymlink(realRoot, virtPath, n.vroot())
 			}
 			if escaped != "" {
+				// Emit the one-time diagnostic only when the cwd-subtree exception
+				// actually changed the outcome (deny mode + a real symlink escape
+				// resolving through the cwd). This avoids a misleading warning for
+				// ".."-escapes, which IsUnderRoot byte-matches as in-subtree but
+				// evalEscapedSymlink rejects (escaped == "").
+				if inCwdSubtree && n.hooks.Session.FirstCwdEscapeWarn() {
+					slog.Warn("symlink_escape=deny: process cwd is a symlink escaping the workspace mount; evaluating its subtree against file_rules instead of blanket-denying",
+						"session", n.hooks.SessionID, "cwd", cwd)
+				}
 				policyPath = escaped
 			} else {
 				return policy.Decision{
