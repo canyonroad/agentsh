@@ -69,8 +69,8 @@ func TestWrapInit_ShimGuard_OpaqueInterceptionAware(t *testing.T) {
 			t.Fatalf("create session: %v", err)
 		}
 		resp, code, err := app.wrapInitCore(s, s.ID, req)
-		if code == http.StatusForbidden {
-			t.Fatalf("code = 403 (err=%v), want non-403 (opaque allowed when execve enforced)", err)
+		if code != http.StatusOK {
+			t.Fatalf("code = %d (err=%v), want 200 (opaque allowed/wrap-init proceeds when execve enforced)", code, err)
 		}
 		if resp.NotifySocket != "" {
 			t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(resp.NotifySocket)) })
