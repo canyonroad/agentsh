@@ -160,4 +160,11 @@ type WrapInitResponse struct {
 	NotifySocket          string            `json:"notify_socket"`
 	SignalSocket          string            `json:"signal_socket,omitempty"`
 	WrapperEnv            map[string]string `json:"wrapper_env"`
+	// EnvInject carries operator-configured sandbox.env_inject values for the
+	// client (shell shim / CLI wrap) to overlay onto the executed command's
+	// environment. On the client-spawned wrap path the server does not build
+	// the child env itself, so these must be plumbed through the response and
+	// applied client-side; on the server-spawned exec path env_inject is
+	// applied directly in internal/api/exec.go instead. Issue #374.
+	EnvInject map[string]string `json:"env_inject,omitempty"`
 }

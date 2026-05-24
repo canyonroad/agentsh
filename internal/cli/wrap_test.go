@@ -591,6 +591,77 @@ func TestWrapLaunchConfig_EnvContainsSessionAndWrapper(t *testing.T) {
 	}
 }
 
+func TestWrapLaunchConfig_AppliesEnvInject(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("agentsh-unixwrap env_inject path is Linux-only")
+	}
+
+	mc := &mockWrapClient{
+		wrapInitResp: types.WrapInitResponse{
+			WrapperBinary: "/bin/true",
+			NotifySocket:  "/tmp/agentsh-notify-test.sock",
+			WrapperEnv: map[string]string{
+				"AGENTSH_SECCOMP_CONFIG": `{"unix_socket_enabled":true}`,
+			},
+			EnvInject: map[string]string{
+				"BASH_ENV": "/usr/lib/agentsh/bash_startup.sh",
+			},
+		},
+	}
+
+	cfg := &clientConfig{serverAddr: "http://127.0.0.1:18080"}
+	lcfg, err := setupWrapInterception(context.Background(), mc, "test-session", "/bin/echo", nil, cfg)
+	require.NoError(t, err)
+	require.NotNil(t, lcfg)
+
+	envMap := make(map[string]bool)
+	for _, e := range lcfg.env {
+		envMap[e] = true
+	}
+	assert.True(t, envMap["BASH_ENV=/usr/lib/agentsh/bash_startup.sh"],
+		"wrap env should contain injected BASH_ENV (issue #374)")
+
+	for _, f := range lcfg.extraFiles {
+		if f != nil {
+			f.Close()
+		}
+	}
+}
+
+func TestWrapLaunchConfig_AppliesEnvInject_PtraceMode(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("ptrace wrap mode is Linux-only")
+	}
+
+	mc := &mockWrapClient{
+		wrapInitResp: types.WrapInitResponse{
+			PtraceMode:   true,
+			NotifySocket: "/tmp/agentsh-ptrace-test.sock",
+			EnvInject: map[string]string{
+				"BASH_ENV": "/usr/lib/agentsh/bash_startup.sh",
+			},
+		},
+	}
+
+	cfg := &clientConfig{serverAddr: "http://127.0.0.1:18080"}
+	lcfg, err := setupWrapInterception(context.Background(), mc, "test-session", "/bin/echo", nil, cfg)
+	require.NoError(t, err)
+	require.NotNil(t, lcfg)
+
+	envMap := make(map[string]bool)
+	for _, e := range lcfg.env {
+		envMap[e] = true
+	}
+	assert.True(t, envMap["BASH_ENV=/usr/lib/agentsh/bash_startup.sh"],
+		"ptrace-mode wrap env should contain injected BASH_ENV (issue #374)")
+
+	for _, f := range lcfg.extraFiles {
+		if f != nil {
+			f.Close()
+		}
+	}
+}
+
 func TestWrapLaunchConfig_EnvIncludesInSessionWhenSafe(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("wrap interception requires Linux or macOS")

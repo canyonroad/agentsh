@@ -14,6 +14,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/agentsh/agentsh/internal/envinject"
 	"github.com/agentsh/agentsh/internal/wraphandoff"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
@@ -31,6 +32,9 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 		notifySocket := wrapResp.NotifySocket
 
 		env := buildWrapEnv(os.Environ(), sessID, cfg.serverAddr, wrapResp.SafeToBypassShellShim)
+		// Overlay sandbox.env_inject so injected vars reach the command in
+		// ptrace mode too, matching the seccomp/shim paths (issue #374).
+		env = envinject.Apply(env, wrapResp.EnvInject)
 
 		// connHolder stores the keepalive connection set by ptracePostStart.
 		var connHolder net.Conn
@@ -132,6 +136,10 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 
 	// Build env for the wrapped process
 	env := buildWrapEnv(os.Environ(), sessID, cfg.serverAddr, wrapResp.SafeToBypassShellShim)
+	// Overlay operator-configured sandbox.env_inject (override semantics)
+	// before the internal markers, matching the shim and server-spawned exec
+	// paths so injected vars reach the executed command (issue #374).
+	env = envinject.Apply(env, wrapResp.EnvInject)
 	env = append(env, "AGENTSH_NOTIFY_SOCK_FD=3") // fd 3 = ExtraFiles[0]
 	if hasSignalSocket {
 		env = append(env, "AGENTSH_SIGNAL_SOCK_FD=4") // fd 4 = ExtraFiles[1]
