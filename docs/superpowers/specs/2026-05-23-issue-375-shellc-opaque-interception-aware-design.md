@@ -45,20 +45,23 @@ When `execveEnforcementActive` is true, the opaque script falls through to norma
 
 ### Plumbing `execveEnforcementActive`
 
-The signal reflects whether inner `execve` will actually be policed for the session:
+`execve` enforcement is a property of the **execution path**, not of the policy itself, so the signal is passed in at the command pre-check call site rather than stored on the engine:
+
+- Refactor `CheckCommand` into an internal `checkCommand(command, args, execveEnforcementActive bool)` holding the existing logic, with the opaque gate becoming `... && !execveEnforcementActive && shellparse.IsOpaqueShellC(...)`.
+- `CheckCommand(command, args)` stays as a thin wrapper calling `checkCommand(command, args, false)` — every existing caller (tests, non-Linux platform adapters, `context_eval`) is untouched and keeps today's hard-deny behavior.
+- Add `CheckCommandWithExecve(command, args, execveEnforcementActive bool)` calling `checkCommand(command, args, execveEnforcementActive)`.
+- Add an `App` helper computing the signal once:
 
 ```
-execveEnforcementActive = cfg.Sandbox.Seccomp.Execve.Enabled || (a.ptraceTracer != nil)
+func (a *App) execveEnforcementActive() bool {
+    return a.cfg.Sandbox.Seccomp.Execve.Enabled || a.ptraceTracer != nil
+}
 ```
 
-- `cfg.Sandbox.Seccomp.Execve.Enabled` is the seccomp-execve intent; a runtime probe failure fails closed in `agentsh-unixwrap` (see security analysis), so the config bool is safe to trust here.
-- `a.ptraceTracer != nil` is the App's existing *runtime* signal that ptrace is actually attached/handling execve (the same check `core.go` uses), rather than the config intent `Sandbox.Ptrace.Enabled` — so a ptrace that failed to initialize does not wrongly relax the pre-check.
-
-(`sandbox.seccomp.execve` and `sandbox.ptrace` are mutually exclusive per config validation, so at most one term is true.)
-
-- Add an immutable field `execveEnforcementActive bool` to `policy.Engine`, alongside `hasRestrictiveCommandRule`, with a setter `SetExecveEnforcementActive(bool)`.
-- The `App` computes the flag once from its config and applies it to every engine it builds: the global engine (policy loader / `SwapPolicy`) and the per-session engine (`internal/api/core.go`, `NewEngineWithVariables`).
-- Engines constructed elsewhere (tests, platform adapters that don't run the Linux wrapper) leave the field `false` — i.e. the safe, current hard-deny behavior. This avoids threading a new parameter through every `NewEngine` caller.
+  - `cfg.Sandbox.Seccomp.Execve.Enabled` is the seccomp-execve intent; a runtime probe failure fails closed in `agentsh-unixwrap` (see security analysis), so the config bool is safe to trust.
+  - `a.ptraceTracer != nil` is the App's existing *runtime* signal that ptrace is attached (the same check `core.go` uses), rather than the config intent `Sandbox.Ptrace.Enabled`, so a ptrace that failed to initialize does not wrongly relax the pre-check.
+  - (`sandbox.seccomp.execve` and `sandbox.ptrace` are mutually exclusive per config validation, so at most one term is true.)
+- Update the command pre-check call sites that run the Linux execve-intercepted path to call `CheckCommandWithExecve(cmd, args, a.execveEnforcementActive())`: `internal/api/exec_stream.go`, `internal/api/pty_core.go`, `internal/api/grpc.go`, and the two sites in `internal/api/core.go`. All have `App` access. Non-execution callers keep `CheckCommand` (i.e. `false`).
 
 ### Why this is safe (security analysis)
 
@@ -83,8 +86,8 @@ execveEnforcementActive = cfg.Sandbox.Seccomp.Execve.Enabled || (a.ptraceTracer 
 
 ## Affected files
 
-- `internal/policy/engine.go` — new field + setter; gate at the opaque-deny branch.
-- `internal/api` — `App` computes the flag and applies it to global + per-session engines (policy loader / `SwapPolicy`, `core.go` engine build).
+- `internal/policy/engine.go` — split `CheckCommand` into `checkCommand(…, execveEnforcementActive bool)` + `CheckCommand` (passes `false`) + `CheckCommandWithExecve`; gate the opaque-deny branch on `!execveEnforcementActive`.
+- `internal/api` — add `App.execveEnforcementActive()`; switch the five command pre-check call sites (`exec_stream.go`, `pty_core.go`, `grpc.go`, two in `core.go`) to `CheckCommandWithExecve`.
 - Tests in `internal/policy` (and a confirmation run of `internal/integration`).
 
 ## Out of scope (tracked separately if desired)
