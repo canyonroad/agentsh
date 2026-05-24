@@ -61,7 +61,9 @@ func (a *App) execveEnforcementActive() bool {
   - `cfg.Sandbox.Seccomp.Execve.Enabled` is the seccomp-execve intent; a runtime probe failure fails closed in `agentsh-unixwrap` (see security analysis), so the config bool is safe to trust.
   - `a.ptraceTracer != nil` is the App's existing *runtime* signal that ptrace is attached (the same check `core.go` uses), rather than the config intent `Sandbox.Ptrace.Enabled`, so a ptrace that failed to initialize does not wrongly relax the pre-check.
   - (`sandbox.seccomp.execve` and `sandbox.ptrace` are mutually exclusive per config validation, so at most one term is true.)
-- Update the command pre-check call sites that run the Linux execve-intercepted path to call `CheckCommandWithExecve(cmd, args, a.execveEnforcementActive())`: `internal/api/exec_stream.go`, `internal/api/pty_core.go`, `internal/api/grpc.go`, and the two sites in `internal/api/core.go`. All have `App` access. Non-execution callers keep `CheckCommand` (i.e. `false`).
+- Update the command pre-check call sites that run the Linux execve-intercepted path to call `CheckCommandWithExecve(cmd, args, a.execveEnforcementActive())`: `internal/api/exec_stream.go`, `internal/api/pty_core.go`, `internal/api/grpc.go`, the two sites in `internal/api/core.go`, **and the shim wrap-init guard in `internal/api/wrap.go` (`wrapInitCore`, the `req.Mode == "shim"` branch)**. All have `App` access. Non-execution callers keep `CheckCommand` (i.e. `false`).
+
+  The shim wrap-init guard is essential, not optional: it is the pre-check the shell-shim kernel-install path hits (the reporter's exact scenario — Daytona runs every command as `bash -c "<script>"`). Without making it interception-aware, an opaque shim command is denied here, returns HTTP 403, and the shim falls back to the `agentsh exec` path — so the command runs but **bypasses the kernel-install wrapper entirely**, defeating the enforcement path for essentially all of the reporter's traffic. Making the guard interception-aware lets wrap-init proceed so the shim runs the wrapper directly, with inner execs policed at depth. Genuinely-denied *derivable* commands (e.g. `sh -c "shutdown"`) still derive to their deny rule and 403 as before; only the blunt opaque deny is relaxed.
 
 ### Why this is safe (security analysis)
 
@@ -87,7 +89,7 @@ func (a *App) execveEnforcementActive() bool {
 ## Affected files
 
 - `internal/policy/engine.go` — split `CheckCommand` into `checkCommand(…, execveEnforcementActive bool)` + `CheckCommand` (passes `false`) + `CheckCommandWithExecve`; gate the opaque-deny branch on `!execveEnforcementActive`.
-- `internal/api` — add `App.execveEnforcementActive()`; switch the five command pre-check call sites (`exec_stream.go`, `pty_core.go`, `grpc.go`, two in `core.go`) to `CheckCommandWithExecve`.
+- `internal/api` — add `App.execveEnforcementActive()`; switch the six command pre-check call sites (`exec_stream.go`, `pty_core.go`, `grpc.go`, two in `core.go`, and the shim wrap-init guard in `wrap.go`) to `CheckCommandWithExecve`.
 - Tests in `internal/policy` (and a confirmation run of `internal/integration`).
 
 ## Out of scope (tracked separately if desired)

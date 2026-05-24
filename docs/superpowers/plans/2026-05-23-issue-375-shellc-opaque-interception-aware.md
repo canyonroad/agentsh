@@ -343,6 +343,18 @@ git commit -m "fix(#375): pass execve-enforcement signal into command pre-check 
 
 ---
 
+## Task 3b: Shim wrap-init guard (found in review)
+
+The shell-shim kernel-install path hits a separate command pre-check in `wrapInitCore` (`internal/api/wrap.go`, the `req.Mode == "shim"` branch). Left on plain `CheckCommand`, an opaque shim command is denied here → HTTP 403 → the shim falls back to `agentsh exec`, bypassing the kernel-install wrapper entirely (defeating enforcement for Daytona-style all-`bash -c` traffic). Make it interception-aware too.
+
+**Files:** Modify `internal/api/wrap.go` (one line in the shim branch); Test `internal/api/wrap_shim_opaque_test.go`.
+
+- [ ] Write `TestWrapInit_ShimGuard_OpaqueInterceptionAware`: build an App via `newTestAppForWrap` + `SwapPolicy` with a restrictive policy (`deny-shutdown` + `allow-shells`); call `wrapInitCore` with `Mode:"shim"`, `AgentCommand:"/bin/sh"`, `AgentArgs:["-c","echo $HOME | head"]`. Assert: execve OFF → code 403; execve ON (`cfg.Sandbox.Seccomp.Execve.Enabled=true`, `WrapperBin:"/bin/true"`, unix sockets enabled) → code 200. Run: expect execve-ON subtest to FAIL (403) first.
+- [ ] In `wrap.go` change `dec := engine.CheckCommand(req.AgentCommand, req.AgentArgs)` → `dec := engine.CheckCommandWithExecve(req.AgentCommand, req.AgentArgs, a.execveEnforcementActive())`. Run: both subtests PASS.
+- [ ] Commit: `fix(#375): make shim wrap-init opaque guard interception-aware`.
+
+---
+
 ## Task 4: Full verification
 
 **Files:** none (verification only)
