@@ -25,6 +25,25 @@ func detectFileEnforcementBackend(caps *SecurityCapabilities) string {
 	return "none"
 }
 
+// seccompBackendDetail explains the seccomp verdict, distinguishing
+// "kernel-supported" from "installable here" (issue #388). caps.SeccompInstallDetail
+// already reads like "NEW_LISTENER filter install failed: EBUSY (errno 16)"
+// (set by realCheckSeccompInstall), so this only prepends the kernel-support
+// context — no double "install failed" wording.
+func seccompBackendDetail(caps *SecurityCapabilities) string {
+	if caps.SeccompInstallable {
+		return ""
+	}
+	if caps.Seccomp {
+		d := caps.SeccompInstallDetail
+		if d == "" {
+			d = "NEW_LISTENER install failed here"
+		}
+		return "kernel supports user-notify, but " + d
+	}
+	return "" // kernel doesn't support user-notify; existing Available=false speaks for itself
+}
+
 // buildLinuxDomains builds the five protection domains from cached probe results and capability flags.
 func buildLinuxDomains(caps *SecurityCapabilities) []ProtectionDomain {
 	fuseMountMethod := "none"
@@ -83,14 +102,14 @@ func buildLinuxDomains(caps *SecurityCapabilities) []ProtectionDomain {
 			Backends: []DetectedBackend{
 				{Name: "fuse", Available: caps.FUSE, Detail: fuseMountMethod, Description: "file interception, soft-delete, redirect", CheckMethod: "probe"},
 				{Name: "landlock", Available: caps.Landlock, Detail: landlockDetail, Description: "kernel path restrictions", CheckMethod: "syscall"},
-				{Name: "seccomp-notify", Available: caps.Seccomp, Detail: "", Description: "openat/stat enforcement", CheckMethod: "probe"},
+				{Name: "seccomp-notify", Available: caps.SeccompInstallable, Detail: seccompBackendDetail(caps), Description: "openat/stat enforcement", CheckMethod: "probe"},
 			},
 			Active: caps.FileEnforcement,
 		},
 		{
 			Name: "Command Control", Weight: WeightCommandControl,
 			Backends: []DetectedBackend{
-				{Name: "seccomp-execve", Available: caps.Seccomp, Detail: "", Description: "execve interception", CheckMethod: "probe"},
+				{Name: "seccomp-execve", Available: caps.SeccompInstallable, Detail: seccompBackendDetail(caps), Description: "execve interception", CheckMethod: "probe"},
 				{Name: "ptrace", Available: caps.Ptrace, Detail: "", Description: "syscall tracing", CheckMethod: "probe"},
 			},
 			Active: commandActive,
@@ -128,9 +147,9 @@ func buildLinuxDomains(caps *SecurityCapabilities) []ProtectionDomain {
 // wrapperDependentBackends lists backends that require agentsh-unixwrap.
 // These are marked unavailable when the wrapper binary is not on PATH.
 var wrapperDependentBackends = map[string]bool{
-	"seccomp-notify":  true,
-	"landlock":        true,
-	"seccomp-execve":  true,
+	"seccomp-notify":   true,
+	"landlock":         true,
+	"seccomp-execve":   true,
 	"landlock-network": true,
 }
 
@@ -154,6 +173,7 @@ func applyWrapperAvailability(domains []ProtectionDomain, secCaps *SecurityCapab
 	// These must be cleared before the domain loop because SelectMode() and
 	// the Active derivation read from secCaps.
 	secCaps.Seccomp = false
+	secCaps.SeccompInstallable = false
 	secCaps.Landlock = false
 	secCaps.LandlockNetwork = false
 
@@ -216,15 +236,16 @@ func applyWrapperAvailability(domains []ProtectionDomain, secCaps *SecurityCapab
 // backwardCompatCaps builds the flat capabilities map for backward compatibility.
 func backwardCompatCaps(caps *SecurityCapabilities, domains []ProtectionDomain) map[string]any {
 	m := map[string]any{
-		"seccomp":             caps.Seccomp,
-		"seccomp_user_notify": caps.Seccomp,
-		"seccomp_basic":       caps.SeccompBasic,
-		"landlock":            caps.Landlock,
-		"landlock_abi":        caps.LandlockABI,
-		"landlock_network":    caps.LandlockNetwork,
-		"fuse":                caps.FUSE,
-		"ptrace":              caps.Ptrace,
-		"file_enforcement":    caps.FileEnforcement,
+		"seccomp":                    caps.Seccomp,
+		"seccomp_user_notify":        caps.SeccompInstallable, // installable here (issue #388)
+		"seccomp_user_notify_kernel": caps.Seccomp,            // kernel-supported (read-only probe)
+		"seccomp_basic":              caps.SeccompBasic,
+		"landlock":                   caps.Landlock,
+		"landlock_abi":               caps.LandlockABI,
+		"landlock_network":           caps.LandlockNetwork,
+		"fuse":                       caps.FUSE,
+		"ptrace":                     caps.Ptrace,
+		"file_enforcement":           caps.FileEnforcement,
 	}
 	for _, d := range domains {
 		for _, b := range d.Backends {

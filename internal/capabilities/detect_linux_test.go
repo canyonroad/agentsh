@@ -4,6 +4,7 @@ package capabilities
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -77,12 +78,13 @@ func TestApplyWrapperAvailability_Missing(t *testing.T) {
 
 	// Build domains with all backends available
 	caps := &SecurityCapabilities{
-		Seccomp:         true,
-		Landlock:        true,
-		LandlockABI:     5,
-		LandlockNetwork: true,
-		FUSE:            true,
-		Ptrace:          true,
+		Seccomp:            true,
+		SeccompInstallable: true,
+		Landlock:           true,
+		LandlockABI:        5,
+		LandlockNetwork:    true,
+		FUSE:               true,
+		Ptrace:             true,
 	}
 	caps.FileEnforcement = detectFileEnforcementBackend(caps)
 	domains := buildLinuxDomains(caps)
@@ -112,6 +114,9 @@ func TestApplyWrapperAvailability_Missing(t *testing.T) {
 	// secCaps fields should be cleared for wrapper-dependent capabilities
 	if caps.Seccomp {
 		t.Error("Seccomp should be false when wrapper missing")
+	}
+	if caps.SeccompInstallable {
+		t.Error("SeccompInstallable should be false when wrapper missing")
 	}
 	if caps.Landlock {
 		t.Error("Landlock should be false when wrapper missing")
@@ -158,6 +163,9 @@ func TestApplyWrapperAvailability_Missing_NoFUSE(t *testing.T) {
 	if caps.Seccomp {
 		t.Error("Seccomp should be false when wrapper missing")
 	}
+	if caps.SeccompInstallable {
+		t.Error("SeccompInstallable should be false when wrapper missing")
+	}
 	if caps.Landlock {
 		t.Error("Landlock should be false when wrapper missing")
 	}
@@ -174,11 +182,12 @@ func TestApplyWrapperAvailability_Present(t *testing.T) {
 	defer func() { wrapperLookPath = orig }()
 
 	caps := &SecurityCapabilities{
-		Seccomp:     true,
-		Landlock:    true,
-		LandlockABI: 5,
-		FUSE:        true,
-		Ptrace:      true,
+		Seccomp:            true,
+		SeccompInstallable: true,
+		Landlock:           true,
+		LandlockABI:        5,
+		FUSE:               true,
+		Ptrace:             true,
 	}
 	caps.FileEnforcement = detectFileEnforcementBackend(caps)
 	domains := buildLinuxDomains(caps)
@@ -261,4 +270,73 @@ func TestDetect_WrapperMissing_Tip(t *testing.T) {
 	if result.SecurityMode == "full" || result.SecurityMode == "landlock" {
 		t.Errorf("SecurityMode = %q, should not report full/landlock without wrapper", result.SecurityMode)
 	}
+}
+
+func TestBuildLinuxDomains_SeccompInstallFalseFlipsVerdictAndScore(t *testing.T) {
+	caps := &SecurityCapabilities{
+		Seccomp:              true,  // kernel-supported
+		SeccompInstallable:   false, // but install fails here (e.g. Daytona EBUSY)
+		SeccompInstallDetail: "EBUSY (errno 16)",
+	}
+	domains := buildLinuxDomains(caps)
+
+	exec := findBackend(t, domains, "Command Control", "seccomp-execve")
+	if exec.Available {
+		t.Error("seccomp-execve must be unavailable when install fails")
+	}
+	if !strings.Contains(exec.Detail, "EBUSY") || !strings.Contains(strings.ToLower(exec.Detail), "kernel") {
+		t.Errorf("seccomp-execve detail should name both kernel-support and the errno; got %q", exec.Detail)
+	}
+	notify := findBackend(t, domains, "File Protection", "seccomp-notify")
+	if notify.Available {
+		t.Error("seccomp-notify must be unavailable when install fails")
+	}
+
+	// ptrace is a genuine fallback: with ptrace available, Command Control
+	// keeps full weight even though seccomp cannot install here. Pins that the
+	// score tracks installability without keying off seccomp specifically.
+	caps.Ptrace = true
+	ccPtrace := findDomain(t, buildLinuxDomains(caps), "Command Control")
+	if got := ComputeScore([]ProtectionDomain{ccPtrace}); got != WeightCommandControl {
+		t.Errorf("Command Control should score %d when ptrace is available (seccomp uninstallable); got %d", WeightCommandControl, got)
+	}
+
+	// With seccomp the only command backend, Command Control score must drop.
+	caps.Ptrace = false
+	domains = buildLinuxDomains(caps)
+	cc := findDomain(t, domains, "Command Control")
+	if ComputeScore([]ProtectionDomain{cc}) != 0 {
+		t.Error("Command Control should score 0 when neither seccomp-execve nor ptrace is available")
+	}
+}
+
+func TestBuildLinuxDomains_SeccompInstallTrueKeepsVerdict(t *testing.T) {
+	caps := &SecurityCapabilities{Seccomp: true, SeccompInstallable: true}
+	domains := buildLinuxDomains(caps)
+	if !findBackend(t, domains, "Command Control", "seccomp-execve").Available {
+		t.Error("seccomp-execve must be available when install succeeds")
+	}
+}
+
+func findDomain(t *testing.T, domains []ProtectionDomain, name string) ProtectionDomain {
+	t.Helper()
+	for _, d := range domains {
+		if d.Name == name {
+			return d
+		}
+	}
+	t.Fatalf("domain %q not found", name)
+	return ProtectionDomain{}
+}
+
+func findBackend(t *testing.T, domains []ProtectionDomain, domain, backend string) DetectedBackend {
+	t.Helper()
+	d := findDomain(t, domains, domain)
+	for _, b := range d.Backends {
+		if b.Name == backend {
+			return b
+		}
+	}
+	t.Fatalf("backend %q not found in %q", backend, domain)
+	return DetectedBackend{}
 }
