@@ -16,7 +16,7 @@ func TestValidateStrictMode(t *testing.T) {
 			name: "full mode with all caps",
 			mode: ModeFull,
 			caps: SecurityCapabilities{
-				Seccomp: true, EBPF: true, FUSE: true,
+				Seccomp: true, SeccompInstallable: true, EBPF: true, FUSE: true,
 			},
 			wantErr: false,
 		},
@@ -29,10 +29,18 @@ func TestValidateStrictMode(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "full mode seccomp kernel-supported but not installable",
+			mode: ModeFull,
+			caps: SecurityCapabilities{
+				Seccomp: true, SeccompInstallable: false, EBPF: true, FUSE: true,
+			},
+			wantErr: true,
+		},
+		{
 			name: "full mode missing eBPF",
 			mode: ModeFull,
 			caps: SecurityCapabilities{
-				Seccomp: true, EBPF: false, FUSE: true,
+				Seccomp: true, SeccompInstallable: true, EBPF: false, FUSE: true,
 			},
 			wantErr: true,
 		},
@@ -40,7 +48,7 @@ func TestValidateStrictMode(t *testing.T) {
 			name: "full mode missing FUSE",
 			mode: ModeFull,
 			caps: SecurityCapabilities{
-				Seccomp: true, EBPF: true, FUSE: false,
+				Seccomp: true, SeccompInstallable: true, EBPF: true, FUSE: false,
 			},
 			wantErr: true,
 		},

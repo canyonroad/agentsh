@@ -17,8 +17,8 @@ var modeRank = map[string]int{
 func ValidateStrictMode(mode string, caps *SecurityCapabilities) error {
 	switch mode {
 	case ModeFull:
-		if !caps.Seccomp {
-			return fmt.Errorf("strict mode %q requires seccomp", mode)
+		if !caps.SeccompInstallable {
+			return fmt.Errorf("strict mode %q requires an installable seccomp filter", mode)
 		}
 		if !caps.EBPF {
 			return fmt.Errorf("strict mode %q requires eBPF", mode)
