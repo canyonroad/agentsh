@@ -50,14 +50,17 @@ func TestFilter_AllowIsAllowlist(t *testing.T) {
 	}
 }
 
-func TestFilter_MaxKeys(t *testing.T) {
-	base := []string{"A=1", "B=2", "C=3", "D=4"}
-	got := Filter(base, &types.EnvPolicyWire{MaxKeys: 2})
-	// BuildEnv returns an error when max_keys is exceeded (does not truncate).
-	// Filter's error-path returns base unchanged, so got == base (4 entries).
-	// The policy violation is enforced by rejecting the env outright; the
-	// caller (Filter) falls back to base to avoid blocking the command.
-	if len(got) == 0 {
-		t.Error("max_keys error path must not return empty env")
+// max_bytes/max_keys are intentionally NOT carried on the wrap path (#379):
+// BuildEnv errors on overflow, which under fail-open would revert to the full
+// unfiltered env. EnvPolicyWire therefore has no such fields; a large env is
+// filtered by allow/deny only and never rejected.
+func TestFilter_NoMaxEnforcementLargeEnvNotRejected(t *testing.T) {
+	base := []string{"A=1", "B=2", "C=3", "D=4", "SECRET_TOKEN=x"}
+	got := Filter(base, &types.EnvPolicyWire{Deny: []string{"SECRET_*"}})
+	if has(got, "SECRET_TOKEN=x") {
+		t.Error("denied var must be stripped")
+	}
+	if len(got) != 4 {
+		t.Errorf("large env must pass through (minus denied), not be rejected; got %d entries: %v", len(got), got)
 	}
 }

@@ -19,10 +19,8 @@ func Filter(base []string, wire *types.EnvPolicyWire) []string {
 		return base
 	}
 	pol := policy.ResolvedEnvPolicy{
-		Allow:    wire.Allow,
-		Deny:     wire.Deny,
-		MaxBytes: wire.MaxBytes,
-		MaxKeys:  wire.MaxKeys,
+		Allow: wire.Allow,
+		Deny:  wire.Deny,
 	}
 	out, err := policy.BuildEnv(pol, base, nil)
 	if err != nil {
