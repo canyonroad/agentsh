@@ -493,6 +493,7 @@ type SandboxSeccompConfig struct {
 	UnixSocket  SandboxSeccompUnixConfig        `yaml:"unix_socket"`
 	Syscalls    SandboxSeccompSyscallConfig     `yaml:"syscalls"`
 	Execve      ExecveConfig                    `yaml:"execve"`
+	Shellc      SandboxSeccompShellcConfig      `yaml:"shellc"`
 	FileMonitor SandboxSeccompFileMonitorConfig `yaml:"file_monitor"`
 
 	// BlockedSocketFamilies lists AF_* families whose socket/socketpair calls
@@ -512,6 +513,21 @@ type SandboxSeccompConfig struct {
 	// Issue #369: kernels >=6 may accept the flag and then misbehave when
 	// the filter combines socket-family and file/metadata-family notify rules.
 	WaitKillable *bool `yaml:"wait_killable"`
+}
+
+// SandboxSeccompShellcConfig controls how the shell-shim handles opaque
+// `sh -c`/`bash -c` payloads that cannot be statically resolved to a single
+// command for policy pre-check (issue #378).
+type SandboxSeccompShellcConfig struct {
+	// Opaque selects handling for opaque shell-c scripts when the policy has
+	// a restrictive command rule:
+	//   "enforce" (default) — run only when per-exec enforcement is active
+	//                         (ptrace, or seccomp.execve + unix_sockets);
+	//                         otherwise deny shellc-opaque-script.
+	//   "allow"             — run even without per-exec enforcement (accepts
+	//                         the bypass risk; emits a warning).
+	//   "deny"              — always deny opaque scripts.
+	Opaque string `yaml:"opaque"`
 }
 
 // SandboxSeccompUnixConfig configures unix socket monitoring via seccomp.
@@ -899,9 +915,9 @@ type DevelopmentPProfConfig struct {
 // AuditWatchtowerConfig configures the WTP (Watchtower Transport Protocol) sink.
 // Spec: docs/superpowers/specs/2026-04-18-wtp-client-design.md §"Configuration & Wiring".
 type AuditWatchtowerConfig struct {
-	Enabled       bool   `yaml:"enabled"`
-	Endpoint      string `yaml:"endpoint"`   // host:port
-	SessionID     string `yaml:"session_id"` // optional; auto-generated ULID if empty
+	Enabled   bool   `yaml:"enabled"`
+	Endpoint  string `yaml:"endpoint"`   // host:port
+	SessionID string `yaml:"session_id"` // optional; auto-generated ULID if empty
 	// AgentID is the operator-visible identifier for this agent on the
 	// Watchtower wire. When empty (the default), buildWatchtowerStore
 	// falls back to os.Hostname() — preserving pre-existing behaviour
@@ -911,7 +927,7 @@ type AuditWatchtowerConfig struct {
 	// time (NOT in applyDefaults — non-daemon CLI subcommands like
 	// `agentsh config show` must not trigger hostname lookup).
 	AgentID       string `yaml:"agent_id"`
-	StateDir      string `yaml:"state_dir"`  // default GetUserStateDir() + "/wtp"; per-OS path differs (XDG_STATE_HOME on Linux, LOCALAPPDATA on Windows). See defaultWatchtowerStateDir.
+	StateDir      string `yaml:"state_dir"` // default GetUserStateDir() + "/wtp"; per-OS path differs (XDG_STATE_HOME on Linux, LOCALAPPDATA on Windows). See defaultWatchtowerStateDir.
 	EphemeralMode bool   `yaml:"ephemeral_mode"`
 
 	// LogGoawayMessage controls whether the WARN log emitted on GOAWAY
@@ -1686,6 +1702,9 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.Sandbox.Seccomp.Mode == "" {
 		cfg.Sandbox.Seccomp.Mode = "enforce"
 	}
+	if cfg.Sandbox.Seccomp.Shellc.Opaque == "" {
+		cfg.Sandbox.Seccomp.Shellc.Opaque = "enforce"
+	}
 
 	// seccompActive is true when the seccomp wrapper will run — either because
 	// seccomp is explicitly enabled, or because unix_sockets wrapping is on
@@ -2443,6 +2462,13 @@ func validateConfig(cfg *Config) error {
 	// auto-start path) catch them before deploy rather than surfacing as a
 	// generic "server unreachable" at runtime (issue #376). Host/environment
 	// checks (capabilities, etc.) intentionally stay at server startup.
+	// Issue #378: opaque shell-c handling mode. Empty is accepted because
+	// applyDefaults normalizes it to "enforce" before the server runs.
+	switch cfg.Sandbox.Seccomp.Shellc.Opaque {
+	case "", "deny", "enforce", "allow":
+	default:
+		return fmt.Errorf("seccomp.shellc.opaque: invalid value %q (want deny, enforce, or allow)", cfg.Sandbox.Seccomp.Shellc.Opaque)
+	}
 	if err := cfg.Sandbox.Validate(); err != nil {
 		return fmt.Errorf("sandbox config: %w", err)
 	}
