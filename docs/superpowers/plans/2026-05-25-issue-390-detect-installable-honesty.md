@@ -359,6 +359,55 @@ No code change expected here. If a comment/detail string needed adjusting, commi
 
 ---
 
+### Task 4: `ValidateStrictMode` requires installable seccomp for `ModeFull` (folded-in scope)
+
+Added after the final review flagged that an explicitly-configured `mode: full` + `strict: true` on an uninstallable host still validated as OK (the auto path is already honest via Task 1). User approved folding this in.
+
+**Files:**
+- Modify: `internal/capabilities/validate.go` — `ValidateStrictMode`, `ModeFull` case (~line 19-22)
+- Test: `internal/capabilities/validate_test.go` — `TestValidateStrictMode` table (~line 8-103)
+
+- [ ] **Step 1: Update the test table.** In `TestValidateStrictMode`:
+  - Add `SeccompInstallable: true` to the caps of these three existing cases so they still reach their intended check: `"full mode with all caps"`, `"full mode missing eBPF"`, `"full mode missing FUSE"`.
+  - Leave `"full mode missing seccomp"` (Seccomp:false ⇒ SeccompInstallable:false) as-is — still `wantErr: true`.
+  - Add a new discriminating case:
+    ```go
+    {
+        name: "full mode seccomp kernel-supported but not installable",
+        mode: ModeFull,
+        caps: SecurityCapabilities{
+            Seccomp: true, SeccompInstallable: false, EBPF: true, FUSE: true,
+        },
+        wantErr: true,
+    },
+    ```
+
+- [ ] **Step 2: Run to verify the new case fails.**
+  Run: `go test ./internal/capabilities/ -run TestValidateStrictMode -v`
+  Expected: FAIL — `"full mode with all caps"` now errors (current code checks `caps.Seccomp` which is set, so it actually still passes) AND the new "kernel-supported but not installable" case does NOT error (current code passes it) → `wantErr true` violated. (At least the new case fails under current code.)
+
+- [ ] **Step 3: Change the `ModeFull` seccomp check.** In `internal/capabilities/validate.go`, `ValidateStrictMode`, `ModeFull` case:
+  ```go
+  case ModeFull:
+      if !caps.SeccompInstallable {
+          return fmt.Errorf("strict mode %q requires an installable seccomp filter", mode)
+      }
+      if !caps.EBPF {
+          return fmt.Errorf("strict mode %q requires eBPF", mode)
+      }
+      if !caps.FUSE {
+          return fmt.Errorf("strict mode %q requires FUSE", mode)
+      }
+  ```
+  (Only the first check changes: `!caps.Seccomp` → `!caps.SeccompInstallable`, and its message.)
+
+- [ ] **Step 4: Run to verify pass.**
+  Run: `go test ./internal/capabilities/ -run TestValidateStrictMode -v` → PASS (all cases).
+
+- [ ] **Step 5: Commit** (only `validate.go` + `validate_test.go`).
+
+---
+
 ## Self-Review
 
 **1. Spec coverage:**
