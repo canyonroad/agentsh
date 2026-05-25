@@ -7,6 +7,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+
+	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 )
 
 // probeSeccompBasic checks whether the seccomp() syscall supports BPF filtering
@@ -63,4 +65,17 @@ func probeSeccompUserNotify() ProbeResult {
 	default:
 		return ProbeResult{Available: false, Detail: fmt.Sprintf("%s (errno %d)", errno, errno)}
 	}
+}
+
+// realCheckSeccompInstall reports whether a real NEW_LISTENER seccomp filter
+// install succeeds in this environment (issue #388). It is sourced from the
+// install probe in internal/netmonitor/unix, distinct from the read-only
+// kernel-supported check (realCheckSeccompUserNotify).
+func realCheckSeccompInstall() CheckResult {
+	res := unixmon.ProbeSeccompInstall()
+	r := CheckResult{Feature: "seccomp-install", Available: res.Installable}
+	if !res.Installable {
+		r.Error = fmt.Errorf("NEW_LISTENER filter install failed: %s", res.Detail)
+	}
+	return r
 }

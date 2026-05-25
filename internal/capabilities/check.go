@@ -28,6 +28,7 @@ type Check func() CheckResult
 // Check function variables - can be replaced in tests.
 var (
 	checkSeccompUserNotify       = realCheckSeccompUserNotify
+	checkSeccompInstall          = realCheckSeccompInstall
 	checkPtrace                  = realCheckPtrace
 	checkCgroupsV2ResourceLimits = realCheckCgroupsV2ResourceLimits
 	checkeBPF                    = realCheckeBPF
