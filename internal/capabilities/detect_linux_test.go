@@ -85,6 +85,7 @@ func TestApplyWrapperAvailability_Missing(t *testing.T) {
 		LandlockNetwork:    true,
 		FUSE:               true,
 		Ptrace:             true,
+		PtraceEnabled:      true,
 	}
 	caps.FileEnforcement = detectFileEnforcementBackend(caps)
 	domains := buildLinuxDomains(caps)
@@ -292,21 +293,28 @@ func TestBuildLinuxDomains_SeccompInstallFalseFlipsVerdictAndScore(t *testing.T)
 		t.Error("seccomp-notify must be unavailable when install fails")
 	}
 
-	// ptrace is a genuine fallback: with ptrace available, Command Control
-	// keeps full weight even though seccomp cannot install here. Pins that the
-	// score tracks installability without keying off seccomp specifically.
+	// #390: a present-but-unengaged ptrace capability does NOT keep Command
+	// Control's weight — only an actively-enforcing backend scores.
 	caps.Ptrace = true
-	ccPtrace := findDomain(t, buildLinuxDomains(caps), "Command Control")
-	if got := ComputeScore([]ProtectionDomain{ccPtrace}); got != WeightCommandControl {
-		t.Errorf("Command Control should score %d when ptrace is available (seccomp uninstallable); got %d", WeightCommandControl, got)
+	caps.PtraceEnabled = false
+	ccIdle := findDomain(t, buildLinuxDomains(caps), "Command Control")
+	if got := ComputeScore([]ProtectionDomain{ccIdle}); got != 0 {
+		t.Errorf("Command Control should score 0 when ptrace is present but not enabled; got %d", got)
 	}
 
-	// With seccomp the only command backend, Command Control score must drop.
+	// ptrace actively enforcing (capability present AND enabled) keeps the weight.
+	caps.PtraceEnabled = true
+	ccActive := findDomain(t, buildLinuxDomains(caps), "Command Control")
+	if got := ComputeScore([]ProtectionDomain{ccActive}); got != WeightCommandControl {
+		t.Errorf("Command Control should score %d when ptrace is actively enforcing; got %d", WeightCommandControl, got)
+	}
+
+	// Neither seccomp installable nor ptrace active -> score 0.
 	caps.Ptrace = false
-	domains = buildLinuxDomains(caps)
-	cc := findDomain(t, domains, "Command Control")
-	if ComputeScore([]ProtectionDomain{cc}) != 0 {
-		t.Error("Command Control should score 0 when neither seccomp-execve nor ptrace is available")
+	caps.PtraceEnabled = false
+	ccNone := findDomain(t, buildLinuxDomains(caps), "Command Control")
+	if ComputeScore([]ProtectionDomain{ccNone}) != 0 {
+		t.Error("Command Control should score 0 when neither seccomp-execve nor ptrace is active")
 	}
 }
 
@@ -315,6 +323,48 @@ func TestBuildLinuxDomains_SeccompInstallTrueKeepsVerdict(t *testing.T) {
 	domains := buildLinuxDomains(caps)
 	if !findBackend(t, domains, "Command Control", "seccomp-execve").Available {
 		t.Error("seccomp-execve must be available when install succeeds")
+	}
+}
+
+func TestBuildLinuxDomains_PtraceBackendReflectsEnforcement(t *testing.T) {
+	// Capability present but not enabled in config: not actively enforcing.
+	idle := buildLinuxDomains(&SecurityCapabilities{Ptrace: true, PtraceEnabled: false})
+	pb := findBackend(t, idle, "Command Control", "ptrace")
+	if pb.Available {
+		t.Error("ptrace backend must be unavailable when ptrace is a present-but-unengaged capability")
+	}
+	if pb.Detail != "available, not active (enable ptrace mode)" {
+		t.Errorf("ptrace detail = %q, want the actionable not-active message", pb.Detail)
+	}
+
+	// Capability present AND enabled: actively enforcing.
+	active := buildLinuxDomains(&SecurityCapabilities{Ptrace: true, PtraceEnabled: true})
+	ab := findBackend(t, active, "Command Control", "ptrace")
+	if !ab.Available {
+		t.Error("ptrace backend must be available when ptrace is enabled (actively enforcing)")
+	}
+	if ab.Detail != "" {
+		t.Errorf("ptrace detail = %q, want empty when actively enforcing", ab.Detail)
+	}
+}
+
+func TestBuildLinuxDomains_CommandActivePriority(t *testing.T) {
+	// seccomp installable -> seccomp-execve is the active backend.
+	d := buildLinuxDomains(&SecurityCapabilities{SeccompInstallable: true})
+	if got := findDomain(t, d, "Command Control").Active; got != "seccomp-execve" {
+		t.Errorf("active = %q, want seccomp-execve when seccomp is installable", got)
+	}
+
+	// seccomp not installable, ptrace not enforcing -> no active backend.
+	d = buildLinuxDomains(&SecurityCapabilities{SeccompInstallable: false, Ptrace: true, PtraceEnabled: false})
+	if got := findDomain(t, d, "Command Control").Active; got != "" {
+		t.Errorf("active = %q, want empty when nothing enforces command control", got)
+	}
+
+	// seccomp not installable, ptrace enforcing (mode==ptrace) -> ptrace active.
+	d = buildLinuxDomains(&SecurityCapabilities{SeccompInstallable: false, Ptrace: true, PtraceEnabled: true})
+	if got := findDomain(t, d, "Command Control").Active; got != "ptrace" {
+		t.Errorf("active = %q, want ptrace when ptrace is the actively-enforcing fallback", got)
 	}
 }
 
