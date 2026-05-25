@@ -44,6 +44,21 @@ func seccompBackendDetail(caps *SecurityCapabilities) string {
 	return "" // kernel doesn't support user-notify; existing Available=false speaks for itself
 }
 
+// ptraceBackendDetail explains the ptrace Command Control backend's verdict.
+// ptrace enforcement is opt-in (config: sandbox ptrace mode), and detect is
+// config-agnostic, so on most hosts this reports the capability as
+// present-but-not-active. The capability itself stays visible in the flat
+// CAPABILITIES section (caps.Ptrace, via backwardCompatCaps). Issue #390.
+func ptraceBackendDetail(caps *SecurityCapabilities) string {
+	if caps.Ptrace && caps.PtraceEnabled {
+		return "" // actively enforcing; the ✓ speaks for itself
+	}
+	if caps.Ptrace {
+		return "available, not active (enable ptrace mode)"
+	}
+	return "" // capability absent; the - speaks for itself
+}
+
 // buildLinuxDomains builds the five protection domains from cached probe results and capability flags.
 func buildLinuxDomains(caps *SecurityCapabilities) []ProtectionDomain {
 	fuseMountMethod := "none"
@@ -63,8 +78,10 @@ func buildLinuxDomains(caps *SecurityCapabilities) []ProtectionDomain {
 	}
 
 	mode := caps.SelectMode()
-	commandActive := "seccomp-execve"
-	if mode == ModePtrace {
+	commandActive := ""
+	if caps.SeccompInstallable {
+		commandActive = "seccomp-execve"
+	} else if mode == ModePtrace {
 		commandActive = "ptrace"
 	}
 
@@ -110,7 +127,7 @@ func buildLinuxDomains(caps *SecurityCapabilities) []ProtectionDomain {
 			Name: "Command Control", Weight: WeightCommandControl,
 			Backends: []DetectedBackend{
 				{Name: "seccomp-execve", Available: caps.SeccompInstallable, Detail: seccompBackendDetail(caps), Description: "execve interception", CheckMethod: "probe"},
-				{Name: "ptrace", Available: caps.Ptrace, Detail: "", Description: "syscall tracing", CheckMethod: "probe"},
+				{Name: "ptrace", Available: caps.Ptrace && caps.PtraceEnabled, Detail: ptraceBackendDetail(caps), Description: "syscall tracing", CheckMethod: "probe"},
 			},
 			Active: commandActive,
 		},

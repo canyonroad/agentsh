@@ -54,8 +54,11 @@ func DetectSecurityCapabilities() *SecurityCapabilities {
 
 // SelectMode returns the best available security mode based on capabilities.
 func (c *SecurityCapabilities) SelectMode() string {
-	// Full mode: all features available
-	if c.Seccomp && c.EBPF && c.FUSE {
+	// Full mode requires a seccomp NEW_LISTENER filter that actually installs
+	// here, not merely kernel user-notify support (issue #390) — kept in sync
+	// with the Linux SelectMode predicate so the two implementations don't
+	// drift.
+	if c.SeccompInstallable && c.EBPF && c.FUSE {
 		return ModeFull
 	}
 

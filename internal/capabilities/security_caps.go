@@ -107,8 +107,11 @@ func DetectSecurityCapabilities() *SecurityCapabilities {
 
 // SelectMode returns the best available security mode based on capabilities.
 func (c *SecurityCapabilities) SelectMode() string {
-	// Full mode: all features available
-	if c.Seccomp && c.EBPF && c.FUSE {
+	// Full mode requires a seccomp NEW_LISTENER filter that actually installs
+	// here, not merely kernel user-notify support (issue #390). On hosts where
+	// the kernel supports user-notify but the listener cannot install (e.g.
+	// Daytona/EBUSY), full mode would never actually enforce.
+	if c.SeccompInstallable && c.EBPF && c.FUSE {
 		return ModeFull
 	}
 
