@@ -520,7 +520,8 @@ type SandboxSeccompConfig struct {
 // command for policy pre-check (issue #378).
 type SandboxSeccompShellcConfig struct {
 	// Opaque selects handling for opaque shell-c scripts when the policy has
-	// a restrictive command rule:
+	// a restrictive command rule (deny/redirect/approve/audit/soft_delete);
+	// allow-only policies always run opaque scripts regardless of this setting:
 	//   "enforce" (default) — run only when per-exec enforcement is active
 	//                         (ptrace, or seccomp.execve + unix_sockets);
 	//                         otherwise deny shellc-opaque-script.

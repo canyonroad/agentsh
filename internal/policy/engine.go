@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"regexp"
@@ -580,12 +581,37 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 	return dec
 }
 
+// ShellCOpaqueMode selects how opaque shell-c scripts are handled when the
+// policy has a restrictive command rule. The zero value is Enforce, so engines
+// constructed without explicit configuration keep the pre-#378 behavior.
+type ShellCOpaqueMode int
+
+const (
+	ShellCOpaqueEnforce ShellCOpaqueMode = iota // run only under active per-exec enforcement; else deny
+	ShellCOpaqueAllow                           // run even without per-exec enforcement
+	ShellCOpaqueDeny                            // always deny opaque scripts
+)
+
+// ParseShellCOpaqueMode maps a config string to a mode. Unknown/empty values
+// map to Enforce (the safe default); config validation rejects bad values
+// before this is reached in production.
+func ParseShellCOpaqueMode(s string) ShellCOpaqueMode {
+	switch s {
+	case "allow":
+		return ShellCOpaqueAllow
+	case "deny":
+		return ShellCOpaqueDeny
+	default:
+		return ShellCOpaqueEnforce
+	}
+}
+
 // CheckCommand evaluates a command against the policy with no assumption of
 // runtime execve interception (opaque shell-c scripts are pre-denied when a
 // restrictive command rule is present). See CheckCommandWithExecve for callers
 // on an execve-policed execution path.
 func (e *Engine) CheckCommand(command string, args []string) Decision {
-	return e.checkCommand(command, args, false)
+	return e.checkCommand(command, args, false, ShellCOpaqueEnforce)
 }
 
 // CheckCommandWithExecve is CheckCommand for callers whose execution path has
@@ -593,11 +619,11 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 // inner execve is policed by CheckExecve. When execveEnforcementActive is true
 // the opaque shell-c pre-deny is skipped — the script runs and its inner
 // commands are enforced precisely at exec time. Issue #375.
-func (e *Engine) CheckCommandWithExecve(command string, args []string, execveEnforcementActive bool) Decision {
-	return e.checkCommand(command, args, execveEnforcementActive)
+func (e *Engine) CheckCommandWithExecve(command string, args []string, execveEnforcementActive bool, opaqueMode ShellCOpaqueMode) Decision {
+	return e.checkCommand(command, args, execveEnforcementActive, opaqueMode)
 }
 
-func (e *Engine) checkCommand(command string, args []string, execveEnforcementActive bool) Decision {
+func (e *Engine) checkCommand(command string, args []string, execveEnforcementActive bool, opaqueMode ShellCOpaqueMode) Decision {
 	result, _ := e.matchCommandRules(command, args)
 	// For `<shell> -c "<simple-cmd>"` invocations, also evaluate the
 	// underlying binary so a rule like `deny bin=shutdown` fires for
@@ -632,20 +658,33 @@ func (e *Engine) checkCommand(command string, args []string, execveEnforcementAc
 					result = dec
 					resultStrictness = decisionStrictness(dec.PolicyDecision)
 				}
-			} else if e.hasRestrictiveCommandRule && !execveEnforcementActive && shellparse.IsOpaqueShellC(cur, curArgs) {
+			} else if e.hasRestrictiveCommandRule && shellparse.IsOpaqueShellC(cur, curArgs) {
 				// Opaque scripts (metachars, pipes, subshells, globs, …) can
-				// execute binaries we can't predict. With any restrictive
-				// command rule in the policy, silently falling through to
-				// the outer `allow sh` admits a bypass (`sh -c "shutdown; :"`).
-				// Policies without restrictive command rules are unaffected.
-				msg := "opaque shell script cannot be safely parsed for policy pre-check"
-				if reason := shellparse.OpaqueReason(cur, curArgs); reason != "" {
-					msg = "opaque shell script: contains " + reason
-				}
-				denyDec := e.wrapDecision(string(types.DecisionDeny), "shellc-opaque-script", msg, nil)
-				if dec := denyDec; decisionStrictness(dec.PolicyDecision) > resultStrictness {
-					result = dec
-					resultStrictness = decisionStrictness(dec.PolicyDecision)
+				// execute binaries we can't predict. The operator chooses how to
+				// handle them via sandbox.seccomp.shellc.opaque (issue #378). The
+				// hasRestrictiveCommandRule gate is preserved so allow-only
+				// policies are never tightened.
+				switch opaqueMode {
+				case ShellCOpaqueAllow:
+					if !execveEnforcementActive {
+						slog.Warn("sandbox.seccomp.shellc.opaque=allow: running opaque shell script without per-exec enforcement",
+							"reason", shellparse.OpaqueReason(cur, curArgs))
+					}
+					// fall through: no pre-deny.
+				default: // ShellCOpaqueEnforce, ShellCOpaqueDeny
+					deny := opaqueMode == ShellCOpaqueDeny || !execveEnforcementActive
+					if deny {
+						msg := "opaque shell script cannot be safely parsed for policy pre-check"
+						if reason := shellparse.OpaqueReason(cur, curArgs); reason != "" {
+							msg = "opaque shell script: contains " + reason
+						}
+						msg += "; set sandbox.seccomp.shellc.opaque=allow to run it without per-exec enforcement, or enable execve enforcement (seccomp.execve + unix_sockets, or ptrace) to run it under policy"
+						denyDec := e.wrapDecision(string(types.DecisionDeny), "shellc-opaque-script", msg, nil)
+						if dec := denyDec; decisionStrictness(dec.PolicyDecision) > resultStrictness {
+							result = dec
+							resultStrictness = decisionStrictness(dec.PolicyDecision)
+						}
+					}
 				}
 			}
 			break

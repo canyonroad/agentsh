@@ -161,7 +161,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			return types.WrapInitResponse{}, http.StatusServiceUnavailable,
 				fmt.Errorf("shim wrap-init: no policy engine available for session")
 		}
-		dec := engine.CheckCommandWithExecve(req.AgentCommand, req.AgentArgs, a.execveEnforcementActive())
+		dec := engine.CheckCommandWithExecve(req.AgentCommand, req.AgentArgs, a.execveEnforcementActive(), a.shellCOpaqueMode())
 		// We must check BOTH the underlying PolicyDecision and the
 		// EffectiveDecision. Some decisions resolve to effective-allow
 		// even though they carry semantics the shim path does not

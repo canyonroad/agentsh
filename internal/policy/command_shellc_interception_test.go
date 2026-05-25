@@ -39,7 +39,7 @@ func TestCheckCommand_OpaqueAllowedWhenExecveEnforced(t *testing.T) {
 		"curl https://example.com",
 	}
 	for _, script := range battery {
-		dec := e.CheckCommandWithExecve("/bin/sh", []string{"-c", script}, true)
+		dec := e.CheckCommandWithExecve("/bin/sh", []string{"-c", script}, true, ShellCOpaqueEnforce)
 		if dec.Rule == "shellc-opaque-script" {
 			t.Errorf("script %q: pre-denied as opaque with execve enforcement active; want fall-through to allow", script)
 		}
@@ -53,7 +53,7 @@ func TestCheckCommand_OpaqueAllowedWhenExecveEnforced(t *testing.T) {
 func TestCheckCommand_OpaqueDeniedWhenNoExecveEnforcement(t *testing.T) {
 	e := newInterceptionTestEngine(t)
 
-	dec := e.CheckCommandWithExecve("/bin/sh", []string{"-c", "echo $HOME | head"}, false)
+	dec := e.CheckCommandWithExecve("/bin/sh", []string{"-c", "echo $HOME | head"}, false, ShellCOpaqueEnforce)
 	if dec.PolicyDecision != types.DecisionDeny || dec.Rule != "shellc-opaque-script" {
 		t.Errorf("got %s rule=%q, want deny shellc-opaque-script", dec.PolicyDecision, dec.Rule)
 	}
@@ -71,7 +71,7 @@ func TestCheckCommand_OpaqueDeniedWhenNoExecveEnforcement(t *testing.T) {
 // whole interception-aware change depends on (issue #375).
 func TestCheckCommand_DerivableDenyStillDeniedWhenExecveEnforced(t *testing.T) {
 	e := newInterceptionTestEngine(t)
-	dec := e.CheckCommandWithExecve("/bin/sh", []string{"-c", "shutdown now"}, true)
+	dec := e.CheckCommandWithExecve("/bin/sh", []string{"-c", "shutdown now"}, true, ShellCOpaqueEnforce)
 	if dec.PolicyDecision != types.DecisionDeny || dec.Rule != "deny-shutdown" {
 		t.Fatalf("got %s rule=%q, want deny rule=deny-shutdown (derivable deny must survive execve relaxation)", dec.PolicyDecision, dec.Rule)
 	}

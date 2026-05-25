@@ -858,7 +858,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		includeEvents = "all"
 	}
 
-	pre := a.policyEngineFor(s).CheckCommandWithExecve(req.Command, req.Args, a.execveEnforcementActive())
+	pre := a.policyEngineFor(s).CheckCommandWithExecve(req.Command, req.Args, a.execveEnforcementActive(), a.shellCOpaqueMode())
 	redirected, originalCmd, originalArgs := applyCommandRedirect(&req.Command, &req.Args, pre)
 	approvalErr := error(nil)
 	pkgApprovalDenied := false
@@ -1067,7 +1067,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	a.broker.Publish(startEv)
 
 	limits := a.policyEngineFor(s).Limits()
-	cmdDecision := a.policyEngineFor(s).CheckCommandWithExecve(wrappedReq.Command, wrappedReq.Args, a.execveEnforcementActive())
+	cmdDecision := a.policyEngineFor(s).CheckCommandWithExecve(wrappedReq.Command, wrappedReq.Args, a.execveEnforcementActive(), a.shellCOpaqueMode())
 	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(ctx, s, cmdID, wrappedReq, a.cfg, cmdDecision.EnvPolicy, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits), extraCfg, a.ptraceTracer, id)
 
 	// Check if process was killed by seccomp (SIGSYS) and emit event

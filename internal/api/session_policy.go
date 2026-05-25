@@ -72,3 +72,9 @@ func (a *App) execveEnforcementActive() bool {
 	// calls are NOT policed, so the opaque shell-c pre-deny must stay. Issue #375.
 	return a.cfg.Sandbox.Seccomp.Execve.Enabled && unixSocketsConfigEnabled(a.cfg)
 }
+
+// shellCOpaqueMode resolves the operator's opaque shell-c handling mode from
+// config (sandbox.seccomp.shellc.opaque) for command pre-checks. Issue #378.
+func (a *App) shellCOpaqueMode() policy.ShellCOpaqueMode {
+	return policy.ParseShellCOpaqueMode(a.cfg.Sandbox.Seccomp.Shellc.Opaque)
+}
