@@ -10,7 +10,7 @@ The fix plumbs the resolved env policy through `WrapInitResponse` (exactly as #3
 
 ## Goals
 
-- When enabled, the wrap path filters the executed command's environment per the resolved env policy: `deny` + the built-in `defaultSecretDeny` list strip secrets; `env_allow` (when set) tightens to allowlist; `max_bytes`/`max_keys` apply.
+- When enabled, the wrap path filters the executed command's environment per the resolved env policy: `deny` + the built-in `defaultSecretDeny` list strip secrets; `env_allow` (when set) tightens to allowlist. (`max_bytes`/`max_keys`/`block_iteration` are out of scope — see Non-Goals.)
 - Default-off: no change to any existing wrap/shim deployment until `sandbox.wrap_env_policy.enabled: true`.
 - Fail-open: any filter error falls back to the unfiltered inherited env; a command is never blocked by env filtering.
 - Mixed-version safe: old server / new client and new server / old client both degrade to today's behavior (no filtering).
@@ -19,7 +19,7 @@ The fix plumbs the resolved env policy through `WrapInitResponse` (exactly as #3
 ## Non-Goals
 
 - **No minimal-base rebuild** (the exec path's deny-by-default minimal base). We keep the inherited env as the base and subtract — preserving the inheritance the wrap path's platforms (Blaxel/E2B/Daytona) and the documented `BASH_ENV`/`env_inject` workaround depend on.
-- **`block_iteration` is not applied** on the wrap path. It relies on replacing `environ`, which is incompatible with shells (documented in `exec.go` `maybeAddShimEnv`). Only allow/deny/max are enforced.
+- **`block_iteration` and `max_bytes`/`max_keys` are not applied** on the wrap path. `block_iteration` relies on replacing `environ`, which is incompatible with shells (documented in `exec.go` `maybeAddShimEnv`). `max_bytes`/`max_keys` are excluded because `policy.BuildEnv` treats an overflow as a hard *error* (it does not truncate); under the wrap path's fail-open contract that error reverts to the **full unfiltered** env, which would silently bypass the very allow/deny stripping the operator configured. The wrap filter is therefore **allow/deny only** (plus the built-in `defaultSecretDeny`).
 - No per-inner-command env rebuild: the filter applies once to the wrapped shell's env at launch; nested commands inherit it. (Coarser than exec by nature; documented.)
 - No change to the server-spawned exec path, Windows/darwin wrap, or `block_iteration` semantics elsewhere.
 - Not flipping the default to on (a later, separately-decided rollout step).
@@ -53,24 +53,23 @@ No default needed (zero value `false` = off); no validation needed (bool).
 In `pkg/types/sessions.go`:
 
 ```go
-// EnvPolicyWire carries the resolved env allow/deny/limits for the client
-// (shell shim / CLI wrap) to filter the executed command's inherited
-// environment. Nil/omitted means "no filtering" (the field is only populated
-// when sandbox.wrap_env_policy.enabled is true), which also makes mixed-version
-// deployments degrade safely. block_iteration is intentionally not carried:
-// it is not enforceable on the wrap path (shells read environ directly).
-// Issue #379.
+// EnvPolicyWire carries the resolved env allow/deny for the client (shell shim
+// / CLI wrap) to filter the executed command's inherited environment. Nil/
+// omitted means "no filtering" (only populated when
+// sandbox.wrap_env_policy.enabled is true), which makes mixed-version
+// deployments degrade safely. Only allow/deny are carried — block_iteration
+// (replaces environ; incompatible with shells) and max_bytes/max_keys
+// (BuildEnv errors on overflow, which fail-open would revert to the full env)
+// are intentionally not enforced on the wrap path. Issue #379.
 type EnvPolicyWire struct {
-    Allow    []string `json:"allow,omitempty"`
-    Deny     []string `json:"deny,omitempty"`
-    MaxBytes int      `json:"max_bytes,omitempty"`
-    MaxKeys  int      `json:"max_keys,omitempty"`
+    Allow []string `json:"allow,omitempty"`
+    Deny  []string `json:"deny,omitempty"`
 }
 ```
 
 and add `EnvPolicy *EnvPolicyWire `json:"env_policy,omitempty"`` to `WrapInitResponse`.
 
-Server: a helper `(a *App) wrapEnvPolicyWire(s *session.Session, req types.WrapInitRequest) *types.EnvPolicyWire` returns `nil` when `!a.cfg.Sandbox.WrapEnvPolicy.Enabled`; otherwise it resolves the env policy for the wrapped command (`a.policyEngineFor(s).CheckCommandWithExecve(req.AgentCommand, req.AgentArgs, a.execveEnforcementActive(), a.shellCOpaqueMode()).EnvPolicy`) and maps `{Allow, Deny, MaxBytes, MaxKeys}` to `EnvPolicyWire`. It is set alongside `EnvInject:` at both response sites (`wrap.go:283`, `wrap.go:519`).
+Server: a helper `(a *App) wrapEnvPolicyWire(s *session.Session, req types.WrapInitRequest) *types.EnvPolicyWire` returns `nil` when `!a.cfg.Sandbox.WrapEnvPolicy.Enabled`; otherwise it resolves the env policy for the wrapped command (`a.policyEngineFor(s).CheckCommandWithExecve(req.AgentCommand, req.AgentArgs, a.execveEnforcementActive(), a.shellCOpaqueMode()).EnvPolicy`) and maps `{Allow, Deny}` to `EnvPolicyWire`. It is set alongside `EnvInject:` at both response sites (`wrap.go:283`, `wrap.go:519`).
 
 ### 3. Subtractive filter helper (new package `internal/wrapenv`)
 
@@ -86,7 +85,6 @@ func Filter(base []string, wire *types.EnvPolicyWire) []string {
     }
     pol := policy.ResolvedEnvPolicy{
         Allow: wire.Allow, Deny: wire.Deny,
-        MaxBytes: wire.MaxBytes, MaxKeys: wire.MaxKeys,
     }
     out, err := policy.BuildEnv(pol, base, nil)
     if err != nil {
@@ -125,12 +123,12 @@ No new error types. `Filter` is fail-open: nil wire or `BuildEnv` error ⇒ inhe
 - deny `["SECRET_*"]`, no allow ⇒ `SECRET_TOKEN` stripped, `PATH`/`HOME` kept.
 - no allow, no deny ⇒ a `defaultSecretDeny`-listed var (e.g. `AWS_SECRET_ACCESS_KEY`) stripped, ordinary vars kept (confirms baseline secret protection).
 - allow `["PATH","HOME"]` ⇒ only those kept.
-- `max_keys` / `max_bytes` enforced.
+- a large env is filtered by allow/deny only and is **not** rejected (confirms `max_*` is not enforced on this path).
 - a var named like an agentsh marker is irrelevant here (markers are added by callers after Filter) — covered by the caller-order tests below.
 
 `internal/api` (wrap helper):
 - flag off ⇒ `wrapEnvPolicyWire` returns `nil` (and the response `EnvPolicy` is nil).
-- flag on with a policy that denies `FOO` ⇒ returns a wire whose `Deny` contains `FOO`; `Allow`/`MaxBytes`/`MaxKeys` mirror the resolved policy.
+- flag on with a policy that denies `FOO` ⇒ returns a wire whose `Deny` contains `FOO`; `Allow` mirrors the resolved policy.
 
 `internal/cli` / `internal/shim/kernelinstall` (ordering): a focused test that, given a base containing a denied var plus an agentsh marker added after Filter, the denied var is removed while the marker and an `env_inject` value survive. (If a full wrap launch is impractical to unit-test, assert the helper composition: `envinject.Apply(buildWrapEnv(wrapenv.Filter(base, wire), …), inject)` keeps markers + inject and drops denied vars.)
 

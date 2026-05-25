@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Enforce env `allow`/`deny`/`max_*` on the client-spawned wrap path (shell shim / kernel-install / `agentsh wrap`) by plumbing the resolved policy through `WrapInitResponse` and applying a subtractive `policy.BuildEnv` filter client-side — gated behind `sandbox.wrap_env_policy.enabled` (default off), fail-open.
+**Goal:** Enforce env `allow`/`deny` on the client-spawned wrap path (shell shim / kernel-install / `agentsh wrap`) by plumbing the resolved policy through `WrapInitResponse` and applying a subtractive `policy.BuildEnv` filter client-side — gated behind `sandbox.wrap_env_policy.enabled` (default off), fail-open. (`max_*`/`block_iteration` are out of scope — see the spec Non-Goals.)
 
 **Architecture:** Server resolves the env policy for the wrapped command and (only when the flag is on) sends it as a new `EnvPolicyWire` field on `WrapInitResponse`. A new `internal/wrapenv.Filter` helper maps the wire type to `policy.ResolvedEnvPolicy` and runs `policy.BuildEnv` over the **inherited** launcher env (subtractive), fail-open. Both client launch sites filter the inherited base *before* adding agentsh markers / `env_inject`, so those always survive.
 
@@ -90,10 +90,8 @@ In `pkg/types/sessions.go`, add (above `WrapInitResponse`):
 // deployments degrade safely. block_iteration is intentionally not carried: it
 // is not enforceable on the wrap path (shells read environ directly). Issue #379.
 type EnvPolicyWire struct {
-	Allow    []string `json:"allow,omitempty"`
-	Deny     []string `json:"deny,omitempty"`
-	MaxBytes int      `json:"max_bytes,omitempty"`
-	MaxKeys  int      `json:"max_keys,omitempty"`
+	Allow []string `json:"allow,omitempty"`
+	Deny  []string `json:"deny,omitempty"`
 }
 ```
 
@@ -204,11 +202,17 @@ func TestFilter_AllowIsAllowlist(t *testing.T) {
 	}
 }
 
-func TestFilter_MaxKeys(t *testing.T) {
-	base := []string{"A=1", "B=2", "C=3", "D=4"}
-	got := Filter(base, &types.EnvPolicyWire{MaxKeys: 2})
-	if len(got) > 2 {
-		t.Errorf("max_keys=2 must cap key count; got %d", len(got))
+// max_bytes/max_keys are NOT carried on the wrap path (#379): BuildEnv errors
+// on overflow, which under fail-open reverts to the full unfiltered env. So a
+// large env is filtered by allow/deny only and never rejected.
+func TestFilter_NoMaxEnforcementLargeEnvNotRejected(t *testing.T) {
+	base := []string{"A=1", "B=2", "C=3", "D=4", "SECRET_TOKEN=x"}
+	got := Filter(base, &types.EnvPolicyWire{Deny: []string{"SECRET_*"}})
+	if has(got, "SECRET_TOKEN=x") {
+		t.Error("denied var must be stripped")
+	}
+	if len(got) != 4 {
+		t.Errorf("large env must pass through (minus denied), not be rejected; got %d: %v", len(got), got)
 	}
 }
 ```
@@ -244,10 +248,8 @@ func Filter(base []string, wire *types.EnvPolicyWire) []string {
 		return base
 	}
 	pol := policy.ResolvedEnvPolicy{
-		Allow:    wire.Allow,
-		Deny:     wire.Deny,
-		MaxBytes: wire.MaxBytes,
-		MaxKeys:  wire.MaxKeys,
+		Allow: wire.Allow,
+		Deny:  wire.Deny,
 	}
 	out, err := policy.BuildEnv(pol, base, nil)
 	if err != nil {
@@ -367,10 +369,8 @@ func (a *App) wrapEnvPolicyWire(s *session.Session, req types.WrapInitRequest) *
 	}
 	pol := engine.CheckCommandWithExecve(req.AgentCommand, req.AgentArgs, a.execveEnforcementActive(), a.shellCOpaqueMode()).EnvPolicy
 	return &types.EnvPolicyWire{
-		Allow:    pol.Allow,
-		Deny:     pol.Deny,
-		MaxBytes: pol.MaxBytes,
-		MaxKeys:  pol.MaxKeys,
+		Allow: pol.Allow,
+		Deny:  pol.Deny,
 	}
 }
 ```
@@ -537,6 +537,6 @@ git add -A && git commit -m "chore(#379): gofmt" || echo "nothing to commit"
 ## Self-review notes
 
 - **Spec coverage:** wire type + flag (Task 1) ← spec §1,§2; `wrapenv.Filter` subtractive fail-open (Task 2) ← spec §3; server resolve+populate when enabled (Task 3) ← spec §2; client apply-before-markers in all 3 sites (Task 4) ← spec §4; verification incl. Windows (Task 5). Non-goals respected: no minimal-rebuild, `block_iteration` not carried (wire omits it), no exec-path change, default-off (flag), fail-open (Filter returns base on nil/error).
-- **Type/name consistency:** `types.EnvPolicyWire{Allow,Deny,MaxBytes,MaxKeys}`, `WrapInitResponse.EnvPolicy *EnvPolicyWire`, `config.SandboxWrapEnvPolicyConfig{Enabled}` at `cfg.Sandbox.WrapEnvPolicy.Enabled`, `wrapenv.Filter(base, wire)`, `(a *App) wrapEnvPolicyWire(s, req)`, `policy.ResolvedEnvPolicy`/`policy.BuildEnv` — consistent across tasks.
+- **Type/name consistency:** `types.EnvPolicyWire{Allow,Deny}`, `WrapInitResponse.EnvPolicy *EnvPolicyWire`, `config.SandboxWrapEnvPolicyConfig{Enabled}` at `cfg.Sandbox.WrapEnvPolicy.Enabled`, `wrapenv.Filter(base, wire)`, `(a *App) wrapEnvPolicyWire(s, req)`, `policy.ResolvedEnvPolicy`/`policy.BuildEnv` — consistent across tasks.
 - **Build stays green per commit:** Task 1 pure additions; Task 2 new package; Task 3 uses Task 1's type; Task 4 uses Task 1+2. Each compiles independently.
 - **No placeholders:** every step has concrete code/commands. (Task 3 test notes a fallback if `policy.Policy` field names differ; Task 4 Step 2 notes the guard-test may pass immediately by design.)
