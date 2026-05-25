@@ -140,6 +140,23 @@ type WrapInitRequest struct {
 	Mode string `json:"mode,omitempty"`
 }
 
+// EnvPolicyWire carries the resolved env allow/deny for the client (shell shim
+// / CLI wrap) to filter the executed command's inherited environment. Nil/
+// omitted means "no filtering" — the field is only populated when
+// sandbox.wrap_env_policy.enabled is true, which also makes mixed-version
+// deployments degrade safely.
+//
+// Only allow/deny are carried. block_iteration (replaces environ, incompatible
+// with shells) and max_bytes/max_keys are intentionally NOT enforced on the
+// wrap path: BuildEnv treats a max_* overflow as a hard error, which under the
+// wrap path's fail-open contract would revert to the FULL unfiltered env —
+// silently bypassing the very allow/deny stripping the operator wanted. So the
+// wrap filter is allow/deny (+ the built-in default-secret-deny) only. Issue #379.
+type EnvPolicyWire struct {
+	Allow []string `json:"allow,omitempty"`
+	Deny  []string `json:"deny,omitempty"`
+}
+
 // WrapInitResponse returns the seccomp wrapper configuration to the caller.
 //
 // To decide whether to install kernel filters, the caller MUST inspect the
@@ -167,4 +184,8 @@ type WrapInitResponse struct {
 	// applied client-side; on the server-spawned exec path env_inject is
 	// applied directly in internal/api/exec.go instead. Issue #374.
 	EnvInject map[string]string `json:"env_inject,omitempty"`
+	// EnvPolicy carries the resolved env allow/deny for the client to
+	// filter the executed command's inherited environment, when
+	// sandbox.wrap_env_policy.enabled is set. Nil ⇒ no filtering. Issue #379.
+	EnvPolicy *EnvPolicyWire `json:"env_policy,omitempty"`
 }

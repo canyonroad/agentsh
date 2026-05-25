@@ -362,6 +362,15 @@ type SandboxConfig struct {
 	// EnvInject specifies environment variables to inject into every command execution.
 	// These bypass policy filtering as they are operator-configured (trusted).
 	EnvInject map[string]string `yaml:"env_inject"`
+
+	WrapEnvPolicy SandboxWrapEnvPolicyConfig `yaml:"wrap_env_policy"`
+}
+
+// SandboxWrapEnvPolicyConfig opts into enforcing env_policy (allow/deny) on the
+// client-spawned wrap path (shell shim / kernel-install / agentsh wrap).
+// Default off; fail-open. Issue #379.
+type SandboxWrapEnvPolicyConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // Validate checks cross-field constraints in the sandbox configuration.
