@@ -366,8 +366,8 @@ type SandboxConfig struct {
 	WrapEnvPolicy SandboxWrapEnvPolicyConfig `yaml:"wrap_env_policy"`
 }
 
-// SandboxWrapEnvPolicyConfig opts into enforcing env_policy (allow/deny/max_*)
-// on the client-spawned wrap path (shell shim / kernel-install / agentsh wrap).
+// SandboxWrapEnvPolicyConfig opts into enforcing env_policy (allow/deny) on the
+// client-spawned wrap path (shell shim / kernel-install / agentsh wrap).
 // Default off; fail-open. Issue #379.
 type SandboxWrapEnvPolicyConfig struct {
 	Enabled bool `yaml:"enabled"`

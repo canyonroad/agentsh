@@ -184,7 +184,7 @@ type WrapInitResponse struct {
 	// applied client-side; on the server-spawned exec path env_inject is
 	// applied directly in internal/api/exec.go instead. Issue #374.
 	EnvInject map[string]string `json:"env_inject,omitempty"`
-	// EnvPolicy carries the resolved env allow/deny/limits for the client to
+	// EnvPolicy carries the resolved env allow/deny for the client to
 	// filter the executed command's inherited environment, when
 	// sandbox.wrap_env_policy.enabled is set. Nil ⇒ no filtering. Issue #379.
 	EnvPolicy *EnvPolicyWire `json:"env_policy,omitempty"`
