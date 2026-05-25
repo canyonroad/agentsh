@@ -543,7 +543,10 @@ In `internal/capabilities/detect_linux.go`, add a helper (near the top of the fi
 
 ```go
 // seccompBackendDetail explains the seccomp verdict, distinguishing
-// "kernel-supported" from "installable here" (issue #388).
+// "kernel-supported" from "installable here" (issue #388). caps.SeccompInstallDetail
+// already reads like "NEW_LISTENER filter install failed: EBUSY (errno 16)"
+// (set by realCheckSeccompInstall), so this only prepends the kernel-support
+// context — no double "install failed" wording.
 func seccompBackendDetail(caps *SecurityCapabilities) string {
 	if caps.SeccompInstallable {
 		return ""
@@ -551,9 +554,9 @@ func seccompBackendDetail(caps *SecurityCapabilities) string {
 	if caps.Seccomp {
 		d := caps.SeccompInstallDetail
 		if d == "" {
-			d = "install failed"
+			d = "NEW_LISTENER install failed here"
 		}
-		return "kernel supports user-notify, but NEW_LISTENER install failed here: " + d
+		return "kernel supports user-notify, but " + d
 	}
 	return "" // kernel doesn't support user-notify; existing Available=false speaks for itself
 }
