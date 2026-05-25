@@ -17,6 +17,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/client"
 	"github.com/agentsh/agentsh/internal/envinject"
+	"github.com/agentsh/agentsh/internal/wrapenv"
 	"github.com/agentsh/agentsh/internal/wraphandoff"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
@@ -197,7 +198,7 @@ func runRelay(p InstallParams, resp types.WrapInitResponse) (Result, error) {
 	// markers (notify fd, argv0 override, wrapper config). See
 	// assembleWrapperEnv for the env_inject override and AGENTSH_SIGNAL_SOCK_FD
 	// stripping rationale (issue #374).
-	env := assembleWrapperEnv(filterShimInternalEnv(p.Env), p.Argv0, resp.WrapperEnv, resp.EnvInject)
+	env := assembleWrapperEnv(wrapenv.Filter(filterShimInternalEnv(p.Env), resp.EnvPolicy), p.Argv0, resp.WrapperEnv, resp.EnvInject)
 
 	// Build wrapper argv: wrapperBin -- realShell shellArgs...
 	// argv[0] is the wrapper binary's basename (conventional).

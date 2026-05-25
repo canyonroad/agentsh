@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/agentsh/agentsh/internal/envinject"
+	"github.com/agentsh/agentsh/internal/wrapenv"
 	"github.com/agentsh/agentsh/internal/wraphandoff"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
@@ -31,7 +32,7 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 	if wrapResp.PtraceMode {
 		notifySocket := wrapResp.NotifySocket
 
-		env := buildWrapEnv(os.Environ(), sessID, cfg.serverAddr, wrapResp.SafeToBypassShellShim)
+		env := buildWrapEnv(wrapenv.Filter(os.Environ(), wrapResp.EnvPolicy), sessID, cfg.serverAddr, wrapResp.SafeToBypassShellShim)
 		// Overlay sandbox.env_inject so injected vars reach the command in
 		// ptrace mode too, matching the seccomp/shim paths (issue #374).
 		env = envinject.Apply(env, wrapResp.EnvInject)
@@ -135,7 +136,7 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 	}
 
 	// Build env for the wrapped process
-	env := buildWrapEnv(os.Environ(), sessID, cfg.serverAddr, wrapResp.SafeToBypassShellShim)
+	env := buildWrapEnv(wrapenv.Filter(os.Environ(), wrapResp.EnvPolicy), sessID, cfg.serverAddr, wrapResp.SafeToBypassShellShim)
 	// Overlay operator-configured sandbox.env_inject (override semantics)
 	// before the internal markers, matching the shim and server-spawned exec
 	// paths so injected vars reach the executed command (issue #374).
