@@ -281,6 +281,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			SafeToBypassShellShim: true,
 			NotifySocket:          notifySocketPath,
 			EnvInject:             mergeEnvInject(a.cfg, a.policyEngineFor(s)),
+			EnvPolicy:             a.wrapEnvPolicyWire(s, req),
 		}, http.StatusOK, nil
 	}
 
@@ -517,7 +518,30 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		// process on this path). Operator-trusted; bypasses policy filtering,
 		// matching the server-spawned exec path. Issue #374.
 		EnvInject: mergeEnvInject(a.cfg, a.policyEngineFor(s)),
+		EnvPolicy: a.wrapEnvPolicyWire(s, req),
 	}, http.StatusOK, nil
+}
+
+// wrapEnvPolicyWire resolves the env policy for the wrapped command and returns
+// it as a wire value for the client to filter the inherited environment, when
+// sandbox.wrap_env_policy.enabled is set. Returns nil when disabled or when no
+// engine is available (fail-open). Even an empty (no allow/deny) policy yields a
+// non-nil wire so the client still applies the default-secret-deny baseline.
+// Only allow/deny are carried; max_*/block_iteration are not enforced on the
+// wrap path. Issue #379.
+func (a *App) wrapEnvPolicyWire(s *session.Session, req types.WrapInitRequest) *types.EnvPolicyWire {
+	if !a.cfg.Sandbox.WrapEnvPolicy.Enabled {
+		return nil
+	}
+	engine := a.policyEngineFor(s)
+	if engine == nil {
+		return nil
+	}
+	pol := engine.CheckCommandWithExecve(req.AgentCommand, req.AgentArgs, a.execveEnforcementActive(), a.shellCOpaqueMode()).EnvPolicy
+	return &types.EnvPolicyWire{
+		Allow: pol.Allow,
+		Deny:  pol.Deny,
+	}
 }
 
 // deriveLandlockAllowPaths returns the execute/read/write allow-path lists
