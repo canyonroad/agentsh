@@ -35,12 +35,20 @@ func TestSecurityCapabilities_SelectMode(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "full mode when all available",
+			name: "full mode when all available and seccomp installable",
 			caps: SecurityCapabilities{
-				Seccomp: true, EBPF: true, FUSE: true, Landlock: true,
+				Seccomp: true, SeccompInstallable: true, EBPF: true, FUSE: true, Landlock: true,
 				Capabilities: true,
 			},
 			expected: "full",
+		},
+		{
+			name: "not full when seccomp kernel-supported but not installable (falls to landlock)",
+			caps: SecurityCapabilities{
+				Seccomp: true, SeccompInstallable: false, EBPF: true, FUSE: true, Landlock: true,
+				Capabilities: true,
+			},
+			expected: "landlock",
 		},
 		{
 			name: "landlock mode when seccomp unavailable",
