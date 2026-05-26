@@ -81,8 +81,9 @@ func (t *Tracer) getSyscallEntryInfo(tid int) (*SyscallEntryInfo, error) {
 	if errno != 0 {
 		return nil, fmt.Errorf("PTRACE_GET_SYSCALL_INFO: %w", errno)
 	}
-	if info.Op != 1 && info.Op != 3 {
-		return nil, fmt.Errorf("PTRACE_GET_SYSCALL_INFO: unexpected op %d (want entry=1 or seccomp=3)", info.Op)
+	if info.Op != ptraceSyscallInfoEntry && info.Op != ptraceSyscallInfoSeccomp {
+		return nil, fmt.Errorf("PTRACE_GET_SYSCALL_INFO: unexpected op %d (want entry=%d or seccomp=%d)",
+			info.Op, ptraceSyscallInfoEntry, ptraceSyscallInfoSeccomp)
 	}
 	return &SyscallEntryInfo{
 		Nr:   int(info.EntryNr),
