@@ -75,7 +75,7 @@ func (t *Tracer) injectFromEntry(tid int, savedRegs Regs, nr int, args ...uint64
 		injectErr = fmt.Errorf("inject resume: %w", err)
 		return 0, injectErr
 	}
-	if err := t.waitForSyscallStop(tid); err != nil {
+	if err := t.waitForSyscallExitStop(tid); err != nil {
 		injectErr = fmt.Errorf("inject wait-exit: %w", err)
 		return 0, injectErr
 	}
@@ -149,7 +149,7 @@ func (t *Tracer) injectFromExit(tid int, savedRegs Regs, nr int, args ...uint64)
 		injectErr = fmt.Errorf("inject resume-exit: %w", err)
 		return 0, injectErr
 	}
-	if err := t.waitForSyscallStop(tid); err != nil {
+	if err := t.waitForSyscallExitStop(tid); err != nil {
 		injectErr = fmt.Errorf("inject wait-exit: %w", err)
 		return 0, injectErr
 	}
@@ -168,6 +168,10 @@ func (t *Tracer) injectFromExit(tid int, savedRegs Regs, nr int, args ...uint64)
 	return ret, nil
 }
 
+// injectMaxStopEvents bounds how many non-progress stops the inject waits
+// tolerate before giving up, guarding against an unexpected stop storm.
+const injectMaxStopEvents = 100
+
 // waitForSyscallStop waits for the specified tid to hit a syscall stop.
 // It uses waitpid with the specific tid to avoid consuming other tracees' events.
 // Returns an error if the tracee exits during the wait, after performing
@@ -181,9 +185,8 @@ func (t *Tracer) injectFromExit(tid int, savedRegs Regs, nr int, args ...uint64)
 // prefilter/seccomp mode (syscall stops report plain SIGTRAP with no event).
 func (t *Tracer) waitForSyscallStop(tid int) error {
 	const (
-		maxStopEvents = 100 // guard against infinite loop from unexpected stop events
-		timeout       = 5 * time.Second
-		pollDelay     = 200 * time.Microsecond
+		timeout   = 5 * time.Second
+		pollDelay = 200 * time.Microsecond
 	)
 	deadline := time.Now().Add(timeout)
 	stopEvents := 0
@@ -230,8 +233,8 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 		// SIGTRAP with a non-zero TrapCause. Resume with signal 0.
 		if sig == unix.SIGTRAP && status.TrapCause() != 0 {
 			stopEvents++
-			if stopEvents >= maxStopEvents {
-				return fmt.Errorf("waitForSyscallStop tid %d: exceeded %d non-progress stop events", tid, maxStopEvents)
+			if stopEvents >= injectMaxStopEvents {
+				return fmt.Errorf("waitForSyscallStop tid %d: exceeded %d non-progress stop events", tid, injectMaxStopEvents)
 			}
 			if err := unix.PtraceSyscall(tid, 0); err != nil {
 				return fmt.Errorf("inject re-resume tid %d: %w", tid, err)
@@ -241,13 +244,52 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 
 		// Real signal delivery: reinject the signal.
 		stopEvents++
-		if stopEvents >= maxStopEvents {
-			return fmt.Errorf("waitForSyscallStop tid %d: exceeded %d non-progress stop events", tid, maxStopEvents)
+		if stopEvents >= injectMaxStopEvents {
+			return fmt.Errorf("waitForSyscallStop tid %d: exceeded %d non-progress stop events", tid, injectMaxStopEvents)
 		}
 		if err := unix.PtraceSyscall(tid, int(sig)); err != nil {
 			return fmt.Errorf("inject re-resume tid %d: %w", tid, err)
 		}
 	}
+}
+
+// waitForSyscallExitStop drives the tracee to a genuine syscall-EXIT stop and
+// returns once there. When PTRACE_GET_SYSCALL_INFO is unavailable it degrades
+// to waitForSyscallStop (legacy cycle-counting; unchanged for pre-5.3 kernels).
+//
+// Background (#369): on kernels that interleave PTRACE_EVENT_SECCOMP / entry
+// stops with the PTRACE_SYSCALL enter/exit pairs (e.g. exe.dev 6.12.90), the
+// fixed-cycle accounting could land the return-value read on an entry/seccomp
+// stop, where rax holds the -ENOSYS entry placeholder rather than the syscall
+// result. Injected syscalls run in isolation (the tracer controls the
+// registers, so no other syscall executes between resumes), so the first EXIT
+// stop reached is the injected syscall's exit; intervening entry/seccomp stops
+// are resumed past.
+func (t *Tracer) waitForSyscallExitStop(tid int) error {
+	if err := t.waitForSyscallStop(tid); err != nil {
+		return err
+	}
+	if !t.hasSyscallInfo {
+		return nil // pre-5.3: cannot distinguish entry vs exit; keep legacy behavior
+	}
+	for i := 0; i < injectMaxStopEvents; i++ {
+		op, err := t.syscallStopOp(tid)
+		if err != nil || op == ptraceSyscallInfoNone {
+			// Can't classify this stop; trust the legacy stop (no worse than before).
+			return nil
+		}
+		if op == ptraceSyscallInfoExit {
+			return nil
+		}
+		// Entry/seccomp stop — advance to the injected syscall's exit.
+		if err := unix.PtraceSyscall(tid, 0); err != nil {
+			return fmt.Errorf("inject advance-to-exit tid %d: %w", tid, err)
+		}
+		if err := t.waitForSyscallStop(tid); err != nil {
+			return err // includes "tracee N exited during injection"
+		}
+	}
+	return fmt.Errorf("waitForSyscallExitStop tid %d: no exit stop within %d events", tid, injectMaxStopEvents)
 }
 
 // injectSyscallRet is a convenience that returns an error if the injected
@@ -277,7 +319,7 @@ func (t *Tracer) advancePastEntry(tid int, savedRegs Regs) error {
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
 		return fmt.Errorf("advance resume: %w", err)
 	}
-	if err := t.waitForSyscallStop(tid); err != nil {
+	if err := t.waitForSyscallExitStop(tid); err != nil {
 		return fmt.Errorf("advance wait: %w", err)
 	}
 	if err := t.setRegs(tid, savedRegs); err != nil {
