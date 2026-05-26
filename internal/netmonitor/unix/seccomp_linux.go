@@ -328,13 +328,7 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	// Unix socket monitoring via user-notify
 	if cfg.UnixSocketEnabled {
 		trap := seccomp.ActNotify
-		rules := []seccomp.ScmpSyscall{
-			seccomp.ScmpSyscall(unix.SYS_SOCKET),
-			seccomp.ScmpSyscall(unix.SYS_CONNECT),
-			seccomp.ScmpSyscall(unix.SYS_BIND),
-			seccomp.ScmpSyscall(unix.SYS_LISTEN),
-			seccomp.ScmpSyscall(unix.SYS_SENDTO),
-		}
+		rules := unixSocketNotifySyscalls()
 		for _, sc := range rules {
 			if err := filt.AddRule(sc, trap); err != nil {
 				return nil, fmt.Errorf("add notify rule %v: %w", sc, err)
@@ -370,12 +364,7 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	// Metadata syscalls via user-notify (when intercept_metadata is enabled)
 	if cfg.InterceptMetadata {
 		trap := seccomp.ActNotify
-		metadataRules := []seccomp.ScmpSyscall{
-			seccomp.ScmpSyscall(unix.SYS_STATX),
-			seccomp.ScmpSyscall(unix.SYS_NEWFSTATAT),
-			seccomp.ScmpSyscall(unix.SYS_FACCESSAT2),
-			seccomp.ScmpSyscall(unix.SYS_READLINKAT),
-		}
+		metadataRules := metadataNotifySyscalls()
 		for _, sc := range metadataRules {
 			if err := filt.AddRule(sc, trap); err != nil {
 				return nil, fmt.Errorf("add metadata rule %v: %w", sc, err)
@@ -560,6 +549,32 @@ func familyToScmpAction(a seccompkg.OnBlockAction) (seccomp.ScmpAction, error) {
 type fileMonitorRuleAdder interface {
 	AddRule(seccomp.ScmpSyscall, seccomp.ScmpAction) error
 	AddRuleConditional(seccomp.ScmpSyscall, seccomp.ScmpAction, []seccomp.ScmpCondition) error
+}
+
+// unixSocketNotifySyscalls returns the socket-family syscalls the wrapper traps
+// via user-notify. Shared between the production filter builder and the
+// WAIT_KILLABLE_RECV behavioral probe (buildProbeFilterBytes) so the two
+// filter compositions can't drift apart (issue #369).
+func unixSocketNotifySyscalls() []seccomp.ScmpSyscall {
+	return []seccomp.ScmpSyscall{
+		seccomp.ScmpSyscall(unix.SYS_SOCKET),
+		seccomp.ScmpSyscall(unix.SYS_CONNECT),
+		seccomp.ScmpSyscall(unix.SYS_BIND),
+		seccomp.ScmpSyscall(unix.SYS_LISTEN),
+		seccomp.ScmpSyscall(unix.SYS_SENDTO),
+	}
+}
+
+// metadataNotifySyscalls returns the metadata syscalls the wrapper traps via
+// user-notify when intercept_metadata is enabled. Shared with the
+// WAIT_KILLABLE_RECV behavioral probe (issue #369).
+func metadataNotifySyscalls() []seccomp.ScmpSyscall {
+	return []seccomp.ScmpSyscall{
+		seccomp.ScmpSyscall(unix.SYS_STATX),
+		seccomp.ScmpSyscall(unix.SYS_NEWFSTATAT),
+		seccomp.ScmpSyscall(unix.SYS_FACCESSAT2),
+		seccomp.ScmpSyscall(unix.SYS_READLINKAT),
+	}
 }
 
 func installFileMonitorRules(adder fileMonitorRuleAdder, action seccomp.ScmpAction, writeOnlyOpens bool) (int, error) {

@@ -195,11 +195,47 @@ func runProbeChild() {
 	childSetupFailure("exec failed: %v", lastErr)
 }
 
-// buildProbeFilterBytes constructs the worst-case filter composition
-// (socket family + file/metadata family + execve trap) as raw BPF bytes
-// using the existing libseccomp + exportFilterBPF path. Filter is
-// ActAllow by default so syscalls not in the rule set pass through
-// unimpeded.
+// addProbeFilterRules installs the worst-case bug-prone notify composition
+// (socket family + the full file_monitor family + metadata family) onto adder,
+// reusing the production wrapper's installers so the probe filter cannot drift
+// from what the wrapper actually installs. Factored out of buildProbeFilterBytes
+// so tests can drive it with a recording adder and assert the real composition
+// (notably that openat2 is trapped — issue #369 Gap C1).
+//
+// WriteOnlyOpens is false (worst case: trap every open unconditionally),
+// independent of session config: the probe makes a single server-wide boot
+// decision and the broadest composition is the fail-safe one to test.
+func addProbeFilterRules(adder fileMonitorRuleAdder) error {
+	trap := seccomp.ActNotify
+	for _, sc := range unixSocketNotifySyscalls() {
+		if err := adder.AddRule(sc, trap); err != nil {
+			return fmt.Errorf("add probe socket rule %v: %w", sc, err)
+		}
+	}
+	if _, err := installFileMonitorRules(adder, trap, false); err != nil {
+		return fmt.Errorf("add probe file-monitor rules: %w", err)
+	}
+	for _, sc := range metadataNotifySyscalls() {
+		if err := adder.AddRule(sc, trap); err != nil {
+			return fmt.Errorf("add probe metadata rule %v: %w", sc, err)
+		}
+	}
+	return nil
+}
+
+// buildProbeFilterBytes compiles the probe composition (see addProbeFilterRules)
+// to raw BPF bytes, ActAllow by default so unlisted syscalls pass through.
+//
+// Issue #369 (Gap C1): the previous hand-picked 10-syscall set omitted openat2
+// (and ~18 other file_monitor rules). On glibc >= 2.34 the dynamic linker uses
+// openat2 for shared-library loads, so the probe child's /bin/true exec took
+// the kernel fast path for its linker storm and never exercised the
+// notify-dispatch path the WAIT_KILLABLE_RECV kernel bug lives on — the probe
+// false-passed.
+//
+// Also used by runInstallProbeChild (seccomp_install_probe_linux.go); the
+// larger filter is benign there since that probe only checks loadRawFilter
+// success and never execs or services notifications.
 func buildProbeFilterBytes() ([]byte, error) {
 	filt, err := seccomp.NewFilter(seccomp.ActAllow)
 	if err != nil {
@@ -207,23 +243,8 @@ func buildProbeFilterBytes() ([]byte, error) {
 	}
 	defer filt.Release()
 
-	trap := seccomp.ActNotify
-	syscalls := []seccomp.ScmpSyscall{
-		seccomp.ScmpSyscall(unix.SYS_SOCKET),
-		seccomp.ScmpSyscall(unix.SYS_CONNECT),
-		seccomp.ScmpSyscall(unix.SYS_BIND),
-		seccomp.ScmpSyscall(unix.SYS_LISTEN),
-		seccomp.ScmpSyscall(unix.SYS_SENDTO),
-		seccomp.ScmpSyscall(unix.SYS_OPENAT),
-		seccomp.ScmpSyscall(unix.SYS_STATX),
-		seccomp.ScmpSyscall(unix.SYS_NEWFSTATAT),
-		seccomp.ScmpSyscall(unix.SYS_FACCESSAT2),
-		seccomp.ScmpSyscall(unix.SYS_READLINKAT),
-	}
-	for _, sc := range syscalls {
-		if err := filt.AddRule(sc, trap); err != nil {
-			return nil, fmt.Errorf("add probe rule %v: %w", sc, err)
-		}
+	if err := addProbeFilterRules(filt); err != nil {
+		return nil, err
 	}
 	return exportFilterBPF(filt)
 }
