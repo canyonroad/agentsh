@@ -10,7 +10,7 @@ import (
 // inject the kernel-version probe and the behavioral probe without
 // crossing platform build tags.
 type waitKillableDeps struct {
-	cfg            config.SandboxSeccompConfig
+	cfg            config.SandboxConfig
 	kernelSupports func() bool
 	probe          func(context.Context) (bool, error)
 }
@@ -26,7 +26,7 @@ type waitKillableDeps struct {
 //  3. Filter composition cannot trigger the bug → true (probe unneeded).
 //  4. Behavioral probe → its result. Probe errors are fail-safe (false).
 func decideWaitKillable(ctx context.Context, deps waitKillableDeps) (bool, string) {
-	if v := deps.cfg.WaitKillable; v != nil {
+	if v := deps.cfg.Seccomp.WaitKillable; v != nil {
 		return *v, "config"
 	}
 	if !deps.kernelSupports() {

@@ -406,10 +406,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// NOTE: Signal filter is disabled when execve interception is enabled because
 	// stacking two seccomp USER_NOTIF filters causes notification delivery failures
 	// (the signal filter's semaphore interferes with execve notification reception).
-	unixSocketEnabled := a.cfg.Sandbox.Seccomp.UnixSocket.Enabled
-	if a.cfg.Sandbox.UnixSockets.Enabled != nil && *a.cfg.Sandbox.UnixSockets.Enabled {
-		unixSocketEnabled = true
-	}
+	unixSocketEnabled := a.cfg.Sandbox.UnixSocketNotifyEnabled()
 	forceNotifyForPreAckCgroup := wrapNeedsCgroupBeforeAck(a, s)
 	if forceNotifyForPreAckCgroup {
 		// Pre-ACK cgroup/eBPF setup only happens after the wrapper hands a

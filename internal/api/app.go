@@ -189,7 +189,7 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 	// startup. This drives buildSeccompWrapperConfig so every wrapper
 	// exec inherits the same boot-time choice. Issue #369.
 	decision, source := decideWaitKillable(context.Background(), waitKillableDeps{
-		cfg:            cfg.Sandbox.Seccomp,
+		cfg:            cfg.Sandbox,
 		kernelSupports: waitKillableKernelSupports,
 		probe:          waitKillableProbe,
 	})

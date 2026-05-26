@@ -16,17 +16,31 @@ func TestDecideWaitKillable(t *testing.T) {
 	probeFail := func(_ context.Context) (bool, error) { return false, nil }
 	probeErr := func(_ context.Context) (bool, error) { return false, errors.New("probe boom") }
 
-	compositionRisky := config.SandboxSeccompConfig{
-		UnixSocket:  config.SandboxSeccompUnixConfig{Enabled: true},
-		FileMonitor: config.SandboxSeccompFileMonitorConfig{Enabled: &tt},
+	// Socket family via seccomp.unix_socket + file_monitor → bug-prone composition.
+	compositionRisky := config.SandboxConfig{
+		Seccomp: config.SandboxSeccompConfig{
+			UnixSocket:  config.SandboxSeccompUnixConfig{Enabled: true},
+			FileMonitor: config.SandboxSeccompFileMonitorConfig{Enabled: &tt},
+		},
 	}
-	compositionSafe := config.SandboxSeccompConfig{
-		UnixSocket: config.SandboxSeccompUnixConfig{Enabled: true},
+	// Socket family via the TOP-LEVEL unix_sockets flag only (seccomp.unix_socket
+	// off) + file_monitor → still bug-prone. Issue #369 Gap A: pre-fix this was
+	// misclassified as safe and skipped the probe.
+	compositionRiskyTopLevel := config.SandboxConfig{
+		UnixSockets: config.SandboxUnixSocketsConfig{Enabled: &tt},
+		Seccomp: config.SandboxSeccompConfig{
+			FileMonitor: config.SandboxSeccompFileMonitorConfig{Enabled: &tt},
+		},
+	}
+	compositionSafe := config.SandboxConfig{
+		Seccomp: config.SandboxSeccompConfig{
+			UnixSocket: config.SandboxSeccompUnixConfig{Enabled: true},
+		},
 	}
 
 	cases := []struct {
 		name           string
-		cfg            config.SandboxSeccompConfig
+		cfg            config.SandboxConfig
 		kernelSupports bool
 		probe          func(context.Context) (bool, error)
 		wantDecision   bool
@@ -40,6 +54,10 @@ func TestDecideWaitKillable(t *testing.T) {
 		{name: "probe pass", cfg: compositionRisky, kernelSupports: true, probe: probeOK, wantDecision: true, wantSource: "behavioral_probe"},
 		{name: "probe fail", cfg: compositionRisky, kernelSupports: true, probe: probeFail, wantDecision: false, wantSource: "behavioral_probe"},
 		{name: "probe error fails safe", cfg: compositionRisky, kernelSupports: true, probe: probeErr, wantDecision: false, wantSource: "behavioral_probe_error"},
+		// #369 Gap A: top-level unix_sockets + file_monitor must reach the probe,
+		// not short-circuit to filter_composition_safe.
+		{name: "top-level unix_sockets reaches probe", cfg: compositionRiskyTopLevel, kernelSupports: true, probe: probeFail, wantDecision: false, wantSource: "behavioral_probe"},
+		{name: "top-level unix_sockets probe pass", cfg: compositionRiskyTopLevel, kernelSupports: true, probe: probeOK, wantDecision: true, wantSource: "behavioral_probe"},
 	}
 
 	for _, tc := range cases {
@@ -59,7 +77,7 @@ func TestDecideWaitKillable(t *testing.T) {
 	}
 }
 
-func configWithWait(cfg config.SandboxSeccompConfig, v *bool) config.SandboxSeccompConfig {
-	cfg.WaitKillable = v
+func configWithWait(cfg config.SandboxConfig, v *bool) config.SandboxConfig {
+	cfg.Seccomp.WaitKillable = v
 	return cfg
 }

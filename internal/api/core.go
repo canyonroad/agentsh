@@ -171,7 +171,11 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 
 	// Pass seccomp configuration to the wrapper
 	seccompCfg := a.buildSeccompWrapperConfig(s, seccompWrapperParams{
-		UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
+		// Mirror wrap.go: the wrapper installs unix-socket notify rules from
+		// the OR of seccomp.unix_socket.enabled and top-level
+		// unix_sockets.enabled. Reading only the seccomp field here made the
+		// exec path disagree with the wrap path (issue #369 Gap B).
+		UnixSocketEnabled:   a.cfg.Sandbox.UnixSocketNotifyEnabled(),
 		SignalFilterEnabled: signalFilterActive,
 		ExecveEnabled:       execveEnabled,
 	})
