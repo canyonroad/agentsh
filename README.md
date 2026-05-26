@@ -23,6 +23,7 @@ agentsh sits *under* your agent/tooling—intercepting **file**, **network**, **
   - PTY activity
   - LLM API requests with DLP and usage tracking
   - signal send/block (Linux enforced, macOS/Windows audit)
+  - database queries via the embedded **PostgreSQL proxy** — per-statement classification and policy
   - Route outbound HTTP API calls through declared services (**http_services**) with per-method, per-path rules, approval gating, and fail-closed host enforcement
 - **Two output modes**:
   - human-friendly shell output
@@ -140,6 +141,19 @@ SID=$(./bin/agentsh session create --workspace . --json | jq -r .id)
 
 ---
 
+### Check what gets enforced
+
+`agentsh detect` probes the host and reports which enforcement primitives are actually available — seccomp, Landlock, FUSE, eBPF, ptrace, cgroups — grouped into per-domain protection scores plus the selected security mode. On restricted hosts (Daytona, E2B, Firecracker-class) where the seccomp user-notify listener can't install, it reports the mode that will *actually* enforce rather than what the kernel merely supports.
+
+```bash
+agentsh detect              # human-readable protection report
+agentsh detect config       # emit a config tuned for this host
+```
+
+See [Security Modes](docs/security-modes.md) for the mode matrix and tuning knobs.
+
+---
+
 ### Tell your agent to use it (AGENTS.md / CLAUDE.md snippet)
 
 ```md
@@ -221,6 +235,7 @@ This writes `/etc/agentsh/shim.conf` with `force=true`, which the shim reads at 
 * commands
 * environment vars
 * network (DNS/connect)
+* database (SQL statements via the PostgreSQL proxy)
 * PTY/session settings
 * declared HTTP services
 
@@ -501,6 +516,46 @@ The generated policy:
 
 ---
 
+## Database Access (PostgreSQL)
+
+agentsh includes an embedded **PostgreSQL proxy** that makes database access agent-aware and policy-governed. It speaks the Postgres wire protocol, classifies every statement into a list of *effects* (reads, writes, DDL, DCL, transaction/session control, bulk `COPY`/export, …), and evaluates each effect against `database_rules` before forwarding upstream — so an `UPDATE`, `DROP`, or unscoped `DELETE` is governed the same way a file write or network connect is.
+
+- **Per-effect, multi-object evaluation** — rules are collect-all / **any-deny-wins** (the most-restrictive verb decides), not first-match.
+- **Decisions:** `allow`, `deny`, `approve` (human OK), `audit`, and statement-level `redirect`.
+- **`require_where` guard** — refuse top-level `UPDATE`/`DELETE` that lack a `WHERE` clause.
+- **Connection-level rules** (`database_connection_rules`) gate which sessions may reach which declared `db_service`.
+- **Auth + statement audit events** for every connection and query; statement-text logging is configurable (`policies.db.log_statements: none | parameters_redacted | full`).
+
+Phase 1 covers the PostgreSQL v3 wire protocol (dialects: `postgres`, `aurora_postgres`; `redshift` / `cockroachdb` in beta). Replication and GSSAPI-encrypted connections default-deny.
+
+```yaml
+database_rules:
+  # normal reads + updates on the declared service
+  - name: app-read-and-update
+    db_service: appdb
+    operations: [READ, UPDATE]
+    decision: allow
+
+  # allow UPDATE/DELETE only when scoped by a WHERE clause
+  - name: app-guard-unscoped-dml
+    db_service: appdb
+    operations: [UPDATE, DELETE]
+    require_where: true
+    decision: allow
+
+  # block schema/DDL mutations; terminate the transaction on violation
+  - name: app-deny-ddl
+    db_service: appdb
+    operations: [CREATE, DROP, ALTER, EXPORT]
+    decision: deny
+    deny_mode_in_tx: terminate
+    message: "appdb is read+update only. Requested: {{.Operation}}"
+```
+
+See the [Database Access Control spec](docs/agentsh-db-access-spec.md) for the full operation taxonomy, effects model, connection rules, and unavoidability threat model.
+
+---
+
 ## Network Redirect
 
 agentsh can transparently redirect DNS and TCP connections, enabling use cases like routing API calls through corporate proxies or switching AI providers without code changes.
@@ -688,6 +743,11 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * **Policy authoring skills:** [`skills/`](skills/) - AI-assistant skills for creating and editing policies in Claude Code, NanoClaw, etc.
 * **Platform comparison:** [`docs/platform-comparison.md`](docs/platform-comparison.md) - feature support, security scores, performance by platform
 * **Bubblewrap vs agentsh:** [`docs/bubblewrap-vs-agentsh-comparison.md`](docs/bubblewrap-vs-agentsh-comparison.md) - comparison with Bubblewrap for Linux container sandboxing
+* **Database access control:** [`docs/agentsh-db-access-spec.md`](docs/agentsh-db-access-spec.md) - PostgreSQL proxy taxonomy, effects model, `database_rules`, connection rules, threat model
+* **Security modes & `detect`:** [`docs/security-modes.md`](docs/security-modes.md) - enforcement modes, protection score, and what `agentsh detect` reports
+* **seccomp:** [`docs/seccomp.md`](docs/seccomp.md) - syscall filtering, execve interception, and socket-family blocking
+* **ptrace mode:** [`docs/ptrace-support.md`](docs/ptrace-support.md) - PTRACE_SEIZE enforcement for restricted containers (`attach_mode`, seccomp prefilter)
+* **eBPF:** [`docs/ebpf.md`](docs/ebpf.md) - eBPF network tracing & policy enforcement
 * **LLM Proxy & DLP:** [`docs/llm-proxy.md`](docs/llm-proxy.md) - embedded proxy configuration, DLP patterns, usage tracking
 * **macOS build guide:** [`docs/macos-build.md`](docs/macos-build.md) - ESF+NE build instructions
 * **macOS ESF+NE architecture:** [`docs/macos-esf-ne-architecture.md`](docs/macos-esf-ne-architecture.md) - System Extension, XPC, and deployment details
