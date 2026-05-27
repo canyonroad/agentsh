@@ -48,6 +48,16 @@ instead of a silent phantom that later `EIO`s and kills the command.
   non-representative probe is a follow-up, tracked separately. (Its
   `ProbePtraceInject` reuse of `ensureScratchPage` is fail-open, so fix (4)'s new
   error path just makes the probe fail-open as before — no behavior change.)
+
+  > **Correction (roborev follow-up, superseding the parenthetical above):** the
+  > "no behavior change / fail-open as before" claim was wrong for the
+  > unmapped-VMA case. Before fix (4), a broken kernel returned `(addr, nil)` and
+  > the probe's own `addrInMaps` check made it fail-**closed** (Injectable=false,
+  > degrade). Fix (4) turning that into a generic error would have flipped it to
+  > fail-**open**. We therefore made `ensureScratchPage` wrap a sentinel
+  > (`errScratchUnmapped`) and had the probe classify it as the clean
+  > broken-kernel signal, **preserving fail-closed** on the unmapped case.
+  > Production inject paths still treat every `ensureScratchPage` error identically.
 - **The `TRACESYSGOOD` fallback hang is not addressed.** On inject failure the
   code logs "falling back to TRACESYSGOOD", which hangs on 6.12.90 (pre-existing,
   separate). With fix (1) correct, the inject succeeds, so this fallback is not

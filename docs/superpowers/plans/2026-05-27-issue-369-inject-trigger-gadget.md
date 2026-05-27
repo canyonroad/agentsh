@@ -173,6 +173,8 @@ Run: `go build ./internal/ptrace/ && go vet ./internal/ptrace/`
 Run: `go test ./internal/ptrace/` and (if kernel allows) `go test -tags 'integration linux' ./internal/ptrace/ 2>&1 | tail -20` → on CI the mmap maps, so `ensureScratchPage` returns success and prefilter-inject tests stay green.
 Note: `ptrace.ProbePtraceInject` (the #399 probe) calls `ensureScratchPage` and is fail-open on its error — so this new error path keeps the probe fail-open (no behavior change there). Confirm `go test ./internal/ptrace/ -tags 'integration linux' -run InjectProbe` still PASSes (Injectable=true on CI).
 
+> **Correction (roborev follow-up):** the "keeps the probe fail-open (no behavior change)" note was wrong for the unmapped-VMA case — before this change the probe fail-**closed** there (its own `addrInMaps` check → Injectable=false/degrade). A plain error would have flipped it to fail-open. Final code instead wraps a sentinel (`errScratchUnmapped`) in `ensureScratchPage` and classifies it in the probe (`classifyScratchInjectErr`) to **preserve fail-closed** on the unmapped case; the wiring is locked by `inject_probe_classify_test.go`.
+
 - [ ] **Step 3: Commit** (`fix(ptrace,#369): fail-closed when injected scratch mmap maps no VMA`).
 
 ---
