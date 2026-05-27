@@ -906,14 +906,29 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		// call — never hold t.mu across it), and reuse the boolean for both the
 		// prefilter and escalation decisions in this handler invocation.
 		//
+		// Skip the op read entirely unless a prefilter or escalation inject can
+		// actually fire at this stop. handleSyscallStop runs on EVERY traced
+		// syscall, so in steady state (prefilter installed, escalations applied,
+		// nothing pending) the per-stop PTRACE_GET_SYSCALL_INFO call would be
+		// pure overhead — this package is sensitive to per-syscall ptrace cost
+		// (#369). Every branch below that consults `exit` requires one of these
+		// flags, so leaving exit=false when none is set is behavior-preserving.
+		//
 		// Historical note on the InSyscall toggle (still the pre-5.3 fallback):
 		//   InSyscall=false → entry stop (first time)
 		//   InSyscall=true  → exit stop (entry was processed)
 		t.mu.Lock()
 		state := t.tracees[tid]
 		inSyscall := state != nil && state.InSyscall
+		mayInject := state != nil && (state.PendingPrefilter ||
+			(state.HasPrefilter && (state.PendingReadEscalation || state.PendingWriteEscalation ||
+				(state.NeedsReadEscalation && !state.ThreadHasReadEscalation) ||
+				(state.NeedsWriteEscalation && !state.ThreadHasWriteEscalation))))
 		t.mu.Unlock()
-		exit := t.atSyscallExitStop(tid, inSyscall)
+		exit := false
+		if mayInject {
+			exit = t.atSyscallExitStop(tid, inSyscall)
+		}
 
 		t.mu.Lock()
 		state = t.tracees[tid]
