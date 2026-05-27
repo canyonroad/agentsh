@@ -32,9 +32,8 @@ func (e *ptraceFamilyEmitter) Publish(ev types.Event) {
 }
 
 // ptraceInjectProbe reports whether ptrace syscall injection is reliable on this
-// kernel. Seam for tests; task #80 switches the default to the real one-time
-// behavioral probe ptrace.ProbePtraceInject().Injectable (#369).
-var ptraceInjectProbe = func() bool { return true } // TODO(#369 task80): real probe
+// kernel. Seam for tests; defaults to the real one-time behavioral probe (#369).
+var ptraceInjectProbe = func() bool { return ptrace.ProbePtraceInject().Injectable }
 
 // initPtraceTracer initializes the ptrace tracer if configured.
 // Called from NewApp on Linux when sandbox.ptrace.enabled is true.

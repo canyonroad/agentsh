@@ -80,6 +80,11 @@ func DetectSecurityCapabilities() *SecurityCapabilities {
 	caps.FUSE = checkFUSE()
 	caps.Ptrace = checkPtraceCapability()
 
+	// Only run the (forking) inject probe when the ptrace capability exists.
+	if caps.Ptrace {
+		caps.PtraceInjectable, caps.PtraceInjectDetail = checkPtraceInject()
+	}
+
 	// Run real probes and cache results
 	ebpfProbe := probeEBPF()
 	cgroupProbe := probeCgroupsV2()
