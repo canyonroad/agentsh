@@ -86,6 +86,7 @@ func TestApplyWrapperAvailability_Missing(t *testing.T) {
 		FUSE:               true,
 		Ptrace:             true,
 		PtraceEnabled:      true,
+		PtraceInjectable:   true,
 	}
 	caps.FileEnforcement = detectFileEnforcementBackend(caps)
 	domains := buildLinuxDomains(caps)
@@ -302,8 +303,9 @@ func TestBuildLinuxDomains_SeccompInstallFalseFlipsVerdictAndScore(t *testing.T)
 		t.Errorf("Command Control should score 0 when ptrace is present but not enabled; got %d", got)
 	}
 
-	// ptrace actively enforcing (capability present AND enabled) keeps the weight.
+	// ptrace actively enforcing (capability present AND enabled AND injectable) keeps the weight.
 	caps.PtraceEnabled = true
+	caps.PtraceInjectable = true
 	ccActive := findDomain(t, buildLinuxDomains(caps), "Command Control")
 	if got := ComputeScore([]ProtectionDomain{ccActive}); got != WeightCommandControl {
 		t.Errorf("Command Control should score %d when ptrace is actively enforcing; got %d", WeightCommandControl, got)
@@ -327,8 +329,8 @@ func TestBuildLinuxDomains_SeccompInstallTrueKeepsVerdict(t *testing.T) {
 }
 
 func TestBuildLinuxDomains_PtraceBackendReflectsEnforcement(t *testing.T) {
-	// Capability present but not enabled in config: not actively enforcing.
-	idle := buildLinuxDomains(&SecurityCapabilities{Ptrace: true, PtraceEnabled: false})
+	// Capability present and injectable but not enabled in config: not actively enforcing.
+	idle := buildLinuxDomains(&SecurityCapabilities{Ptrace: true, PtraceEnabled: false, PtraceInjectable: true})
 	pb := findBackend(t, idle, "Command Control", "ptrace")
 	if pb.Available {
 		t.Error("ptrace backend must be unavailable when ptrace is a present-but-unengaged capability")
@@ -337,8 +339,8 @@ func TestBuildLinuxDomains_PtraceBackendReflectsEnforcement(t *testing.T) {
 		t.Errorf("ptrace detail = %q, want the actionable not-active message", pb.Detail)
 	}
 
-	// Capability present AND enabled: actively enforcing.
-	active := buildLinuxDomains(&SecurityCapabilities{Ptrace: true, PtraceEnabled: true})
+	// Capability present AND enabled AND injectable: actively enforcing.
+	active := buildLinuxDomains(&SecurityCapabilities{Ptrace: true, PtraceEnabled: true, PtraceInjectable: true})
 	ab := findBackend(t, active, "Command Control", "ptrace")
 	if !ab.Available {
 		t.Error("ptrace backend must be available when ptrace is enabled (actively enforcing)")
@@ -389,4 +391,38 @@ func findBackend(t *testing.T, domains []ProtectionDomain, domain, backend strin
 	}
 	t.Fatalf("backend %q not found in %q", backend, domain)
 	return DetectedBackend{}
+}
+
+// findPtraceBackend returns a pointer to the ptrace backend in the "Command Control" domain,
+// or nil if not found.
+func findPtraceBackend(domains []ProtectionDomain) *DetectedBackend {
+	for _, d := range domains {
+		if d.Name == "Command Control" {
+			for i := range d.Backends {
+				if d.Backends[i].Name == "ptrace" {
+					b := d.Backends[i]
+					return &b
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func TestPtraceBackendDetail_InjectUnreliable(t *testing.T) {
+	caps := &SecurityCapabilities{Ptrace: true, PtraceEnabled: true, PtraceInjectable: false}
+	if got := ptraceBackendDetail(caps); got != "syscall injection unreliable on this kernel (disabled)" {
+		t.Fatalf("detail = %q", got)
+	}
+}
+
+func TestPtraceBackend_Available_RequiresInjectable(t *testing.T) {
+	domains := buildLinuxDomains(&SecurityCapabilities{Ptrace: true, PtraceEnabled: true, PtraceInjectable: false})
+	if b := findPtraceBackend(domains); b == nil || b.Available {
+		t.Fatalf("ptrace backend should be unavailable when not injectable; got %+v", b)
+	}
+	domains = buildLinuxDomains(&SecurityCapabilities{Ptrace: true, PtraceEnabled: true, PtraceInjectable: true})
+	if b := findPtraceBackend(domains); b == nil || !b.Available {
+		t.Fatalf("ptrace backend should be available when injectable; got %+v", b)
+	}
 }

@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/agentsh/agentsh/internal/ptrace"
 )
 
 const capSysPtrace = 19
@@ -40,6 +42,13 @@ func parseCapEff(content string) (uint64, error) {
 // report the capability but block the actual syscall.
 func checkPtraceCapability() bool {
 	return probePtraceAttach()
+}
+
+// checkPtraceInject reports whether ptrace syscall injection reliably creates
+// mappings on this kernel (issue #369), via the one-time behavioral probe.
+func checkPtraceInject() (injectable bool, detail string) {
+	r := ptrace.ProbePtraceInject()
+	return r.Injectable, r.Detail
 }
 
 // probePtraceAttach forks a short-lived child and attempts PTRACE_SEIZE.

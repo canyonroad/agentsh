@@ -92,6 +92,11 @@ type App struct {
 	// is configured. When true, command execution is blocked to prevent running
 	// without syscall enforcement (fail-closed).
 	ptraceFailed atomic.Bool
+	// ptraceDegraded is set when the runtime probe reports that ptrace syscall
+	// injection is unreliable on this kernel, causing initPtraceTracer to skip
+	// starting the tracer. Unlike ptraceFailed it is NOT fail-closed: commands
+	// continue under remaining backends. (#369)
+	ptraceDegraded atomic.Bool
 
 	// cmdResolver registers PID→command_id for ESF file event attribution (darwin).
 	// Nil on non-darwin platforms or when policy socket is not configured.

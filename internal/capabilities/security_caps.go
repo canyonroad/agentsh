@@ -37,6 +37,8 @@ type SecurityCapabilities struct {
 	PIDNamespace         bool   // isolated PID namespace
 	Ptrace               bool   // SYS_PTRACE capability available
 	PtraceEnabled        bool   // ptrace enforcement enabled in config
+	PtraceInjectable     bool   // injected syscalls (mmap) reliably take effect here (issue #369)
+	PtraceInjectDetail   string // why injection is unreliable, when PtraceInjectable is false
 	FileEnforcement      string // "landlock", "fuse", "seccomp-notify", "none"
 
 	// Cached probe results (populated by DetectSecurityCapabilities, reused by buildLinuxDomains)
@@ -77,6 +79,11 @@ func DetectSecurityCapabilities() *SecurityCapabilities {
 	}
 	caps.FUSE = checkFUSE()
 	caps.Ptrace = checkPtraceCapability()
+
+	// Only run the (forking) inject probe when the ptrace capability exists.
+	if caps.Ptrace {
+		caps.PtraceInjectable, caps.PtraceInjectDetail = checkPtraceInject()
+	}
 
 	// Run real probes and cache results
 	ebpfProbe := probeEBPF()
