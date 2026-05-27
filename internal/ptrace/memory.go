@@ -345,3 +345,76 @@ func nativeEndianUint64(b []byte) uint64 {
 	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
 		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
 }
+
+// --- #369 scratch-mmap diagnostics ---
+//
+// These let us confirm whether an injected mmap actually creates a mapping in
+// the tracee, and at the address the return register reported. Used by
+// ensureScratchPage to diagnose the structural EIO on exe.dev 6.12.90 where the
+// injected mmap returns a plausible page-aligned address that is not mapped.
+
+// mapStarts returns the set of mapping start addresses in /proc/<tid>/maps
+// (nil on error). Snapshot before an injected mmap to diff afterward.
+func mapStarts(tid int) map[uint64]struct{} {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", tid))
+	if err != nil {
+		return nil
+	}
+	return parseMapStarts(data)
+}
+
+// newMapRanges returns the "start-end" ranges in /proc/<tid>/maps whose start
+// was not present in before (i.e. mappings created since the snapshot).
+func newMapRanges(tid int, before map[uint64]struct{}) []string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", tid))
+	if err != nil {
+		return nil
+	}
+	return parseNewMapRanges(data, before)
+}
+
+func parseMapStarts(data []byte) map[uint64]struct{} {
+	out := make(map[uint64]struct{})
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	for sc.Scan() {
+		line := sc.Text()
+		dash := strings.IndexByte(line, '-')
+		if dash <= 0 {
+			continue
+		}
+		start, err := strconv.ParseUint(line[:dash], 16, 64)
+		if err != nil {
+			continue
+		}
+		out[start] = struct{}{}
+	}
+	return out
+}
+
+func parseNewMapRanges(data []byte, before map[uint64]struct{}) []string {
+	var out []string
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	for sc.Scan() {
+		line := sc.Text()
+		dash := strings.IndexByte(line, '-')
+		if dash <= 0 {
+			continue
+		}
+		sp := strings.IndexByte(line[dash:], ' ')
+		if sp < 0 {
+			continue
+		}
+		start, err := strconv.ParseUint(line[:dash], 16, 64)
+		if err != nil {
+			continue
+		}
+		if _, seen := before[start]; seen {
+			continue
+		}
+		out = append(out, line[:dash+sp]) // "start-end"
+		if len(out) >= 16 {
+			break
+		}
+	}
+	return out
+}

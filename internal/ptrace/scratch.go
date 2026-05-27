@@ -4,6 +4,7 @@ package ptrace
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"golang.org/x/sys/unix"
@@ -51,6 +52,12 @@ func (t *Tracer) ensureScratchPage(tid, tgid int, savedRegs Regs) (*scratchPage,
 		return sp, nil
 	}
 
+	// #369 diagnostic: snapshot the tracee's mappings, inject mmap, then verify
+	// the mmap actually created a mapping at the returned address. A new mapping
+	// at a different address than addr ⇒ the return register is mis-read; no new
+	// mapping ⇒ the injected mmap did not take effect on this kernel.
+	mapsBefore := mapStarts(tid)
+
 	// Inject mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
 	addr, err := t.injectSyscallRet(tid, savedRegs, unix.SYS_MMAP,
 		0, 4096,
@@ -61,6 +68,17 @@ func (t *Tracer) ensureScratchPage(tid, tgid int, savedRegs Regs) (*scratchPage,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("mmap injection: %w", err)
+	}
+
+	retMapped := addrInMaps(tid, addr)
+	if !retMapped {
+		// Anomaly path only (keeps the extra /proc/maps read off the happy path):
+		// dump the mappings the injected mmap actually created so we can tell a
+		// mis-read return (new mapping at a different address) from an mmap that
+		// did not take effect (no new mapping). #369.
+		slog.Warn("scratch mmap returned an unmapped address (#369 diag)",
+			"tid", tid, "tgid", tgid, "mmap_ret", fmt.Sprintf("0x%x", addr),
+			"new_mappings", newMapRanges(tid, mapsBefore))
 	}
 
 	sp = &scratchPage{addr: addr, size: 4096}
