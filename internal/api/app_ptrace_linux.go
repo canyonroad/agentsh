@@ -31,6 +31,11 @@ func (e *ptraceFamilyEmitter) Publish(ev types.Event) {
 	e.broker.Publish(ev)
 }
 
+// ptraceInjectProbe reports whether ptrace syscall injection is reliable on this
+// kernel. Seam for tests; task #80 switches the default to the real one-time
+// behavioral probe ptrace.ProbePtraceInject().Injectable (#369).
+var ptraceInjectProbe = func() bool { return true } // TODO(#369 task80): real probe
+
 // initPtraceTracer initializes the ptrace tracer if configured.
 // Called from NewApp on Linux when sandbox.ptrace.enabled is true.
 // Always wires FamilyChecker when families are configured, regardless of which
@@ -41,6 +46,16 @@ func (a *App) initPtraceTracer() {
 	if !cfg.Enabled {
 		// Even when ptrace is disabled, check if socket-family blocking is
 		// configured but has no enforcement engine available, and warn.
+		a.warnIfFamiliesOrphan()
+		a.warnIfSocketRulesOrphan()
+		return
+	}
+
+	if !ptraceInjectProbe() {
+		slog.Warn("ptrace syscall injection is unreliable on this kernel; not starting the " +
+			"ptrace tracer (degraded). Commands run WITHOUT ptrace enforcement. Run on a kernel " +
+			"with working ptrace injection, or set sandbox.ptrace.enabled:false to silence. (#369)")
+		a.ptraceDegraded.Store(true)
 		a.warnIfFamiliesOrphan()
 		a.warnIfSocketRulesOrphan()
 		return
