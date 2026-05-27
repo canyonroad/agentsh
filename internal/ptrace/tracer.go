@@ -873,6 +873,20 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 	}
 }
 
+// atSyscallExitStop reports whether the tracee is at a syscall-EXIT stop. It
+// prefers the authoritative PTRACE_GET_SYSCALL_INFO op; the hand-maintained
+// InSyscall toggle is only a pre-5.3 fallback, because that toggle can desync
+// from the real stop sequence on kernels whose post-exec stop storm interleaves
+// PTRACE_EVENT/signal stops (#369). Call on the tracer thread at a ptrace stop.
+func (t *Tracer) atSyscallExitStop(tid int, inSyscall bool) bool {
+	if t.hasSyscallInfo {
+		if op, err := t.syscallStopOp(tid); err == nil {
+			return op == ptraceSyscallInfoExit
+		}
+	}
+	return inSyscall
+}
+
 // handleSyscallStop handles SIGTRAP|0x80 stops (TRACESYSGOOD mode).
 func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	// Deferred seccomp prefilter and escalation injection are only relevant
@@ -884,16 +898,30 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		// drop the tracee's first real syscall). At exit, the syscall already
 		// completed, so injection is safe.
 		//
-		// State.InSyscall tracks what the PREVIOUS stop set:
-		//   InSyscall=false → this is an entry stop (first time)
-		//   InSyscall=true  → this is an exit stop (entry was processed)
+		// Whether this stop is a syscall EXIT. Prefer the authoritative
+		// PTRACE_GET_SYSCALL_INFO op over the hand-maintained InSyscall toggle,
+		// which can desync from the real stop sequence on kernels whose
+		// post-exec stop storm interleaves PTRACE_EVENT/signal stops (#369).
+		// Read the op ONCE here, outside t.mu (atSyscallExitStop issues a ptrace
+		// call — never hold t.mu across it), and reuse the boolean for both the
+		// prefilter and escalation decisions in this handler invocation.
+		//
+		// Historical note on the InSyscall toggle (still the pre-5.3 fallback):
+		//   InSyscall=false → entry stop (first time)
+		//   InSyscall=true  → exit stop (entry was processed)
 		t.mu.Lock()
 		state := t.tracees[tid]
-		if state != nil && state.PendingPrefilter && !state.InSyscall {
+		inSyscall := state != nil && state.InSyscall
+		t.mu.Unlock()
+		exit := t.atSyscallExitStop(tid, inSyscall)
+
+		t.mu.Lock()
+		state = t.tracees[tid]
+		if state != nil && state.PendingPrefilter && !exit {
 			// This is a syscall entry. Let normal handling process it.
 			// The next stop will be the exit, where we'll inject.
 			t.mu.Unlock()
-		} else if state != nil && state.PendingPrefilter && state.InSyscall {
+		} else if state != nil && state.PendingPrefilter && exit {
 			// This is a syscall exit — safe to inject now.
 			state.PendingPrefilter = false
 			// Set InSyscall=false before injection so injectSyscall uses the
@@ -925,12 +953,13 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		}
 
 		// Deferred BPF escalation: inject escalation filters at exit stops.
-		// Follows the same pattern as PendingPrefilter above.
+		// Follows the same pattern as PendingPrefilter above and reuses the same
+		// authoritative `exit` classification computed above.
 		// Only attempt injection when a seccomp prefilter is installed;
 		// without one, all syscalls are already traced via TRACESYSGOOD.
 		t.mu.Lock()
 		state = t.tracees[tid]
-		if state != nil && state.HasPrefilter && state.InSyscall && state.PendingReadEscalation {
+		if state != nil && state.HasPrefilter && exit && state.PendingReadEscalation {
 			state.PendingReadEscalation = false
 			state.InSyscall = false
 			t.mu.Unlock()
@@ -949,7 +978,7 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 				}
 				t.mu.Unlock()
 			}
-		} else if state != nil && state.HasPrefilter && state.InSyscall && state.PendingWriteEscalation {
+		} else if state != nil && state.HasPrefilter && exit && state.PendingWriteEscalation {
 			state.PendingWriteEscalation = false
 			state.InSyscall = false
 			t.mu.Unlock()
@@ -968,7 +997,7 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 				}
 				t.mu.Unlock()
 			}
-		} else if state != nil && state.HasPrefilter && !state.InSyscall {
+		} else if state != nil && state.HasPrefilter && !exit {
 			// Entry stop — set pending flags for next exit.
 			if state.NeedsReadEscalation && !state.ThreadHasReadEscalation {
 				state.PendingReadEscalation = true
