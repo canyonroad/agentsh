@@ -3,8 +3,15 @@
 package ptrace
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -36,6 +43,15 @@ func (r *vmReader) read(addr uint64, buf []byte) error {
 	if len(buf) == 0 {
 		return nil
 	}
+	return retryTransientMem(r.tid, addr, "read", func() error {
+		return r.readOnce(addr, buf)
+	})
+}
+
+// readOnce performs a single read attempt: process_vm_readv, falling back to
+// /proc/<tid>/mem pread. retryTransientMem retries this whole ladder on a
+// transient EIO (#369).
+func (r *vmReader) readOnce(addr uint64, buf []byte) error {
 	liov := unix.Iovec{Base: &buf[0], Len: uint64(len(buf))}
 	riov := unix.RemoteIovec{Base: uintptr(addr), Len: len(buf)}
 	_, err := unix.ProcessVMReadv(r.tid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
@@ -145,6 +161,15 @@ func (t *Tracer) writeBytes(tid int, addr uint64, buf []byte) error {
 	if len(buf) == 0 {
 		return nil
 	}
+	return retryTransientMem(tid, addr, "write", func() error {
+		return t.writeBytesOnce(tid, addr, buf)
+	})
+}
+
+// writeBytesOnce performs a single write attempt: process_vm_writev, falling
+// back to /proc/<tid>/mem pwrite. retryTransientMem retries this whole ladder on
+// a transient EIO (#369).
+func (t *Tracer) writeBytesOnce(tid int, addr uint64, buf []byte) error {
 	// Try process_vm_writev first (direct address-space copy, no VFS overhead).
 	liov := unix.Iovec{Base: &buf[0], Len: uint64(len(buf))}
 	riov := unix.RemoteIovec{Base: uintptr(addr), Len: len(buf)}
@@ -159,6 +184,119 @@ func (t *Tracer) writeBytes(tid int, addr uint64, buf []byte) error {
 	}
 	_, err = unix.Pwrite(fd, buf, int64(addr))
 	return err
+}
+
+// memRetryMaxAttempts bounds retries of a tracee-memory access on a transient
+// EIO. Injected accesses normally complete in microseconds, so the escalating
+// backoff (1+2+4+8 ≈ 15ms worst case) is paid only on the rare transient error.
+const memRetryMaxAttempts = 5
+
+// isTransientMemErr reports whether a tracee-memory access error looks like the
+// race-sensitive EIO observed on some kernels (exe.dev 6.12.90, #369), where
+// process_vm_* / /proc/<pid>/mem transiently fail right after a ptrace stop
+// transition (the access succeeds when serialized under strace). EFAULT is
+// intentionally NOT treated as transient — it is frequently a legitimate
+// bad-pointer result (e.g. readString crossing a page boundary), and retrying it
+// would add latency to normal operation.
+func isTransientMemErr(err error) bool {
+	return errors.Is(err, unix.EIO)
+}
+
+// retryTransientMem runs access (the full process_vm_* → /proc-mem ladder),
+// retrying on a transient EIO with escalating backoff. This replicates the
+// latency that makes the same access succeed under strace. On a healthy kernel
+// EIO never occurs, so access runs exactly once with no added latency. On
+// exhaustion it logs diagnostic context and returns the last error. (#369)
+func retryTransientMem(tid int, addr uint64, op string, access func() error) error {
+	var err error
+	for attempt := 0; attempt < memRetryMaxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(1<<(attempt-1)) * time.Millisecond) // 1,2,4,8ms
+		}
+		err = access()
+		if err == nil {
+			if attempt > 0 {
+				slog.Debug("ptrace mem access recovered after retry",
+					"tid", tid, "addr", fmt.Sprintf("0x%x", addr), "op", op, "attempts", attempt+1)
+			}
+			return nil
+		}
+		if !isTransientMemErr(err) {
+			return err
+		}
+	}
+	logMemErrContext(tid, addr, op, err)
+	return err
+}
+
+// logMemErrContext records, at WARN, why a tracee-memory access kept failing:
+// the tracee's scheduler state char from /proc/<tid>/stat (expected 't'/'T' when
+// ptrace-stopped) and whether addr falls inside any /proc/<tid>/maps region.
+// Best-effort and observable without strace; never alters the returned error. (#369)
+func logMemErrContext(tid int, addr uint64, op string, accessErr error) {
+	slog.Warn("ptrace mem access failed after retries",
+		"tid", tid, "addr", fmt.Sprintf("0x%x", addr), "op", op,
+		"error", accessErr, "tracee_state", procStateChar(tid),
+		"addr_mapped", addrInMaps(tid, addr), "attempts", memRetryMaxAttempts)
+}
+
+// procStateChar returns the process state char from /proc/<tid>/stat ("" on error).
+func procStateChar(tid int) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", tid))
+	if err != nil {
+		return ""
+	}
+	return parseProcStatState(data)
+}
+
+// parseProcStatState extracts the state char (field 3) from /proc/<pid>/stat
+// content. comm (field 2) may contain spaces and parens, so the state char is
+// the first whitespace-delimited token after the LAST ')'. Returns "" if the
+// input is malformed.
+func parseProcStatState(data []byte) string {
+	i := bytes.LastIndexByte(data, ')')
+	if i < 0 || i+1 >= len(data) {
+		return ""
+	}
+	rest := strings.TrimLeft(string(data[i+1:]), " \t")
+	if rest == "" {
+		return ""
+	}
+	if sp := strings.IndexAny(rest, " \t\n"); sp >= 0 {
+		return rest[:sp]
+	}
+	return rest
+}
+
+// addrInMaps reports whether addr falls inside any mapped region in
+// /proc/<tid>/maps. Returns false on any error (best-effort diagnostic).
+func addrInMaps(tid int, addr uint64) bool {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/maps", tid))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text() // "start-end perms offset dev inode pathname"
+		dash := strings.IndexByte(line, '-')
+		if dash < 0 {
+			continue
+		}
+		sp := strings.IndexByte(line[dash:], ' ')
+		if sp < 0 {
+			continue
+		}
+		start, err1 := strconv.ParseUint(line[:dash], 16, 64)
+		end, err2 := strconv.ParseUint(line[dash+1:dash+sp], 16, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		if addr >= start && addr < end {
+			return true
+		}
+	}
+	return false
 }
 
 // writeString writes a NUL-terminated string to the tracee's memory.
