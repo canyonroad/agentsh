@@ -86,7 +86,7 @@ func (t *Tracer) injectFromEntry(tid int, savedRegs Regs, nr int, args ...uint64
 		return 0, injectErr
 	}
 	if got := retRegs.SyscallNr(); got != nr {
-		injectErr = fmt.Errorf("injected syscall %d did not execute (orig_rax=%d at exit); stop misclassified (#369)", nr, got)
+		injectErr = fmt.Errorf("injected syscall %d did not execute (syscall_nr=%d at exit); stop misclassified (#369)", nr, got)
 		return 0, injectErr
 	}
 	ret := retRegs.ReturnValue()
@@ -172,7 +172,7 @@ func (t *Tracer) injectFromExit(tid int, savedRegs Regs, nr int, args ...uint64)
 		return 0, injectErr
 	}
 	if got := retRegs.SyscallNr(); got != nr {
-		injectErr = fmt.Errorf("injected syscall %d did not execute (orig_rax=%d at exit); stop misclassified (#369)", nr, got)
+		injectErr = fmt.Errorf("injected syscall %d did not execute (syscall_nr=%d at exit); stop misclassified (#369)", nr, got)
 		return 0, injectErr
 	}
 	ret := retRegs.ReturnValue()
