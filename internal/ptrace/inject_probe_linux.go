@@ -5,6 +5,7 @@ package ptrace
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -261,24 +262,30 @@ func injectProbeBody(pid int) (mapped bool, detail string, probeErr error) {
 		return false, "", fmt.Errorf("getRegs after advancePastEntry: %w", err)
 	}
 
-	// Snapshot mappings BEFORE the inject so we can report exactly what the
-	// injected mmap created (or didn't) on a clean failure.
-	before := mapStarts(pid)
-
-	// 4. THE PRODUCTION GADGET MMAP INJECT.
-	sp, err := tr.ensureScratchPage(pid, pid, savedRegs)
-	if err != nil {
-		// An inject error (not a clean unmapped return) is a probe error:
-		// fail-open. A broken kernel returns a plausible address with no
-		// mapping (err==nil, addr set), which is the mapped==false path below.
-		return false, "", fmt.Errorf("ensureScratchPage: %w", err)
+	// 4. THE PRODUCTION GADGET MMAP INJECT. ensureScratchPage injects the mmap
+	// and itself verifies a real VMA appeared at the returned address (#369).
+	// classifyScratchInjectErr turns its result into the probe's contract.
+	if _, err := tr.ensureScratchPage(pid, pid, savedRegs); err != nil {
+		return classifyScratchInjectErr(err)
 	}
+	return true, "", nil
+}
 
-	// 5. Did a real VMA appear at the returned address?
-	mapped = addrInMaps(pid, sp.addr)
-	if !mapped {
-		detail = fmt.Sprintf("ptrace inject probe: injected mmap returned 0x%x but created no mapping (#369); new_mappings=%v",
-			sp.addr, newMapRanges(pid, before))
+// classifyScratchInjectErr maps an ensureScratchPage error to the inject
+// probe's (mapped, detail, probeErr) contract (#369):
+//   - errScratchUnmapped → the injected mmap returned but mapped no VMA: the
+//     clean broken-kernel signal (mapped==false, no probe error), which makes
+//     runInjectProbe report Injectable=false and DEGRADE (fail-closed).
+//   - any other error → the probe could not run cleanly: a probe error, which
+//     makes runInjectProbe report Injectable=true (fail-open).
+//
+// This is the load-bearing fail-closed/fail-open decision: a regression here
+// (or dropping the %w wrap in scratchUnmappedError) silently reverts the probe
+// to fail-open on the exact broken-kernel class it exists to catch, so it is
+// unit-tested directly.
+func classifyScratchInjectErr(err error) (mapped bool, detail string, probeErr error) {
+	if errors.Is(err, errScratchUnmapped) {
+		return false, fmt.Sprintf("ptrace inject probe: %v", err), nil
 	}
-	return mapped, detail, nil
+	return false, "", fmt.Errorf("ensureScratchPage: %w", err)
 }

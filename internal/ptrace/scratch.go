@@ -3,12 +3,32 @@
 package ptrace
 
 import (
+	"errors"
 	"fmt"
-	"log/slog"
 	"sync"
 
 	"golang.org/x/sys/unix"
 )
+
+// errScratchUnmapped is returned (wrapped) by ensureScratchPage when the
+// injected mmap returns an address that maps no VMA in the tracee (#369). It is
+// a sentinel so callers can distinguish this specific "injection produced no
+// mapping" outcome from a generic inject failure: the #399 inject self-probe
+// treats it as the clean broken-kernel degrade signal (Injectable=false),
+// whereas production inject paths treat any error the same (fall back). Test
+// with errors.Is.
+var errScratchUnmapped = errors.New("scratch mmap mapped no VMA")
+
+// scratchUnmappedError builds the error ensureScratchPage returns when the
+// injected mmap returns an address that maps no VMA (#369). It wraps
+// errScratchUnmapped (so the #399 probe can detect this specific case via
+// errors.Is) and carries the addr + the mappings the mmap actually created for
+// diagnostics. Keep the %w wrap: it is the load-bearing half of the probe's
+// fail-closed broken-kernel signal (see classifyScratchInjectErr).
+func scratchUnmappedError(addr uint64, newMappings []string) error {
+	return fmt.Errorf("scratch mmap returned 0x%x but mapped no VMA (#369); new_mappings=%v: %w",
+		addr, newMappings, errScratchUnmapped)
+}
 
 // scratchPage tracks a scratch memory page mmap'd into a tracee's address space.
 // Per-TGID: threads in the same process share address space.
@@ -70,15 +90,8 @@ func (t *Tracer) ensureScratchPage(tid, tgid int, savedRegs Regs) (*scratchPage,
 		return nil, fmt.Errorf("mmap injection: %w", err)
 	}
 
-	retMapped := addrInMaps(tid, addr)
-	if !retMapped {
-		// Anomaly path only (keeps the extra /proc/maps read off the happy path):
-		// dump the mappings the injected mmap actually created so we can tell a
-		// mis-read return (new mapping at a different address) from an mmap that
-		// did not take effect (no new mapping). #369.
-		slog.Warn("scratch mmap returned an unmapped address (#369 diag)",
-			"tid", tid, "tgid", tgid, "mmap_ret", fmt.Sprintf("0x%x", addr),
-			"new_mappings", newMapRanges(tid, mapsBefore))
+	if !addrInMaps(tid, addr) {
+		return nil, scratchUnmappedError(addr, newMapRanges(tid, mapsBefore))
 	}
 
 	sp = &scratchPage{addr: addr, size: 4096}

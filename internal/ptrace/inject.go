@@ -85,6 +85,10 @@ func (t *Tracer) injectFromEntry(tid int, savedRegs Regs, nr int, args ...uint64
 		injectErr = fmt.Errorf("inject getRegs: %w", err)
 		return 0, injectErr
 	}
+	if got := retRegs.SyscallNr(); got != nr {
+		injectErr = fmt.Errorf("injected syscall %d did not execute (syscall_nr=%d at exit); stop misclassified (#369)", nr, got)
+		return 0, injectErr
+	}
 	ret := retRegs.ReturnValue()
 
 	// Restore original registers.
@@ -108,6 +112,14 @@ func (t *Tracer) injectFromEntry(tid int, savedRegs Regs, nr int, args ...uint64
 // two cycles (enter + exit).
 func (t *Tracer) injectFromExit(tid int, savedRegs Regs, nr int, args ...uint64) (int64, error) {
 	gadget := syscallGadgetAddr(savedRegs)
+
+	insn := make([]byte, syscallInsnSize)
+	if err := t.readBytes(tid, gadget, insn); err != nil {
+		return 0, fmt.Errorf("inject gadget read @0x%x: %w", gadget, err)
+	}
+	if !isSyscallInsn(insn) {
+		return 0, fmt.Errorf("inject gadget @0x%x not a syscall instruction (% x); stop misclassified (#369)", gadget, insn)
+	}
 
 	injRegs := savedRegs.Clone()
 	injRegs.SetSyscallNr(nr)
@@ -157,6 +169,10 @@ func (t *Tracer) injectFromExit(tid int, savedRegs Regs, nr int, args ...uint64)
 	retRegs, err := t.getRegs(tid)
 	if err != nil {
 		injectErr = fmt.Errorf("inject getRegs: %w", err)
+		return 0, injectErr
+	}
+	if got := retRegs.SyscallNr(); got != nr {
+		injectErr = fmt.Errorf("injected syscall %d did not execute (syscall_nr=%d at exit); stop misclassified (#369)", nr, got)
 		return 0, injectErr
 	}
 	ret := retRegs.ReturnValue()

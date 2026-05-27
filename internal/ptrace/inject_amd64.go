@@ -11,3 +11,6 @@ func syscallGadgetAddr(regs Regs) uint64 {
 
 // syscallInsnSize is the size of the syscall instruction on this architecture.
 const syscallInsnSize = 2
+
+// isSyscallInsn reports whether b is the amd64 `syscall` instruction (0F 05).
+func isSyscallInsn(b []byte) bool { return len(b) >= 2 && b[0] == 0x0f && b[1] == 0x05 }
