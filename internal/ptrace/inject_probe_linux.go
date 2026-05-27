@@ -263,17 +263,29 @@ func injectProbeBody(pid int) (mapped bool, detail string, probeErr error) {
 	}
 
 	// 4. THE PRODUCTION GADGET MMAP INJECT. ensureScratchPage injects the mmap
-	// and itself verifies a real VMA appeared at the returned address (#369):
-	//   - nil error           → a VMA appeared, injection works on this kernel.
-	//   - errScratchUnmapped  → the injected mmap returned but mapped nothing;
-	//                            this is the clean broken-kernel signal the probe
-	//                            exists to catch (mapped==false → Injectable=false).
-	//   - any other error     → the probe could not run cleanly (fail-open).
+	// and itself verifies a real VMA appeared at the returned address (#369).
+	// classifyScratchInjectErr turns its result into the probe's contract.
 	if _, err := tr.ensureScratchPage(pid, pid, savedRegs); err != nil {
-		if errors.Is(err, errScratchUnmapped) {
-			return false, fmt.Sprintf("ptrace inject probe: %v", err), nil
-		}
-		return false, "", fmt.Errorf("ensureScratchPage: %w", err)
+		return classifyScratchInjectErr(err)
 	}
 	return true, "", nil
+}
+
+// classifyScratchInjectErr maps an ensureScratchPage error to the inject
+// probe's (mapped, detail, probeErr) contract (#369):
+//   - errScratchUnmapped → the injected mmap returned but mapped no VMA: the
+//     clean broken-kernel signal (mapped==false, no probe error), which makes
+//     runInjectProbe report Injectable=false and DEGRADE (fail-closed).
+//   - any other error → the probe could not run cleanly: a probe error, which
+//     makes runInjectProbe report Injectable=true (fail-open).
+//
+// This is the load-bearing fail-closed/fail-open decision: a regression here
+// (or dropping the %w wrap in scratchUnmappedError) silently reverts the probe
+// to fail-open on the exact broken-kernel class it exists to catch, so it is
+// unit-tested directly.
+func classifyScratchInjectErr(err error) (mapped bool, detail string, probeErr error) {
+	if errors.Is(err, errScratchUnmapped) {
+		return false, fmt.Sprintf("ptrace inject probe: %v", err), nil
+	}
+	return false, "", fmt.Errorf("ensureScratchPage: %w", err)
 }

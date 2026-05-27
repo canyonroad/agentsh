@@ -19,6 +19,17 @@ import (
 // with errors.Is.
 var errScratchUnmapped = errors.New("scratch mmap mapped no VMA")
 
+// scratchUnmappedError builds the error ensureScratchPage returns when the
+// injected mmap returns an address that maps no VMA (#369). It wraps
+// errScratchUnmapped (so the #399 probe can detect this specific case via
+// errors.Is) and carries the addr + the mappings the mmap actually created for
+// diagnostics. Keep the %w wrap: it is the load-bearing half of the probe's
+// fail-closed broken-kernel signal (see classifyScratchInjectErr).
+func scratchUnmappedError(addr uint64, newMappings []string) error {
+	return fmt.Errorf("scratch mmap returned 0x%x but mapped no VMA (#369); new_mappings=%v: %w",
+		addr, newMappings, errScratchUnmapped)
+}
+
 // scratchPage tracks a scratch memory page mmap'd into a tracee's address space.
 // Per-TGID: threads in the same process share address space.
 type scratchPage struct {
@@ -80,8 +91,7 @@ func (t *Tracer) ensureScratchPage(tid, tgid int, savedRegs Regs) (*scratchPage,
 	}
 
 	if !addrInMaps(tid, addr) {
-		return nil, fmt.Errorf("scratch mmap returned 0x%x but mapped no VMA (#369); new_mappings=%v: %w",
-			addr, newMapRanges(tid, mapsBefore), errScratchUnmapped)
+		return nil, scratchUnmappedError(addr, newMapRanges(tid, mapsBefore))
 	}
 
 	sp = &scratchPage{addr: addr, size: 4096}
