@@ -27,6 +27,14 @@ func ValidateStrictMode(mode string, caps *SecurityCapabilities) error {
 			return fmt.Errorf("strict mode %q requires FUSE", mode)
 		}
 
+	case ModePtrace:
+		if !caps.Ptrace {
+			return fmt.Errorf("strict mode %q requires the ptrace capability", mode)
+		}
+		if !caps.PtraceInjectable {
+			return fmt.Errorf("strict mode %q requires reliable ptrace syscall injection (unavailable on this kernel)", mode)
+		}
+
 	case ModeLandlock:
 		if !caps.Landlock {
 			return fmt.Errorf("strict mode %q requires Landlock", mode)

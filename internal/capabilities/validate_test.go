@@ -93,9 +93,9 @@ func TestValidateStrictMode(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "minimal always passes",
-			mode: ModeMinimal,
-			caps: SecurityCapabilities{},
+			name:    "minimal always passes",
+			mode:    ModeMinimal,
+			caps:    SecurityCapabilities{},
 			wantErr: false,
 		},
 	}
@@ -262,11 +262,11 @@ func containsHelper(s, substr string) bool {
 // back to ModeDescription).
 func TestModeDescriptionWithCaps(t *testing.T) {
 	tests := []struct {
-		name     string
-		mode     string
-		caps     *SecurityCapabilities
-		wantSub  string
-		denySub  string // substring that must NOT appear
+		name    string
+		mode    string
+		caps    *SecurityCapabilities
+		wantSub string
+		denySub string // substring that must NOT appear
 	}{
 		{
 			name:    "minimal with active capability drop",
@@ -397,5 +397,14 @@ func TestModeDescriptionWithCapsGOOS(t *testing.T) {
 					tt.mode, tt.caps, tt.goos, got, tt.denySub)
 			}
 		})
+	}
+}
+
+func TestValidateStrictMode_PtraceRequiresInjectable(t *testing.T) {
+	if err := ValidateStrictMode(ModePtrace, &SecurityCapabilities{Ptrace: true, PtraceInjectable: false}); err == nil {
+		t.Fatal("strict ptrace mode must fail when injection is unreliable")
+	}
+	if err := ValidateStrictMode(ModePtrace, &SecurityCapabilities{Ptrace: true, PtraceInjectable: true}); err != nil {
+		t.Fatalf("strict ptrace mode should pass when injectable: %v", err)
 	}
 }

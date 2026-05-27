@@ -50,6 +50,12 @@ func seccompBackendDetail(caps *SecurityCapabilities) string {
 // present-but-not-active. The capability itself stays visible in the flat
 // CAPABILITIES section (caps.Ptrace, via backwardCompatCaps). Issue #390.
 func ptraceBackendDetail(caps *SecurityCapabilities) string {
+	if caps.Ptrace && !caps.PtraceInjectable {
+		if d := caps.PtraceInjectDetail; d != "" {
+			return d
+		}
+		return "syscall injection unreliable on this kernel (disabled)"
+	}
 	if caps.Ptrace && caps.PtraceEnabled {
 		return "" // actively enforcing; the ✓ speaks for itself
 	}
@@ -127,7 +133,7 @@ func buildLinuxDomains(caps *SecurityCapabilities) []ProtectionDomain {
 			Name: "Command Control", Weight: WeightCommandControl,
 			Backends: []DetectedBackend{
 				{Name: "seccomp-execve", Available: caps.SeccompInstallable, Detail: seccompBackendDetail(caps), Description: "execve interception", CheckMethod: "probe"},
-				{Name: "ptrace", Available: caps.Ptrace && caps.PtraceEnabled, Detail: ptraceBackendDetail(caps), Description: "syscall tracing", CheckMethod: "probe"},
+				{Name: "ptrace", Available: caps.Ptrace && caps.PtraceEnabled && caps.PtraceInjectable, Detail: ptraceBackendDetail(caps), Description: "syscall tracing", CheckMethod: "probe"},
 			},
 			Active: commandActive,
 		},
