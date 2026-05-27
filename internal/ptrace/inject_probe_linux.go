@@ -5,6 +5,7 @@ package ptrace
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -261,24 +262,18 @@ func injectProbeBody(pid int) (mapped bool, detail string, probeErr error) {
 		return false, "", fmt.Errorf("getRegs after advancePastEntry: %w", err)
 	}
 
-	// Snapshot mappings BEFORE the inject so we can report exactly what the
-	// injected mmap created (or didn't) on a clean failure.
-	before := mapStarts(pid)
-
-	// 4. THE PRODUCTION GADGET MMAP INJECT.
-	sp, err := tr.ensureScratchPage(pid, pid, savedRegs)
-	if err != nil {
-		// An inject error (not a clean unmapped return) is a probe error:
-		// fail-open. A broken kernel returns a plausible address with no
-		// mapping (err==nil, addr set), which is the mapped==false path below.
+	// 4. THE PRODUCTION GADGET MMAP INJECT. ensureScratchPage injects the mmap
+	// and itself verifies a real VMA appeared at the returned address (#369):
+	//   - nil error           → a VMA appeared, injection works on this kernel.
+	//   - errScratchUnmapped  → the injected mmap returned but mapped nothing;
+	//                            this is the clean broken-kernel signal the probe
+	//                            exists to catch (mapped==false → Injectable=false).
+	//   - any other error     → the probe could not run cleanly (fail-open).
+	if _, err := tr.ensureScratchPage(pid, pid, savedRegs); err != nil {
+		if errors.Is(err, errScratchUnmapped) {
+			return false, fmt.Sprintf("ptrace inject probe: %v", err), nil
+		}
 		return false, "", fmt.Errorf("ensureScratchPage: %w", err)
 	}
-
-	// 5. Did a real VMA appear at the returned address?
-	mapped = addrInMaps(pid, sp.addr)
-	if !mapped {
-		detail = fmt.Sprintf("ptrace inject probe: injected mmap returned 0x%x but created no mapping (#369); new_mappings=%v",
-			sp.addr, newMapRanges(pid, before))
-	}
-	return mapped, detail, nil
+	return true, "", nil
 }

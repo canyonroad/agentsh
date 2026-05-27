@@ -3,11 +3,21 @@
 package ptrace
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
 	"golang.org/x/sys/unix"
 )
+
+// errScratchUnmapped is returned (wrapped) by ensureScratchPage when the
+// injected mmap returns an address that maps no VMA in the tracee (#369). It is
+// a sentinel so callers can distinguish this specific "injection produced no
+// mapping" outcome from a generic inject failure: the #399 inject self-probe
+// treats it as the clean broken-kernel degrade signal (Injectable=false),
+// whereas production inject paths treat any error the same (fall back). Test
+// with errors.Is.
+var errScratchUnmapped = errors.New("scratch mmap mapped no VMA")
 
 // scratchPage tracks a scratch memory page mmap'd into a tracee's address space.
 // Per-TGID: threads in the same process share address space.
@@ -70,8 +80,8 @@ func (t *Tracer) ensureScratchPage(tid, tgid int, savedRegs Regs) (*scratchPage,
 	}
 
 	if !addrInMaps(tid, addr) {
-		return nil, fmt.Errorf("scratch mmap returned 0x%x but mapped no VMA (#369); new_mappings=%v",
-			addr, newMapRanges(tid, mapsBefore))
+		return nil, fmt.Errorf("scratch mmap returned 0x%x but mapped no VMA (#369); new_mappings=%v: %w",
+			addr, newMapRanges(tid, mapsBefore), errScratchUnmapped)
 	}
 
 	sp = &scratchPage{addr: addr, size: 4096}
