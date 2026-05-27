@@ -11,37 +11,56 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// assertSyscallStop fails the test unless ws is a TRACESYSGOOD syscall-trap
+// stop (SIGTRAP|0x80). Without this, a stray group/signal stop would make
+// syscallStopOp read a non-syscall stop (op=NONE → fallback), and the test
+// would assert against a meaningless classification instead of failing loudly.
+func assertSyscallStop(t *testing.T, ws unix.WaitStatus, where string) {
+	t.Helper()
+	if !ws.Stopped() {
+		t.Fatalf("%s: expected a stop, status=%v", where, ws)
+	}
+	if ws.StopSignal() != unix.SIGTRAP|0x80 {
+		t.Fatalf("%s: expected syscall-trap stop (SIGTRAP|0x80), got signal %v", where, ws.StopSignal())
+	}
+}
+
 // driveToEntryStop starts a ptraced child, reaps its initial trace stop, sets
-// TRACESYSGOOD, and advances it to its first syscall-ENTRY stop. It returns the
-// child pid; the caller is responsible for killing/reaping it. The OS thread
-// must already be locked by the caller (ptrace requires same-thread calls).
-func driveToEntryStop(t *testing.T) int {
+// TRACESYSGOOD|EXITKILL, and advances it to its first syscall-ENTRY stop. It
+// returns the child pid and a cleanup func that kills+reaps it. The OS thread
+// must already be locked by the caller (ptrace requires same-thread calls), and
+// the caller must `defer cleanup()` AFTER its `defer runtime.UnlockOSThread()`
+// so the reaping wait4 runs on the still-locked tracer thread (LIFO order);
+// EXITKILL additionally bounds the child's lifetime to this process.
+func driveToEntryStop(t *testing.T) (pid int, cleanup func()) {
 	t.Helper()
 	cmd := exec.Command("/bin/true")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	pid := cmd.Process.Pid
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	pid = cmd.Process.Pid
+	cleanup = func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }
 
 	var ws unix.WaitStatus
 	if _, err := unix.Wait4(pid, &ws, 0, nil); err != nil {
+		cleanup()
 		t.Fatalf("initial wait4: %v", err)
 	}
-	if err := unix.PtraceSetOptions(pid, unix.PTRACE_O_TRACESYSGOOD); err != nil {
-		t.Fatalf("PTRACE_SETOPTIONS TRACESYSGOOD: %v", err)
+	if err := unix.PtraceSetOptions(pid, unix.PTRACE_O_TRACESYSGOOD|unix.PTRACE_O_EXITKILL); err != nil {
+		cleanup()
+		t.Fatalf("PTRACE_SETOPTIONS: %v", err)
 	}
 	if err := unix.PtraceSyscall(pid, 0); err != nil {
+		cleanup()
 		t.Fatalf("ptracesyscall to entry: %v", err)
 	}
 	if _, err := unix.Wait4(pid, &ws, 0, nil); err != nil {
+		cleanup()
 		t.Fatalf("wait4 entry: %v", err)
 	}
-	if !ws.Stopped() {
-		t.Fatalf("expected stop at syscall-entry, status=%v", ws)
-	}
-	return pid
+	assertSyscallStop(t, ws, "syscall-entry")
+	return pid, cleanup
 }
 
 // TestAtSyscallExitStop_LiveTracee exercises the authoritative #369 trigger
@@ -58,7 +77,8 @@ func TestAtSyscallExitStop_LiveTracee(t *testing.T) {
 		t.Skip("PTRACE_GET_SYSCALL_INFO unsupported on this kernel")
 	}
 
-	pid := driveToEntryStop(t)
+	pid, cleanup := driveToEntryStop(t)
+	defer cleanup()
 
 	// At the entry stop, atSyscallExitStop must return false even when the
 	// (deliberately wrong) fallback bool says true — proving it uses the op.
@@ -74,9 +94,7 @@ func TestAtSyscallExitStop_LiveTracee(t *testing.T) {
 	if _, err := unix.Wait4(pid, &ws, 0, nil); err != nil {
 		t.Fatalf("wait4 exit: %v", err)
 	}
-	if !ws.Stopped() {
-		t.Fatalf("expected stop at syscall-exit, status=%v", ws)
-	}
+	assertSyscallStop(t, ws, "syscall-exit")
 	// At the exit stop, it must return true even when the fallback bool says
 	// false.
 	if !tr.atSyscallExitStop(pid, false) {
@@ -100,7 +118,8 @@ func TestInjectFromExit_BenignSyscallThroughGuards(t *testing.T) {
 		t.Skip("PTRACE_GET_SYSCALL_INFO unsupported on this kernel")
 	}
 
-	pid := driveToEntryStop(t)
+	pid, cleanup := driveToEntryStop(t)
+	defer cleanup()
 	tr.mu.Lock()
 	tr.tracees[pid] = &TraceeState{TID: pid, TGID: pid, InSyscall: false, MemFD: -1}
 	tr.mu.Unlock()
@@ -119,7 +138,7 @@ func TestInjectFromExit_BenignSyscallThroughGuards(t *testing.T) {
 		t.Fatalf("getRegs after advancePastEntry: %v", err)
 	}
 
-	// Inject getpid() through the gadget + orig_rax guards.
+	// Inject getpid() through the gadget + syscall_nr guards.
 	ret, err := tr.injectFromExit(pid, savedRegs, unix.SYS_GETPID)
 	if err != nil {
 		t.Fatalf("injectFromExit(getpid) rejected a valid inject: %v", err)
