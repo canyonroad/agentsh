@@ -4,7 +4,6 @@ package ptrace
 
 import (
 	"fmt"
-	"log/slog"
 	"sync"
 
 	"golang.org/x/sys/unix"
@@ -70,15 +69,9 @@ func (t *Tracer) ensureScratchPage(tid, tgid int, savedRegs Regs) (*scratchPage,
 		return nil, fmt.Errorf("mmap injection: %w", err)
 	}
 
-	retMapped := addrInMaps(tid, addr)
-	if !retMapped {
-		// Anomaly path only (keeps the extra /proc/maps read off the happy path):
-		// dump the mappings the injected mmap actually created so we can tell a
-		// mis-read return (new mapping at a different address) from an mmap that
-		// did not take effect (no new mapping). #369.
-		slog.Warn("scratch mmap returned an unmapped address (#369 diag)",
-			"tid", tid, "tgid", tgid, "mmap_ret", fmt.Sprintf("0x%x", addr),
-			"new_mappings", newMapRanges(tid, mapsBefore))
+	if !addrInMaps(tid, addr) {
+		return nil, fmt.Errorf("scratch mmap returned 0x%x but mapped no VMA (#369); new_mappings=%v",
+			addr, newMapRanges(tid, mapsBefore))
 	}
 
 	sp = &scratchPage{addr: addr, size: 4096}
