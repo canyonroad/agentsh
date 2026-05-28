@@ -297,8 +297,10 @@ type Tracer struct {
 	hasSyscallInfo bool // true if PTRACE_GET_SYSCALL_INFO is supported (Linux 5.3+)
 
 	// #369 #2 diagnostic — Run-goroutine-only, no lock. Throttles the /proc
-	// reconciliation scan (see trace_debug.go reconcileProc).
-	lastProcScan time.Time
+	// reconciliation scan (see trace_debug.go reconcileProc) and the ECHILD
+	// stolen-exit anomaly log (see onEchildWithTracees).
+	lastProcScan  time.Time
+	lastEchildLog time.Time
 
 	stopped chan struct{}
 }
@@ -1987,18 +1989,45 @@ func (t *Tracer) Run(ctx context.Context) error {
 				continue
 			}
 			if err == unix.ECHILD {
+				// ECHILD means the kernel reports no waitable children/tracees.
+				// If we still track tracees, this is the #369 #2 stolen-exit
+				// anomaly: the child's exit was reaped out from under us (Go
+				// runtime / cmd.Wait racing our Wait4 — see attachThread), so
+				// handleExit never ran and the exec's waitFn blocks forever on
+				// its exit channel. Recover instead of parking: reap tracees that
+				// have vanished from /proc (which unblocks their waiters), run the
+				// wedge diagnostics, and re-poll on the idle timer so a transient
+				// ECHILD cannot wedge the loop. Only block efficiently (the
+				// original behaviour) when there are genuinely no tracees left.
+				if t.TraceeCount() > 0 {
+					t.onEchildWithTracees()
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-t.stopped:
+						return nil
+					case req := <-t.attachQueue:
+						t.serviceAttachReq(req)
+					case req := <-t.resumeQueue:
+						t.handleResumeRequest(req)
+					case <-idleTimer.C:
+					}
+					if !idleTimer.Stop() {
+						select {
+						case <-idleTimer.C:
+						default:
+						}
+					}
+					idleTimer.Reset(5 * time.Millisecond)
+					continue
+				}
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
 				case <-t.stopped:
 					return nil
 				case req := <-t.attachQueue:
-					if err := t.attachProcess(req.pid, req.opts); err != nil {
-						slog.Error("attach from queue failed", "pid", req.pid, "error", err)
-						t.signalAttachDone(req.pid, err)
-					} else {
-						t.signalAttachDone(req.pid, nil)
-					}
+					t.serviceAttachReq(req)
 					continue
 				case req := <-t.resumeQueue:
 					t.handleResumeRequest(req)
@@ -2054,6 +2083,64 @@ func (t *Tracer) Stop() {
 	default:
 		close(t.stopped)
 	}
+}
+
+// serviceAttachReq processes one queued attach request and signals its waiter.
+func (t *Tracer) serviceAttachReq(req attachRequest) {
+	if err := t.attachProcess(req.pid, req.opts); err != nil {
+		slog.Error("attach from queue failed", "pid", req.pid, "error", err)
+		t.signalAttachDone(req.pid, err)
+	} else {
+		t.signalAttachDone(req.pid, nil)
+	}
+}
+
+// onEchildWithTracees handles the #369 #2 anomaly: Wait4(-1) returned ECHILD even
+// though we still track tracees. It reaps tracees that have vanished from /proc
+// (recovering stolen exits), surfaces the anomaly at WARN (throttled to once per
+// second so a genuinely-stuck tracee does not spam), and runs the wedge
+// diagnostics. Run goroutine only.
+func (t *Tracer) onEchildWithTracees() {
+	recovered := t.recoverVanishedTracees()
+
+	now := time.Now()
+	if now.Sub(t.lastEchildLog) >= time.Second {
+		t.lastEchildLog = now
+		slog.Warn("ptrace: Wait4 ECHILD while tracees tracked — stolen-exit/wedge anomaly (#369 #2)",
+			"tracee_count", t.TraceeCount(), "recovered", recovered)
+		if ptraceTraceOn() {
+			t.dumpTraceRing("echild-with-tracees")
+		}
+	}
+
+	t.scanWedged()
+	t.reconcileProc()
+}
+
+// recoverVanishedTracees reaps tracees that have vanished from /proc. When
+// Wait4(-1) returns ECHILD but we still track a tracee, that tracee's exit was
+// reaped out from under us (Go runtime / cmd.Wait racing our Wait4 — see
+// attachThread). Our handleExit never ran, so its exit notification never fired
+// and the exec's waitFn blocks forever on its exit channel. Synthesize the exit
+// (ExitVanished) so the waiter unblocks. Returns the count recovered.
+func (t *Tracer) recoverVanishedTracees() int {
+	t.mu.Lock()
+	tids := make([]int, 0, len(t.tracees))
+	for tid := range t.tracees {
+		tids = append(tids, tid)
+	}
+	t.mu.Unlock()
+
+	recovered := 0
+	for _, tid := range tids {
+		if procExists(tid) {
+			continue // still present (running or ptrace-stopped) — not a stolen exit
+		}
+		slog.Warn("ptrace: recovering stolen exit — tracee vanished from /proc under ECHILD (#369 #2)", "tid", tid)
+		t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
+		recovered++
+	}
+	return recovered
 }
 
 func (t *Tracer) drainQueues(ctx context.Context) error {

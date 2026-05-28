@@ -30,3 +30,11 @@ func readProcStatusField(tid int, field string) (int, error) {
 	}
 	return 0, fmt.Errorf("%s not found in /proc/%d/status", field, tid)
 }
+
+// procExists reports whether /proc/<tid> still exists. A thread that has exited
+// and been reaped has no /proc entry; used to detect tracees whose exit was
+// reaped out from under the tracer (#369 #2).
+func procExists(tid int) bool {
+	_, err := os.Stat(fmt.Sprintf("/proc/%d", tid))
+	return err == nil
+}
