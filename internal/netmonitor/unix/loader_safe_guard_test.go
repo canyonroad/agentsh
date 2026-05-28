@@ -74,6 +74,51 @@ func TestFileHandler_LoaderSafeReadOverride(t *testing.T) {
 		}
 	})
 
+	// Bare system directory nodes are overridden regardless of which deny rule
+	// fired — these are universally read-safe and the wrapped shell can't start
+	// without them. Matches the ptrace enforcer; matches erans's working policy.
+	t.Run("dir-node override applies to non-catch-all deny", func(t *testing.T) {
+		// e.g. an explicit deny-proc-sys rule denying /proc/self — still overridden
+		// for the bare directory node (contents like /proc/self/maps are not).
+		policy := &mockFilePolicy{decisions: map[string]FilePolicyDecision{
+			"/proc/self": {Decision: "deny", EffectiveDecision: "deny", Rule: "deny-proc-sys"},
+		}}
+		res, _ := NewFileHandler(policy, NewMountRegistry(), &mockFileEmitter{}, true).Handle(FileRequest{
+			PID: 1234, Syscall: int32(unix.SYS_OPENAT), Path: "/proc/self", Operation: "open",
+			Flags: unix.O_RDONLY | unix.O_DIRECTORY, SessionID: "sess-1",
+		})
+		if res.Action != ActionContinue {
+			t.Errorf("/proc/self bare dir-node must be overridden even on an explicit deny rule, got %s", res.Action)
+		}
+	})
+
+	// Dir-node CONTENTS are NOT covered by the exact-match override — a deny of
+	// /proc/self/maps still stands (exact match doesn't catch subpaths).
+	t.Run("dir-node override does NOT cover subpath contents", func(t *testing.T) {
+		policy := &mockFilePolicy{decisions: map[string]FilePolicyDecision{
+			"/proc/self/maps": {Decision: "deny", EffectiveDecision: "deny", Rule: "deny-proc-sys"},
+		}}
+		res, _ := NewFileHandler(policy, NewMountRegistry(), &mockFileEmitter{}, true).Handle(FileRequest{
+			PID: 1234, Syscall: int32(unix.SYS_OPENAT), Path: "/proc/self/maps", Operation: "open",
+			Flags: unix.O_RDONLY, SessionID: "sess-1",
+		})
+		if res.Action != ActionDeny {
+			t.Errorf("contents of a system dir-node must remain policy-controlled, got %s", res.Action)
+		}
+	})
+
+	// Writes to a system dir node are still enforced.
+	t.Run("write to dir node is still denied", func(t *testing.T) {
+		policy := denyAll("/etc/new.conf")
+		res, _ := NewFileHandler(policy, NewMountRegistry(), &mockFileEmitter{}, true).Handle(FileRequest{
+			PID: 1234, Syscall: int32(unix.SYS_OPENAT), Path: "/etc/new.conf", Operation: "write",
+			Flags: unix.O_WRONLY | unix.O_CREAT, SessionID: "sess-1",
+		})
+		if res.Action != ActionDeny {
+			t.Errorf("write to /etc/new.conf must stay denied, got %s", res.Action)
+		}
+	})
+
 	// An overridden read must be recorded as a shadow-deny — the only forensic
 	// trace that policy denied but file_monitor allowed it.
 	t.Run("override emits shadow-deny event", func(t *testing.T) {
@@ -110,6 +155,22 @@ func TestFileHandler_LoaderSafeReadOverride(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestIsSystemDirNode(t *testing.T) {
+	safe := []string{"/", "/dev", "/dev/pts", "/proc", "/proc/self", "/proc/thread-self", "/etc", "/etc/ssl", "/tmp", "/var", "/run"}
+	for _, p := range safe {
+		if !isSystemDirNode(p) {
+			t.Errorf("isSystemDirNode(%q) = false, want true", p)
+		}
+	}
+	// Exact-match only — subpaths and similarly-named paths must NOT match.
+	unsafe := []string{"/proc/self/maps", "/etc/secret", "/etc/ssl/private", "/home/user", "/devnull", "/tmpfoo", "/var/log/secret", "/proc/1", ""}
+	for _, p := range unsafe {
+		if isSystemDirNode(p) {
+			t.Errorf("isSystemDirNode(%q) = true, want false (exact match only)", p)
+		}
+	}
 }
 
 func TestIsLoaderSafeSystemPath(t *testing.T) {

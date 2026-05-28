@@ -136,24 +136,33 @@ func (h *FileHandler) Handle(req FileRequest) (FileResult, *types.Event) {
 			// Audit-only mode: log but allow.
 			return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, false)
 		}
-		// #369 loader-safe guard: never DENY a read-only access to an essential
-		// system/loader path when the denial came from a catch-all default rule.
-		// A deny-by-default policy would otherwise make every dynamically-linked
-		// program un-loadable under file_monitor — the loader reads
-		// /etc/ld.so.cache and walks /lib, /usr, ... during startup, and those
-		// opens fall through allow-system-read (its /lib/** globs don't match the
-		// bare dirs) to the default-deny-files catch-all. The ptrace enforcer
-		// effectively allows these, so file_monitor must too.
-		//
-		// Scoped to the catch-all rule ONLY: an operator's EXPLICIT deny rule on a
-		// system subpath (e.g. `deny read /opt/app/secrets/**`) is still honored,
-		// matching ptrace's first-match-explicit-deny semantics. Read-only only —
-		// writes/creates/deletes to these paths stay enforced.
-		if isDefaultDenyRule(dec.Rule) && isReadOnlyFileOp(req.Syscall, req.Flags) && isLoaderSafeSystemPath(req.Path) {
-			slog.Debug("file_monitor: loader-safe read override (#369)",
-				"path", req.Path, "operation", req.Operation, "policy_rule", dec.Rule, "session", req.SessionID)
-			// shadowDeny=true records that policy said deny but we did not enforce.
-			return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, true)
+		// #369 loader-safe + system-dir-node guards: file_monitor must not deny
+		// the read-only opens / stats every wrapped program needs to start, or a
+		// deny-by-default policy makes every dynamically-linked command fail.
+		// The ptrace enforcer effectively allows both classes below; file_monitor
+		// matches it. Read-only only — writes/creates/deletes stay enforced.
+		if isReadOnlyFileOp(req.Syscall, req.Flags) {
+			// (1) Standard system DIRECTORY NODES (/, /dev, /proc/self, /etc, ...).
+			// EXACT match — does NOT extend to contents (a deny of /etc/secret
+			// still stands). Overrides ANY deny rule (catch-all or explicit) for
+			// these specific bare nodes, because they are universally read-safe
+			// (every program stats them) and the wrapped shell can't start
+			// without them; operator denies on /proc/self etc. are about the
+			// CONTENTS (maps, cmdline, environ), which exact-match preserves.
+			if isSystemDirNode(req.Path) {
+				slog.Debug("file_monitor: system-dir-node read override (#369)",
+					"path", req.Path, "operation", req.Operation, "policy_rule", dec.Rule, "session", req.SessionID)
+				return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, true)
+			}
+			// (2) Loader-essential subtrees (/lib, /usr, ld.so.cache, ...). Subtree
+			// match. Scoped to the CATCH-ALL deny only: an operator's explicit
+			// deny rule on a system subpath (e.g. `deny read /opt/app/secrets/**`)
+			// is still honored, matching ptrace's first-match-explicit-deny.
+			if isDefaultDenyRule(dec.Rule) && isLoaderSafeSystemPath(req.Path) {
+				slog.Debug("file_monitor: loader-safe read override (#369)",
+					"path", req.Path, "operation", req.Operation, "policy_rule", dec.Rule, "session", req.SessionID)
+				return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, true)
+			}
 		}
 		// Enforced deny.
 		return FileResult{Action: ActionDeny, Errno: int32(sysunix.EACCES)}, h.buildFileEvent(req, dec, true, false)
@@ -219,6 +228,42 @@ var loaderSafeReadPrefixes = []string{
 	"/usr", "/lib", "/lib64", "/lib32", "/libx32", "/bin", "/sbin",
 	"/etc/ld.so.cache", "/etc/ld.so.preload", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
 }
+
+// systemDirNodeReads are the bare system DIRECTORY NODES every wrapped program
+// stats/opens during normal startup (the shell walking `/`, libc consulting
+// `/proc/self`, programs touching `/dev`, `/etc`, `/tmp`, ...). In a
+// deny-by-default policy, allow rules typically write `"/etc/ssl/**"` style
+// globs that match contents but not the bare directory node, so the node's
+// `openat(O_DIRECTORY)` or `stat` falls to the catch-all (or to a broad
+// deny-proc-sys-style explicit rule) and is denied — preventing the program
+// from starting. The override is EXACT match only (the entries listed below),
+// so reads of CONTENTS (e.g., `/etc/secret`, `/proc/self/maps`) remain
+// policy-controlled. Unlike loaderSafeReadPrefixes, this set overrides ANY
+// deny rule for these specific bare nodes — they are universally read-safe
+// and the ptrace enforcer effectively allows them; operator deny rules over
+// these paths are aimed at the CONTENTS (which exact-match preserves).
+var systemDirNodeReads = map[string]bool{
+	"/":                    true,
+	"/dev":                 true,
+	"/dev/pts":             true,
+	"/dev/fd":              true,
+	"/proc":                true,
+	"/proc/self":           true,
+	"/proc/thread-self":    true,
+	"/sys":                 true,
+	"/etc":                 true,
+	"/etc/ca-certificates": true,
+	"/etc/ssl":             true,
+	"/etc/ssl/certs":       true,
+	"/tmp":                 true,
+	"/var":                 true,
+	"/var/tmp":             true,
+	"/run":                 true,
+}
+
+// isSystemDirNode reports whether p is exactly one of the bare system directory
+// nodes whose read-only stat/open must always succeed (exact match only).
+func isSystemDirNode(p string) bool { return systemDirNodeReads[p] }
 
 // defaultDenyRuleNames are the catch-all "deny everything not explicitly
 // allowed" rule names. The loader-safe override fires only when a loader read
