@@ -165,6 +165,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	}
 
 	// Resume → gadget's syscall instruction → execve ENTRY stop.
+	t.traceResume(tid, "redirect-exec-entry", 0)
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
 		slog.Warn("redirectExec: resume to entry failed", "tid", tid, "error", err)
 		t.cleanupInjectedFD(tid, savedRegs, stubFDNum, savedFD)
@@ -198,6 +199,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	// Use PtraceSyscall (not allowSyscall) to ensure we catch the exec
 	// exit stop even in prefilter/seccomp mode. This is needed so the
 	// PendingExecStubFD cleanup runs on exec failure.
+	t.traceResume(tid, "redirect-exec-resume", 0)
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
 		if errors.Is(err, unix.ESRCH) {
 			t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)

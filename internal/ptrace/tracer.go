@@ -199,6 +199,16 @@ type TraceeState struct {
 	// (allow + pass-through) from "non-empty unknown SessionID"
 	// (fail-closed bug).
 	SessionlessPIDAttach bool
+
+	// #369 #2 diagnostic — only written when AGENTSH_PTRACE_TRACE is set (see
+	// trace_debug.go). awaitingResume records that a stop was consumed but no
+	// resume/park has been issued yet; the idle-tick scan flags any tracee that
+	// stays armed past wedgeThreshold. Guarded by t.mu.
+	awaitingResume bool
+	lastStopDesc   string
+	lastStopSeq    uint64
+	lastStopAt     time.Time
+	wedgeLogged    bool
 }
 
 type resumeRequest struct {
@@ -616,6 +626,7 @@ func (t *Tracer) allowSyscall(tid int) {
 	// Fast path: without seccomp prefilter, hasPrefilter is always false,
 	// so the result is always PtraceSyscall. Skip the mutex entirely.
 	if !t.cfg.SeccompPrefilter {
+		t.traceResume(tid, "allowSyscall-syscall", 0)
 		if err := unix.PtraceSyscall(tid, 0); err != nil && errors.Is(err, unix.ESRCH) {
 			t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 		}
@@ -632,11 +643,14 @@ func (t *Tracer) allowSyscall(tid int) {
 	t.mu.Unlock()
 
 	var err error
+	via := "allowSyscall-syscall"
 	if hasPrefilter && !needExit {
+		via = "allowSyscall-cont"
 		err = unix.PtraceCont(tid, 0)
 	} else {
 		err = unix.PtraceSyscall(tid, 0)
 	}
+	t.traceResume(tid, via, 0)
 	if err != nil && errors.Is(err, unix.ESRCH) {
 		t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 	}
@@ -676,6 +690,7 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 	}
 	t.mu.Unlock()
 
+	t.traceResume(tid, "denySyscall", 0)
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
 		if errors.Is(err, unix.ESRCH) {
 			t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
@@ -692,6 +707,7 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 func (t *Tracer) resumeTracee(tid int, sig int) {
 	// Fast path: without seccomp prefilter, always use PtraceSyscall.
 	if !t.cfg.SeccompPrefilter {
+		t.traceResume(tid, "resumeTracee-syscall", sig)
 		unix.PtraceSyscall(tid, sig)
 		return
 	}
@@ -706,8 +722,10 @@ func (t *Tracer) resumeTracee(tid int, sig int) {
 	t.mu.Unlock()
 
 	if hasPrefilter && !needExit {
+		t.traceResume(tid, "resumeTracee-cont", sig)
 		unix.PtraceCont(tid, sig)
 	} else {
+		t.traceResume(tid, "resumeTracee-syscall", sig)
 		unix.PtraceSyscall(tid, sig)
 	}
 }
@@ -782,6 +800,7 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 						slog.Warn("ptrace: detach after exec failed, resuming instead", "tid", tid, "err", err)
 						t.resumeTracee(tid, 0)
 					} else {
+						t.traceResume(tid, "detach-after-exec", 0)
 						t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 					}
 				} else {
@@ -851,6 +870,7 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 				}
 
 				ptraceListen(tid)
+				t.traceResume(tid, "listen", 0)
 				break
 			}
 
@@ -1697,6 +1717,7 @@ func (t *Tracer) handleExitEvent(tid int) {
 			t.resumeTracee(tid, 0)
 			return
 		}
+		t.traceResume(tid, "detach-on-exit", 0)
 		t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 		return
 	}
@@ -1909,6 +1930,8 @@ func (t *Tracer) Run(ctx context.Context) error {
 	defer t.cancelPendingAttachWaiters()
 	defer t.cancelPendingExitWaiters()
 
+	initPtraceTrace()
+
 	t.hasSyscallInfo = probePtraceSyscallInfo()
 	if t.hasSyscallInfo {
 		slog.Info("ptrace: PTRACE_GET_SYSCALL_INFO supported")
@@ -1974,6 +1997,7 @@ func (t *Tracer) Run(ctx context.Context) error {
 		}
 
 		if tid == 0 {
+			t.scanWedged()
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -2000,6 +2024,7 @@ func (t *Tracer) Run(ctx context.Context) error {
 			continue
 		}
 
+		t.traceStop(tid, status)
 		t.handleStop(ctx, tid, status, &rusage)
 	}
 }
