@@ -62,6 +62,7 @@ const (
 	evWaitRet                        // wait4 returned
 	evStop                           // a stop was dispatched to handleStop
 	evResume                         // a resume/park was issued
+	evNote                           // a milestone note (attach handshake, exit-notify, park)
 )
 
 func (k traceEventKind) String() string {
@@ -74,6 +75,8 @@ func (k traceEventKind) String() string {
 		return "stop"
 	case evResume:
 		return "resume"
+	case evNote:
+		return "note"
 	default:
 		return "?"
 	}
@@ -190,6 +193,16 @@ func (t *Tracer) traceResume(tid int, via string, sig int) {
 		s.awaitingResume = false
 	}
 	t.mu.Unlock()
+}
+
+// traceNote records a milestone (attach handshake step, exit-notify event, idle
+// park) to the ring. `layer` is the category ("attach"/"exit"/"idle"), `msg` a
+// short literal, `id` the relevant pid/tid. Call from the Run goroutine.
+func traceNote(layer, msg string, id int) {
+	if !ptraceTraceOn() {
+		return
+	}
+	ringAppend(traceEvent{kind: evNote, tid: id, layer: layer, via: msg})
 }
 
 // scanWedged is the v1 (consumed-but-not-resumed) alarm, retained as a secondary
@@ -319,6 +332,8 @@ func (t *Tracer) dumpTraceRing(reason string) {
 				"status", describeWaitStatus(unix.WaitStatus(ev.status)))
 		case evResume:
 			slog.Warn("ptrace-trace", "seq", ev.seq, "us", offUs, "ev", "resume", "tid", ev.tid, "via", ev.via, "sig", ev.arg)
+		case evNote:
+			slog.Warn("ptrace-trace", "seq", ev.seq, "us", offUs, "ev", "note", "layer", ev.layer, "msg", ev.via, "id", ev.tid)
 		}
 	}
 	slog.Warn("ptrace-trace ring DUMP END", "reason", reason)
