@@ -229,36 +229,38 @@ var loaderSafeReadPrefixes = []string{
 	"/etc/ld.so.cache", "/etc/ld.so.preload", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
 }
 
-// systemDirNodeReads are the bare system DIRECTORY NODES every wrapped program
-// stats/opens during normal startup (the shell walking `/`, libc consulting
-// `/proc/self`, programs touching `/dev`, `/etc`, `/tmp`, ...). In a
-// deny-by-default policy, allow rules typically write `"/etc/ssl/**"` style
-// globs that match contents but not the bare directory node, so the node's
-// `openat(O_DIRECTORY)` or `stat` falls to the catch-all (or to a broad
-// deny-proc-sys-style explicit rule) and is denied — preventing the program
-// from starting. The override is EXACT match only (the entries listed below),
-// so reads of CONTENTS (e.g., `/etc/secret`, `/proc/self/maps`) remain
-// policy-controlled. Unlike loaderSafeReadPrefixes, this set overrides ANY
-// deny rule for these specific bare nodes — they are universally read-safe
-// and the ptrace enforcer effectively allows them; operator deny rules over
-// these paths are aimed at the CONTENTS (which exact-match preserves).
+// systemDirNodeReads are the bare KERNEL / PROCESS directory nodes whose
+// read-only stat/open every dynamically-linked program performs at startup
+// (the shell walking `/`, libc consulting `/proc/self`, programs touching
+// `/dev`, `/etc`). In a deny-by-default policy, allow rules typically write
+// `"/etc/ssl/**"` style globs that match contents but not the bare node, so
+// the node's `openat(O_DIRECTORY)` or `stat` falls to the catch-all (or to a
+// broad `deny-proc-sys`-style explicit rule) and is denied — preventing the
+// program from starting. The override is EXACT match only, so reads of
+// CONTENTS (e.g., `/etc/secret`, `/proc/self/maps`) remain policy-controlled.
+//
+// Unlike loaderSafeReadPrefixes, this set overrides ANY deny rule for these
+// specific bare nodes — they are universally read-safe (the kernel/libc
+// invariants every program relies on), the ptrace enforcer already allows
+// them, and operator deny rules over these paths are aimed at the CONTENTS
+// (which exact-match preserves).
+//
+// Deliberately NARROW: this list is kernel/process essentials only. Paths
+// that are sometimes-but-not-universally needed (`/tmp`, `/var`, `/run`,
+// `/etc/ssl`, `/etc/ssl/certs`, `/etc/ca-certificates`) intentionally fall
+// to policy — an operator who denies them clearly means it, and a policy
+// that needs them should add an explicit allow rule (matching what
+// shipped deny-by-default policies will eventually carry).
 var systemDirNodeReads = map[string]bool{
-	"/":                    true,
-	"/dev":                 true,
-	"/dev/pts":             true,
-	"/dev/fd":              true,
-	"/proc":                true,
-	"/proc/self":           true,
-	"/proc/thread-self":    true,
-	"/sys":                 true,
-	"/etc":                 true,
-	"/etc/ca-certificates": true,
-	"/etc/ssl":             true,
-	"/etc/ssl/certs":       true,
-	"/tmp":                 true,
-	"/var":                 true,
-	"/var/tmp":             true,
-	"/run":                 true,
+	"/":                 true,
+	"/dev":              true,
+	"/dev/pts":          true,
+	"/dev/fd":           true,
+	"/proc":             true,
+	"/proc/self":        true,
+	"/proc/thread-self": true,
+	"/sys":              true,
+	"/etc":              true,
 }
 
 // isSystemDirNode reports whether p is exactly one of the bare system directory

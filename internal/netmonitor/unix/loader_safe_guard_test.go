@@ -158,17 +158,23 @@ func TestFileHandler_LoaderSafeReadOverride(t *testing.T) {
 }
 
 func TestIsSystemDirNode(t *testing.T) {
-	safe := []string{"/", "/dev", "/dev/pts", "/proc", "/proc/self", "/proc/thread-self", "/etc", "/etc/ssl", "/tmp", "/var", "/run"}
+	// Kernel / process essentials — universally read-safe; override applies.
+	safe := []string{"/", "/dev", "/dev/pts", "/dev/fd", "/proc", "/proc/self", "/proc/thread-self", "/sys", "/etc"}
 	for _, p := range safe {
 		if !isSystemDirNode(p) {
 			t.Errorf("isSystemDirNode(%q) = false, want true", p)
 		}
 	}
-	// Exact-match only — subpaths and similarly-named paths must NOT match.
-	unsafe := []string{"/proc/self/maps", "/etc/secret", "/etc/ssl/private", "/home/user", "/devnull", "/tmpfoo", "/var/log/secret", "/proc/1", ""}
+	// Exact-match only — subpaths must NOT match. Plus paths intentionally left
+	// OUT of the override (operator-policy territory: /tmp, /var, /etc/ssl, ...).
+	unsafe := []string{
+		"/proc/self/maps", "/etc/secret", "/etc/ssl/private", "/home/user",
+		"/devnull", "/tmpfoo", "/var/log/secret", "/proc/1", "",
+		"/tmp", "/var", "/var/tmp", "/run", "/etc/ssl", "/etc/ssl/certs", "/etc/ca-certificates",
+	}
 	for _, p := range unsafe {
 		if isSystemDirNode(p) {
-			t.Errorf("isSystemDirNode(%q) = true, want false (exact match only)", p)
+			t.Errorf("isSystemDirNode(%q) = true, want false (exact-match-only / outside narrowed set)", p)
 		}
 	}
 }
