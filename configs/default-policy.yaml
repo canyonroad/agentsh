@@ -77,6 +77,12 @@ file_rules:
   - name: allow-system-read
     description: Read access to standard system paths
     paths:
+      - "/usr"
+      - "/lib"
+      - "/lib64"
+      - "/bin"
+      - "/sbin"
+      - "/opt"
       - "/usr/**"
       - "/lib/**"
       - "/lib64/**"
