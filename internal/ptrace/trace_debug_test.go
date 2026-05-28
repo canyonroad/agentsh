@@ -149,8 +149,8 @@ func TestReconcileProc_RunningTraceeNotFlagged(t *testing.T) {
 	tr.tracees[os.Getpid()] = &TraceeState{TID: os.Getpid()}
 
 	out := withTrace(t, true, func() {
-		tr.reconcileProc()                              // first scan records lastProcScan
-		tr.lastProcScan = time.Now().Add(-time.Second)  // bypass throttle
+		tr.reconcileProc()                             // first scan records lastProcScan
+		tr.lastProcScan = time.Now().Add(-time.Second) // bypass throttle
 		tr.reconcileProc()
 	})
 	if strings.Contains(out, "WEDGE(v2)") {
@@ -235,3 +235,26 @@ func TestRecoverVanishedTracees_NoneVanished(t *testing.T) {
 	}
 }
 
+func TestEchildBackoff_Escalates(t *testing.T) {
+	// Early spins stay tight (catch transient ECHILD fast); a persistent wedge
+	// backs off and is capped so it never spins at ~200 Hz.
+	if d := echildBackoff(0); d != 5*time.Millisecond {
+		t.Errorf("echildBackoff(0) = %v, want 5ms", d)
+	}
+	if d := echildBackoff(6); d <= 5*time.Millisecond {
+		t.Errorf("echildBackoff(6) = %v, want > 5ms", d)
+	}
+	cap250 := echildBackoff(1000)
+	if cap250 != 250*time.Millisecond {
+		t.Errorf("echildBackoff(1000) = %v, want 250ms cap", cap250)
+	}
+	// Monotonic non-decreasing.
+	prev := time.Duration(0)
+	for n := 0; n <= 40; n++ {
+		d := echildBackoff(n)
+		if d < prev {
+			t.Errorf("echildBackoff(%d)=%v decreased below %v", n, d, prev)
+		}
+		prev = d
+	}
+}

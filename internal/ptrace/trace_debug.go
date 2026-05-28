@@ -96,10 +96,14 @@ type traceEvent struct {
 
 const traceRingSize = 8192
 
-// traceRing and traceRingIdx are written ONLY by the Run goroutine (every stop,
-// resume, and wait4 in the tracer runs there), so no synchronization is needed.
-// dumpTraceRing reads them, also from the Run goroutine (idle tick). The atomic
-// is used solely so a future off-goroutine reader could snapshot the index.
+// traceRing and traceRingIdx are written ONLY by the Run goroutine. Every append
+// site runs there: the Run-loop Wait4, handleStop and its dispatch handlers, the
+// resume primitives, and waitForSyscallStop (which is only ever called inline
+// from the Run goroutine — by handleStop's inject paths and by the #399 startup
+// self-probe, which runs during Run() startup, also on the Run goroutine). So no
+// synchronization is needed. dumpTraceRing reads them, also from the Run goroutine
+// (idle tick). The atomic on the index is solely so a future off-goroutine reader
+// could snapshot it safely.
 var (
 	traceRing    [traceRingSize]traceEvent
 	traceRingIdx atomic.Uint64

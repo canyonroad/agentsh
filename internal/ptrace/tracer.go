@@ -298,9 +298,12 @@ type Tracer struct {
 
 	// #369 #2 diagnostic — Run-goroutine-only, no lock. Throttles the /proc
 	// reconciliation scan (see trace_debug.go reconcileProc) and the ECHILD
-	// stolen-exit anomaly log (see onEchildWithTracees).
+	// stolen-exit anomaly log (see onEchildWithTracees). echildSpins counts
+	// consecutive ECHILD-with-tracees ticks that recovered nothing, so the
+	// re-poll backs off instead of spinning at ~200 Hz on a persistent wedge.
 	lastProcScan  time.Time
 	lastEchildLog time.Time
+	echildSpins   int
 
 	stopped chan struct{}
 }
@@ -2000,7 +2003,11 @@ func (t *Tracer) Run(ctx context.Context) error {
 				// ECHILD cannot wedge the loop. Only block efficiently (the
 				// original behaviour) when there are genuinely no tracees left.
 				if t.TraceeCount() > 0 {
-					t.onEchildWithTracees()
+					if t.onEchildWithTracees() > 0 {
+						t.echildSpins = 0
+					} else {
+						t.echildSpins++
+					}
 					select {
 					case <-ctx.Done():
 						return ctx.Err()
@@ -2018,7 +2025,7 @@ func (t *Tracer) Run(ctx context.Context) error {
 						default:
 						}
 					}
-					idleTimer.Reset(5 * time.Millisecond)
+					idleTimer.Reset(echildBackoff(t.echildSpins))
 					continue
 				}
 				select {
@@ -2066,6 +2073,7 @@ func (t *Tracer) Run(ctx context.Context) error {
 			continue
 		}
 
+		t.echildSpins = 0
 		t.traceStop(tid, status)
 		t.handleStop(ctx, tid, status, &rusage)
 	}
@@ -2099,8 +2107,8 @@ func (t *Tracer) serviceAttachReq(req attachRequest) {
 // though we still track tracees. It reaps tracees that have vanished from /proc
 // (recovering stolen exits), surfaces the anomaly at WARN (throttled to once per
 // second so a genuinely-stuck tracee does not spam), and runs the wedge
-// diagnostics. Run goroutine only.
-func (t *Tracer) onEchildWithTracees() {
+// diagnostics. Returns the number of stolen exits recovered. Run goroutine only.
+func (t *Tracer) onEchildWithTracees() int {
 	recovered := t.recoverVanishedTracees()
 
 	now := time.Now()
@@ -2115,6 +2123,24 @@ func (t *Tracer) onEchildWithTracees() {
 
 	t.scanWedged()
 	t.reconcileProc()
+	return recovered
+}
+
+// echildBackoff maps the count of consecutive ECHILD-with-tracees ticks that
+// recovered nothing to a re-poll delay. Early ticks stay at 5ms so a transient
+// ECHILD or a freshly-vanished tracee is caught fast; a persistent wedge (no
+// recovery possible) backs off to 250ms so the loop doesn't spin at ~200 Hz.
+func echildBackoff(spins int) time.Duration {
+	switch {
+	case spins <= 4:
+		return 5 * time.Millisecond
+	case spins <= 8:
+		return 25 * time.Millisecond
+	case spins <= 16:
+		return 100 * time.Millisecond
+	default:
+		return 250 * time.Millisecond
+	}
 }
 
 // recoverVanishedTracees reaps tracees that have vanished from /proc. When
