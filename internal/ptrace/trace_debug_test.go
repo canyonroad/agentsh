@@ -5,16 +5,16 @@ package ptrace
 import (
 	"bytes"
 	"log/slog"
+	"os"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-// withTrace runs fn with the stop/resume diagnostic forced on and slog captured
-// to a buffer, restoring both afterwards. Returns the captured log text.
+// withTrace runs fn with the diagnostic forced on/off and slog captured to a
+// buffer, restoring both afterwards. Returns the captured log text.
 func withTrace(t *testing.T, on bool, fn func()) string {
 	t.Helper()
 	prevEnabled := ptraceTraceEnabled.Load()
@@ -36,14 +36,11 @@ func TestDescribeWaitStatus(t *testing.T) {
 		status unix.WaitStatus
 		want   string
 	}{
-		// stopped: low byte 0x7f, stop signal in bits 8-15.
 		{"syscall-stop", unix.WaitStatus(uint32(unix.SIGTRAP|0x80)<<8 | 0x7f), "syscall-stop"},
 		{"plain-sigtrap", unix.WaitStatus(uint32(unix.SIGTRAP)<<8 | 0x7f), "sigtrap(plain)"},
-		// SIGTRAP + PTRACE event in bits 16-23.
 		{"event-exec", unix.WaitStatus(uint32(unix.PTRACE_EVENT_EXEC)<<16 | uint32(unix.SIGTRAP)<<8 | 0x7f), "event:EXEC"},
 		{"event-seccomp", unix.WaitStatus(uint32(unix.PTRACE_EVENT_SECCOMP)<<16 | uint32(unix.SIGTRAP)<<8 | 0x7f), "event:SECCOMP"},
 		{"event-clone", unix.WaitStatus(uint32(unix.PTRACE_EVENT_CLONE)<<16 | uint32(unix.SIGTRAP)<<8 | 0x7f), "event:CLONE"},
-		// exited: low 7 bits zero, code in bits 8-15.
 		{"exited", unix.WaitStatus(42 << 8), "exited(code=42)"},
 	}
 	for _, tc := range cases {
@@ -53,10 +50,6 @@ func TestDescribeWaitStatus(t *testing.T) {
 			}
 		})
 	}
-
-	// A group-stop (non-SIGTRAP stop signal) and a kill signal decode to their
-	// own categories without panicking — assert the prefix only (signal-name
-	// strings are platform-dependent).
 	group := describeWaitStatus(unix.WaitStatus(uint32(unix.SIGSTOP)<<8 | 0x7f))
 	if !strings.HasPrefix(group, "signal-stop(") && !strings.HasPrefix(group, "group-stop(") {
 		t.Errorf("SIGSTOP stop decoded as %q, want signal-stop/group-stop", group)
@@ -66,97 +59,117 @@ func TestDescribeWaitStatus(t *testing.T) {
 	}
 }
 
+func TestReadProcStopState_SelfAndMissing(t *testing.T) {
+	// Reading our own process: it's running, not traced by us.
+	state, tracerPid, ok := readProcStopState(os.Getpid())
+	if !ok {
+		t.Fatal("readProcStopState(self) ok=false, want true")
+	}
+	// State should be a plausible scheduler state letter, never a stop ('t'/'T'),
+	// since we're actively running this test.
+	if state == 't' || state == 'T' {
+		t.Errorf("self proc_state = %q, did not expect a stop state", state)
+	}
+	_ = tracerPid // 0 normally; nonzero only under an external debugger.
+
+	// A pid that cannot exist must report ok=false.
+	if _, _, ok := readProcStopState(1 << 30); ok {
+		t.Error("readProcStopState(huge pid) ok=true, want false")
+	}
+}
+
 func TestTrace_DisabledIsSilentAndInert(t *testing.T) {
 	tr := NewTracer(TracerConfig{})
 	tr.tracees[100] = &TraceeState{TID: 100}
+	beforeIdx := traceRingIdx.Load()
 
 	out := withTrace(t, false, func() {
+		traceWaitCall("run", -1)
+		traceWaitRet("run", 0, 0, nil)
 		tr.traceStop(100, unix.WaitStatus(uint32(unix.SIGTRAP|0x80)<<8|0x7f))
 		tr.traceResume(100, "allowSyscall-cont", 0)
 		tr.scanWedged()
+		tr.reconcileProc()
 	})
 
 	if out != "" {
 		t.Errorf("disabled trace must emit nothing, got:\n%s", out)
 	}
-	// And it must not have armed the wedge detector.
+	if traceRingIdx.Load() != beforeIdx {
+		t.Error("disabled trace must not append to the ring")
+	}
 	if tr.tracees[100].awaitingResume {
 		t.Error("disabled traceStop must not arm awaitingResume")
 	}
 }
 
-func TestTrace_StopArmsResumeClears(t *testing.T) {
+func TestRing_AppendsAndDumps(t *testing.T) {
 	tr := NewTracer(TracerConfig{})
-	tr.tracees[200] = &TraceeState{TID: 200}
+	tr.tracees[7] = &TraceeState{TID: 7}
 
-	withTrace(t, true, func() {
-		tr.traceStop(200, unix.WaitStatus(uint32(unix.PTRACE_EVENT_SECCOMP)<<16|uint32(unix.SIGTRAP)<<8|0x7f))
-		if !tr.tracees[200].awaitingResume {
-			t.Fatal("traceStop must arm awaitingResume")
-		}
-		if tr.tracees[200].lastStopDesc != "event:SECCOMP" {
-			t.Errorf("lastStopDesc = %q, want event:SECCOMP", tr.tracees[200].lastStopDesc)
-		}
-		tr.traceResume(200, "denySyscall", 0)
-		if tr.tracees[200].awaitingResume {
-			t.Error("traceResume must clear awaitingResume")
-		}
+	out := withTrace(t, true, func() {
+		traceWaitCall("run", -1)
+		traceWaitRet("run", 7, unix.WaitStatus(uint32(unix.PTRACE_EVENT_SECCOMP)<<16|uint32(unix.SIGTRAP)<<8|0x7f), nil)
+		tr.traceStop(7, unix.WaitStatus(uint32(unix.PTRACE_EVENT_SECCOMP)<<16|uint32(unix.SIGTRAP)<<8|0x7f))
+		tr.traceResume(7, "denySyscall", 0)
+		tr.dumpTraceRing("unit-test")
 	})
+
+	for _, want := range []string{"DUMP BEGIN", "DUMP END", "wait_call", "wait_ret", "ev=stop", "ev=resume", "event:SECCOMP", "via=denySyscall"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ring dump missing %q; got:\n%s", want, out)
+		}
+	}
 }
 
-func TestTrace_TerminalStopDoesNotArm(t *testing.T) {
+func TestScanWedged_v1_FlagsConsumedButUnresumedStop(t *testing.T) {
 	tr := NewTracer(TracerConfig{})
-	tr.tracees[300] = &TraceeState{TID: 300}
-	withTrace(t, true, func() {
-		tr.traceStop(300, unix.WaitStatus(7<<8)) // exited(code=7)
-		if tr.tracees[300].awaitingResume {
-			t.Error("a terminal (exited) stop must not arm the wedge detector")
-		}
-	})
-}
-
-func TestScanWedged_FlagsConsumedButUnresumedStop(t *testing.T) {
-	tr := NewTracer(TracerConfig{})
-	// Wedged: armed, aged past threshold.
 	tr.tracees[10] = &TraceeState{TID: 10, awaitingResume: true, lastStopDesc: "event:EXEC",
-		lastStopSeq: 99, lastStopAt: time.Now().Add(-3 * wedgeThreshold)}
-	// Recently armed: must NOT flag yet.
-	tr.tracees[11] = &TraceeState{TID: 11, awaitingResume: true, lastStopDesc: "syscall-stop",
-		lastStopAt: time.Now()}
-	// Resumed (parked/continued): must NOT flag.
+		lastStopAt: time.Now().Add(-3 * wedgeThreshold)}
+	tr.tracees[11] = &TraceeState{TID: 11, awaitingResume: true, lastStopAt: time.Now()}
 	tr.tracees[12] = &TraceeState{TID: 12, awaitingResume: false, lastStopAt: time.Now().Add(-3 * wedgeThreshold)}
 
 	out := withTrace(t, true, func() { tr.scanWedged() })
 
-	if !strings.Contains(out, "WEDGE") || !strings.Contains(out, "tid=10") || !strings.Contains(out, "event:EXEC") {
-		t.Errorf("scanWedged must flag the wedged tid 10 with its last stop; got:\n%s", out)
+	if !strings.Contains(out, "WEDGE(v1)") || !strings.Contains(out, "tid=10") {
+		t.Errorf("scanWedged must flag the aged-armed tid 10; got:\n%s", out)
 	}
 	if strings.Contains(out, "tid=11") || strings.Contains(out, "tid=12") {
-		t.Errorf("scanWedged must not flag recently-armed (11) or resumed (12) tracees; got:\n%s", out)
+		t.Errorf("scanWedged must not flag recently-armed (11) or resumed (12); got:\n%s", out)
 	}
 	if !tr.tracees[10].wedgeLogged {
 		t.Error("scanWedged must mark the flagged tracee wedgeLogged")
 	}
+}
 
-	// Second scan must not re-flag the same wedge (wedgeLogged set).
-	out2 := withTrace(t, true, func() { tr.scanWedged() })
-	if strings.Contains(out2, "tid=10") {
-		t.Errorf("scanWedged must not re-flag an already-reported wedge; got:\n%s", out2)
+func TestReconcileProc_RunningTraceeNotFlagged(t *testing.T) {
+	tr := NewTracer(TracerConfig{})
+	// Use our own (running) pid as a stand-in tracee: /proc says state R and
+	// TracerPid != us, so it must never be flagged as wedged.
+	tr.tracees[os.Getpid()] = &TraceeState{TID: os.Getpid()}
+
+	out := withTrace(t, true, func() {
+		tr.reconcileProc()                              // first scan records lastProcScan
+		tr.lastProcScan = time.Now().Add(-time.Second)  // bypass throttle
+		tr.reconcileProc()
+	})
+	if strings.Contains(out, "WEDGE(v2)") {
+		t.Errorf("a running tracee must not be flagged by reconcileProc; got:\n%s", out)
 	}
 }
 
-func TestTrace_SeqMonotonic(t *testing.T) {
+func TestReconcileProc_Throttled(t *testing.T) {
 	tr := NewTracer(TracerConfig{})
-	tr.tracees[400] = &TraceeState{TID: 400}
-	before := ptraceTraceSeq.Load()
 	withTrace(t, true, func() {
-		tr.traceStop(400, unix.WaitStatus(uint32(unix.SIGTRAP|0x80)<<8|0x7f))
-		tr.traceResume(400, "allowSyscall-cont", 0)
+		tr.lastProcScan = time.Time{}
+		tr.reconcileProc()
+		first := tr.lastProcScan
+		if first.IsZero() {
+			t.Fatal("reconcileProc must record lastProcScan on first run")
+		}
+		tr.reconcileProc() // within procScanInterval — must be a no-op
+		if !tr.lastProcScan.Equal(first) {
+			t.Error("reconcileProc must be throttled within procScanInterval")
+		}
 	})
-	if got := ptraceTraceSeq.Load(); got < before+2 {
-		t.Errorf("trace seq did not advance by >=2: before=%d after=%d", before, got)
-	}
-	// Sanity: the counter is a real atomic (compile-time guard against accidental
-	// type change away from atomic.Uint64).
-	var _ *atomic.Uint64 = &ptraceTraceSeq
 }

@@ -13,19 +13,29 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// #369 #2 diagnostic instrumentation.
+// #369 #2 diagnostic instrumentation (v2 — wait-layer + /proc ground truth).
 //
-// The FUSE-on hang on kernel 6.12.90 leaves the tracer goroutine idle in the
-// Run-loop select (tracer.go) while a child sits stopped-but-reapable: a stop was
-// consumed by handleStop, but no resume (PtraceCont/PtraceSyscall) or park
-// (PTRACE_LISTEN) was issued for it, so Wait4 never returns that tid again. The
-// branch responsible cannot be found by local inspection — it does not reproduce
-// off exe.dev. This trace lets a single repro name the un-resumed stop: it logs
-// every stop the Run loop dispatches and every resume/park issued, and an
-// idle-tick scan flags any tracee whose stop was consumed but never resumed.
+// The FUSE-on hang on kernel 6.12.90 leaves a child kernel-stopped-and-reapable
+// while the tracer goroutine idles in the Run-loop select, with NO server thread
+// in wait4. The rc10 trace (v1) proved the stop is lost UPSTREAM of handleStop:
+// its WEDGE alarm (consumed-but-not-resumed) never fired, because the stop is
+// never consumed by the Run loop in the first place. v1 also masked the hang —
+// per-event slog added enough latency to suppress the timing race (Heisenbug).
 //
-// Enabled only via the AGENTSH_PTRACE_TRACE env var. When off, the cost is one
-// relaxed atomic load per stop/resume and nothing is written to TraceeState.
+// v2 fixes both:
+//   - A lock-free in-memory RING BUFFER replaces per-event slog. All trace events
+//     (wait4 call/return at every layer, stop dispatch, resume/park) are appended
+//     by the single Run goroutine, so no locking is needed and the per-event cost
+//     is a struct copy — low enough not to perturb the race. The ring is dumped
+//     to slog only when an alarm fires (rare).
+//   - A /proc RECONCILIATION alarm: on the idle tick (throttled), any tracee the
+//     Run loop believes is running but that /proc reports kernel-stopped (State
+//     t/T) with TracerPid==us is flagged and the ring dumped. This is ground
+//     truth, independent of where the stop was lost — it fires even though the
+//     stop never reached handleStop.
+//
+// Enabled only via AGENTSH_PTRACE_TRACE. When off, every hook is one relaxed
+// atomic load and returns.
 
 var (
 	ptraceTraceEnabled atomic.Bool
@@ -33,35 +43,121 @@ var (
 )
 
 // wedgeThreshold is how long a tracee may sit with a consumed-but-unresumed stop
-// before the idle-tick reporter flags it. Generous enough never to flag a tracee
-// merely between a stop and its imminent resume on the same loop turn.
+// before the (v1) idle-tick reporter flags it. Retained as a secondary signal.
 const wedgeThreshold = 2 * time.Second
 
-// initPtraceTrace enables the stop/resume diagnostic when AGENTSH_PTRACE_TRACE is
-// set to a truthy value. Called once at the top of Run.
+// procStuckThreshold is how long a tracee must remain kernel-stopped (per /proc)
+// while we think it is running before the v2 reconciliation alarm fires.
+const procStuckThreshold = 1500 * time.Millisecond
+
+// procScanInterval throttles the /proc reconciliation scan so it adds negligible
+// overhead and does not itself perturb the race (it runs only on idle ticks).
+const procScanInterval = 500 * time.Millisecond
+
+// traceEventKind names a ring entry's category.
+type traceEventKind uint8
+
+const (
+	evWaitCall traceEventKind = iota // about to call wait4(arg)
+	evWaitRet                        // wait4 returned
+	evStop                           // a stop was dispatched to handleStop
+	evResume                         // a resume/park was issued
+)
+
+func (k traceEventKind) String() string {
+	switch k {
+	case evWaitCall:
+		return "wait_call"
+	case evWaitRet:
+		return "wait_ret"
+	case evStop:
+		return "stop"
+	case evResume:
+		return "resume"
+	default:
+		return "?"
+	}
+}
+
+// traceEvent is one ring entry. Fields are raw; formatting happens only on dump.
+// String fields hold interned literals (the wait layer / resume site), so an
+// append allocates nothing.
+type traceEvent struct {
+	seq    uint64
+	mono   int64 // time.Now().UnixNano()
+	kind   traceEventKind
+	tid    int   // returned/affected tid (or wait pid arg for evWaitCall)
+	arg    int64 // wait pid arg (evWaitCall), signal (evResume), or returned tid (evWaitRet)
+	status uint32
+	errno  int32
+	layer  string // "run" | "inject" | "attach" — for wait events
+	via    string // resume site
+}
+
+const traceRingSize = 8192
+
+// traceRing and traceRingIdx are written ONLY by the Run goroutine (every stop,
+// resume, and wait4 in the tracer runs there), so no synchronization is needed.
+// dumpTraceRing reads them, also from the Run goroutine (idle tick). The atomic
+// is used solely so a future off-goroutine reader could snapshot the index.
+var (
+	traceRing    [traceRingSize]traceEvent
+	traceRingIdx atomic.Uint64
+)
+
+// initPtraceTrace enables the diagnostic when AGENTSH_PTRACE_TRACE is truthy.
 func initPtraceTrace() {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("AGENTSH_PTRACE_TRACE"))) {
 	case "1", "true", "yes", "on":
 		ptraceTraceEnabled.Store(true)
-		slog.Info("ptrace-trace: stop/resume diagnostic enabled (#369)")
+		slog.Info("ptrace-trace: wait-layer + /proc diagnostic enabled (#369 #2)")
 	}
 }
 
-// ptraceTraceOn reports whether the diagnostic is active.
 func ptraceTraceOn() bool { return ptraceTraceEnabled.Load() }
 
-// traceStop records and logs a stop dispatched from the Run loop, arming the
-// wedge detector so the idle-tick scan can flag it if no resume or park follows.
-// Terminal stops (exit/signaled) need no resume and do not arm. Call with t.mu
-// NOT held.
+// ringAppend writes one event to the ring (Run goroutine only).
+func ringAppend(ev traceEvent) {
+	ev.seq = ptraceTraceSeq.Add(1)
+	ev.mono = time.Now().UnixNano()
+	i := traceRingIdx.Load()
+	traceRing[i%traceRingSize] = ev
+	traceRingIdx.Store(i + 1)
+}
+
+// traceWaitCall records that wait4(arg) is about to be called at layer.
+func traceWaitCall(layer string, arg int) {
+	if !ptraceTraceOn() {
+		return
+	}
+	ringAppend(traceEvent{kind: evWaitCall, tid: arg, arg: int64(arg), layer: layer})
+}
+
+// traceWaitRet records a wait4 return: which tid (0 = none), status, errno.
+func traceWaitRet(layer string, ret int, status unix.WaitStatus, err error) {
+	if !ptraceTraceOn() {
+		return
+	}
+	var errno int32
+	if err != nil {
+		if e, ok := err.(unix.Errno); ok {
+			errno = int32(e)
+		} else {
+			errno = -1
+		}
+	}
+	ringAppend(traceEvent{kind: evWaitRet, tid: ret, arg: int64(ret), status: uint32(status), errno: errno, layer: layer})
+}
+
+// traceStop records a stop dispatched from the Run loop and arms the (v1)
+// wedge detector. Call with t.mu NOT held.
 func (t *Tracer) traceStop(tid int, st unix.WaitStatus) {
 	if !ptraceTraceOn() {
 		return
 	}
-	desc := describeWaitStatus(st)
-	seq := ptraceTraceSeq.Add(1)
-	slog.Info("ptrace-trace stop", "seq", seq, "tid", tid, "status", desc)
+	ringAppend(traceEvent{kind: evStop, tid: tid, status: uint32(st)})
 
+	desc := describeWaitStatus(st)
 	terminal := st.Exited() || st.Signaled()
 	t.mu.Lock()
 	if s := t.tracees[tid]; s != nil {
@@ -70,7 +166,7 @@ func (t *Tracer) traceStop(tid int, st unix.WaitStatus) {
 		} else {
 			s.awaitingResume = true
 			s.lastStopDesc = desc
-			s.lastStopSeq = seq
+			s.lastStopSeq = ptraceTraceSeq.Load()
 			s.lastStopAt = time.Now()
 			s.wedgeLogged = false
 		}
@@ -78,16 +174,13 @@ func (t *Tracer) traceStop(tid int, st unix.WaitStatus) {
 	t.mu.Unlock()
 }
 
-// traceResume records and logs a resume or intentional park for a tracee and
-// clears the wedge-detector arm. `via` names the resume site (e.g.
-// "allowSyscall-cont", "resumeTracee-syscall", "listen", "detach"). Call with
+// traceResume records a resume/park and clears the (v1) wedge arm. Call with
 // t.mu NOT held.
 func (t *Tracer) traceResume(tid int, via string, sig int) {
 	if !ptraceTraceOn() {
 		return
 	}
-	seq := ptraceTraceSeq.Add(1)
-	slog.Info("ptrace-trace resume", "seq", seq, "tid", tid, "via", via, "sig", sig)
+	ringAppend(traceEvent{kind: evResume, tid: tid, arg: int64(sig), via: via})
 	t.mu.Lock()
 	if s := t.tracees[tid]; s != nil {
 		s.awaitingResume = false
@@ -95,43 +188,157 @@ func (t *Tracer) traceResume(tid int, via string, sig int) {
 	t.mu.Unlock()
 }
 
-// scanWedged reports, at most once each, any tracee whose stop was consumed but
-// never resumed for longer than wedgeThreshold. Called from the Run-loop idle
-// branch. This is the diagnostic's headline output: it names the wedged tid and
-// the stop type that went un-resumed, pinning the handleStop branch at fault.
+// scanWedged is the v1 (consumed-but-not-resumed) alarm, retained as a secondary
+// signal. rc10 showed it does not fire for #2, but if it ever does we want the
+// ring. Call from the Run-loop idle branch.
 func (t *Tracer) scanWedged() {
 	if !ptraceTraceOn() {
 		return
 	}
 	now := time.Now()
-	type victim struct {
-		tid  int
-		desc string
-		seq  uint64
-		age  time.Duration
-	}
-	var victims []victim
+	var victims []int
 	t.mu.Lock()
 	for tid, s := range t.tracees {
 		if s == nil || !s.awaitingResume || s.wedgeLogged {
 			continue
 		}
-		age := now.Sub(s.lastStopAt)
-		if age < wedgeThreshold {
+		if now.Sub(s.lastStopAt) < wedgeThreshold {
 			continue
 		}
 		s.wedgeLogged = true
-		victims = append(victims, victim{tid: tid, desc: s.lastStopDesc, seq: s.lastStopSeq, age: age})
+		victims = append(victims, tid)
 	}
 	t.mu.Unlock()
-	for _, v := range victims {
-		slog.Warn("ptrace-trace WEDGE: stop consumed but never resumed (#369)",
-			"tid", v.tid, "last_stop", v.desc, "stop_seq", v.seq, "age_ms", v.age.Milliseconds())
+	if len(victims) > 0 {
+		for _, tid := range victims {
+			slog.Warn("ptrace-trace WEDGE(v1): stop consumed but never resumed (#369)", "tid", tid)
+		}
+		t.dumpTraceRing("wedge-v1")
 	}
 }
 
+// reconcileProc is the v2 ground-truth alarm. On the idle tick (throttled to
+// procScanInterval) it reads /proc for every tracee the Run loop believes is
+// running; any that is kernel-stopped (State t/T) with TracerPid==us for longer
+// than procStuckThreshold is flagged and the trace ring dumped. This catches the
+// hang regardless of where the stop was lost, because /proc is ground truth.
+func (t *Tracer) reconcileProc() {
+	if !ptraceTraceOn() {
+		return
+	}
+	now := time.Now()
+	if now.Sub(t.lastProcScan) < procScanInterval {
+		return
+	}
+	t.lastProcScan = now
+
+	myPid := os.Getpid()
+
+	// Snapshot tids (and skip intentionally parked tracees) under the lock.
+	type cand struct{ tid int }
+	var cands []cand
+	t.mu.Lock()
+	for tid := range t.tracees {
+		if _, parked := t.parkedTracees[tid]; parked {
+			continue
+		}
+		cands = append(cands, cand{tid})
+	}
+	t.mu.Unlock()
+
+	var flagged []int
+	for _, c := range cands {
+		state, tracerPid, ok := readProcStopState(c.tid)
+		stuck := ok && (state == 't' || state == 'T') && tracerPid == myPid
+
+		t.mu.Lock()
+		s := t.tracees[c.tid]
+		if s == nil {
+			t.mu.Unlock()
+			continue
+		}
+		if !stuck {
+			s.procStuckSince = time.Time{}
+			t.mu.Unlock()
+			continue
+		}
+		if s.procStuckSince.IsZero() {
+			s.procStuckSince = now
+		}
+		fire := !s.procWedgeLogged && now.Sub(s.procStuckSince) >= procStuckThreshold
+		if fire {
+			s.procWedgeLogged = true
+		}
+		stuckMs := now.Sub(s.procStuckSince).Milliseconds()
+		t.mu.Unlock()
+
+		if fire {
+			slog.Warn("ptrace-trace WEDGE(v2): tracee kernel-stopped but Run loop not progressing it (#369 #2)",
+				"tid", c.tid, "proc_state", string(rune(state)), "tracer_pid", tracerPid, "stuck_ms", stuckMs)
+			flagged = append(flagged, c.tid)
+		}
+	}
+	if len(flagged) > 0 {
+		t.dumpTraceRing(fmt.Sprintf("wedge-v2 tids=%v", flagged))
+	}
+}
+
+// dumpTraceRing emits the whole ring oldest→newest to slog. Called only when an
+// alarm fires, so the slog cost is acceptable. BEGIN/END markers bracket the dump
+// for easy extraction; t0 is the first event's timestamp so offsets are relative.
+func (t *Tracer) dumpTraceRing(reason string) {
+	total := traceRingIdx.Load()
+	if total == 0 {
+		slog.Warn("ptrace-trace ring DUMP: empty", "reason", reason)
+		return
+	}
+	n := uint64(traceRingSize)
+	if total < n {
+		n = total
+	}
+	start := total - n
+	first := traceRing[start%traceRingSize]
+	t0 := first.mono
+
+	slog.Warn("ptrace-trace ring DUMP BEGIN", "reason", reason, "events", n)
+	for i := start; i < total; i++ {
+		ev := traceRing[i%traceRingSize]
+		offUs := (ev.mono - t0) / 1000
+		switch ev.kind {
+		case evWaitCall:
+			slog.Warn("ptrace-trace", "seq", ev.seq, "us", offUs, "ev", "wait_call", "layer", ev.layer, "pid_arg", ev.arg)
+		case evWaitRet:
+			slog.Warn("ptrace-trace", "seq", ev.seq, "us", offUs, "ev", "wait_ret", "layer", ev.layer,
+				"ret_tid", ev.arg, "status", describeWaitStatus(unix.WaitStatus(ev.status)), "errno", ev.errno)
+		case evStop:
+			slog.Warn("ptrace-trace", "seq", ev.seq, "us", offUs, "ev", "stop", "tid", ev.tid,
+				"status", describeWaitStatus(unix.WaitStatus(ev.status)))
+		case evResume:
+			slog.Warn("ptrace-trace", "seq", ev.seq, "us", offUs, "ev", "resume", "tid", ev.tid, "via", ev.via, "sig", ev.arg)
+		}
+	}
+	slog.Warn("ptrace-trace ring DUMP END", "reason", reason)
+}
+
+// readProcStopState reports whether tracee tid is currently kernel-stopped from
+// the OS's point of view, and who its tracer is. It reuses procStateChar (reads
+// /proc/<tid>/stat State char) and readProcStatusField (TracerPid). ok is false
+// if /proc could not be read (tracee vanished). State 't' = tracing stop,
+// 'T' = stopped (job control).
+func readProcStopState(tid int) (state byte, tracerPid int, ok bool) {
+	sc := procStateChar(tid)
+	if sc == "" {
+		return 0, 0, false
+	}
+	tp, err := readProcStatusField(tid, "TracerPid:")
+	if err != nil {
+		return sc[0], 0, false
+	}
+	return sc[0], tp, true
+}
+
 // describeWaitStatus decodes a wait status into the same classification handleStop
-// dispatches on, so each "stop" trace line names the branch that will run.
+// dispatches on, so each stop/wait line names the branch that will run.
 func describeWaitStatus(st unix.WaitStatus) string {
 	switch {
 	case st.Exited():

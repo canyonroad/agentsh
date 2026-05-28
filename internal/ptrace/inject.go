@@ -211,7 +211,9 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 			return fmt.Errorf("waitForSyscallStop tid %d: timed out after %v", tid, timeout)
 		}
 		var status unix.WaitStatus
+		traceWaitCall("inject", tid)
 		wpid, err := unix.Wait4(tid, &status, unix.WNOHANG|unix.WALL, nil)
+		traceWaitRet("inject", wpid, status, err)
 		if err != nil {
 			if err == unix.EINTR {
 				continue

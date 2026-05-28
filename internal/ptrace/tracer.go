@@ -209,6 +209,12 @@ type TraceeState struct {
 	lastStopSeq    uint64
 	lastStopAt     time.Time
 	wedgeLogged    bool
+	// /proc reconciliation (#2 v2): ground-truth detection that this tracee is
+	// kernel-stopped (State t/T, TracerPid==us) while the Run loop believes it
+	// is running. procStuckSince is when we first observed it stuck; once it
+	// persists past the threshold we dump the trace ring and set procWedgeLogged.
+	procStuckSince  time.Time
+	procWedgeLogged bool
 }
 
 type resumeRequest struct {
@@ -289,6 +295,10 @@ type Tracer struct {
 	readyFileAttempts int
 
 	hasSyscallInfo bool // true if PTRACE_GET_SYSCALL_INFO is supported (Linux 5.3+)
+
+	// #369 #2 diagnostic — Run-goroutine-only, no lock. Throttles the /proc
+	// reconciliation scan (see trace_debug.go reconcileProc).
+	lastProcScan time.Time
 
 	stopped chan struct{}
 }
@@ -1968,7 +1978,9 @@ func (t *Tracer) Run(ctx context.Context) error {
 
 		var status unix.WaitStatus
 		var rusage unix.Rusage
+		traceWaitCall("run", -1)
 		tid, err := unix.Wait4(-1, &status, unix.WALL|unix.WNOHANG, &rusage)
+		traceWaitRet("run", tid, status, err)
 
 		if err != nil {
 			if err == unix.EINTR {
@@ -1998,6 +2010,7 @@ func (t *Tracer) Run(ctx context.Context) error {
 
 		if tid == 0 {
 			t.scanWedged()
+			t.reconcileProc()
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
