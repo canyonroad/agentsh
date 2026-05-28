@@ -4,6 +4,7 @@ package unix
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -135,6 +136,20 @@ func (h *FileHandler) Handle(req FileRequest) (FileResult, *types.Event) {
 			// Audit-only mode: log but allow.
 			return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, false)
 		}
+		// #369 loader-safe guard: never DENY a read-only access to an essential
+		// system/loader path. A deny-by-default policy would otherwise make every
+		// dynamically-linked program un-loadable under file_monitor — the dynamic
+		// loader reads /etc/ld.so.cache and walks /lib, /usr, ... during startup,
+		// and those opens fall through a policy's allow-system-read (its /lib/**
+		// globs don't match the bare dirs) to the default-deny-files catch-all.
+		// The ptrace enforcer effectively allows these, so file_monitor must too.
+		// Read-only only — writes/creates/deletes to these paths stay enforced.
+		if isReadOnlyFileOp(req.Syscall, req.Flags) && isLoaderSafeSystemPath(req.Path) {
+			slog.Debug("file_monitor: loader-safe read override (#369)",
+				"path", req.Path, "operation", req.Operation, "policy_rule", dec.Rule, "session", req.SessionID)
+			// shadowDeny=true records that policy said deny but we did not enforce.
+			return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, true)
+		}
 		// Enforced deny.
 		return FileResult{Action: ActionDeny, Errno: int32(sysunix.EACCES)}, h.buildFileEvent(req, dec, true, false)
 	}
@@ -184,4 +199,27 @@ func (h *FileHandler) buildFileEvent(req FileRequest, dec FilePolicyDecision, bl
 	}
 
 	return ev
+}
+
+// loaderSafeReadPrefixes are system paths whose READ-ONLY access must never be
+// denied: the dynamic loader and libc must read these to start any program
+// (ld.so.cache/preload/conf, and the standard system library + binary trees the
+// loader resolves through). This mirrors the established system-readonly path
+// set and the ptrace enforcer's effective behavior (#369). Matching is
+// exact-or-subtree, so "/lib" covers both the bare directory open the loader
+// performs during search-path resolution and every file beneath it.
+var loaderSafeReadPrefixes = []string{
+	"/usr", "/lib", "/lib64", "/lib32", "/libx32", "/bin", "/sbin", "/opt",
+	"/etc/ld.so.cache", "/etc/ld.so.preload", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
+}
+
+// isLoaderSafeSystemPath reports whether p is one of the loader-essential system
+// paths (exact match or a subtree element).
+func isLoaderSafeSystemPath(p string) bool {
+	for _, pre := range loaderSafeReadPrefixes {
+		if p == pre || strings.HasPrefix(p, pre+"/") {
+			return true
+		}
+	}
+	return false
 }
