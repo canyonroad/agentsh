@@ -48,6 +48,12 @@ file_rules:
   - name: allow-system-read
     description: Read-only access to system paths
     paths:
+      - "/usr"
+      - "/lib"
+      - "/lib64"
+      - "/bin"
+      - "/sbin"
+      - "/opt"
       - "/usr/**"
       - "/lib/**"
       - "/lib64/**"

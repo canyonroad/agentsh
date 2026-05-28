@@ -4,6 +4,7 @@ package unix
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -135,6 +136,25 @@ func (h *FileHandler) Handle(req FileRequest) (FileResult, *types.Event) {
 			// Audit-only mode: log but allow.
 			return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, false)
 		}
+		// #369 loader-safe guard: never DENY a read-only access to an essential
+		// system/loader path when the denial came from a catch-all default rule.
+		// A deny-by-default policy would otherwise make every dynamically-linked
+		// program un-loadable under file_monitor — the loader reads
+		// /etc/ld.so.cache and walks /lib, /usr, ... during startup, and those
+		// opens fall through allow-system-read (its /lib/** globs don't match the
+		// bare dirs) to the default-deny-files catch-all. The ptrace enforcer
+		// effectively allows these, so file_monitor must too.
+		//
+		// Scoped to the catch-all rule ONLY: an operator's EXPLICIT deny rule on a
+		// system subpath (e.g. `deny read /opt/app/secrets/**`) is still honored,
+		// matching ptrace's first-match-explicit-deny semantics. Read-only only —
+		// writes/creates/deletes to these paths stay enforced.
+		if isDefaultDenyRule(dec.Rule) && isReadOnlyFileOp(req.Syscall, req.Flags) && isLoaderSafeSystemPath(req.Path) {
+			slog.Debug("file_monitor: loader-safe read override (#369)",
+				"path", req.Path, "operation", req.Operation, "policy_rule", dec.Rule, "session", req.SessionID)
+			// shadowDeny=true records that policy said deny but we did not enforce.
+			return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, true)
+		}
 		// Enforced deny.
 		return FileResult{Action: ActionDeny, Errno: int32(sysunix.EACCES)}, h.buildFileEvent(req, dec, true, false)
 	}
@@ -184,4 +204,43 @@ func (h *FileHandler) buildFileEvent(req FileRequest, dec FilePolicyDecision, bl
 	}
 
 	return ev
+}
+
+// loaderSafeReadPrefixes are system paths whose READ-ONLY access must never be
+// denied: the dynamic loader and libc must read these to start any program
+// (ld.so.cache/preload/conf, and the standard system library + binary trees the
+// loader resolves through). This mirrors the established system-readonly path
+// set and the ptrace enforcer's effective behavior (#369). Matching is
+// exact-or-subtree, so "/lib" covers both the bare directory open the loader
+// performs during search-path resolution and every file beneath it. Note: /opt
+// is intentionally excluded — the loader never searches it, and some policies
+// (e.g. agent-sandbox) deliberately do not grant it system-read.
+var loaderSafeReadPrefixes = []string{
+	"/usr", "/lib", "/lib64", "/lib32", "/libx32", "/bin", "/sbin",
+	"/etc/ld.so.cache", "/etc/ld.so.preload", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
+}
+
+// defaultDenyRuleNames are the catch-all "deny everything not explicitly
+// allowed" rule names. The loader-safe override fires only when a loader read
+// was denied by one of these — never by an operator's explicit deny rule
+// targeting a specific path, which must still be honored (matching the ptrace
+// enforcer's first-match-explicit-deny semantics). "default-deny-files" is both
+// the shipped policies' catch-all rule name and the engine's no-match fallback.
+var defaultDenyRuleNames = map[string]bool{
+	"default-deny-files": true,
+}
+
+// isDefaultDenyRule reports whether a deny decision came from a catch-all
+// default rule rather than an explicit, path-specific operator deny.
+func isDefaultDenyRule(rule string) bool { return defaultDenyRuleNames[rule] }
+
+// isLoaderSafeSystemPath reports whether p is one of the loader-essential system
+// paths (exact match or a subtree element).
+func isLoaderSafeSystemPath(p string) bool {
+	for _, pre := range loaderSafeReadPrefixes {
+		if p == pre || strings.HasPrefix(p, pre+"/") {
+			return true
+		}
+	}
+	return false
 }

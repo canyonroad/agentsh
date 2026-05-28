@@ -77,6 +77,12 @@ file_rules:
   - name: allow-system-read
     description: Read access to standard system paths
     paths:
+      - "/usr"
+      - "/lib"
+      - "/lib64"
+      - "/bin"
+      - "/sbin"
+      - "/opt"
       - "/usr/**"
       - "/lib/**"
       - "/lib64/**"
@@ -103,6 +109,13 @@ file_rules:
       - "/etc/mime.types"
       - "/etc/protocols"
       - "/etc/services"
+      # Dynamic linker / NSS runtime files — needed by every dynamically-linked
+      # program on startup (#369).
+      - "/etc/ld.so.cache"
+      - "/etc/ld.so.preload"
+      - "/etc/ld.so.conf"
+      - "/etc/ld.so.conf.d/**"
+      - "/etc/nsswitch.conf"
     operations:
       - read
       - open
