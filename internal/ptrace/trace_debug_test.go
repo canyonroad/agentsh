@@ -235,6 +235,69 @@ func TestRecoverVanishedTracees_NoneVanished(t *testing.T) {
 	}
 }
 
+func TestHasPendingExitNotify(t *testing.T) {
+	tr := NewTracer(TracerConfig{})
+	if tr.hasPendingExitNotify() {
+		t.Error("fresh tracer must have no pending exit notifications")
+	}
+	if _, err := tr.RegisterExitNotify(4321); err != nil {
+		t.Fatalf("RegisterExitNotify: %v", err)
+	}
+	if !tr.hasPendingExitNotify() {
+		t.Error("hasPendingExitNotify must be true after a registration")
+	}
+}
+
+// TestReconcileExitNotify is the rc13 fix: an exec whose registered pid has
+// vanished from /proc (exit never delivered) is unblocked with ExitVanished,
+// while a live registration is left intact.
+func TestReconcileExitNotify(t *testing.T) {
+	tr := NewTracer(TracerConfig{})
+
+	const goneTID = 1 << 30 // no such pid
+	goneCh, err := tr.RegisterExitNotify(goneTID)
+	if err != nil {
+		t.Fatalf("register gone: %v", err)
+	}
+	liveCh, err := tr.RegisterExitNotify(os.Getpid())
+	if err != nil {
+		t.Fatalf("register live: %v", err)
+	}
+
+	tr.lastExitRecon = time.Time{} // bypass throttle
+	if got := tr.reconcileExitNotify(); got != 1 {
+		t.Fatalf("reconcileExitNotify() = %d, want 1 (only the vanished pid)", got)
+	}
+
+	select {
+	case es := <-goneCh:
+		if es.Reason != ExitVanished {
+			t.Errorf("vanished exec Reason = %v, want ExitVanished", es.Reason)
+		}
+	default:
+		t.Error("vanished registration must be signalled (exec would otherwise hang)")
+	}
+	select {
+	case <-liveCh:
+		t.Error("live registration must NOT be signalled")
+	default:
+	}
+	if tr.hasPendingExitNotify() == false {
+		t.Error("live registration must remain pending after reconcile")
+	}
+}
+
+func TestReconcileExitNotify_Throttled(t *testing.T) {
+	tr := NewTracer(TracerConfig{})
+	tr.lastExitRecon = time.Now() // within throttle window
+	if _, err := tr.RegisterExitNotify(1 << 30); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if got := tr.reconcileExitNotify(); got != 0 {
+		t.Errorf("reconcileExitNotify must no-op within the throttle window, got %d", got)
+	}
+}
+
 func TestEchildBackoff_Escalates(t *testing.T) {
 	// Early spins stay tight (catch transient ECHILD fast); a persistent wedge
 	// backs off and is capped so it never spins at ~200 Hz.

@@ -304,6 +304,8 @@ type Tracer struct {
 	lastProcScan  time.Time
 	lastEchildLog time.Time
 	echildSpins   int
+	lastExitRecon time.Time
+	idleParkLog   time.Time
 
 	stopped chan struct{}
 }
@@ -536,6 +538,7 @@ func (t *Tracer) RegisterExitNotify(pid int) (<-chan ExitStatus, error) {
 	if loaded {
 		return nil, fmt.Errorf("exit notify already registered for pid %d", pid)
 	}
+	traceNote("exit", "register", pid)
 	return ch, nil
 }
 
@@ -1786,6 +1789,7 @@ func (t *Tracer) handleExit(tid int, status unix.WaitStatus, rusage *unix.Rusage
 			} else if status.Signaled() {
 				es.Signal = int(status.Signal())
 			}
+			traceNote("exit", "notify", tgid)
 			ch <- es
 		}
 		if t.fds != nil {
@@ -2028,6 +2032,37 @@ func (t *Tracer) Run(ctx context.Context) error {
 					idleTimer.Reset(echildBackoff(t.echildSpins))
 					continue
 				}
+				// No tracees tracked. An exec may still be blocked on an
+				// exit-notify channel for a child whose exit we never saw (it
+				// vanished from /proc — reaped before we did). Reconcile pending
+				// exit-notify registrations against /proc and unblock any whose
+				// pid is gone. While execs are still pending, re-poll on a timer
+				// so a lost attach/resume wakeup can never wedge the loop here
+				// (this no-timer park is where rc10–rc12 hung — #369 #2). Only
+				// block indefinitely when nothing at all is in flight.
+				t.reconcileExitNotify()
+				if t.hasPendingExitNotify() {
+					t.onIdleParkWithPending()
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-t.stopped:
+						return nil
+					case req := <-t.attachQueue:
+						t.serviceAttachReq(req)
+					case req := <-t.resumeQueue:
+						t.handleResumeRequest(req)
+					case <-idleTimer.C:
+					}
+					if !idleTimer.Stop() {
+						select {
+						case <-idleTimer.C:
+						default:
+						}
+					}
+					idleTimer.Reset(idleEchildRepoll)
+					continue
+				}
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -2053,12 +2088,7 @@ func (t *Tracer) Run(ctx context.Context) error {
 			case <-t.stopped:
 				return nil
 			case req := <-t.attachQueue:
-				if err := t.attachProcess(req.pid, req.opts); err != nil {
-					slog.Error("attach from queue failed", "pid", req.pid, "error", err)
-					t.signalAttachDone(req.pid, err)
-				} else {
-					t.signalAttachDone(req.pid, nil)
-				}
+				t.serviceAttachReq(req)
 			case req := <-t.resumeQueue:
 				t.handleResumeRequest(req)
 			case <-idleTimer.C:
@@ -2095,21 +2125,98 @@ func (t *Tracer) Stop() {
 
 // serviceAttachReq processes one queued attach request and signals its waiter.
 func (t *Tracer) serviceAttachReq(req attachRequest) {
+	traceNote("attach", "recv", req.pid)
 	if err := t.attachProcess(req.pid, req.opts); err != nil {
 		slog.Error("attach from queue failed", "pid", req.pid, "error", err)
+		traceNote("attach", "attach-failed", req.pid)
 		t.signalAttachDone(req.pid, err)
 	} else {
+		traceNote("attach", "attached", req.pid)
 		t.signalAttachDone(req.pid, nil)
+	}
+}
+
+// idleEchildRepoll is how often the genuine-idle (no tracees) ECHILD path
+// re-polls Wait4 while execs are still pending, so a lost attach/resume wakeup
+// or a vanished-but-registered exec cannot wedge the loop. Slower than the
+// active 5ms tick because nothing is running to wait on.
+const idleEchildRepoll = 50 * time.Millisecond
+
+// hasPendingExitNotify reports whether any exec is still waiting on an
+// exit-notify channel (i.e. there is in-flight work the loop must not abandon).
+func (t *Tracer) hasPendingExitNotify() bool {
+	pending := false
+	t.exitNotify.Range(func(_, _ any) bool {
+		pending = true
+		return false
+	})
+	return pending
+}
+
+// reconcileExitNotify unblocks execs whose child has vanished. When an exec's
+// registered pid no longer exists in /proc but its exit was never delivered to
+// us (reaped out from under the tracer, or processed without firing the notify),
+// the exec's waitFn blocks forever. Signal ExitVanished for any registered pid
+// that is gone from /proc. This is the no-tracee analog of recoverVanishedTracees
+// and targets the rc12 wedge where the loop parks idle (TraceeCount==0) while an
+// exec is still waiting (#369 #2). Throttled. Returns the count recovered.
+func (t *Tracer) reconcileExitNotify() int {
+	now := time.Now()
+	if now.Sub(t.lastExitRecon) < 200*time.Millisecond {
+		return 0
+	}
+	t.lastExitRecon = now
+
+	var gone []int
+	t.exitNotify.Range(func(k, _ any) bool {
+		pid, ok := k.(int)
+		if ok && !procExists(pid) {
+			gone = append(gone, pid)
+		}
+		return true
+	})
+
+	recovered := 0
+	for _, pid := range gone {
+		v, ok := t.exitNotify.LoadAndDelete(pid)
+		if !ok {
+			continue // handleExit won the race and already delivered the real exit
+		}
+		slog.Warn("ptrace: recovering vanished exec — registered pid gone from /proc, no exit delivered (#369 #2)", "pid", pid)
+		traceNote("exit", "recover-vanished", pid)
+		select {
+		case v.(chan ExitStatus) <- ExitStatus{PID: pid, Reason: ExitVanished}:
+		default:
+		}
+		recovered++
+	}
+	return recovered
+}
+
+// onIdleParkWithPending surfaces the suspicious case where the loop is about to
+// park idle (no tracees) while execs are still pending — the rc10–rc12 wedge
+// shape. Throttled to once/second; dumps the trace ring when tracing is enabled.
+func (t *Tracer) onIdleParkWithPending() {
+	now := time.Now()
+	if now.Sub(t.idleParkLog) < time.Second {
+		return
+	}
+	t.idleParkLog = now
+	slog.Warn("ptrace: idle ECHILD park with execs still pending — re-polling (#369 #2)")
+	if ptraceTraceOn() {
+		t.dumpTraceRing("idle-echild-pending")
 	}
 }
 
 // onEchildWithTracees handles the #369 #2 anomaly: Wait4(-1) returned ECHILD even
 // though we still track tracees. It reaps tracees that have vanished from /proc
-// (recovering stolen exits), surfaces the anomaly at WARN (throttled to once per
-// second so a genuinely-stuck tracee does not spam), and runs the wedge
-// diagnostics. Returns the number of stolen exits recovered. Run goroutine only.
+// (recovering stolen exits), also reconciles pending exit-notify registrations,
+// surfaces the anomaly at WARN (throttled to once per second so a genuinely-stuck
+// tracee does not spam), and runs the wedge diagnostics. Returns the number of
+// stolen exits recovered. Run goroutine only.
 func (t *Tracer) onEchildWithTracees() int {
 	recovered := t.recoverVanishedTracees()
+	recovered += t.reconcileExitNotify()
 
 	now := time.Now()
 	if now.Sub(t.lastEchildLog) >= time.Second {
@@ -2177,12 +2284,7 @@ func (t *Tracer) drainQueues(ctx context.Context) error {
 		case <-t.stopped:
 			return fmt.Errorf("tracer stopped")
 		case req := <-t.attachQueue:
-			if err := t.attachProcess(req.pid, req.opts); err != nil {
-				slog.Error("attach from queue failed", "pid", req.pid, "error", err)
-				t.signalAttachDone(req.pid, err)
-			} else {
-				t.signalAttachDone(req.pid, nil)
-			}
+			t.serviceAttachReq(req)
 		case req := <-t.resumeQueue:
 			t.handleResumeRequest(req)
 		default:
