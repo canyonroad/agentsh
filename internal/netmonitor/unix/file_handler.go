@@ -212,9 +212,11 @@ func (h *FileHandler) buildFileEvent(req FileRequest, dec FilePolicyDecision, bl
 // loader resolves through). This mirrors the established system-readonly path
 // set and the ptrace enforcer's effective behavior (#369). Matching is
 // exact-or-subtree, so "/lib" covers both the bare directory open the loader
-// performs during search-path resolution and every file beneath it.
+// performs during search-path resolution and every file beneath it. Note: /opt
+// is intentionally excluded — the loader never searches it, and some policies
+// (e.g. agent-sandbox) deliberately do not grant it system-read.
 var loaderSafeReadPrefixes = []string{
-	"/usr", "/lib", "/lib64", "/lib32", "/libx32", "/bin", "/sbin", "/opt",
+	"/usr", "/lib", "/lib64", "/lib32", "/libx32", "/bin", "/sbin",
 	"/etc/ld.so.cache", "/etc/ld.so.preload", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
 }
 

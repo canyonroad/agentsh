@@ -106,8 +106,12 @@ func TestIssue369_ShippedPoliciesAllowLoaderReads(t *testing.T) {
 			if err != nil {
 				// Root default-policy.yml + configs/default-policy.yaml carry a
 				// command-rule arg pattern NewEngine rejects as a regexp — an
-				// unrelated pre-existing issue. Skip rather than conflate it.
-				t.Skipf("engine %s: %v", rel, err)
+				// unrelated pre-existing issue. Skip ONLY that specific failure;
+				// any other load failure in a protected policy must fail loudly.
+				if strings.Contains(err.Error(), "compile command rule") {
+					t.Skipf("engine %s: %v", rel, err)
+				}
+				t.Fatalf("engine %s: %v", rel, err)
 			}
 			for _, path := range loaderEssentialReads {
 				dec := e.CheckFile(path, "open")

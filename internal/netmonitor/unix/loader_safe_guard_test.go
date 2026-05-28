@@ -76,13 +76,13 @@ func TestFileHandler_LoaderSafeReadOverride(t *testing.T) {
 }
 
 func TestIsLoaderSafeSystemPath(t *testing.T) {
-	safe := []string{"/lib", "/lib/x", "/usr", "/usr/lib/libc.so.6", "/etc/ld.so.cache", "/etc/ld.so.conf.d/x.conf", "/bin", "/sbin", "/opt/foo"}
+	safe := []string{"/lib", "/lib/x", "/usr", "/usr/lib/libc.so.6", "/etc/ld.so.cache", "/etc/ld.so.conf.d/x.conf", "/bin", "/sbin"}
 	for _, p := range safe {
 		if !isLoaderSafeSystemPath(p) {
 			t.Errorf("isLoaderSafeSystemPath(%q) = false, want true", p)
 		}
 	}
-	unsafe := []string{"/home/user", "/etc/shadow", "/etc/ld.so.cache.evil", "/libfoo", "/", "/var/lib", "/tmp"}
+	unsafe := []string{"/home/user", "/etc/shadow", "/etc/ld.so.cache.evil", "/libfoo", "/", "/var/lib", "/tmp", "/opt", "/opt/foo"}
 	for _, p := range unsafe {
 		if isLoaderSafeSystemPath(p) {
 			t.Errorf("isLoaderSafeSystemPath(%q) = true, want false", p)
