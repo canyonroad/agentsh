@@ -2088,12 +2088,7 @@ func (t *Tracer) Run(ctx context.Context) error {
 			case <-t.stopped:
 				return nil
 			case req := <-t.attachQueue:
-				if err := t.attachProcess(req.pid, req.opts); err != nil {
-					slog.Error("attach from queue failed", "pid", req.pid, "error", err)
-					t.signalAttachDone(req.pid, err)
-				} else {
-					t.signalAttachDone(req.pid, nil)
-				}
+				t.serviceAttachReq(req)
 			case req := <-t.resumeQueue:
 				t.handleResumeRequest(req)
 			case <-idleTimer.C:
@@ -2289,12 +2284,7 @@ func (t *Tracer) drainQueues(ctx context.Context) error {
 		case <-t.stopped:
 			return fmt.Errorf("tracer stopped")
 		case req := <-t.attachQueue:
-			if err := t.attachProcess(req.pid, req.opts); err != nil {
-				slog.Error("attach from queue failed", "pid", req.pid, "error", err)
-				t.signalAttachDone(req.pid, err)
-			} else {
-				t.signalAttachDone(req.pid, nil)
-			}
+			t.serviceAttachReq(req)
 		case req := <-t.resumeQueue:
 			t.handleResumeRequest(req)
 		default:
