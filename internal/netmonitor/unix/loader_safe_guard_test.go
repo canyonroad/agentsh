@@ -57,6 +57,22 @@ func TestFileHandler_LoaderSafeReadOverride(t *testing.T) {
 			}
 		})
 	}
+
+	// An operator's EXPLICIT deny rule on a system subpath must still be honored
+	// — only the catch-all default deny is overridden (matches ptrace).
+	t.Run("explicit deny on system subpath is honored", func(t *testing.T) {
+		policy := &mockFilePolicy{decisions: map[string]FilePolicyDecision{
+			"/usr/lib/app/secret.key": {Decision: "deny", EffectiveDecision: "deny", Rule: "deny-app-secrets"},
+		}}
+		handler := NewFileHandler(policy, NewMountRegistry(), &mockFileEmitter{}, true)
+		res, _ := handler.Handle(FileRequest{
+			PID: 1234, Syscall: int32(unix.SYS_OPENAT), Path: "/usr/lib/app/secret.key",
+			Operation: "open", Flags: unix.O_RDONLY, SessionID: "sess-1",
+		})
+		if res.Action != ActionDeny {
+			t.Errorf("explicit (non-catch-all) deny on a system subpath must be honored, got %s", res.Action)
+		}
+	})
 }
 
 func TestIsLoaderSafeSystemPath(t *testing.T) {
