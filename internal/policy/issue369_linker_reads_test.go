@@ -80,14 +80,15 @@ file_rules:
 // and that this fix modifies. The write-scoped-catch-all policies (default.yaml,
 // agent-default.yaml) allow loader reads via the engine's default-allow-reads
 // fallback and are intentionally excluded — asserting an explicit allow rule
-// there would wrongly fail.
+// there would wrongly fail. The two default-policy files are also excluded:
+// they don't load via NewEngine (unrelated command-rule regex) so they'd only
+// ever be always-skipped rows overstating coverage; their loader-read support
+// is verified by the runtime guard test instead.
 var denyByDefaultPoliciesWithSystemRead = []string{
 	"../../configs/policies/agent-sandbox.yaml",
 	"../../configs/policies/dev-safe.yaml",
 	"../../configs/policies/ci-strict.yaml",
 	"../../configs/policies/bench-realistic.yaml",
-	"../../default-policy.yml",
-	"../../configs/default-policy.yaml",
 }
 
 // TestIssue369_ShippedPoliciesAllowLoaderReads asserts the deny-by-default
@@ -104,13 +105,6 @@ func TestIssue369_ShippedPoliciesAllowLoaderReads(t *testing.T) {
 			}
 			e, err := NewEngine(p, false, true)
 			if err != nil {
-				// Root default-policy.yml + configs/default-policy.yaml carry a
-				// command-rule arg pattern NewEngine rejects as a regexp — an
-				// unrelated pre-existing issue. Skip ONLY that specific failure;
-				// any other load failure in a protected policy must fail loudly.
-				if strings.Contains(err.Error(), "compile command rule") {
-					t.Skipf("engine %s: %v", rel, err)
-				}
 				t.Fatalf("engine %s: %v", rel, err)
 			}
 			for _, path := range loaderEssentialReads {

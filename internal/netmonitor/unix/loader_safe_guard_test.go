@@ -73,6 +73,43 @@ func TestFileHandler_LoaderSafeReadOverride(t *testing.T) {
 			t.Errorf("explicit (non-catch-all) deny on a system subpath must be honored, got %s", res.Action)
 		}
 	})
+
+	// An overridden read must be recorded as a shadow-deny — the only forensic
+	// trace that policy denied but file_monitor allowed it.
+	t.Run("override emits shadow-deny event", func(t *testing.T) {
+		policy := denyAll("/lib")
+		res, ev := NewFileHandler(policy, NewMountRegistry(), &mockFileEmitter{}, true).Handle(FileRequest{
+			PID: 1234, Syscall: int32(unix.SYS_OPENAT), Path: "/lib", Operation: "open",
+			Flags: unix.O_RDONLY | unix.O_DIRECTORY, SessionID: "sess-1",
+		})
+		if res.Action != ActionContinue {
+			t.Fatalf("expected override to allow, got %s", res.Action)
+		}
+		if ev == nil {
+			t.Fatal("expected an audit event for the override")
+		}
+		if v, ok := ev.Fields["shadow_deny"]; !ok || v != true {
+			t.Errorf("override event must carry shadow_deny=true; got %v (ok=%v)", v, ok)
+		}
+	})
+
+	// In audit-only mode (enforce=false) the deny short-circuits to allow BEFORE
+	// the override runs, so it must NOT be marked as a loader-safe shadow-deny.
+	t.Run("enforce=false does not take the override path", func(t *testing.T) {
+		policy := denyAll("/lib")
+		res, ev := NewFileHandler(policy, NewMountRegistry(), &mockFileEmitter{}, false).Handle(FileRequest{
+			PID: 1234, Syscall: int32(unix.SYS_OPENAT), Path: "/lib", Operation: "open",
+			Flags: unix.O_RDONLY | unix.O_DIRECTORY, SessionID: "sess-1",
+		})
+		if res.Action != ActionContinue {
+			t.Fatalf("audit-only should allow, got %s", res.Action)
+		}
+		if ev != nil {
+			if v, ok := ev.Fields["shadow_deny"]; ok && v == true {
+				t.Error("audit-only allow must not be marked as a loader-safe shadow-deny override")
+			}
+		}
+	})
 }
 
 func TestIsLoaderSafeSystemPath(t *testing.T) {
