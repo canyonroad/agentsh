@@ -306,6 +306,10 @@ type Tracer struct {
 	echildSpins   int
 	lastExitRecon time.Time
 	idleParkLog   time.Time
+	// runThreadTID is the OS thread id (gettid) the Run loop is locked to, set
+	// once at Run start. The watchdog logs it so a stop owned by a different
+	// thread than this one is visible in the dump (#369 #2).
+	runThreadTID int
 
 	stopped chan struct{}
 }
@@ -1950,6 +1954,13 @@ func (t *Tracer) Run(ctx context.Context) error {
 	defer t.cancelPendingExitWaiters()
 
 	initPtraceTrace()
+	t.runThreadTID = unix.Gettid()
+
+	// External wedge watchdog (#369 #2): detects ptrace-stopped-but-unadvanced
+	// tracees by /proc ground truth from OUTSIDE this loop, and force-recovers
+	// them so a blocked exec returns instead of hanging. Runs for the lifetime
+	// of the tracer.
+	go t.runStuckTraceeWatchdog(ctx)
 
 	t.hasSyscallInfo = probePtraceSyscallInfo()
 	if t.hasSyscallInfo {

@@ -41,6 +41,7 @@ func (t *Tracer) attachProcess(pid int, opts attachOpts) error {
 }
 
 func (t *Tracer) attachThread(tid int, opts attachOpts) error {
+	traceNote("attach", "seize", tid)
 	err := unix.PtraceSeize(tid)
 	if err != nil {
 		reason := "other"
@@ -68,7 +69,9 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 	var status unix.WaitStatus
 	deadline := time.Now().Add(2 * time.Second)
 	for {
+		traceWaitCall("attach", tid)
 		wpid, werr := unix.Wait4(tid, &status, unix.WNOHANG|unix.WALL, nil)
+		traceWaitRet("attach", wpid, status, werr)
 		if werr != nil {
 			if werr == unix.EINTR {
 				continue
@@ -194,7 +197,9 @@ func (t *Tracer) safeDetach(tid int) {
 	var status unix.WaitStatus
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
+		traceWaitCall("detach", tid)
 		wpid, err := unix.Wait4(tid, &status, unix.WNOHANG|unix.WALL, nil)
+		traceWaitRet("detach", wpid, status, err)
 		if err != nil {
 			// Wait4 failed — try best-effort detach.
 			unix.PtraceDetach(tid)
