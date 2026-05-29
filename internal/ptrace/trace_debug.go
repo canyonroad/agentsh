@@ -112,6 +112,11 @@ const traceRingSize = 65536
 // synchronization is needed. dumpTraceRing reads them, also from the Run goroutine
 // (idle tick). The atomic on the index is solely so a future off-goroutine reader
 // could snapshot it safely.
+//
+// ASSUMPTION: a single Tracer.Run() per process. agentsh runs exactly one ptrace
+// tracer (a.ptraceTracer), so this holds. The ring is package-global (rather than
+// per-Tracer) only to keep the trace hooks call-site-light; if a second concurrent
+// Tracer.Run() is ever introduced, move this state onto Tracer to avoid a race.
 var (
 	traceRing    [traceRingSize]traceEvent
 	traceRingIdx atomic.Uint64
