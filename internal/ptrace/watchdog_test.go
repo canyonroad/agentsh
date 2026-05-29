@@ -4,6 +4,7 @@ package ptrace
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -107,5 +108,57 @@ func TestLoopIdleFor(t *testing.T) {
 	tr.lastProgressNanos.Store(now.Add(-10 * time.Second).UnixNano())
 	if d := tr.loopIdleFor(now); d < 9*time.Second {
 		t.Errorf("stale loopIdleFor = %v, want ~10s", d)
+	}
+}
+
+// TestScanStalledExecs confirms the capture-only dump-on-cliff: an exec whose
+// exit-notify has been pending past the threshold triggers a ring dump, then a
+// terminating dump when it resolves; a fresh one does not; and it's a no-op when
+// tracing is off.
+func TestScanStalledExecs(t *testing.T) {
+	tr := NewTracer(TracerConfig{})
+	const pid = 4078
+	if _, err := tr.RegisterExitNotify(pid); err != nil {
+		t.Fatalf("RegisterExitNotify: %v", err)
+	}
+
+	// Tracing off: pure no-op, no bookkeeping recorded.
+	firstSeen := map[int]time.Time{}
+	dumped := map[int]bool{}
+	out := withTrace(t, false, func() { tr.scanStalledExecs(firstSeen, dumped) })
+	if out != "" || len(firstSeen) != 0 {
+		t.Errorf("scanStalledExecs must be a no-op when tracing is off; out=%q firstSeen=%v", out, firstSeen)
+	}
+
+	// Tracing on, freshly pending: recorded but NOT dumped yet.
+	out = withTrace(t, true, func() { tr.scanStalledExecs(firstSeen, dumped) })
+	if strings.Contains(out, "exec stalled") {
+		t.Errorf("a freshly-pending exec must not be flagged as stalled; got:\n%s", out)
+	}
+	if firstSeen[pid].IsZero() {
+		t.Fatal("scanStalledExecs must record first-seen for a pending exec")
+	}
+
+	// Age it past the threshold → stall dump fires once.
+	firstSeen[pid] = time.Now().Add(-2 * watchdogExecStallDump)
+	out = withTrace(t, true, func() {
+		traceWaitCall("run", -1) // seed one ring event so the dump is non-empty
+		tr.scanStalledExecs(firstSeen, dumped)
+	})
+	if !strings.Contains(out, "exec stalled") || !strings.Contains(out, "DUMP BEGIN") {
+		t.Errorf("an aged-pending exec must dump the ring; got:\n%s", out)
+	}
+	if !dumped[pid] {
+		t.Error("scanStalledExecs must mark the exec dumped")
+	}
+
+	// Resolve it (exit-notify gone) → terminating dump fires, bookkeeping cleared.
+	tr.exitNotify.LoadAndDelete(pid)
+	out = withTrace(t, true, func() { tr.scanStalledExecs(firstSeen, dumped) })
+	if !strings.Contains(out, "resolved") {
+		t.Errorf("a resolved stalled exec must emit a terminating dump; got:\n%s", out)
+	}
+	if _, ok := firstSeen[pid]; ok {
+		t.Error("scanStalledExecs must clear bookkeeping for a resolved exec")
 	}
 }

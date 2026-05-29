@@ -44,6 +44,12 @@ const (
 	// A busy-but-progressing loop refreshes lastProgressNanos on every stop, so a
 	// slow-but-alive loop never trips the killer (only a wedged one does).
 	watchdogLoopStale = 3 * time.Second
+	// watchdogExecStallDump is how long an exec's exit-notify may stay pending
+	// before the watchdog dumps the trace ring (capture-only, #369 #2). A normal
+	// exec resolves in ms; seconds means it is cliffing. The dump fires once
+	// during the stall and again when it resolves, so erans captures both the
+	// steady-state spin and the terminating sequence the ~35s cliff ends with.
+	watchdogExecStallDump = 10 * time.Second
 )
 
 // runStuckTraceeWatchdog is the watchdog goroutine. It must NOT LockOSThread:
@@ -52,8 +58,10 @@ const (
 func (t *Tracer) runStuckTraceeWatchdog(ctx context.Context) {
 	ticker := time.NewTicker(watchdogTick)
 	defer ticker.Stop()
-	stuckSince := make(map[int]time.Time) // tid -> first observed ptrace-stuck
-	diagged := make(map[int]bool)         // tid -> diagnostic already emitted
+	stuckSince := make(map[int]time.Time)    // tid -> first observed ptrace-stuck
+	diagged := make(map[int]bool)            // tid -> diagnostic already emitted
+	execFirstSeen := make(map[int]time.Time) // pid -> first observed pending exit-notify
+	execDumped := make(map[int]bool)         // pid -> stall dump already emitted
 	for {
 		select {
 		case <-ctx.Done():
@@ -63,6 +71,53 @@ func (t *Tracer) runStuckTraceeWatchdog(ctx context.Context) {
 		case <-ticker.C:
 		}
 		t.scanStuckTracees(stuckSince, diagged)
+		t.scanStalledExecs(execFirstSeen, execDumped)
+	}
+}
+
+// scanStalledExecs is a capture-only diagnostic (#369 #2): it watches pending
+// exit-notify registrations (one per in-flight exec) and dumps the trace ring
+// when one stays pending past watchdogExecStallDump — i.e. an exec is cliffing.
+// It dumps once during the stall (steady-state spin) and again when the exec
+// finally resolves (the terminating sequence). No-op when tracing is off (the
+// ring is empty). Runs on the watchdog goroutine; the maps carry state across
+// ticks. Changes nothing about enforcement or recovery.
+func (t *Tracer) scanStalledExecs(firstSeen map[int]time.Time, dumped map[int]bool) {
+	if !ptraceTraceOn() {
+		return
+	}
+	now := time.Now()
+	live := make(map[int]bool)
+	t.exitNotify.Range(func(k, _ any) bool {
+		pid, ok := k.(int)
+		if !ok {
+			return true
+		}
+		live[pid] = true
+		if firstSeen[pid].IsZero() {
+			firstSeen[pid] = now
+		}
+		if !dumped[pid] && now.Sub(firstSeen[pid]) >= watchdogExecStallDump {
+			dumped[pid] = true
+			slog.Warn("ptrace WATCHDOG: exec stalled — exit-notify pending past threshold, dumping trace ring (#369 #2)",
+				"pid", pid, "stalled_ms", now.Sub(firstSeen[pid]).Milliseconds(),
+				"run_thread_tid", t.runThreadTID)
+			t.dumpTraceRing(fmt.Sprintf("exec-stall pid=%d", pid))
+		}
+		return true
+	})
+	for pid := range firstSeen {
+		if live[pid] {
+			continue
+		}
+		// The exec resolved. If it had stalled, capture the terminating sequence
+		// (what finally unblocked it — the ~35s cliff's end).
+		if dumped[pid] {
+			slog.Warn("ptrace WATCHDOG: stalled exec resolved, dumping terminating trace ring (#369 #2)", "pid", pid)
+			t.dumpTraceRing(fmt.Sprintf("exec-stall-resolved pid=%d", pid))
+		}
+		delete(firstSeen, pid)
+		delete(dumped, pid)
 	}
 }
 
