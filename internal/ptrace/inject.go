@@ -228,6 +228,7 @@ func (t *Tracer) waitForSyscallStopUntil(tid int, deadline time.Time) error {
 	)
 	stopEvents := 0
 	idlePolls := 0
+	start := time.Now()
 	for {
 		// Refresh the Run-loop heartbeat: an active inject poll is real progress,
 		// so a multi-second inject must not make the watchdog think the loop is
@@ -235,7 +236,10 @@ func (t *Tracer) waitForSyscallStopUntil(tid int, deadline time.Time) error {
 		// runs this loop, so it still goes stale and is healed.
 		t.lastProgressNanos.Store(time.Now().UnixNano())
 		if time.Now().After(deadline) {
-			return fmt.Errorf("waitForSyscallStop tid %d: timed out after %v", tid, injectWaitTimeout)
+			// Report the actual elapsed wait, not the constant — with a shared
+			// deadline (waitForSyscallExitStop) later iterations start mid-budget,
+			// so the constant would overstate the wait during #369 #2 triage.
+			return fmt.Errorf("waitForSyscallStop tid %d: timed out after %v", tid, time.Since(start).Round(time.Millisecond))
 		}
 		var status unix.WaitStatus
 		traceWaitCall("inject", tid)
