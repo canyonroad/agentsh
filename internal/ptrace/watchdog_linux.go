@@ -40,6 +40,10 @@ const (
 	watchdogTick      = 1 * time.Second
 	watchdogDiagAfter = 3 * time.Second  // log + ring dump (observe)
 	watchdogHealAfter = 15 * time.Second // SIGKILL + unblock the waiting exec (recover)
+	// watchdogLoopStale gates healing on the Run loop genuinely not progressing.
+	// A busy-but-progressing loop refreshes lastProgressNanos on every stop, so a
+	// slow-but-alive loop never trips the killer (only a wedged one does).
+	watchdogLoopStale = 3 * time.Second
 )
 
 // runStuckTraceeWatchdog is the watchdog goroutine. It must NOT LockOSThread:
@@ -70,12 +74,16 @@ func (t *Tracer) scanStuckTracees(stuckSince map[int]time.Time, diagged map[int]
 	now := time.Now()
 
 	// Snapshot tracked tids, skipping intentionally-parked tracees (keepStopped
-	// for the cgroup hook, or parked awaiting approval) — those are stopped on
+	// for the cgroup hook, or parked awaiting approval) and tracees held in
+	// PTRACE_LISTEN (job-control group-stops) — all of those are stopped on
 	// purpose and must not be reaped by the watchdog.
 	t.mu.Lock()
 	tids := make([]int, 0, len(t.tracees))
-	for tid := range t.tracees {
+	for tid, s := range t.tracees {
 		if _, parked := t.parkedTracees[tid]; parked {
+			continue
+		}
+		if s != nil && s.listening {
 			continue
 		}
 		tids = append(tids, tid)
@@ -102,13 +110,19 @@ func (t *Tracer) scanStuckTracees(stuckSince map[int]time.Time, diagged map[int]
 			slog.Warn("ptrace WATCHDOG: tracee ptrace-stopped but Run loop not advancing it (#369 #2)",
 				"tid", tid, "proc_state", string(rune(state)),
 				"syscall", procSyscallSummary(tid), "stuck_ms", dur.Milliseconds(),
-				"run_thread_tid", t.runThreadTID, "watchdog_tid", unix.Gettid())
+				"run_thread_tid", t.runThreadTID, "watchdog_tid", unix.Gettid(),
+				"loop_progress_ms_ago", t.loopIdleFor(now).Milliseconds())
 			if ptraceTraceOn() {
 				t.dumpTraceRing(fmt.Sprintf("watchdog tid=%d stuck=%dms", tid, dur.Milliseconds()))
 			}
 		}
 
-		if dur >= watchdogHealAfter {
+		// Heal only when (a) the tracee has been stuck long enough, (b) the Run
+		// loop is itself not progressing (so a slow-but-alive loop is never the
+		// trigger), and (c) the loop is not actively handling THIS tid right now.
+		if dur >= watchdogHealAfter &&
+			t.loopIdleFor(now) >= watchdogLoopStale &&
+			t.currentHandlingTID.Load() != int64(tid) {
 			t.healStuckTracee(tid)
 			delete(stuckSince, tid)
 			delete(diagged, tid)
@@ -168,4 +182,16 @@ func procSyscallSummary(tid int) string {
 		return "?"
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// loopIdleFor reports how long since the Run loop last dispatched a stop. The
+// watchdog uses it to heal only when the loop is genuinely not progressing — a
+// busy-but-progressing loop refreshes the heartbeat on every stop. Initialized
+// at Run start, so it is non-zero whenever the watchdog runs.
+func (t *Tracer) loopIdleFor(now time.Time) time.Duration {
+	last := t.lastProgressNanos.Load()
+	if last == 0 {
+		return 0 // not yet initialized; treat as just-progressed (do not heal)
+	}
+	return now.Sub(time.Unix(0, last))
 }

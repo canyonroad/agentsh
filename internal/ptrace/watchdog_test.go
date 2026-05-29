@@ -47,7 +47,8 @@ func TestHealStuckTracee(t *testing.T) {
 }
 
 // TestScanStuckTracees_RunningAndParkedNotFlagged confirms the watchdog never
-// flags or heals a tracee that is not ptrace-stopped, nor a parked one.
+// flags or heals a tracee that is not ptrace-stopped, nor a parked one, nor one
+// held in PTRACE_LISTEN (job-control group-stop).
 func TestScanStuckTracees_RunningAndParkedNotFlagged(t *testing.T) {
 	tr := NewTracer(TracerConfig{})
 
@@ -62,9 +63,13 @@ func TestScanStuckTracees_RunningAndParkedNotFlagged(t *testing.T) {
 	tr.parkedTracees[parked] = struct{}{}
 	parkedCh, _ := tr.RegisterExitNotify(parked)
 
+	// A LISTEN'd (group-stopped) tracee must be skipped — never SIGKILL'd.
+	const listening = (1 << 30) + 1
+	tr.tracees[listening] = &TraceeState{TID: listening, TGID: listening, MemFD: -1, listening: true}
+	listeningCh, _ := tr.RegisterExitNotify(listening)
+
 	stuckSince := map[int]time.Time{}
 	diagged := map[int]bool{}
-	// Several sweeps; even far past the heal threshold nothing should fire.
 	for i := 0; i < 3; i++ {
 		tr.scanStuckTracees(stuckSince, diagged)
 	}
@@ -74,9 +79,33 @@ func TestScanStuckTracees_RunningAndParkedNotFlagged(t *testing.T) {
 		t.Error("a running tracee must not be healed")
 	case <-parkedCh:
 		t.Error("a parked tracee must not be healed")
+	case <-listeningCh:
+		t.Error("a PTRACE_LISTEN'd (group-stopped) tracee must not be healed")
 	default:
 	}
 	if _, ok := stuckSince[parked]; ok {
 		t.Error("parked tracee must be skipped (never recorded as stuck)")
+	}
+	if _, ok := stuckSince[listening]; ok {
+		t.Error("listening tracee must be skipped (never recorded as stuck)")
+	}
+}
+
+// TestLoopIdleFor confirms the heartbeat gate: a fresh heartbeat reads ~0, a
+// stale one reads the elapsed time, and an uninitialized one reads 0 (don't heal).
+func TestLoopIdleFor(t *testing.T) {
+	tr := NewTracer(TracerConfig{})
+	now := time.Now()
+
+	if d := tr.loopIdleFor(now); d != 0 {
+		t.Errorf("uninitialized loopIdleFor = %v, want 0", d)
+	}
+	tr.lastProgressNanos.Store(now.UnixNano())
+	if d := tr.loopIdleFor(now); d > 5*time.Millisecond {
+		t.Errorf("fresh loopIdleFor = %v, want ~0", d)
+	}
+	tr.lastProgressNanos.Store(now.Add(-10 * time.Second).UnixNano())
+	if d := tr.loopIdleFor(now); d < 9*time.Second {
+		t.Errorf("stale loopIdleFor = %v, want ~10s", d)
 	}
 }
