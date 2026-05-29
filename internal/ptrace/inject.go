@@ -207,6 +207,11 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 	deadline := time.Now().Add(timeout)
 	stopEvents := 0
 	for {
+		// Refresh the Run-loop heartbeat: an active inject poll is real progress,
+		// so a multi-second inject must not make the watchdog think the loop is
+		// wedged and heal an unrelated tracee (#369 #2). The idle-spin wedge never
+		// runs this loop, so it still goes stale and is healed.
+		t.lastProgressNanos.Store(time.Now().UnixNano())
 		if time.Now().After(deadline) {
 			return fmt.Errorf("waitForSyscallStop tid %d: timed out after %v", tid, timeout)
 		}

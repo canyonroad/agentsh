@@ -811,10 +811,16 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 	// #369 #2 watchdog coordination: record that the Run loop is making progress
 	// (handling a stop), mark the tid it is actively servicing so the watchdog
 	// never heals a tracee mid-handling, and clear the listening flag — any stop
-	// event means the tracee is no longer idly held in PTRACE_LISTEN.
+	// event means the tracee is no longer idly held in PTRACE_LISTEN. The
+	// heartbeat is refreshed on exit too (and inside the inject poll loop, see
+	// waitForSyscallStop) so a long-but-progressing handleStop never looks
+	// stale; only the idle-spin wedge (no handleStop at all) goes stale.
 	t.lastProgressNanos.Store(time.Now().UnixNano())
 	t.currentHandlingTID.Store(int64(tid))
-	defer t.currentHandlingTID.Store(0)
+	defer func() {
+		t.currentHandlingTID.Store(0)
+		t.lastProgressNanos.Store(time.Now().UnixNano())
+	}()
 	t.mu.Lock()
 	if s := t.tracees[tid]; s != nil {
 		s.listening = false
