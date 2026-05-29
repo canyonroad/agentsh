@@ -3,12 +3,25 @@
 package ptrace
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+// errInjectTraceeVanished is returned by the inject waits when the tracee has
+// disappeared from /proc mid-injection — its exit was reaped out from under us
+// (the steal #406 also recovers). Without this, the wpid==0 poll spins to the
+// timeout on every inject step, degrading every exec by seconds (#369 #2).
+var errInjectTraceeVanished = errors.New("inject: tracee vanished from /proc mid-injection (#369 #2)")
+
+// injectWaitTimeout bounds a single inject wait sequence. An injected syscall
+// completes in microseconds; this is generous headroom. waitForSyscallExitStop
+// shares ONE deadline across its advance-to-exit loop so the whole exit wait is
+// bounded by this, not injectMaxStopEvents × this (#369 #2).
+const injectWaitTimeout = 3 * time.Second
 
 // injectSyscall executes an arbitrary syscall inside a stopped tracee.
 //
@@ -200,12 +213,21 @@ const injectMaxStopEvents = 100
 // Handles both TRACESYSGOOD mode (syscall stops report SIGTRAP|0x80) and
 // prefilter/seccomp mode (syscall stops report plain SIGTRAP with no event).
 func (t *Tracer) waitForSyscallStop(tid int) error {
+	return t.waitForSyscallStopUntil(tid, time.Now().Add(injectWaitTimeout))
+}
+
+// waitForSyscallStopUntil is waitForSyscallStop with a caller-supplied absolute
+// deadline, so a multi-step wait (waitForSyscallExitStop) can bound its whole
+// sequence with one deadline rather than resetting the clock on every step.
+func (t *Tracer) waitForSyscallStopUntil(tid int, deadline time.Time) error {
 	const (
-		timeout   = 5 * time.Second
 		pollDelay = 200 * time.Microsecond
+		// Check /proc for a vanished tracee every ~this many idle polls
+		// (~10ms at pollDelay) — cheap relative to a stat per poll.
+		livenessEvery = 50
 	)
-	deadline := time.Now().Add(timeout)
 	stopEvents := 0
+	idlePolls := 0
 	for {
 		// Refresh the Run-loop heartbeat: an active inject poll is real progress,
 		// so a multi-second inject must not make the watchdog think the loop is
@@ -213,7 +235,7 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 		// runs this loop, so it still goes stale and is healed.
 		t.lastProgressNanos.Store(time.Now().UnixNano())
 		if time.Now().After(deadline) {
-			return fmt.Errorf("waitForSyscallStop tid %d: timed out after %v", tid, timeout)
+			return fmt.Errorf("waitForSyscallStop tid %d: timed out after %v", tid, injectWaitTimeout)
 		}
 		var status unix.WaitStatus
 		traceWaitCall("inject", tid)
@@ -226,10 +248,17 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 			return fmt.Errorf("wait4 tid %d: %w", tid, err)
 		}
 		if wpid == 0 {
-			// Tracee hasn't stopped yet.
+			// Tracee produced no stop. If it has vanished from /proc (its exit was
+			// reaped out from under us mid-inject — #369 #2), bail immediately
+			// instead of spinning to the timeout on every inject step.
+			idlePolls++
+			if idlePolls%livenessEvery == 0 && !procExists(tid) {
+				return errInjectTraceeVanished
+			}
 			time.Sleep(pollDelay)
 			continue
 		}
+		idlePolls = 0
 		if !status.Stopped() {
 			if status.Exited() || status.Signaled() {
 				// Clean up tracee bookkeeping before returning.
@@ -289,7 +318,11 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 // stop reached is the injected syscall's exit; intervening entry/seccomp stops
 // are resumed past.
 func (t *Tracer) waitForSyscallExitStop(tid int) error {
-	if err := t.waitForSyscallStop(tid); err != nil {
+	// One shared deadline for the whole advance-to-exit sequence, so it is
+	// bounded by injectWaitTimeout total — not injectMaxStopEvents × that (which
+	// let a stuck inject spin for tens of seconds per exec, #369 #2).
+	deadline := time.Now().Add(injectWaitTimeout)
+	if err := t.waitForSyscallStopUntil(tid, deadline); err != nil {
 		return err
 	}
 	if !t.hasSyscallInfo {
@@ -308,7 +341,7 @@ func (t *Tracer) waitForSyscallExitStop(tid int) error {
 		if err := unix.PtraceSyscall(tid, 0); err != nil {
 			return fmt.Errorf("inject advance-to-exit tid %d: %w", tid, err)
 		}
-		if err := t.waitForSyscallStop(tid); err != nil {
+		if err := t.waitForSyscallStopUntil(tid, deadline); err != nil {
 			return err // includes "tracee N exited during injection"
 		}
 	}
