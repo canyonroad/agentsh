@@ -207,10 +207,8 @@ func runProbeChild() {
 // decision and the broadest composition is the fail-safe one to test.
 func addProbeFilterRules(adder fileMonitorRuleAdder) error {
 	trap := seccomp.ActNotify
-	for _, sc := range unixSocketNotifySyscalls() {
-		if err := adder.AddRule(sc, trap); err != nil {
-			return fmt.Errorf("add probe socket rule %v: %w", sc, err)
-		}
+	if _, err := installUnixSocketNotifyRules(adder, trap); err != nil {
+		return fmt.Errorf("add probe socket rules: %w", err)
 	}
 	if _, err := installFileMonitorRules(adder, trap, false); err != nil {
 		return fmt.Errorf("add probe file-monitor rules: %w", err)

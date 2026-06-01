@@ -327,14 +327,11 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 
 	// Unix socket monitoring via user-notify
 	if cfg.UnixSocketEnabled {
-		trap := seccomp.ActNotify
-		rules := unixSocketNotifySyscalls()
-		for _, sc := range rules {
-			if err := filt.AddRule(sc, trap); err != nil {
-				return nil, fmt.Errorf("add notify rule %v: %w", sc, err)
-			}
+		added, err := installUnixSocketNotifyRules(filt, seccomp.ActNotify)
+		if err != nil {
+			return nil, err
 		}
-		ruleCounts["unix_socket"] = len(rules)
+		ruleCounts["unix_socket"] = added
 	}
 
 	// Execve interception via user-notify
@@ -563,6 +560,53 @@ func unixSocketNotifySyscalls() []seccomp.ScmpSyscall {
 		seccomp.ScmpSyscall(unix.SYS_LISTEN),
 		seccomp.ScmpSyscall(unix.SYS_SENDTO),
 	}
+}
+
+// unixSocketNotifyRuleAdder is the subset of *seccomp.ScmpFilter used to
+// install the unix-socket monitoring notify rules. Split out so the rule
+// shapes can be asserted in tests without loading a kernel filter.
+type unixSocketNotifyRuleAdder interface {
+	AddRule(seccomp.ScmpSyscall, seccomp.ScmpAction) error
+	AddRuleConditional(seccomp.ScmpSyscall, seccomp.ScmpAction, []seccomp.ScmpCondition) error
+}
+
+// installUnixSocketNotifyRules installs the user-notify rules that drive
+// AF_UNIX socket monitoring and returns the number of rules added.
+//
+// socket(2) is scoped to arg0==AF_UNIX rather than trapped unconditionally.
+// A catch-all notify on socket(2) routes every socket() call to the userspace
+// handler, which preempts the kernel-side conditional ActErrno rules that
+// socket_rules / blocked_socket_families install on the same syscall — those
+// errno rules are intentionally not mirrored into the notify handler's
+// block-list (see internal/api/blocklist_config_linux.go), so the catch-all
+// silently let non-AF_UNIX families (e.g. NETLINK_XFRM, AF_RXRPC) through.
+// Scoping to AF_UNIX keeps the monitor's coverage (it only cares about unix
+// sockets) while leaving other families on the kernel fast path.
+//
+// connect/bind/listen/sendto act on an already-created fd — the address family
+// is not in arg0 — so they stay unconditional; they do not collide with
+// socket_rules, which only match socket(2)/socketpair(2).
+func installUnixSocketNotifyRules(adder unixSocketNotifyRuleAdder, action seccomp.ScmpAction) (int, error) {
+	added := 0
+	for _, sc := range unixSocketNotifySyscalls() {
+		if sc == seccomp.ScmpSyscall(unix.SYS_SOCKET) {
+			cond := seccomp.ScmpCondition{
+				Argument: 0,
+				Op:       seccomp.CompareEqual,
+				Operand1: uint64(unix.AF_UNIX),
+			}
+			if err := adder.AddRuleConditional(sc, action, []seccomp.ScmpCondition{cond}); err != nil {
+				return added, fmt.Errorf("add notify rule %v (AF_UNIX): %w", sc, err)
+			}
+			added++
+			continue
+		}
+		if err := adder.AddRule(sc, action); err != nil {
+			return added, fmt.Errorf("add notify rule %v: %w", sc, err)
+		}
+		added++
+	}
+	return added, nil
 }
 
 // metadataNotifySyscalls returns the metadata syscalls the wrapper traps via

@@ -25,6 +25,7 @@ import (
 
 const socketRuleHelperEnv = "AGENTSH_TEST_SOCKET_RULE_HELPER"
 const socketRuleHelperNotifyLog = "notify_log"
+const socketRuleHelperErrnoTupleUnix = "errno_tuple_unix"
 const socketRuleHelperDirtyFragNetlinkXFRM = "dirtyfrag_netlink_xfrm"
 const socketRuleHelperDirtyFragNetlinkRoute = "dirtyfrag_netlink_route"
 const socketRuleHelperDirtyFragRXRPC = "dirtyfrag_rxrpc"
@@ -277,6 +278,70 @@ func TestDirtyFragSocketpairNetlinkXFRM_MitigationSetProtocolRule(t *testing.T) 
 	require.Contains(t, combined, "audit_syscall=socketpair")
 	require.NotContains(t, combined, "audit_event=seccomp_socket_family_blocked")
 	require.NotContains(t, combined, "audit_event=seccomp_blocked")
+}
+
+// TestSeccompSocketRuleBlock_ErrnoTupleWithUnixMonitor is the regression guard
+// for the socket-rule shadow bug: an errno socket tuple rule must still be
+// enforced kernel-side when AF_UNIX socket monitoring is enabled. Before the
+// fix, the catch-all notify on socket(2) routed socket(NETLINK_XFRM) to the
+// (absent) userspace handler instead of the errno rule, so this hangs until the
+// harness timeout. After the fix, socket(2) notify is scoped to AF_UNIX and the
+// NETLINK_XFRM errno rule fires kernel-side → EAFNOSUPPORT.
+func TestSeccompSocketRuleBlock_ErrnoTupleWithUnixMonitor(t *testing.T) {
+	if os.Getenv(socketRuleHelperEnv) == socketRuleHelperErrnoTupleUnix {
+		runSocketRuleHelperErrnoTupleUnix(t)
+		return
+	}
+
+	combined := runSocketRuleHelperSubprocess(t, socketRuleHelperErrnoTupleUnix)
+	requireResultEAFNOSUPPORT(t, combined, "socket_result")
+}
+
+func runSocketRuleHelperErrnoTupleUnix(t *testing.T) {
+	t.Helper()
+
+	if err := DetectSupport(); err != nil {
+		t.Skipf("seccomp user-notify not supported: %v", err)
+	}
+
+	typ := int(gounix.SOCK_RAW)
+	protocol := int(gounix.NETLINK_XFRM)
+	cfg := FilterConfig{
+		UnixSocketEnabled: true,
+		SocketRules: []seccompkg.SocketRule{
+			{
+				Name:         "netlink_xfrm",
+				Family:       gounix.AF_NETLINK,
+				FamilyName:   "AF_NETLINK",
+				Type:         &typ,
+				TypeName:     "SOCK_RAW",
+				Protocol:     &protocol,
+				ProtocolName: "NETLINK_XFRM",
+				Action:       seccompkg.OnBlockErrno,
+			},
+		},
+	}
+	filt, err := InstallFilterWithConfig(cfg)
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "permission") || strings.Contains(lower, "operation not permitted") {
+			t.Skipf("cannot install seccomp filter (privilege): %v", err)
+		}
+		t.Fatalf("InstallFilterWithConfig: %v", err)
+	}
+	defer filt.Close()
+
+	// No notify handler is started. With the fix, socket(NETLINK_XFRM) does not
+	// match the AF_UNIX-scoped notify rule and is errno'd by the kernel. Before
+	// the fix it would trap to USER_NOTIF and block here forever (caught by the
+	// subprocess timeout in runSocketRuleHelperSubprocess).
+	fd, _, errno := gounix.Syscall(
+		gounix.SYS_SOCKET,
+		uintptr(gounix.AF_NETLINK),
+		uintptr(gounix.SOCK_RAW|gounix.SOCK_CLOEXEC),
+		uintptr(gounix.NETLINK_XFRM),
+	)
+	printRawSyscallResult("socket_result", fd, errno)
 }
 
 func runSocketRuleHelperSubprocess(t *testing.T, mode string) string {
@@ -802,6 +867,62 @@ func (r *recordingConditionalAdder) AddRuleConditional(call seccomp.ScmpSyscall,
 		syscall:    call,
 		action:     action,
 		conditions: copied,
+	})
+	if r.failOnCall != 0 && len(r.calls) == r.failOnCall {
+		return errors.New("synthetic add failure")
+	}
+	return nil
+}
+
+func TestInstallUnixSocketNotifyRules_SocketScopedToAFUnix(t *testing.T) {
+	recorder := &recordingConditionalAdder{}
+
+	added, err := installUnixSocketNotifyRules(recorder, seccomp.ActNotify)
+
+	require.NoError(t, err)
+	require.Equal(t, 5, added)
+
+	// socket(2) must be conditional on arg0==AF_UNIX. A catch-all notify on
+	// socket(2) traps every socket() call to userspace, which shadows the
+	// kernel-side conditional ActErrno socket_rules / blocked_families on other
+	// families (e.g. NETLINK_XFRM, AF_RXRPC) and silently lets them through.
+	var socketCall *recordedConditionalCall
+	for i := range recorder.calls {
+		if recorder.calls[i].syscall == seccomp.ScmpSyscall(gounix.SYS_SOCKET) {
+			socketCall = &recorder.calls[i]
+		}
+	}
+	require.NotNil(t, socketCall, "socket(2) notify rule must be installed")
+	require.Equal(t, seccomp.ActNotify, socketCall.action)
+	require.Contains(t, socketCall.conditions, seccomp.ScmpCondition{
+		Argument: 0,
+		Op:       seccomp.CompareEqual,
+		Operand1: uint64(gounix.AF_UNIX),
+	}, "socket(2) notify must be scoped to AF_UNIX, not catch-all")
+
+	// connect/bind/listen/sendto operate on an already-created fd (the family
+	// is not in arg0), so they remain unconditional notify.
+	for _, sc := range []seccomp.ScmpSyscall{
+		seccomp.ScmpSyscall(gounix.SYS_CONNECT),
+		seccomp.ScmpSyscall(gounix.SYS_BIND),
+		seccomp.ScmpSyscall(gounix.SYS_LISTEN),
+		seccomp.ScmpSyscall(gounix.SYS_SENDTO),
+	} {
+		found := false
+		for _, c := range recorder.calls {
+			if c.syscall == sc {
+				found = true
+				require.Empty(t, c.conditions, "%v notify should be unconditional", sc)
+			}
+		}
+		require.True(t, found, "%v notify rule must be installed", sc)
+	}
+}
+
+func (r *recordingConditionalAdder) AddRule(call seccomp.ScmpSyscall, action seccomp.ScmpAction) error {
+	r.calls = append(r.calls, recordedConditionalCall{
+		syscall: call,
+		action:  action,
 	})
 	if r.failOnCall != 0 && len(r.calls) == r.failOnCall {
 		return errors.New("synthetic add failure")
