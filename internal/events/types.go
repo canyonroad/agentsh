@@ -104,8 +104,8 @@ const (
 //
 // See docs/seccomp.md § "Audit Events" for the JSON wire format.
 const (
-	EventSeccompBlocked      EventType = "seccomp_blocked"
-	EventNotifyHandlerPanic  EventType = "notify_handler_panic"
+	EventSeccompBlocked     EventType = "seccomp_blocked"
+	EventNotifyHandlerPanic EventType = "notify_handler_panic"
 )
 
 // Signal events.
@@ -120,14 +120,14 @@ const (
 
 // MCP inspection events.
 const (
-	EventMCPToolSeen              EventType = "mcp_tool_seen"
-	EventMCPToolChanged           EventType = "mcp_tool_changed"
-	EventMCPToolCalled            EventType = "mcp_tool_called"
-	EventMCPDetection             EventType = "mcp_detection"
-	EventMCPToolCallIntercepted   EventType = "mcp_tool_call_intercepted"
-	EventMCPCrossServerBlocked    EventType = "mcp_cross_server_blocked"
-	EventMCPNetworkConnection     EventType = "mcp_network_connection"
-	EventMCPServerNameSimilarity  EventType = "mcp_server_name_similarity"
+	EventMCPToolSeen             EventType = "mcp_tool_seen"
+	EventMCPToolChanged          EventType = "mcp_tool_changed"
+	EventMCPToolCalled           EventType = "mcp_tool_called"
+	EventMCPDetection            EventType = "mcp_detection"
+	EventMCPToolCallIntercepted  EventType = "mcp_tool_call_intercepted"
+	EventMCPCrossServerBlocked   EventType = "mcp_cross_server_blocked"
+	EventMCPNetworkConnection    EventType = "mcp_network_connection"
+	EventMCPServerNameSimilarity EventType = "mcp_server_name_similarity"
 )
 
 // Package check events.
@@ -151,6 +151,10 @@ const (
 	EventCgroupMode               EventType = "cgroup_mode"
 	EventCgroupOrphansReaped      EventType = "cgroup_orphans_reaped"
 	EventCgroupUnavailableRefusal EventType = "cgroup_unavailable_refusal"
+	// EventCgroupLimitsDegraded is emitted when sandbox.cgroups.best_effort is on
+	// and a per-command resource limit could not be enforced; the command runs
+	// without the limit. See issue #411.
+	EventCgroupLimitsDegraded EventType = "cgroup_limits_degraded"
 )
 
 // PolicyLoadedEvent is emitted when a policy is loaded.
@@ -274,6 +278,7 @@ var EventCategory = map[EventType]string{
 	EventCgroupMode:               "cgroup",
 	EventCgroupOrphansReaped:      "cgroup",
 	EventCgroupUnavailableRefusal: "cgroup",
+	EventCgroupLimitsDegraded:     "cgroup",
 }
 
 // AllEventTypes lists all event types.
@@ -316,4 +321,5 @@ var AllEventTypes = []EventType{
 	EventPolicyLoaded, EventPolicyChanged,
 	// Cgroup
 	EventCgroupMode, EventCgroupOrphansReaped, EventCgroupUnavailableRefusal,
+	EventCgroupLimitsDegraded,
 }
