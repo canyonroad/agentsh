@@ -20,6 +20,7 @@ import (
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
+	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/cilium/ebpf"
 )
 
@@ -533,6 +534,26 @@ func TestDefaultWrapCgroupSetup_Unavailable_NotRequired_WarnContinues(t *testing
 	}
 }
 
+// drainCgroupEvents collects events published to the broker for the given
+// session without blocking, returning the first cgroup_limits_degraded event
+// (or nil) and whether any cgroup_unavailable_refusal event was seen.
+func drainCgroupEvents(ch <-chan types.Event) (degraded *types.Event, sawRefusal bool) {
+	for {
+		select {
+		case ev := <-ch:
+			switch ev.Type {
+			case string(events.EventCgroupLimitsDegraded):
+				e := ev
+				degraded = &e
+			case string(events.EventCgroupUnavailableRefusal):
+				sawRefusal = true
+			}
+		default:
+			return degraded, sawRefusal
+		}
+	}
+}
+
 // TestApplyCgroupV2_BestEffort_LimitsUnavailable_Degrades verifies that when
 // best_effort=true and no eBPF flags are set, a CgroupResourceLimitsUnavailableError
 // causes a degraded run (nil error, no-op cleanup) rather than a hard failure.
@@ -553,6 +574,7 @@ func TestApplyCgroupV2_BestEffort_LimitsUnavailable_Degrades(t *testing.T) {
 		Limits: limits.CgroupV2Limits{MaxMemoryBytes: 16 << 20},
 	}
 
+	ch := app.broker.Subscribe("sess", 8)
 	cleanup, err := applyCgroupV2(context.Background(),
 		storeEmitter{store: app.store, broker: app.broker}, app,
 		"sess", "cmd", 1234, policy.Limits{MaxMemoryMB: 16}, nil, nil)
@@ -561,6 +583,16 @@ func TestApplyCgroupV2_BestEffort_LimitsUnavailable_Degrades(t *testing.T) {
 	}
 	if cleanup == nil {
 		t.Fatal("expected non-nil no-op cleanup")
+	}
+	degraded, sawRefusal := drainCgroupEvents(ch)
+	if degraded == nil {
+		t.Fatal("expected a cgroup_limits_degraded event to be published")
+	}
+	if degraded.Fields["error_type"] != "resource_limits_unavailable" {
+		t.Errorf("error_type: got %v, want resource_limits_unavailable", degraded.Fields["error_type"])
+	}
+	if sawRefusal {
+		t.Error("cgroup_unavailable_refusal must not be emitted on the degrade path")
 	}
 	_ = cleanup()
 }
@@ -584,6 +616,7 @@ func TestApplyCgroupV2_BestEffort_UnavailableError_Degrades(t *testing.T) {
 		Limits: limits.CgroupV2Limits{MaxMemoryBytes: 16 << 20},
 	}
 
+	ch := app.broker.Subscribe("sess", 8)
 	cleanup, err := applyCgroupV2(context.Background(),
 		storeEmitter{store: app.store, broker: app.broker}, app,
 		"sess", "cmd", 1234, policy.Limits{MaxMemoryMB: 16}, nil, nil)
@@ -592,6 +625,16 @@ func TestApplyCgroupV2_BestEffort_UnavailableError_Degrades(t *testing.T) {
 	}
 	if cleanup == nil {
 		t.Fatal("expected non-nil no-op cleanup")
+	}
+	degraded, sawRefusal := drainCgroupEvents(ch)
+	if degraded == nil {
+		t.Fatal("expected a cgroup_limits_degraded event to be published")
+	}
+	if degraded.Fields["error_type"] != "cgroup_unavailable" {
+		t.Errorf("error_type: got %v, want cgroup_unavailable", degraded.Fields["error_type"])
+	}
+	if sawRefusal {
+		t.Error("cgroup_unavailable_refusal must not be emitted on the degrade path")
 	}
 	_ = cleanup()
 }

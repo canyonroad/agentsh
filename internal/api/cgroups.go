@@ -44,6 +44,8 @@ func cgroupBestEffortDegradable(cfg *config.Config) bool {
 		return false
 	}
 	e := cfg.Sandbox.Network.EBPF
+	// EnforceWithoutDNS is intentionally omitted: it is a modifier that has no
+	// effect unless Enforce is set, which is already checked above. #411.
 	return !e.Enabled && !e.Enforce && !e.Required
 }
 
