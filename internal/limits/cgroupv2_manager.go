@@ -89,8 +89,14 @@ func (m *CgroupManager) Apply(name string, pid int, lim CgroupV2Limits) (*Cgroup
 	safe := sanitizeCgroupName(name)
 	dir := filepath.Join(parent, safe)
 
-	if err := m.fs.Mkdir(dir, 0o755); err != nil && !errors.Is(err, syscall.EEXIST) {
-		return nil, fmt.Errorf("mkdir cgroup (mode=%s, dir=%s): %w", m.probe.Mode, dir, err)
+	createdDir := true
+	if err := m.fs.Mkdir(dir, 0o755); err != nil {
+		if !errors.Is(err, syscall.EEXIST) {
+			return nil, fmt.Errorf("mkdir cgroup (mode=%s, dir=%s): %w", m.probe.Mode, dir, err)
+		}
+		// The dir already existed — this call did not create it, so the
+		// EPERM-cleanup below must not remove it.
+		createdDir = false
 	}
 
 	writeLimit := func(file string, val []byte) error {
@@ -98,11 +104,13 @@ func (m *CgroupManager) Apply(name string, pid int, lim CgroupV2Limits) (*Cgroup
 			// errors.Is unwraps the *fs.PathError that os.WriteFile and the kernel return.
 			if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
 				// Host won't permit the limit write even though mkdir succeeded
-				// (non-writable nested cgroup). Remove the empty child so we don't
-				// accumulate orphans, and surface the deliberate typed error so
-				// callers can apply best-effort policy instead of a generic abort.
-				_ = m.fs.Remove(dir)
-				// Remove fails silently: EBUSY if the dir is populated (safe), ENOENT if already gone.
+				// (non-writable nested cgroup). Remove the child we created so we
+				// don't accumulate orphans, and surface the deliberate typed error
+				// so callers can apply best-effort policy instead of a generic abort.
+				if createdDir {
+					// Remove fails silently: EBUSY if the dir is populated (safe), ENOENT if already gone.
+					_ = m.fs.Remove(dir)
+				}
 				return &CgroupResourceLimitsUnavailableError{
 					Reason: fmt.Sprintf("write %s (mode=%s, dir=%s): %v", file, m.probe.Mode, dir, err),
 					Limits: lim,
