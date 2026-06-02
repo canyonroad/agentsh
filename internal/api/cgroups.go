@@ -10,6 +10,7 @@ import (
 
 	"github.com/cilium/ebpf"
 
+	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/limits"
 	"github.com/agentsh/agentsh/internal/metrics"
@@ -32,6 +33,19 @@ var (
 	ebpfPopulateAllowlist     = ebpftrace.PopulateAllowlist
 	ebpfCleanupAllowlist      = ebpftrace.CleanupAllowlist
 )
+
+// cgroupBestEffortDegradable reports whether an unenforceable resource-limit
+// error should degrade to a no-op (run without the limit) rather than fail
+// closed. Degradation requires sandbox.cgroups.best_effort AND the absence of
+// any eBPF flag — eBPF egress enforcement rides on the cgroup and must stay
+// strict. See issue #411.
+func cgroupBestEffortDegradable(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Sandbox.Cgroups.BestEffort {
+		return false
+	}
+	e := cfg.Sandbox.Network.EBPF
+	return !e.Enabled && !e.Enforce && !e.Required
+}
 
 func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, cmdID string, pid int, lim policy.Limits, m *metrics.Collector, pol *policy.Engine) (func() error, error) {
 	cfg := app.cfg
@@ -75,6 +89,27 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 		var rlue *limits.CgroupResourceLimitsUnavailableError
 		switch {
 		case errors.As(err, &rlue):
+			if cgroupBestEffortDegradable(cfg) {
+				slog.Warn("cgroup: resource limits unenforceable; running without them (best_effort)",
+					"session_id", sessionID, "command_id", cmdID, "reason", rlue.Reason,
+					"max_memory_mb", lim.MaxMemoryMB, "cpu_quota_pct", lim.CPUQuotaPercent, "pids_max", lim.PidsMax)
+				ev := types.Event{
+					ID:        uuid.NewString(),
+					Timestamp: time.Now().UTC(),
+					Type:      string(events.EventCgroupLimitsDegraded),
+					SessionID: sessionID,
+					CommandID: cmdID,
+					Fields: map[string]any{
+						"reason":        rlue.Reason,
+						"max_memory_mb": lim.MaxMemoryMB,
+						"cpu_quota_pct": lim.CPUQuotaPercent,
+						"pids_max":      lim.PidsMax,
+					},
+				}
+				_ = emit.AppendEvent(ctx, ev)
+				emit.Publish(ev)
+				return func() error { return nil }, nil
+			}
 			ev := types.Event{
 				ID:        uuid.NewString(),
 				Timestamp: time.Now().UTC(),
@@ -93,6 +128,27 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 			emit.Publish(ev)
 			return nil, err
 		case errors.As(err, &ue):
+			if cgroupBestEffortDegradable(cfg) {
+				slog.Warn("cgroup: enforcement unavailable; running without cgroup (best_effort)",
+					"session_id", sessionID, "command_id", cmdID, "reason", ue.Reason,
+					"max_memory_mb", lim.MaxMemoryMB, "cpu_quota_pct", lim.CPUQuotaPercent, "pids_max", lim.PidsMax)
+				ev := types.Event{
+					ID:        uuid.NewString(),
+					Timestamp: time.Now().UTC(),
+					Type:      string(events.EventCgroupLimitsDegraded),
+					SessionID: sessionID,
+					CommandID: cmdID,
+					Fields: map[string]any{
+						"reason":        ue.Reason,
+						"max_memory_mb": lim.MaxMemoryMB,
+						"cpu_quota_pct": lim.CPUQuotaPercent,
+						"pids_max":      lim.PidsMax,
+					},
+				}
+				_ = emit.AppendEvent(ctx, ev)
+				emit.Publish(ev)
+				return func() error { return nil }, nil
+			}
 			ev := types.Event{
 				ID:        uuid.NewString(),
 				Timestamp: time.Now().UTC(),

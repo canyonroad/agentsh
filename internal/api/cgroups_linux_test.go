@@ -533,6 +533,93 @@ func TestDefaultWrapCgroupSetup_Unavailable_NotRequired_WarnContinues(t *testing
 	}
 }
 
+// TestApplyCgroupV2_BestEffort_LimitsUnavailable_Degrades verifies that when
+// best_effort=true and no eBPF flags are set, a CgroupResourceLimitsUnavailableError
+// causes a degraded run (nil error, no-op cleanup) rather than a hard failure.
+func TestApplyCgroupV2_BestEffort_LimitsUnavailable_Degrades(t *testing.T) {
+	withEBPFHooks(t)
+	cgPath := t.TempDir()
+
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = true
+	cfg.Sandbox.Cgroups.BestEffort = true
+	// eBPF off — pure resource-limit case.
+
+	app := newAppWithFakeCgroupManager(t, cfg, cgPath)
+	fake := app.cgroupMgr.(*fakeCgroupManagerForAPITest)
+	fake.mode = limits.ModeAttachOnly
+	fake.applyErr = &limits.CgroupResourceLimitsUnavailableError{
+		Reason: "child memory.max not writable: EPERM",
+		Limits: limits.CgroupV2Limits{MaxMemoryBytes: 16 << 20},
+	}
+
+	cleanup, err := applyCgroupV2(context.Background(),
+		storeEmitter{store: app.store, broker: app.broker}, app,
+		"sess", "cmd", 1234, policy.Limits{MaxMemoryMB: 16}, nil, nil)
+	if err != nil {
+		t.Fatalf("expected degrade (nil err), got %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("expected non-nil no-op cleanup")
+	}
+	_ = cleanup()
+}
+
+// TestApplyCgroupV2_BestEffortDisabled_LimitsUnavailable_FailsClosed verifies
+// that best_effort=false keeps the existing fail-closed behavior.
+func TestApplyCgroupV2_BestEffortDisabled_LimitsUnavailable_FailsClosed(t *testing.T) {
+	withEBPFHooks(t)
+	cgPath := t.TempDir()
+
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = true
+	cfg.Sandbox.Cgroups.BestEffort = false
+
+	app := newAppWithFakeCgroupManager(t, cfg, cgPath)
+	fake := app.cgroupMgr.(*fakeCgroupManagerForAPITest)
+	fake.mode = limits.ModeAttachOnly
+	fake.applyErr = &limits.CgroupResourceLimitsUnavailableError{
+		Reason: "child memory.max not writable: EPERM",
+		Limits: limits.CgroupV2Limits{MaxMemoryBytes: 16 << 20},
+	}
+
+	_, err := applyCgroupV2(context.Background(),
+		storeEmitter{store: app.store, broker: app.broker}, app,
+		"sess", "cmd", 1234, policy.Limits{MaxMemoryMB: 16}, nil, nil)
+	var rlErr *limits.CgroupResourceLimitsUnavailableError
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("expected typed error, got %T (%v)", err, err)
+	}
+}
+
+// TestApplyCgroupV2_BestEffort_WithEBPF_FailsClosed verifies that when
+// best_effort=true but eBPF is enabled, egress enforcement must stay strict
+// and the error is still returned (fail closed).
+func TestApplyCgroupV2_BestEffort_WithEBPF_FailsClosed(t *testing.T) {
+	withEBPFHooks(t)
+	cgPath := t.TempDir()
+
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = true
+	cfg.Sandbox.Cgroups.BestEffort = true
+	cfg.Sandbox.Network.EBPF.Enabled = true // egress boundary present
+
+	app := newAppWithFakeCgroupManager(t, cfg, cgPath)
+	fake := app.cgroupMgr.(*fakeCgroupManagerForAPITest)
+	fake.mode = limits.ModeAttachOnly
+	fake.applyErr = &limits.CgroupResourceLimitsUnavailableError{
+		Reason: "child memory.max not writable: EPERM",
+		Limits: limits.CgroupV2Limits{MaxMemoryBytes: 16 << 20},
+	}
+
+	_, err := applyCgroupV2(context.Background(),
+		storeEmitter{store: app.store, broker: app.broker}, app,
+		"sess", "cmd", 1234, policy.Limits{MaxMemoryMB: 16}, nil, nil)
+	if err == nil {
+		t.Fatal("expected fail-closed with eBPF enabled, got nil")
+	}
+}
+
 // TestDefaultWrapCgroupSetup_Unavailable_Required_HardFails verifies that
 // when the probe mode is ModeUnavailable and ebpf.required is true, the
 // CgroupUnavailableError propagates as a hard failure.
