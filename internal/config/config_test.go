@@ -2339,3 +2339,18 @@ func TestAuditWatchtowerConfig_BatchCompression_DefaultsExpand(t *testing.T) {
 		t.Errorf("default gzip_level = %d, want 6", got)
 	}
 }
+
+func TestConfig_CgroupsBestEffortParses(t *testing.T) {
+	cfg, err := loadFromString(t, `
+sandbox:
+  cgroups:
+    enabled: true
+    best_effort: true
+`)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Sandbox.Cgroups.BestEffort {
+		t.Fatalf("sandbox.cgroups.best_effort: got false, want true")
+	}
+}
