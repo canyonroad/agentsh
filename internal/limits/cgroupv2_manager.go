@@ -95,12 +95,14 @@ func (m *CgroupManager) Apply(name string, pid int, lim CgroupV2Limits) (*Cgroup
 
 	writeLimit := func(file string, val []byte) error {
 		if err := m.fs.WriteFile(filepath.Join(dir, file), val, 0o644); err != nil {
+			// errors.Is unwraps the *fs.PathError that os.WriteFile and the kernel return.
 			if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
 				// Host won't permit the limit write even though mkdir succeeded
 				// (non-writable nested cgroup). Remove the empty child so we don't
 				// accumulate orphans, and surface the deliberate typed error so
 				// callers can apply best-effort policy instead of a generic abort.
 				_ = m.fs.Remove(dir)
+				// Remove fails silently: EBUSY if the dir is populated (safe), ENOENT if already gone.
 				return &CgroupResourceLimitsUnavailableError{
 					Reason: fmt.Sprintf("write %s (mode=%s, dir=%s): %v", file, m.probe.Mode, dir, err),
 					Limits: lim,

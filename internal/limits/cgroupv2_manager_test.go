@@ -186,7 +186,44 @@ func TestManagerApply_TopLevelMemoryMaxWriteEPERM_ReturnsTypedErrorAndCleansUp(t
 	if !errors.As(err, &rlErr) {
 		t.Fatalf("error type: got %T (%v), want *CgroupResourceLimitsUnavailableError", err, err)
 	}
+	if rlErr.Limits.MaxMemoryBytes != 8<<20 {
+		t.Errorf("typed error Limits: got %+v, want MaxMemoryBytes=%d", rlErr.Limits, 8<<20)
+	}
 	if _, statErr := f.Stat(DefaultSliceDir + "/agentsh-sess-cmd"); statErr == nil {
+		t.Errorf("orphan child cgroup dir left behind after EPERM write")
+	}
+}
+
+func TestManagerApply_NestedMemoryMaxWriteEPERM_ReturnsTypedErrorAndCleansUp(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "cpu memory pids")
+
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	if m.Probe().Mode != ModeNested {
+		t.Fatalf("precondition: mode %q, want ModeNested", m.Probe().Mode)
+	}
+
+	// parentDir() for ModeNested returns OwnCgroup; inject EPERM only on the
+	// deterministic per-command child path so the probe's random-name child
+	// write succeeds and the precondition above holds.
+	childMemMax := own + "/agentsh-sess-cmd/memory.max"
+	f.writeErrs[childMemMax] = syscall.EPERM
+
+	_, err = m.Apply("agentsh-sess-cmd", 1234, CgroupV2Limits{MaxMemoryBytes: 8 << 20})
+	var rlErr *CgroupResourceLimitsUnavailableError
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("error type: got %T (%v), want *CgroupResourceLimitsUnavailableError", err, err)
+	}
+	if rlErr.Limits.MaxMemoryBytes != 8<<20 {
+		t.Errorf("typed error Limits: got %+v, want MaxMemoryBytes=%d", rlErr.Limits, 8<<20)
+	}
+	if _, statErr := f.Stat(own + "/agentsh-sess-cmd"); statErr == nil {
 		t.Errorf("orphan child cgroup dir left behind after EPERM write")
 	}
 }
