@@ -40,6 +40,10 @@ type fakeCgroupFS struct {
 	// cgroup.subtree_control reports delegated controllers but the kernel
 	// denies mkdir within the subtree (read-only delegation, MAC policies).
 	mkdirErrUnder map[string]error
+	// writeErrUnder injects an error returned by WriteFile for any path whose
+	// ancestor directory equals a key. Used to simulate hosts where a child
+	// cgroup can be created but its memory.max is not writable (#411).
+	writeErrUnder map[string]error
 }
 
 type fakeEntry struct {
@@ -55,6 +59,7 @@ func newFakeCgroupFS() *fakeCgroupFS {
 		openWriteErrsOnce:    map[string]error{},
 		openWriteContentErrs: map[string]error{},
 		mkdirErrUnder:        map[string]error{},
+		writeErrUnder:        map[string]error{},
 	}
 }
 
@@ -90,6 +95,11 @@ func (f *fakeCgroupFS) ReadFile(p string) ([]byte, error) {
 
 func (f *fakeCgroupFS) WriteFile(p string, data []byte, perm os.FileMode) error {
 	p = path.Clean(p)
+	for anc := path.Dir(p); anc != "/" && anc != "."; anc = path.Dir(anc) {
+		if err, ok := f.writeErrUnder[anc]; ok {
+			return &fs.PathError{Op: "write", Path: p, Err: err}
+		}
+	}
 	if err, ok := f.writeErrs[p]; ok {
 		return &fs.PathError{Op: "write", Path: p, Err: err}
 	}
