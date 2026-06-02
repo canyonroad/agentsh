@@ -267,6 +267,11 @@ func probeNestedWritability(fs cgroupFS, own string) error {
 // returns EPERM. Stat'ing memory.max (the old canary) does not catch this.
 // Writing the value "max" is a safe no-op the kernel always accepts when the
 // file is writable. The probe child is removed before returning. See #411.
+//
+// Any Mkdir error (including EEXIST) is treated as failure — a pre-existing
+// probe directory is stale evidence (perms may have changed since it was
+// created, cleanup may have failed for unrelated reasons), so we fail closed
+// rather than falsely claim writability.
 func probeTopLevelLimitWritability(fs cgroupFS, sliceDir string) error {
 	name := fmt.Sprintf("agentsh.limit-probe-%d-%d", os.Getpid(), time.Now().UnixNano())
 	probeDir := filepath.Join(sliceDir, name)

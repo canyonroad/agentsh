@@ -667,8 +667,11 @@ func TestProbe_TopLevelMemoryMaxNotWritable_DowngradesFromTopLevel(t *testing.T)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	if res.Mode == ModeTopLevel {
-		t.Fatalf("mode: got ModeTopLevel, want a downgraded mode (memory.max not writable)")
+	if res.Mode != ModeUnavailable {
+		t.Fatalf("mode: got %q, want ModeUnavailable (memory.max not writable, attach-only not permitted)", res.Mode)
+	}
+	if !strings.Contains(res.Reason, "memory.max not writable") {
+		t.Errorf("reason should contain 'memory.max not writable': %q", res.Reason)
 	}
 }
 
@@ -690,5 +693,8 @@ func TestProbe_TopLevelMemoryMaxNotWritable_UpgradesToAttachOnly(t *testing.T) {
 	}
 	if res.Mode != ModeAttachOnly {
 		t.Fatalf("mode: got %q, want ModeAttachOnly", res.Mode)
+	}
+	if !strings.Contains(res.Reason, "memory.max not writable") {
+		t.Errorf("reason should contain 'memory.max not writable' (maybeUpgradeToAttachOnly preserves original reason): %q", res.Reason)
 	}
 }
