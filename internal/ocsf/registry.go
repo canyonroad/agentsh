@@ -104,6 +104,7 @@ var pendingTypes = map[string]struct{}{
 	"cgroup_cleanup_failed":       {},
 	"cgroup_orphans_reaped":       {},
 	"cgroup_unavailable_refusal":  {},
+	"cgroup_limits_degraded":      {},
 	"notify_handler_panic":        {},
 	"fuse_mounted":                {},
 	"fuse_mount_failed":           {},
