@@ -160,6 +160,37 @@ func TestManagerApply_AttachOnly_EmptyLimits_Succeeds(t *testing.T) {
 	}
 }
 
+func TestManagerApply_TopLevelMemoryMaxWriteEPERM_ReturnsTypedErrorAndCleansUp(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	f.seedFile(DefaultSliceDir+"/memory.max", "max")
+
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	if m.Probe().Mode != ModeTopLevel {
+		t.Fatalf("precondition: mode %q, want ModeTopLevel", m.Probe().Mode)
+	}
+
+	// Make the per-command child memory.max write fail (deterministic path from the name arg).
+	childMemMax := DefaultSliceDir + "/agentsh-sess-cmd/memory.max"
+	f.writeErrs[childMemMax] = syscall.EPERM
+
+	_, err = m.Apply("agentsh-sess-cmd", 1234, CgroupV2Limits{MaxMemoryBytes: 8 << 20})
+	var rlErr *CgroupResourceLimitsUnavailableError
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("error type: got %T (%v), want *CgroupResourceLimitsUnavailableError", err, err)
+	}
+	if _, statErr := f.Stat(DefaultSliceDir + "/agentsh-sess-cmd"); statErr == nil {
+		t.Errorf("orphan child cgroup dir left behind after EPERM write")
+	}
+}
+
 func TestManagerApply_AttachOnly_WithLimits_Refuses(t *testing.T) {
 	f := newFakeCgroupFS()
 	seedHealthyRoot(f)
