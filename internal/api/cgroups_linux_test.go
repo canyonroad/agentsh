@@ -535,8 +535,10 @@ func TestDefaultWrapCgroupSetup_Unavailable_NotRequired_WarnContinues(t *testing
 }
 
 // drainCgroupEvents collects events published to the broker for the given
-// session without blocking, returning the first cgroup_limits_degraded event
-// (or nil) and whether any cgroup_unavailable_refusal event was seen.
+// session without blocking, returning the most recent cgroup_limits_degraded
+// event (or nil) and whether any cgroup_unavailable_refusal event was seen.
+// The degrade paths under test each emit exactly one degraded event, so "most
+// recent" and "only" coincide here.
 func drainCgroupEvents(ch <-chan types.Event) (degraded *types.Event, sawRefusal bool) {
 	for {
 		select {
