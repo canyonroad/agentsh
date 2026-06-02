@@ -47,6 +47,33 @@ func cgroupBestEffortDegradable(cfg *config.Config) bool {
 	return !e.Enabled && !e.Enforce && !e.Required
 }
 
+// emitCgroupDegradedAndContinue logs and emits a single cgroup_limits_degraded
+// event, then returns a no-op cleanup so the wrap proceeds without the limit.
+// errorType distinguishes the resource-limits-unavailable case from the
+// total-cgroup-unavailable case for downstream alerting. See issue #411.
+func emitCgroupDegradedAndContinue(ctx context.Context, emit storeEmitter, sessionID, cmdID, errorType, reason string, lim policy.Limits) (func() error, error) {
+	slog.Warn("cgroup: enforcement unavailable; running without it (best_effort)",
+		"session_id", sessionID, "command_id", cmdID, "error_type", errorType, "reason", reason,
+		"max_memory_mb", lim.MaxMemoryMB, "cpu_quota_pct", lim.CPUQuotaPercent, "pids_max", lim.PidsMax)
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      string(events.EventCgroupLimitsDegraded),
+		SessionID: sessionID,
+		CommandID: cmdID,
+		Fields: map[string]any{
+			"error_type":    errorType,
+			"reason":        reason,
+			"max_memory_mb": lim.MaxMemoryMB,
+			"cpu_quota_pct": lim.CPUQuotaPercent,
+			"pids_max":      lim.PidsMax,
+		},
+	}
+	_ = emit.AppendEvent(ctx, ev)
+	emit.Publish(ev)
+	return func() error { return nil }, nil
+}
+
 func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, cmdID string, pid int, lim policy.Limits, m *metrics.Collector, pol *policy.Engine) (func() error, error) {
 	cfg := app.cfg
 	needsCgroup := cfg != nil && (cfg.Sandbox.Cgroups.Enabled ||
@@ -90,25 +117,7 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 		switch {
 		case errors.As(err, &rlue):
 			if cgroupBestEffortDegradable(cfg) {
-				slog.Warn("cgroup: resource limits unenforceable; running without them (best_effort)",
-					"session_id", sessionID, "command_id", cmdID, "reason", rlue.Reason,
-					"max_memory_mb", lim.MaxMemoryMB, "cpu_quota_pct", lim.CPUQuotaPercent, "pids_max", lim.PidsMax)
-				ev := types.Event{
-					ID:        uuid.NewString(),
-					Timestamp: time.Now().UTC(),
-					Type:      string(events.EventCgroupLimitsDegraded),
-					SessionID: sessionID,
-					CommandID: cmdID,
-					Fields: map[string]any{
-						"reason":        rlue.Reason,
-						"max_memory_mb": lim.MaxMemoryMB,
-						"cpu_quota_pct": lim.CPUQuotaPercent,
-						"pids_max":      lim.PidsMax,
-					},
-				}
-				_ = emit.AppendEvent(ctx, ev)
-				emit.Publish(ev)
-				return func() error { return nil }, nil
+				return emitCgroupDegradedAndContinue(ctx, emit, sessionID, cmdID, "resource_limits_unavailable", rlue.Reason, lim)
 			}
 			ev := types.Event{
 				ID:        uuid.NewString(),
@@ -129,25 +138,7 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 			return nil, err
 		case errors.As(err, &ue):
 			if cgroupBestEffortDegradable(cfg) {
-				slog.Warn("cgroup: enforcement unavailable; running without cgroup (best_effort)",
-					"session_id", sessionID, "command_id", cmdID, "reason", ue.Reason,
-					"max_memory_mb", lim.MaxMemoryMB, "cpu_quota_pct", lim.CPUQuotaPercent, "pids_max", lim.PidsMax)
-				ev := types.Event{
-					ID:        uuid.NewString(),
-					Timestamp: time.Now().UTC(),
-					Type:      string(events.EventCgroupLimitsDegraded),
-					SessionID: sessionID,
-					CommandID: cmdID,
-					Fields: map[string]any{
-						"reason":        ue.Reason,
-						"max_memory_mb": lim.MaxMemoryMB,
-						"cpu_quota_pct": lim.CPUQuotaPercent,
-						"pids_max":      lim.PidsMax,
-					},
-				}
-				_ = emit.AppendEvent(ctx, ev)
-				emit.Publish(ev)
-				return func() error { return nil }, nil
+				return emitCgroupDegradedAndContinue(ctx, emit, sessionID, cmdID, "cgroup_unavailable", ue.Reason, lim)
 			}
 			ev := types.Event{
 				ID:        uuid.NewString(),
