@@ -160,6 +160,109 @@ func TestManagerApply_AttachOnly_EmptyLimits_Succeeds(t *testing.T) {
 	}
 }
 
+func TestManagerApply_TopLevelMemoryMaxWriteEPERM_ReturnsTypedErrorAndCleansUp(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	f.seedFile(DefaultSliceDir+"/memory.max", "max")
+
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	if m.Probe().Mode != ModeTopLevel {
+		t.Fatalf("precondition: mode %q, want ModeTopLevel", m.Probe().Mode)
+	}
+
+	// Make the per-command child memory.max write fail (deterministic path from the name arg).
+	childMemMax := DefaultSliceDir + "/agentsh-sess-cmd/memory.max"
+	f.writeErrs[childMemMax] = syscall.EPERM
+
+	_, err = m.Apply("agentsh-sess-cmd", 1234, CgroupV2Limits{MaxMemoryBytes: 8 << 20})
+	var rlErr *CgroupResourceLimitsUnavailableError
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("error type: got %T (%v), want *CgroupResourceLimitsUnavailableError", err, err)
+	}
+	if rlErr.Limits.MaxMemoryBytes != 8<<20 {
+		t.Errorf("typed error Limits: got %+v, want MaxMemoryBytes=%d", rlErr.Limits, 8<<20)
+	}
+	if _, statErr := f.Stat(DefaultSliceDir + "/agentsh-sess-cmd"); statErr == nil {
+		t.Errorf("orphan child cgroup dir left behind after EPERM write")
+	}
+}
+
+func TestManagerApply_NestedMemoryMaxWriteEPERM_ReturnsTypedErrorAndCleansUp(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "cpu memory pids")
+
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	if m.Probe().Mode != ModeNested {
+		t.Fatalf("precondition: mode %q, want ModeNested", m.Probe().Mode)
+	}
+
+	// parentDir() for ModeNested returns OwnCgroup; inject EPERM only on the
+	// deterministic per-command child path so the probe's random-name child
+	// write succeeds and the precondition above holds.
+	childMemMax := own + "/agentsh-sess-cmd/memory.max"
+	f.writeErrs[childMemMax] = syscall.EPERM
+
+	_, err = m.Apply("agentsh-sess-cmd", 1234, CgroupV2Limits{MaxMemoryBytes: 8 << 20})
+	var rlErr *CgroupResourceLimitsUnavailableError
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("error type: got %T (%v), want *CgroupResourceLimitsUnavailableError", err, err)
+	}
+	if rlErr.Limits.MaxMemoryBytes != 8<<20 {
+		t.Errorf("typed error Limits: got %+v, want MaxMemoryBytes=%d", rlErr.Limits, 8<<20)
+	}
+	if _, statErr := f.Stat(own + "/agentsh-sess-cmd"); statErr == nil {
+		t.Errorf("orphan child cgroup dir left behind after EPERM write")
+	}
+}
+
+func TestManagerApply_TopLevelMultiLimitPartialWriteEPERM_CleansUp(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	f.seedFile(DefaultSliceDir+"/memory.max", "max")
+
+	m, err := newCgroupManagerFS(context.Background(), f, own, false)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	if m.Probe().Mode != ModeTopLevel {
+		t.Fatalf("precondition: mode %q, want ModeTopLevel", m.Probe().Mode)
+	}
+
+	// Inject EPERM on pids.max only — memory.max must succeed first so the
+	// child dir is non-empty when pids.max fails, exercising partial-write cleanup.
+	f.writeErrs[DefaultSliceDir+"/agentsh-sess-cmd/pids.max"] = syscall.EPERM
+
+	_, err = m.Apply("agentsh-sess-cmd", 1234, CgroupV2Limits{MaxMemoryBytes: 8 << 20, PidsMax: 64})
+	var rlErr *CgroupResourceLimitsUnavailableError
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("error type: got %T (%v), want *CgroupResourceLimitsUnavailableError", err, err)
+	}
+	// The fake's Remove(dir) deletes only the exact dir key. After memory.max was
+	// written (adding the child file key) and pids.max EPERM triggered Remove(dir),
+	// the dir entry itself is gone — Stat of the dir returns ENOENT even though
+	// the child file key may remain as an orphan in the flat map.
+	if _, statErr := f.Stat(DefaultSliceDir + "/agentsh-sess-cmd"); statErr == nil {
+		t.Errorf("orphan child cgroup dir left behind after partial-write EPERM")
+	}
+}
+
 func TestManagerApply_AttachOnly_WithLimits_Refuses(t *testing.T) {
 	f := newFakeCgroupFS()
 	seedHealthyRoot(f)

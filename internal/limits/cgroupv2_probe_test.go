@@ -651,3 +651,50 @@ func TestProbe_AttachOnly_FilteredWhenFeasibilityFails(t *testing.T) {
 		t.Fatalf("reason should contain 'attach-only also infeasible': %q", res.Reason)
 	}
 }
+
+func TestProbe_TopLevelMemoryMaxNotWritable_DowngradesFromTopLevel(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EBUSY // force fallback to top-level
+	f.seedFile(DefaultSliceDir+"/memory.max", "max")                // canary exists
+	f.writeErrUnder[DefaultSliceDir] = syscall.EPERM                // but child writes EPERM
+
+	// permitAttachOnly=false so the result is NOT upgraded; assert the raw downgrade.
+	res, err := ProbeCgroupsV2(context.Background(), f, own, false)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeUnavailable {
+		t.Fatalf("mode: got %q, want ModeUnavailable (memory.max not writable, attach-only not permitted)", res.Mode)
+	}
+	if !strings.Contains(res.Reason, "memory.max not writable") {
+		t.Errorf("reason should contain 'memory.max not writable': %q", res.Reason)
+	}
+}
+
+func TestProbe_TopLevelMemoryMaxNotWritable_UpgradesToAttachOnly(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	f.seedFile(DefaultSliceDir+"/memory.max", "max")
+	f.writeErrUnder[DefaultSliceDir] = syscall.EPERM
+
+	// permitAttachOnly=true: attach feasibility checks `own`, which allows mkdir +
+	// cgroup.procs writes, so the result upgrades to attach-only.
+	res, err := ProbeCgroupsV2(context.Background(), f, own, true)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeAttachOnly {
+		t.Fatalf("mode: got %q, want ModeAttachOnly", res.Mode)
+	}
+	if !strings.Contains(res.Reason, "memory.max not writable") {
+		t.Errorf("reason should contain 'memory.max not writable' (maybeUpgradeToAttachOnly preserves original reason): %q", res.Reason)
+	}
+}

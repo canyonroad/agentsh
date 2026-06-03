@@ -488,6 +488,13 @@ type SandboxCgroupsConfig struct {
 	// If empty, agentsh will default to the current process cgroup.
 	// Note: this should be a path under /sys/fs/cgroup (or relative to the current process cgroup dir).
 	BasePath string `yaml:"base_path"`
+	// BestEffort, when true, degrades unenforceable per-command resource limits
+	// (e.g. memory.max EPERM on a non-writable nested cgroup) to a logged warning
+	// and runs the command WITHOUT the limit, instead of fail-closing the wrap.
+	// Defaults to false (fail-closed) to preserve the resource-limit guarantee.
+	// Ignored when eBPF enforcement is configured: the cgroup egress path stays strict.
+	// See issue #411.
+	BestEffort bool `yaml:"best_effort"`
 }
 
 type SandboxUnixSocketsConfig struct {

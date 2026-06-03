@@ -89,24 +89,52 @@ func (m *CgroupManager) Apply(name string, pid int, lim CgroupV2Limits) (*Cgroup
 	safe := sanitizeCgroupName(name)
 	dir := filepath.Join(parent, safe)
 
-	if err := m.fs.Mkdir(dir, 0o755); err != nil && !errors.Is(err, syscall.EEXIST) {
-		return nil, fmt.Errorf("mkdir cgroup (mode=%s, dir=%s): %w", m.probe.Mode, dir, err)
+	createdDir := true
+	if err := m.fs.Mkdir(dir, 0o755); err != nil {
+		if !errors.Is(err, syscall.EEXIST) {
+			return nil, fmt.Errorf("mkdir cgroup (mode=%s, dir=%s): %w", m.probe.Mode, dir, err)
+		}
+		// The dir already existed — this call did not create it, so the
+		// EPERM-cleanup below must not remove it.
+		createdDir = false
+	}
+
+	writeLimit := func(file string, val []byte) error {
+		if err := m.fs.WriteFile(filepath.Join(dir, file), val, 0o644); err != nil {
+			// errors.Is unwraps the *fs.PathError that os.WriteFile and the kernel return.
+			if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+				// Host won't permit the limit write even though mkdir succeeded
+				// (non-writable nested cgroup). Remove the child we created so we
+				// don't accumulate orphans, and surface the deliberate typed error
+				// so callers can apply best-effort policy instead of a generic abort.
+				if createdDir {
+					// Remove fails silently: EBUSY if the dir is populated (safe), ENOENT if already gone.
+					_ = m.fs.Remove(dir)
+				}
+				return &CgroupResourceLimitsUnavailableError{
+					Reason: fmt.Sprintf("write %s (mode=%s, dir=%s): %v", file, m.probe.Mode, dir, err),
+					Limits: lim,
+				}
+			}
+			return fmt.Errorf("write %s (mode=%s, dir=%s): %w", file, m.probe.Mode, dir, err)
+		}
+		return nil
 	}
 
 	if lim.MaxMemoryBytes > 0 {
-		if err := m.fs.WriteFile(filepath.Join(dir, "memory.max"), []byte(strconv.FormatInt(lim.MaxMemoryBytes, 10)), 0o644); err != nil {
-			return nil, fmt.Errorf("write memory.max (mode=%s, dir=%s): %w", m.probe.Mode, dir, err)
+		if err := writeLimit("memory.max", []byte(strconv.FormatInt(lim.MaxMemoryBytes, 10))); err != nil {
+			return nil, err
 		}
 	}
 	if lim.PidsMax > 0 {
-		if err := m.fs.WriteFile(filepath.Join(dir, "pids.max"), []byte(strconv.Itoa(lim.PidsMax)), 0o644); err != nil {
-			return nil, fmt.Errorf("write pids.max (mode=%s, dir=%s): %w", m.probe.Mode, dir, err)
+		if err := writeLimit("pids.max", []byte(strconv.Itoa(lim.PidsMax))); err != nil {
+			return nil, err
 		}
 	}
 	if lim.CPUQuotaPct > 0 {
 		q, p := cpuMaxFromPct(lim.CPUQuotaPct)
-		if err := m.fs.WriteFile(filepath.Join(dir, "cpu.max"), []byte(fmt.Sprintf("%d %d", q, p)), 0o644); err != nil {
-			return nil, fmt.Errorf("write cpu.max (mode=%s, dir=%s): %w", m.probe.Mode, dir, err)
+		if err := writeLimit("cpu.max", []byte(fmt.Sprintf("%d %d", q, p))); err != nil {
+			return nil, err
 		}
 	}
 

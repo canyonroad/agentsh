@@ -260,6 +260,32 @@ func probeNestedWritability(fs cgroupFS, own string) error {
 	return nil
 }
 
+// probeTopLevelLimitWritability verifies that a child cgroup created under
+// sliceDir accepts a write to its memory.max. On hosts where the slice exists
+// with controller files present but the nested cgroup is not writable (e.g.
+// Freestyle Firecracker), mkdir of the child succeeds yet writing memory.max
+// returns EPERM. Stat'ing memory.max (the old canary) does not catch this.
+// Writing the value "max" is a safe no-op the kernel always accepts when the
+// file is writable. The probe child is removed before returning. See #411.
+//
+// Any Mkdir error (including EEXIST) is treated as failure — a pre-existing
+// probe directory is stale evidence (perms may have changed since it was
+// created, cleanup may have failed for unrelated reasons), so we fail closed
+// rather than falsely claim writability.
+func probeTopLevelLimitWritability(fs cgroupFS, sliceDir string) error {
+	name := fmt.Sprintf("agentsh.limit-probe-%d-%d", os.Getpid(), time.Now().UnixNano())
+	probeDir := filepath.Join(sliceDir, name)
+	if err := fs.Mkdir(probeDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir probe child: %w", err)
+	}
+	writeErr := fs.WriteFile(filepath.Join(probeDir, "memory.max"), []byte("max"), 0o644)
+	_ = fs.Remove(probeDir)
+	if writeErr != nil {
+		return fmt.Errorf("write child memory.max: %w", writeErr)
+	}
+	return nil
+}
+
 // tryLeafMove handles the EBUSY case: the own cgroup has internal processes
 // (including agentsh itself), preventing subtree_control writes. We create a
 // "agentsh.leaf" child cgroup, move the current process into it, and retry enabling
@@ -336,6 +362,19 @@ func tryTopLevel(ctx context.Context, fs cgroupFS, own, nestedFailureReason stri
 		return &CgroupProbeResult{
 			Mode:      ModeUnavailable,
 			Reason:    fmt.Sprintf("%s; %s missing controller files after mkdir", nestedFailureReason, DefaultSliceDir),
+			OwnCgroup: own,
+			SliceDir:  DefaultSliceDir,
+		}, nil
+	}
+
+	// The canary file exists, but on nested cgroups it may not be writable
+	// (mkdir of a child succeeds, memory.max write EPERMs). Verify before
+	// claiming ModeTopLevel; callers upgrade ModeUnavailable to ModeAttachOnly
+	// when pid-attach is still feasible. See #411.
+	if werr := probeTopLevelLimitWritability(fs, DefaultSliceDir); werr != nil {
+		return &CgroupProbeResult{
+			Mode:      ModeUnavailable,
+			Reason:    fmt.Sprintf("%s; %s child memory.max not writable: %v", nestedFailureReason, DefaultSliceDir, werr),
 			OwnCgroup: own,
 			SliceDir:  DefaultSliceDir,
 		}, nil
