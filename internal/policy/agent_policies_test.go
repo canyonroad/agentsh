@@ -719,6 +719,17 @@ func TestAgentDefault_FileDecisions(t *testing.T) {
 			wantRule: "allow-dev-write",
 		},
 		{
+			// shell redirection (> /dev/null) uses openat(O_WRONLY|O_CREAT|O_TRUNC),
+			// which is classified as "write" (not "create") since O_CREAT without
+			// O_EXCL is open-or-create. The built-in policy also carries "create" in
+			// allow-dev-write, so this tests both the new classification and the rule.
+			name:     "shell redirect /dev/null via allow-dev-write (create op)",
+			path:     "/dev/null",
+			op:       "create",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-write",
+		},
+		{
 			name:     "write /dev/tty via allow-dev-write",
 			path:     "/dev/tty",
 			op:       "write",

@@ -65,17 +65,21 @@ func TestSyscallToOperation(t *testing.T) {
 	}{
 		// openat operations
 		{"openat read-only", unix.SYS_OPENAT, 0, "open"},
-		{"openat O_CREAT", unix.SYS_OPENAT, unix.O_CREAT, "create"},
+		{"openat O_CREAT", unix.SYS_OPENAT, unix.O_CREAT, "write"},
+		{"openat O_CREAT|O_EXCL", unix.SYS_OPENAT, unix.O_CREAT | unix.O_EXCL, "create"},
 		{"openat O_TMPFILE", unix.SYS_OPENAT, unix.O_TMPFILE, "create"},
 		{"openat O_WRONLY", unix.SYS_OPENAT, unix.O_WRONLY, "write"},
 		{"openat O_RDWR", unix.SYS_OPENAT, unix.O_RDWR, "write"},
 		{"openat O_APPEND", unix.SYS_OPENAT, unix.O_APPEND, "write"},
 		{"openat O_TRUNC", unix.SYS_OPENAT, unix.O_TRUNC, "write"},
-		{"openat O_WRONLY|O_CREAT", unix.SYS_OPENAT, unix.O_WRONLY | unix.O_CREAT, "create"},
+		{"openat O_WRONLY|O_CREAT", unix.SYS_OPENAT, unix.O_WRONLY | unix.O_CREAT, "write"},
+		{"openat O_WRONLY|O_CREAT|O_TRUNC", unix.SYS_OPENAT, unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC, "write"},
+		{"openat O_WRONLY|O_CREAT|O_EXCL", unix.SYS_OPENAT, unix.O_WRONLY | unix.O_CREAT | unix.O_EXCL, "create"},
 
 		// openat2 operations (same logic)
 		{"openat2 read-only", unix.SYS_OPENAT2, 0, "open"},
-		{"openat2 O_CREAT", unix.SYS_OPENAT2, unix.O_CREAT, "create"},
+		{"openat2 O_CREAT", unix.SYS_OPENAT2, unix.O_CREAT, "write"},
+		{"openat2 O_CREAT|O_EXCL", unix.SYS_OPENAT2, unix.O_CREAT | unix.O_EXCL, "create"},
 		{"openat2 O_WRONLY", unix.SYS_OPENAT2, unix.O_WRONLY, "write"},
 
 		// unlinkat operations

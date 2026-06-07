@@ -294,11 +294,17 @@ func readOpenHowResolve(pid int, howPtr uint64) (uint64, error) {
 func syscallToOperation(nr int32, flags uint32) string {
 	switch nr {
 	case unix.SYS_OPENAT, unix.SYS_OPENAT2:
-		// Create takes precedence over write
-		if flags&unix.O_CREAT != 0 || flags&unix.O_TMPFILE == unix.O_TMPFILE {
+		// O_TMPFILE creates an unnamed temporary inode — always "create".
+		if flags&unix.O_TMPFILE == unix.O_TMPFILE {
 			return "create"
 		}
-		if flags&(unix.O_WRONLY|unix.O_RDWR|unix.O_APPEND|unix.O_TRUNC) != 0 {
+		// O_CREAT|O_EXCL is atomic exclusive creation (fails if file exists) — "create".
+		// Plain O_CREAT without O_EXCL is open-or-create: behaves as "write" for
+		// existing files, which is the shell-redirection pattern (> /dev/null).
+		if flags&(unix.O_CREAT|unix.O_EXCL) == (unix.O_CREAT | unix.O_EXCL) {
+			return "create"
+		}
+		if flags&(unix.O_WRONLY|unix.O_RDWR|unix.O_APPEND|unix.O_TRUNC|unix.O_CREAT) != 0 {
 			return "write"
 		}
 		return "open"

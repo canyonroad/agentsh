@@ -462,9 +462,9 @@ func TestFilterConfig_InterceptMetadata(t *testing.T) {
 	}
 }
 
-// TestEmulatedOpen_CreateOperation verifies that openat with O_CREAT maps
-// to "create" and is emulatable via AddFD.
-func TestEmulatedOpen_CreateOperation(t *testing.T) {
+// TestEmulatedOpen_ShellRedirect verifies that openat with O_CREAT|O_WRONLY|O_TRUNC
+// maps to "write" (shell-redirection pattern) and is emulatable via AddFD.
+func TestEmulatedOpen_ShellRedirect(t *testing.T) {
 	pol := &mockFilePolicy{
 		decisions: map[string]FilePolicyDecision{
 			"/workspace/new.txt": {Decision: "allow", EffectiveDecision: "allow", Rule: "workspace-rw"},
@@ -476,7 +476,7 @@ func TestEmulatedOpen_CreateOperation(t *testing.T) {
 
 	flags := uint32(unix.O_CREAT | unix.O_WRONLY | unix.O_TRUNC)
 	op := syscallToOperation(unix.SYS_OPENAT, flags)
-	assert.Equal(t, "create", op, "O_CREAT must take precedence for operation mapping")
+	assert.Equal(t, "write", op, "O_CREAT without O_EXCL maps to write (shell-redirection pattern)")
 
 	req := FileRequest{
 		PID:       303,
@@ -494,7 +494,7 @@ func TestEmulatedOpen_CreateOperation(t *testing.T) {
 	assert.Equal(t, ActionContinue, result.Action)
 
 	require.Len(t, emit.events, 1)
-	assert.Equal(t, "file_create", emit.events[0].Type)
+	assert.Equal(t, "file_write", emit.events[0].Type)
 	assert.Equal(t, "allowed", emit.events[0].EffectiveAction)
 
 	// O_CREAT is emulatable (not O_TMPFILE, not RESOLVE_*).
@@ -666,8 +666,8 @@ func TestFileHandler_OperationMapping(t *testing.T) {
 			name:     "openat_O_CREAT",
 			syscall:  int32(unix.SYS_OPENAT),
 			flags:    unix.O_CREAT,
-			wantOp:   "create",
-			wantType: "file_create",
+			wantOp:   "write",
+			wantType: "file_write",
 			wantSysc: "openat",
 		},
 		{

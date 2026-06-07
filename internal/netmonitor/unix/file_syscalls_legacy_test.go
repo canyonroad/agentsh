@@ -42,7 +42,9 @@ func TestLegacySyscallToOperation(t *testing.T) {
 		expected string
 	}{
 		{"open read-only", unix.SYS_OPEN, 0, "open"},
-		{"open O_CREAT", unix.SYS_OPEN, unix.O_CREAT, "create"},
+		{"open O_CREAT", unix.SYS_OPEN, unix.O_CREAT, "write"},
+		{"open O_CREAT|O_EXCL", unix.SYS_OPEN, unix.O_CREAT | unix.O_EXCL, "create"},
+		{"open O_TMPFILE", unix.SYS_OPEN, unix.O_TMPFILE, "create"},
 		{"open O_WRONLY", unix.SYS_OPEN, unix.O_WRONLY, "write"},
 		{"open O_RDWR", unix.SYS_OPEN, unix.O_RDWR, "write"},
 		{"open O_APPEND", unix.SYS_OPEN, unix.O_APPEND, "write"},

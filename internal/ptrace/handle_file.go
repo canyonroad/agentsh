@@ -42,13 +42,17 @@ func syscallToOperation(nr int, flags int) string {
 }
 
 func openatOperation(flags int) string {
-	if flags&unix.O_CREAT != 0 {
-		return "create"
-	}
+	// O_TMPFILE creates an unnamed temporary inode — always "create".
 	if flags&unix.O_TMPFILE == unix.O_TMPFILE {
 		return "create"
 	}
-	if flags&(unix.O_WRONLY|unix.O_RDWR|unix.O_APPEND|unix.O_TRUNC) != 0 {
+	// O_CREAT|O_EXCL is atomic exclusive creation (fails if file exists) — "create".
+	// Plain O_CREAT without O_EXCL is open-or-create: behaves as "write" for
+	// existing files, which is the shell-redirection pattern (> /dev/null).
+	if flags&(unix.O_CREAT|unix.O_EXCL) == (unix.O_CREAT | unix.O_EXCL) {
+		return "create"
+	}
+	if flags&(unix.O_WRONLY|unix.O_RDWR|unix.O_APPEND|unix.O_TRUNC|unix.O_CREAT) != 0 {
 		return "write"
 	}
 	return "open"

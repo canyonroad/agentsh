@@ -142,10 +142,14 @@ func extractLegacyFileArgs(args SyscallArgs) FileArgs {
 func legacySyscallToOperation(nr int32, flags uint32) string {
 	switch nr {
 	case unix.SYS_OPEN:
-		if flags&unix.O_CREAT != 0 || flags&unix.O_TMPFILE == unix.O_TMPFILE {
+		// Use the same O_CREAT|O_EXCL / O_TMPFILE semantics as openatOperation.
+		if flags&unix.O_TMPFILE == unix.O_TMPFILE {
 			return "create"
 		}
-		if flags&(unix.O_WRONLY|unix.O_RDWR|unix.O_APPEND|unix.O_TRUNC) != 0 {
+		if flags&(unix.O_CREAT|unix.O_EXCL) == (unix.O_CREAT | unix.O_EXCL) {
+			return "create"
+		}
+		if flags&(unix.O_WRONLY|unix.O_RDWR|unix.O_APPEND|unix.O_TRUNC|unix.O_CREAT) != 0 {
 			return "write"
 		}
 		return "open"
