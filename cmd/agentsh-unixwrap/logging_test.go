@@ -200,6 +200,11 @@ func TestSetupLogging_NoSelfDeadlockUnderFileMonitor(t *testing.T) {
 	}
 	defer logR.Close()
 	defer logW.Close()
+	// Drain the routed sink so it can never backpressure the child:
+	// if wrapper diagnostics ever outgrow the pipe buffer, an undrained
+	// pipe would block the child post-filter and masquerade as the tz
+	// deadlock this test guards against.
+	go func() { _, _ = io.Copy(io.Discard, logR) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
