@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/wraphandoff"
+	"github.com/agentsh/agentsh/internal/wrapperlog"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -1036,6 +1037,101 @@ func buildFakeWrapper(t *testing.T) string {
 		t.Skipf("compile fake wrapper: %v\n%s", err, out)
 	}
 	return binPath
+}
+
+// ─── Test: filterShimInternalEnv strips AGENTSH_WRAPPER_LOG_FD ──────────────
+
+func TestFilterShimInternalEnv_StripsWrapperLogFD(t *testing.T) {
+	in := []string{"PATH=/bin", wrapperlog.EnvKey + "=7", "HOME=/root"}
+	out := filterShimInternalEnv(in)
+	for _, e := range out {
+		if strings.HasPrefix(e, wrapperlog.EnvKey+"=") {
+			t.Fatalf("inherited %s not stripped: %v", wrapperlog.EnvKey, out)
+		}
+	}
+	if len(out) != 2 {
+		t.Fatalf("unexpected env after strip: %v", out)
+	}
+}
+
+func TestAssembleWrapperEnv_DropsWrapperLogFDFromWrapperEnv(t *testing.T) {
+	env := assembleWrapperEnv(
+		[]string{"PATH=/bin"},
+		"",
+		map[string]string{
+			wrapperlog.EnvKey:        "9", // must NOT pass through — the relay sets its own
+			"AGENTSH_SECCOMP_CONFIG": "{}",
+		},
+		nil,
+	)
+	for _, e := range env {
+		if strings.HasPrefix(e, wrapperlog.EnvKey+"=") {
+			t.Fatalf("server-supplied %s leaked into wrapper env: %v", wrapperlog.EnvKey, env)
+		}
+	}
+}
+
+// TestInstall_PassesWrapperLogFDAndCreatesStateLogFile verifies the
+// issue #415 relay wiring end-to-end: runRelay opens the state-dir log
+// file, passes it as ExtraFiles[1], and exports AGENTSH_WRAPPER_LOG_FD=4
+// to the wrapper. XDG_STATE_HOME is redirected to a temp dir so the test
+// owns the state-dir location.
+func TestInstall_PassesWrapperLogFDAndCreatesStateLogFile(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+
+	wrapperBin := buildFakeWrapperPrintEnv(t)
+
+	sockDir := t.TempDir()
+	notifySockPath := filepath.Join(sockDir, "notify.sock")
+	ln, err := net.Listen("unix", notifySockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	serveNotifySetupStatus(ln, true)
+
+	wrapResp := types.WrapInitResponse{
+		WrapperBinary: wrapperBin,
+		NotifySocket:  notifySockPath,
+		WrapperEnv:    map[string]string{"FAKE_WRAPPER": "1"},
+	}
+	handler, _ := makeWrapInitHandler(200, wrapResp)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeOn
+	p.Env = []string{"HOME=/tmp"}
+
+	outFile, err := os.CreateTemp(t.TempDir(), "wrapper-env-*.txt")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	outPath := outFile.Name()
+	outFile.Close()
+	p.Env = append(p.Env, "FAKE_ENV_OUT="+outPath)
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("Install returned error: %v", err)
+	}
+	if res.Action != ResultExec {
+		t.Fatalf("expected ResultExec, got %v (reason: %s)", res.Action, res.Reason)
+	}
+
+	envOutput, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read wrapper env output: %v", err)
+	}
+	if !strings.Contains(string(envOutput), wrapperlog.EnvKey+"=4") {
+		t.Errorf("wrapper env missing %s=4:\n%s", wrapperlog.EnvKey, envOutput)
+	}
+
+	logPath := filepath.Join(stateHome, "agentsh", "logs", "unixwrap.log")
+	if _, err := os.Stat(logPath); err != nil {
+		t.Errorf("state-dir log file not created at %s: %v", logPath, err)
+	}
 }
 
 // findModuleRoot walks up from the current working directory to find go.mod.

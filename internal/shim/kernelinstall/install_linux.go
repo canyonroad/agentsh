@@ -19,6 +19,7 @@ import (
 	"github.com/agentsh/agentsh/internal/envinject"
 	"github.com/agentsh/agentsh/internal/wrapenv"
 	"github.com/agentsh/agentsh/internal/wraphandoff"
+	"github.com/agentsh/agentsh/internal/wrapperlog"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
@@ -200,6 +201,17 @@ func runRelay(p InstallParams, resp types.WrapInitResponse) (Result, error) {
 	// stripping rationale (issue #374).
 	env := assembleWrapperEnv(wrapenv.Filter(filterShimInternalEnv(p.Env), resp.EnvPolicy), p.Argv0, resp.WrapperEnv, resp.EnvInject)
 
+	// Wrapper log routing (issue #415): point the wrapper's diagnostics
+	// at the state-dir log file. The relay's own stderr IS the user's
+	// terminal, so draining a pipe into our slog would put the noise
+	// right back on screen; an O_APPEND file needs no drain goroutine
+	// and keeps concurrent shim execs line-atomic. Debug (not Warn) on
+	// failure for the same reason — the relay must not add stderr noise.
+	logFile, logErr := wrapperlog.OpenStateLogFile()
+	if logErr != nil {
+		slog.Debug("kernelinstall: wrapper log file unavailable; wrapper diagnostics stay on stderr", "error", logErr)
+	}
+
 	// Build wrapper argv: wrapperBin -- realShell shellArgs...
 	// argv[0] is the wrapper binary's basename (conventional).
 	wrapperArgs := make([]string, 0, 2+len(p.ShellArgs))
@@ -215,15 +227,27 @@ func runRelay(p InstallParams, resp types.WrapInitResponse) (Result, error) {
 	cmd.Stderr = os.Stderr
 	// ExtraFiles[0] becomes fd 3 in the child (0=stdin,1=stdout,2=stderr,3=ExtraFiles[0])
 	cmd.ExtraFiles = []*os.File{childFile}
+	if logFile != nil {
+		// ExtraFiles[1] = fd 4 — free in shim mode (the signal-filter
+		// socketpair is deliberately not replicated here).
+		cmd.ExtraFiles = append(cmd.ExtraFiles, logFile)
+		cmd.Env = append(cmd.Env, wrapperlog.EnvKey+"=4")
+	}
 
 	if err := cmd.Start(); err != nil {
 		parentFile.Close()
 		childFile.Close()
+		if logFile != nil {
+			logFile.Close()
+		}
 		return Result{}, fmt.Errorf("start wrapper: %w", err)
 	}
 
 	// The wrapper owns childFile now; close our copy in the parent.
 	childFile.Close()
+	if logFile != nil {
+		logFile.Close()
+	}
 
 	// Receive the seccomp notify fd from the wrapper via SCM_RIGHTS.
 	notifyFD, recvErr := recvNotifyFD(parentFile)
@@ -405,6 +429,12 @@ func assembleWrapperEnv(base []string, argv0 string, wrapperEnv, envInject map[s
 			slog.Debug("kernelinstall: stripping signal sock fd from wrapper env (shim mode limitation)")
 			continue
 		}
+		if k == wrapperlog.EnvKey {
+			// The relay is the wrapper's parent here and sets its own
+			// authoritative log fd; a server-supplied value would point
+			// at an fd that does not exist in this process (issue #415).
+			continue
+		}
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
 	return env
@@ -414,8 +444,9 @@ func filterShimInternalEnv(env []string) []string {
 	out := make([]string, 0, len(env))
 	signalPrefix := signalSockFDKey + "="
 	argv0Prefix := argv0EnvKey + "="
+	logFDPrefix := wrapperlog.EnvKey + "="
 	for _, e := range env {
-		if strings.HasPrefix(e, signalPrefix) || strings.HasPrefix(e, argv0Prefix) {
+		if strings.HasPrefix(e, signalPrefix) || strings.HasPrefix(e, argv0Prefix) || strings.HasPrefix(e, logFDPrefix) {
 			continue
 		}
 		out = append(out, e)
