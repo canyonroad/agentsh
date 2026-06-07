@@ -291,6 +291,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 	// Fail fast if context is already cancelled (ptrace mode doesn't use CommandContext)
 	if tracer != nil && ctx.Err() != nil {
+		extra.closeWrapperLogPipe()
 		if stdoutPipeR != nil {
 			stdoutPipeR.Close()
 		}
@@ -311,6 +312,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 	if err := cmd.Start(); err != nil {
 		slog.Debug("exec command start failed", "command", req.Command, "error", err)
+		extra.closeWrapperLogPipe()
 		if stdoutPipeR != nil {
 			stdoutPipeR.Close()
 		}

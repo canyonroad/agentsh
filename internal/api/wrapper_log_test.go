@@ -10,6 +10,27 @@ import (
 	"time"
 )
 
+func TestCloseWrapperLogPipe_IdempotentAndNilSafe(t *testing.T) {
+	var nilCfg *extraProcConfig
+	nilCfg.closeWrapperLogPipe() // must not panic
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	cfg := &extraProcConfig{wrapperLogParent: r, wrapperLogChild: w}
+	cfg.closeWrapperLogPipe()
+	if cfg.wrapperLogParent != nil || cfg.wrapperLogChild != nil {
+		t.Fatal("fields not nil-ed after close")
+	}
+	// Second write end close must have happened: writing to a closed
+	// pipe *os.File errors immediately.
+	if _, err := w.Write([]byte("x")); err == nil {
+		t.Error("write end not closed")
+	}
+	cfg.closeWrapperLogPipe() // idempotent — must not panic
+}
+
 // syncBuffer makes bytes.Buffer safe for the drain goroutine + test reader.
 type syncBuffer struct {
 	mu  sync.Mutex

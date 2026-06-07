@@ -255,10 +255,10 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	// stderr. The fd number is the next ExtraFiles slot — 4 normally,
 	// 5 when the signal socket is present. On pipe failure the env var
 	// is omitted and the wrapper falls back to stderr (legacy behavior);
-	// logging must never block an exec. Like the notify/signal
-	// socketpairs above, the pipe ends are not closed if cmd.Start()
-	// later fails — the *os.File finalizers reap them at the next GC
-	// (rare path; any future explicit cleanup should include these).
+	// logging must never block an exec. Unlike the notify/signal
+	// socketpairs above (left to finalizers), the pipe ends are
+	// explicitly released via closeWrapperLogPipe on the pre-start
+	// cancel and cmd.Start()-failure paths.
 	if logR, logW, pipeErr := os.Pipe(); pipeErr == nil {
 		fdStr := strconv.Itoa(3 + len(extraCfg.extraFiles))
 		wrappedReq.Env[wrapperlog.EnvKey] = fdStr

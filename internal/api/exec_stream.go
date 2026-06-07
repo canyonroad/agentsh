@@ -370,6 +370,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	}
 
 	if tracer != nil && ctx.Err() != nil {
+		extra.closeWrapperLogPipe()
 		if stdoutPipeR != nil {
 			stdoutPipeR.Close()
 		}
@@ -389,6 +390,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	}
 
 	if err := cmd.Start(); err != nil {
+		extra.closeWrapperLogPipe()
 		if stdoutPipeR != nil {
 			stdoutPipeR.Close()
 		}

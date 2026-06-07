@@ -6,6 +6,27 @@ import (
 	"os"
 )
 
+// closeWrapperLogPipe releases both wrapper-log pipe ends on exec paths
+// that fail before startWrapperHandlers runs (pre-start cancel,
+// cmd.Start() failure). Safe to call multiple times and on configs
+// without a log pipe. The pre-existing notify/signal socketpairs are
+// deliberately left to their finalizers on these paths (see
+// buildWrapperSetup); the pipe is closed here because it is new on
+// this branch and cheap to handle (issue #415).
+func (e *extraProcConfig) closeWrapperLogPipe() {
+	if e == nil {
+		return
+	}
+	if e.wrapperLogChild != nil {
+		_ = e.wrapperLogChild.Close()
+		e.wrapperLogChild = nil
+	}
+	if e.wrapperLogParent != nil {
+		_ = e.wrapperLogParent.Close()
+		e.wrapperLogParent = nil
+	}
+}
+
 // startWrapperLogDrain forwards agentsh-unixwrap diagnostic lines from
 // the wrapper log pipe into the server log (issue #415). The wrapper
 // sets FD_CLOEXEC on its end, so EOF arrives when it execs the real
