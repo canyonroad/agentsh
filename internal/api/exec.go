@@ -274,10 +274,12 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		var pipeErr error
 		stdoutPipeR, stdoutPipeW, pipeErr = os.Pipe()
 		if pipeErr != nil {
+			extra.closeWrapperLogPipe()
 			return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stdout pipe: %w", pipeErr)
 		}
 		stderrPipeR, stderrPipeW, pipeErr = os.Pipe()
 		if pipeErr != nil {
+			extra.closeWrapperLogPipe()
 			stdoutPipeR.Close()
 			stdoutPipeW.Close()
 			return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stderr pipe: %w", pipeErr)
