@@ -4,6 +4,7 @@ package kernelinstall
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -131,7 +132,16 @@ func Install(p InstallParams) (Result, error) {
 		return Result{Action: ResultSkip, Reason: reason}, nil
 	}
 
-	// Step 4: check response completeness
+	// Step 4: ptrace mode — server has a live tracer and wants a PID handshake
+	// instead of a seccomp wrapper. Issue #416: without this branch the
+	// WrapperBinary=="" check below returns ResultSkip, leaving the child shell
+	// unassociated with a session and HandleExecve passes all its execs through
+	// as "sessionless_pid_attach" without policy checks.
+	if resp.PtraceMode {
+		return runPtraceHandshake(p, resp)
+	}
+
+	// Step 4b: check response completeness for seccomp wrapper path
 	if resp.WrapperBinary == "" || resp.NotifySocket == "" {
 		reason := "wrap-init returned empty WrapperBinary or NotifySocket"
 		if p.Mode == ModeOn {
@@ -317,6 +327,202 @@ func waitWrapper(cmd *exec.Cmd) int {
 		return ee.ExitCode()
 	}
 	return 1
+}
+
+// runPtraceHandshake handles attach_mode=pid ptrace mode responses from
+// wrap-init. It replaces the seccomp-wrapper relay for deployments where the
+// server runs a ptrace tracer rather than a seccomp user-notify listener.
+//
+// The server's wrap-init returns PtraceMode=true + NotifySocket (no
+// WrapperBinary). The tracer is already watching all descendants of the
+// workload supervisor via PTRACE_O_TRACEFORK, but newly-forked shells have
+// SessionlessPIDAttach=true and no policy enforcement. This function:
+//
+//  1. Forks a child that execs the real shell (p.RealShell + p.ShellArgs)
+//  2. Tells the server the child's PID via the notify socket
+//  3. Waits for ACK — which means the server has called BindSession on the
+//     child's TraceeState, promoting it to the named session
+//  4. After ACK the child is released (via a sync pipe) to exec the real shell
+//
+// Children of the shell then inherit the session ID from the bound state, so
+// HandleExecve evaluates command deny rules for every inner exec (sudo, etc).
+func runPtraceHandshake(p InstallParams, resp types.WrapInitResponse) (Result, error) {
+	notifySocket := resp.NotifySocket
+
+	// Sync pipe: child reads one byte from readEnd before exec'ing the shell.
+	// Parent writes after server ACK so the shell execs only once session is bound.
+	readFD, writeFD, err := createPipe()
+	if err != nil {
+		reason := fmt.Sprintf("ptrace handshake: create sync pipe: %v", err)
+		if p.Mode == ModeOn {
+			return Result{Action: ResultFailClosed, Reason: reason}, nil
+		}
+		return Result{Action: ResultSkip, Reason: reason}, nil
+	}
+
+	// Build the child's environment: same filtering as the seccomp relay path.
+	env := wrapenv.Filter(filterShimInternalEnv(p.Env), resp.EnvPolicy)
+	env = envinject.Apply(env, resp.EnvInject)
+
+	cmd := exec.Command(p.RealShell, p.ShellArgs...)
+	cmd.Env = env
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// Pass the read end of the sync pipe as an extra fd so the child can
+	// wait for the session-bind ACK before it begins executing.
+	readFile := os.NewFile(uintptr(readFD), "ptrace-sync-read")
+	cmd.ExtraFiles = []*os.File{readFile}
+
+	// Run the real shell via a POSIX wrapper that blocks on the sync pipe then
+	// execs with the correct argv[0]. exec -a is a bash/busybox-ash extension
+	// not supported by dash; only use it when Argv0 overrides the binary path
+	// (Alpine/busybox: RealShell=/bin/sh.real, Argv0=/bin/sh). Without the
+	// override the simpler exec "$@" works on all shells including dash.
+	// The fd is closed before exec so it doesn't leak into the user shell.
+	syncFDNum := 3 // ExtraFiles[0] → fd 3 in child
+	cmd.Path = p.RealShell
+
+	var wrapScript string
+	var shellArgs []string
+	if p.Argv0 != "" {
+		// Alpine/busybox: exec real shell with a different argv[0].
+		// exec -a is supported by busybox ash and bash but not dash; it's safe
+		// here because when Argv0 is set the shim has already confirmed the
+		// shell is busybox or bash (not dash).
+		wrapScript = fmt.Sprintf(
+			`read -r _ <&%d; exec %d<&-; _a="$1"; shift; exec -a "$_a" "$@"`,
+			syncFDNum, syncFDNum,
+		)
+		// $0="--", $1=Argv0 (for exec -a), $2=RealShell, $3+=ShellArgs
+		shellArgs = make([]string, 0, 3+len(p.ShellArgs))
+		shellArgs = append(shellArgs, p.RealShell, "-c", wrapScript, "--")
+		shellArgs = append(shellArgs, p.Argv0)         // $1: argv0 for exec -a
+		shellArgs = append(shellArgs, p.RealShell)     // $2: binary (after shift, $1)
+		shellArgs = append(shellArgs, p.ShellArgs...)  // $3+: shell args
+	} else {
+		// Common case: exec the real shell directly; argv[0] = binary path.
+		// exec "$@" is POSIX and works on dash, bash, and busybox ash.
+		wrapScript = fmt.Sprintf(
+			`read -r _ <&%d; exec %d<&-; exec "$@"`,
+			syncFDNum, syncFDNum,
+		)
+		// $0="--", $1=RealShell, $2+=ShellArgs
+		shellArgs = make([]string, 0, 2+len(p.ShellArgs))
+		shellArgs = append(shellArgs, p.RealShell, "-c", wrapScript, "--")
+		shellArgs = append(shellArgs, p.RealShell)     // $1: binary (exec "$@" → first arg)
+		shellArgs = append(shellArgs, p.ShellArgs...)  // $2+: shell args
+	}
+	cmd.Args = shellArgs
+
+	if err := cmd.Start(); err != nil {
+		_ = unix.Close(readFD)
+		_ = unix.Close(writeFD)
+		readFile.Close()
+		reason := fmt.Sprintf("ptrace handshake: start child: %v", err)
+		if p.Mode == ModeOn {
+			return Result{Action: ResultFailClosed, Reason: reason}, nil
+		}
+		return Result{Action: ResultSkip, Reason: reason}, nil
+	}
+	readFile.Close()
+	_ = unix.Close(readFD)
+
+	childPID := cmd.Process.Pid
+
+	// Connect to the server's notify socket and send the child PID.
+	conn, dialErr := net.DialTimeout("unix", notifySocket, 10*time.Second)
+	if dialErr != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = unix.Close(writeFD)
+		reason := fmt.Sprintf("ptrace handshake: dial notify socket: %v", dialErr)
+		if p.Mode == ModeOn {
+			return Result{Action: ResultFailClosed, Reason: reason}, nil
+		}
+		return Result{Action: ResultSkip, Reason: reason}, nil
+	}
+
+	pidBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(pidBytes, uint32(childPID))
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Write(pidBytes); err != nil {
+		conn.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = unix.Close(writeFD)
+		reason := fmt.Sprintf("ptrace handshake: send PID: %v", err)
+		if p.Mode == ModeOn {
+			return Result{Action: ResultFailClosed, Reason: reason}, nil
+		}
+		return Result{Action: ResultSkip, Reason: reason}, nil
+	}
+
+	// Wait for ACK/NACK from server (BindSession result).
+	ack := make([]byte, 1)
+	if _, err := conn.Read(ack); err != nil {
+		conn.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = unix.Close(writeFD)
+		reason := fmt.Sprintf("ptrace handshake: read ACK: %v", err)
+		if p.Mode == ModeOn {
+			return Result{Action: ResultFailClosed, Reason: reason}, nil
+		}
+		return Result{Action: ResultSkip, Reason: reason}, nil
+	}
+	conn.Close()
+
+	if ack[0] != 1 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = unix.Close(writeFD)
+		reason := "ptrace handshake: server rejected attach (NACK)"
+		slog.Warn("kernelinstall: ptrace session bind rejected", "pid", childPID)
+		if p.Mode == ModeOn {
+			return Result{Action: ResultFailClosed, Reason: reason}, nil
+		}
+		return Result{Action: ResultSkip, Reason: reason}, nil
+	}
+
+	// ACK: session is bound. Signal child to proceed by writing a byte.
+	if _, writeErr := unix.Write(writeFD, []byte{1}); writeErr != nil && !errors.Is(writeErr, unix.EPIPE) {
+		// EPIPE means child already exited (closed read end); any other error
+		// means the child is stuck on the pipe read and will hang — kill it.
+		slog.Warn("kernelinstall: write to sync pipe failed, killing child", "error", writeErr)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = unix.Close(writeFD)
+		reason := fmt.Sprintf("ptrace handshake: write sync pipe: %v", writeErr)
+		if p.Mode == ModeOn {
+			return Result{Action: ResultFailClosed, Reason: reason}, nil
+		}
+		return Result{Action: ResultSkip, Reason: reason}, nil
+	}
+	_ = unix.Close(writeFD)
+
+	slog.Debug("kernelinstall: ptrace session bound, child released", "pid", childPID)
+
+	exitCode := waitWrapper(cmd)
+	return Result{
+		Action:          ResultExec,
+		WrapperExitCode: exitCode,
+	}, nil
+}
+
+// createPipe creates a pipe and returns (readFD, writeFD, error).
+func createPipe() (int, int, error) {
+	var fds [2]int
+	if err := unix.Pipe2(fds[:], unix.O_CLOEXEC); err != nil {
+		return -1, -1, err
+	}
+	// Clear CLOEXEC on read end so it survives exec into child (needed for sync).
+	if _, _, errno := unix.Syscall(unix.SYS_FCNTL, uintptr(fds[0]), unix.F_SETFD, 0); errno != 0 {
+		unix.Close(fds[0])
+		unix.Close(fds[1])
+		return -1, -1, errno
+	}
+	return fds[0], fds[1], nil
 }
 
 // recvNotifyFD receives a file descriptor from a Unix socket using SCM_RIGHTS.

@@ -1148,6 +1148,222 @@ func TestAssembleWrapperEnv_EnvInjectCannotShadowWrapperLogFD(t *testing.T) {
 	}
 }
 
+// ─── Tests for PtraceMode response handling (#416) ──────────────────────────
+
+// TestInstall_PtraceModeACK verifies that when wrap-init returns a ptrace-mode
+// response (PtraceMode=true, WrapperBinary=""), Install performs the PID socket
+// handshake and runs the child shell, returning ResultExec with its exit code.
+// This is the primary regression guard for #416: before the fix, Install hit
+// the `WrapperBinary==""` check and returned ResultSkip, leaving the child
+// without session association and command deny rules unenforced.
+func TestInstall_PtraceModeACK(t *testing.T) {
+	orig := seccompFilterCount
+	seccompFilterCount = func() int { return 0 }
+	t.Cleanup(func() { seccompFilterCount = orig })
+
+	sockDir := t.TempDir()
+	notifySockPath := filepath.Join(sockDir, "ptrace-notify.sock")
+
+	ln, err := net.Listen("unix", notifySockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	pidCh := make(chan uint32, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 4)
+		if _, err := conn.Read(buf); err != nil {
+			return
+		}
+		pidCh <- uint32(buf[0]) | uint32(buf[1])<<8 | uint32(buf[2])<<16 | uint32(buf[3])<<24
+		conn.Write([]byte{1}) // ACK
+	}()
+
+	handler, _ := makeWrapInitHandler(200, types.WrapInitResponse{
+		PtraceMode:   true,
+		NotifySocket: notifySockPath,
+		// WrapperBinary deliberately empty — this is the ptrace-mode shape
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeAuto
+	p.RealShell = "/bin/sh"
+	p.ShellArgs = []string{"-c", "exit 0"}
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("Install error: %v", err)
+	}
+	if res.Action != ResultExec {
+		t.Fatalf("action = %v (reason=%q), want ResultExec", res.Action, res.Reason)
+	}
+	if res.WrapperExitCode != 0 {
+		t.Errorf("WrapperExitCode = %d, want 0", res.WrapperExitCode)
+	}
+
+	select {
+	case pid := <-pidCh:
+		if pid == 0 {
+			t.Error("received PID 0 — server should have gotten a real child PID")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("server never received PID from Install handshake")
+	}
+}
+
+// TestInstall_PtraceModeACK_ExitCode verifies that a non-zero child exit code
+// is faithfully propagated through WrapperExitCode.
+func TestInstall_PtraceModeACK_ExitCode(t *testing.T) {
+	orig := seccompFilterCount
+	seccompFilterCount = func() int { return 0 }
+	t.Cleanup(func() { seccompFilterCount = orig })
+
+	sockDir := t.TempDir()
+	notifySockPath := filepath.Join(sockDir, "ptrace-notify2.sock")
+	ln, err := net.Listen("unix", notifySockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 4)
+		conn.Read(buf)
+		conn.Write([]byte{1}) // ACK
+	}()
+
+	handler, _ := makeWrapInitHandler(200, types.WrapInitResponse{
+		PtraceMode:   true,
+		NotifySocket: notifySockPath,
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeAuto
+	p.RealShell = "/bin/sh"
+	p.ShellArgs = []string{"-c", "exit 42"}
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("Install error: %v", err)
+	}
+	if res.Action != ResultExec {
+		t.Fatalf("action = %v, want ResultExec", res.Action)
+	}
+	if res.WrapperExitCode != 42 {
+		t.Errorf("WrapperExitCode = %d, want 42", res.WrapperExitCode)
+	}
+}
+
+// TestInstall_PtraceModeNACK_ModeAuto verifies that when the server sends NACK
+// (attach rejected), Install returns ResultSkip in ModeAuto so the command
+// falls through to its existing enforcement path rather than fail-closing.
+func TestInstall_PtraceModeNACK_ModeAuto(t *testing.T) {
+	orig := seccompFilterCount
+	seccompFilterCount = func() int { return 0 }
+	t.Cleanup(func() { seccompFilterCount = orig })
+
+	sockDir := t.TempDir()
+	notifySockPath := filepath.Join(sockDir, "ptrace-nack.sock")
+	ln, err := net.Listen("unix", notifySockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 4)
+		conn.Read(buf)
+		conn.Write([]byte{0}) // NACK
+	}()
+
+	handler, _ := makeWrapInitHandler(200, types.WrapInitResponse{
+		PtraceMode:   true,
+		NotifySocket: notifySockPath,
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeAuto
+	p.RealShell = "/bin/sh"
+	p.ShellArgs = []string{"-c", "exit 0"}
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("Install error: %v", err)
+	}
+	if res.Action != ResultSkip {
+		t.Errorf("action = %v (reason=%q), want ResultSkip on NACK in ModeAuto", res.Action, res.Reason)
+	}
+}
+
+// TestInstall_PtraceModeNACK_ModeOn verifies fail-closed semantics on NACK
+// when shim_install=on.
+func TestInstall_PtraceModeNACK_ModeOn(t *testing.T) {
+	orig := seccompFilterCount
+	seccompFilterCount = func() int { return 0 }
+	t.Cleanup(func() { seccompFilterCount = orig })
+
+	sockDir := t.TempDir()
+	notifySockPath := filepath.Join(sockDir, "ptrace-nack-on.sock")
+	ln, err := net.Listen("unix", notifySockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 4)
+		conn.Read(buf)
+		conn.Write([]byte{0}) // NACK
+	}()
+
+	handler, _ := makeWrapInitHandler(200, types.WrapInitResponse{
+		PtraceMode:   true,
+		NotifySocket: notifySockPath,
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	p := baseParams(srv)
+	p.Mode = ModeOn
+	p.RealShell = "/bin/sh"
+	p.ShellArgs = []string{"-c", "exit 0"}
+
+	res, err := Install(p)
+	if err != nil {
+		t.Fatalf("Install error: %v", err)
+	}
+	if res.Action != ResultFailClosed {
+		t.Errorf("action = %v (reason=%q), want ResultFailClosed on NACK in ModeOn", res.Action, res.Reason)
+	}
+}
+
 // findModuleRoot walks up from the current working directory to find go.mod.
 func findModuleRoot(t *testing.T) string {
 	t.Helper()

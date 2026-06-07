@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/ptrace"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/wraphandoff"
 	"golang.org/x/sys/unix"
@@ -668,6 +670,68 @@ func TestAcceptSignalFD_ContinuesAfterWrongUID(t *testing.T) {
 	waitForConnClosed(t, secondConn)
 
 	_ = listener.Close()
+	waitForTestDone(t, done)
+}
+
+// TestAcceptPtracePID_BindsSession verifies the BindSession path introduced for
+// #416: when app.ptraceTracer is a *ptrace.Tracer with a sessionless tracee for
+// the sent PID, acceptPtracePID calls BindSession and responds with ACK (1).
+// This is the server-side half of the fix; the shim-side half is runPtraceHandshake.
+func TestAcceptPtracePID_BindsSession(t *testing.T) {
+	// Use the test process's own PID — it always exists in /proc and BindSession
+	// works purely on the in-memory tracee map (no ptrace seize needed).
+	childPID := os.Getpid()
+
+	tr := ptrace.NewTracerForTest(childPID)
+
+	cfg := &config.Config{}
+	app, mgr := newTestAppForWrap(t, cfg)
+	app.ptraceTracer = tr
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	socketDir := t.TempDir()
+	socketPath := filepath.Join(socketDir, "ptrace-bind.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.acceptPtracePID(context.Background(), listener, socketPath, s.ID, os.Getuid())
+	}()
+
+	conn := dialUnixConn(t, socketPath)
+	defer conn.Close()
+
+	pidBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(pidBytes, uint32(childPID))
+	if _, err := conn.Write(pidBytes); err != nil {
+		t.Fatalf("write PID: %v", err)
+	}
+
+	// Must receive ACK byte 1 — BindSession succeeded for the pre-seeded tracee.
+	ack := make([]byte, 1)
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Read(ack); err != nil {
+		t.Fatalf("read ACK: %v", err)
+	}
+	if ack[0] != 1 {
+		t.Errorf("expected ACK byte 1, got %d — BindSession path not taken", ack[0])
+	}
+
+	// Verify BindSession populated the session ID on the tracee.
+	if got, _ := tr.ResolveSessionID(int32(childPID)); got != s.ID {
+		t.Errorf("ResolveSessionID = %q, want %q", got, s.ID)
+	}
+
+	conn.Close() // releases the keepalive goroutine
 	waitForTestDone(t, done)
 }
 

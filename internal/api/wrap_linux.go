@@ -19,6 +19,7 @@ import (
 	"time"
 
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
+	"github.com/agentsh/agentsh/internal/ptrace"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/internal/wraphandoff"
@@ -416,6 +417,36 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 	// Clear read deadline for the keepalive phase
 	conn.SetDeadline(time.Time{})
 
+	// attach_mode=pid: the child shell is auto-inherited by the tracer via
+	// PTRACE_O_TRACEFORK and is already being traced with SessionlessPIDAttach=true.
+	// PtraceSeize would fail EPERM for an already-traced process. Instead, call
+	// BindSession to promote the existing TraceeState to the named session so
+	// HandleExecve sees a real session and enforces command policy. Issue #416.
+	tr, isBound := a.ptraceTracer.(*ptrace.Tracer)
+	if isBound {
+		if bindErr := tr.BindSession(pid, sessionID); bindErr == nil {
+			// Already-traced PID: session bound. Send ACK and hold the keepalive.
+			conn.Write([]byte{1})
+			slog.Info("ptrace wrap: session bound to already-traced shell", "pid", pid, "session_id", sessionID)
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, 1)
+				select {
+				case <-ctx.Done():
+				default:
+					conn.Read(buf) // blocks until shell exits or connection closes
+				}
+			}()
+			return
+		}
+		// BindSession returned an error (PID not in tracees map), which means either
+		// a.ptraceTracer is not a *ptrace.Tracer or the tracee was never added.
+		// In production neither can happen (wrap.go gates this path behind a non-nil
+		// *ptrace.Tracer and the tracer adds children via PTRACE_EVENT_FORK before
+		// releasing the parent stop). Fall through to ptraceExecAttach, which will
+		// return EPERM for an already-traced child.
+	}
+
 	_, _, attachErr := ptraceExecAttach(a.ptraceTracer, pid, sessionID, "", false)
 	if attachErr != nil {
 		conn.Write([]byte{0}) // NACK
@@ -432,14 +463,10 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 	go func() {
 		defer conn.Close()
 		buf := make([]byte, 1)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				conn.Read(buf) // blocks until close or error
-				return
-			}
+		select {
+		case <-ctx.Done():
+		default:
+			conn.Read(buf) // blocks until shell exits or connection closes
 		}
 	}()
 }
