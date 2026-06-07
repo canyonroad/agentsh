@@ -54,6 +54,10 @@ func setupLogging() {
 		return
 	}
 	f := os.NewFile(uintptr(fd), "wrapper-log")
+	if f == nil {
+		log.Printf("warning: cannot adopt %s=%d; wrapper diagnostics stay on stderr", wrapperlog.EnvKey, fd)
+		return
+	}
 	log.SetOutput(f)
 	slog.SetDefault(slog.New(slog.NewTextHandler(f, nil)))
 	logDest = f

@@ -76,7 +76,10 @@ func TestSetupLogging_InvalidFDFallsBackToStderr(t *testing.T) {
 	orig := slog.Default()
 	defer resetLogging(orig)
 
-	// Learn a definitely-closed fd number.
+	// Learn a definitely-closed fd number. NOTE: this assumes the fd
+	// number is not reused by another goroutine between Close and the
+	// Fstat inside setupLogging — a tiny window we accept; if this test
+	// ever flakes, switch to a number above the process rlimit.
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
@@ -103,6 +106,9 @@ func TestSetupLogging_NonNumericFallsBackToStderr(t *testing.T) {
 	setupLogging()
 	if logDest != nil {
 		t.Fatal("expected stderr fallback for non-numeric value")
+	}
+	if os.Getenv(wrapperlog.EnvKey) != "" {
+		t.Error("env var must be stripped even on parse failure")
 	}
 }
 
