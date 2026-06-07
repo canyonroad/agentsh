@@ -23,6 +23,12 @@ func startWrapperLogDrain(r *os.File, logger *slog.Logger, sessionID, command st
 		for sc.Scan() {
 			logger.Info("unixwrap", "session_id", sessionID, "command", command, "line", sc.Text())
 		}
+		// Normal exit is EOF (wrapper exec'd or died). Anything else —
+		// e.g. bufio.ErrTooLong past the 64KiB token cap — silently
+		// stops draining, so leave a trace for operators.
+		if err := sc.Err(); err != nil {
+			logger.Debug("unixwrap log drain stopped early", "session_id", sessionID, "error", err)
+		}
 	}()
 	return done
 }
