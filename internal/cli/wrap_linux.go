@@ -170,16 +170,19 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 	// Debug-level fallback note on open failure — a Warn would reintroduce
 	// the exact noise this removes. wrap.go closes every extraFiles entry
 	// after Start, so no extra cleanup is needed.
+	// os.Getenv returns the FIRST duplicate, so drop any copy of the
+	// key carried in by the inherited environment, env_inject, or
+	// server WrapperEnv. Unconditional: even on open failure a stale
+	// value must not survive — inside the wrapper it could name a
+	// valid-but-unrelated fd (e.g. the signal socket at fd 4) and
+	// receive routed diagnostics.
+	env = stripEnvKey(env, wrapperlog.EnvKey)
 	logFile, logErr := wrapperlog.OpenStateLogFile()
 	if logErr != nil {
 		// Debug, not Warn: the CLI's stderr is the user's terminal and
 		// the wrapper falls back to it anyway (legacy behavior).
 		slog.Debug("wrap: wrapper log file unavailable; wrapper diagnostics stay on stderr", "error", logErr)
 	} else {
-		// os.Getenv returns the FIRST duplicate, so drop any copy of
-		// the key carried in by the inherited environment, env_inject,
-		// or server WrapperEnv before appending the authoritative one.
-		env = stripEnvKey(env, wrapperlog.EnvKey)
 		env = append(env, fmt.Sprintf("%s=%d", wrapperlog.EnvKey, 3+len(extraFiles)))
 		extraFiles = append(extraFiles, logFile)
 	}
