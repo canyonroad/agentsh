@@ -24,6 +24,7 @@ import (
 	"github.com/agentsh/agentsh/internal/policy/signing"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/signal"
+	"github.com/agentsh/agentsh/internal/wrapperlog"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -246,6 +247,25 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		extraCfg.signalEngine = sessionPolicy.SignalEngine()
 		extraCfg.signalRegistry = signal.NewPIDRegistry(sessionID, os.Getpid())
 		extraCfg.signalCommandID = func() string { return s.CurrentCommandID() }
+	}
+
+	// Wrapper log routing (issue #415): hand the wrapper a pipe for its
+	// diagnostics (the "seccomp: filter loaded" line, landlock notices)
+	// so they land in the server log instead of the wrapped command's
+	// stderr. The fd number is the next ExtraFiles slot — 4 normally,
+	// 5 when the signal socket is present. On pipe failure the env var
+	// is omitted and the wrapper falls back to stderr (legacy behavior);
+	// logging must never block an exec.
+	if logR, logW, pipeErr := os.Pipe(); pipeErr == nil {
+		fdStr := strconv.Itoa(3 + len(extraCfg.extraFiles))
+		wrappedReq.Env[wrapperlog.EnvKey] = fdStr
+		extraCfg.env[wrapperlog.EnvKey] = fdStr
+		extraCfg.extraFiles = append(extraCfg.extraFiles, logW)
+		extraCfg.wrapperLogParent = logR
+		extraCfg.wrapperLogChild = logW
+	} else {
+		slog.Warn("wrapper log pipe unavailable; wrapper diagnostics will appear on command stderr",
+			"session_id", sessionID, "error", pipeErr)
 	}
 
 	return &wrapperSetupResult{wrappedReq: wrappedReq, extraCfg: extraCfg}

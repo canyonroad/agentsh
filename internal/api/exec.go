@@ -29,13 +29,13 @@ type extraProcConfig struct {
 	extraFiles       []*os.File
 	env              map[string]string
 	envInject        map[string]string // Operator-trusted env vars that bypass policy filtering
-	notifyParentSock *os.File       // Parent socket to receive seccomp notify fd (Linux only)
-	notifySessionID  string         // Session ID for notify handler
-	notifyStore      eventStore     // Event store for notify handler
-	notifyBroker     eventBroker    // Event broker for notify handler
-	notifyPolicy     *policy.Engine // Policy engine for notify handler
-	execveHandler    any            // Execve handler (*unixmon.ExecveHandler on Linux, nil otherwise)
-	blockList        any            // Seccomp block-list dispatch config (*unixmon.BlockListConfig on Linux, nil otherwise)
+	notifyParentSock *os.File          // Parent socket to receive seccomp notify fd (Linux only)
+	notifySessionID  string            // Session ID for notify handler
+	notifyStore      eventStore        // Event store for notify handler
+	notifyBroker     eventBroker       // Event broker for notify handler
+	notifyPolicy     *policy.Engine    // Policy engine for notify handler
+	execveHandler    any               // Execve handler (*unixmon.ExecveHandler on Linux, nil otherwise)
+	blockList        any               // Seccomp block-list dispatch config (*unixmon.BlockListConfig on Linux, nil otherwise)
 
 	// File monitor config
 	fileMonitorCfg  config.SandboxSeccompFileMonitorConfig
@@ -63,6 +63,14 @@ type extraProcConfig struct {
 	// ptraceSync indicates the READY/GO handshake is enabled for hybrid mode.
 	// Only true when ptrace is active AND seccomp notify features are enabled.
 	ptraceSync bool
+
+	// Wrapper log routing (issue #415): pipe carrying unixwrap
+	// diagnostics into the server log. wrapperLogChild is the write end
+	// inherited by the wrapper via extraFiles; the parent's copy is
+	// closed in startWrapperHandlers so the drain goroutine sees EOF
+	// when the wrapper execs (its own copy is CLOEXEC).
+	wrapperLogParent *os.File
+	wrapperLogChild  *os.File
 }
 
 // eventStore is the interface for storing events.
@@ -240,7 +248,12 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		}
 	}
 	cmd.Env = env
-	slog.Debug("exec env final", "command", req.Command, "env_count", len(env), "has_extra", extra != nil, "envInject_count", func() int { if extra != nil { return len(extra.envInject) }; return 0 }())
+	slog.Debug("exec env final", "command", req.Command, "env_count", len(env), "has_extra", extra != nil, "envInject_count", func() int {
+		if extra != nil {
+			return len(extra.envInject)
+		}
+		return 0
+	}())
 	if extra != nil && len(extra.extraFiles) > 0 {
 		cmd.ExtraFiles = append(cmd.ExtraFiles, extra.extraFiles...)
 	}
@@ -278,10 +291,18 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 	// Fail fast if context is already cancelled (ptrace mode doesn't use CommandContext)
 	if tracer != nil && ctx.Err() != nil {
-		if stdoutPipeR != nil { stdoutPipeR.Close() }
-		if stderrPipeR != nil { stderrPipeR.Close() }
-		if stdoutPipeW != nil { stdoutPipeW.Close() }
-		if stderrPipeW != nil { stderrPipeW.Close() }
+		if stdoutPipeR != nil {
+			stdoutPipeR.Close()
+		}
+		if stderrPipeR != nil {
+			stderrPipeR.Close()
+		}
+		if stdoutPipeW != nil {
+			stdoutPipeW.Close()
+		}
+		if stderrPipeW != nil {
+			stderrPipeW.Close()
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return 124, nil, nil, 0, 0, false, false, types.ExecResources{}, ctx.Err()
 		}
@@ -290,10 +311,18 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 	if err := cmd.Start(); err != nil {
 		slog.Debug("exec command start failed", "command", req.Command, "error", err)
-		if stdoutPipeR != nil { stdoutPipeR.Close() }
-		if stderrPipeR != nil { stderrPipeR.Close() }
-		if stdoutPipeW != nil { stdoutPipeW.Close() }
-		if stderrPipeW != nil { stderrPipeW.Close() }
+		if stdoutPipeR != nil {
+			stdoutPipeR.Close()
+		}
+		if stderrPipeR != nil {
+			stderrPipeR.Close()
+		}
+		if stdoutPipeW != nil {
+			stdoutPipeW.Close()
+		}
+		if stderrPipeW != nil {
+			stderrPipeW.Close()
+		}
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
 	}
 	slog.Debug("exec command started", "command", req.Command, "pid", cmd.Process.Pid)
@@ -303,8 +332,20 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		stdoutPipeW.Close()
 		stderrPipeW.Close()
 		pipeWG.Add(2)
-		go func() { defer pipeWG.Done(); if _, err := io.Copy(stdoutW, stdoutPipeR); err != nil { slog.Debug("ptrace stdout drain error", "error", err) }; stdoutPipeR.Close() }()
-		go func() { defer pipeWG.Done(); if _, err := io.Copy(stderrW, stderrPipeR); err != nil { slog.Debug("ptrace stderr drain error", "error", err) }; stderrPipeR.Close() }()
+		go func() {
+			defer pipeWG.Done()
+			if _, err := io.Copy(stdoutW, stdoutPipeR); err != nil {
+				slog.Debug("ptrace stdout drain error", "error", err)
+			}
+			stdoutPipeR.Close()
+		}()
+		go func() {
+			defer pipeWG.Done()
+			if _, err := io.Copy(stderrW, stderrPipeR); err != nil {
+				slog.Debug("ptrace stderr drain error", "error", err)
+			}
+			stderrPipeR.Close()
+		}()
 	}
 
 	pgid := 0
@@ -771,6 +812,18 @@ func mergeEnv(base []string, s *session.Session, overrides map[string]string) []
 func startWrapperHandlers(ctx context.Context, extra *extraProcConfig, pid, pgid int, ptraceReady chan<- error) {
 	if extra == nil {
 		return
+	}
+	// Wrapper log routing (issue #415): the child now owns its dup of
+	// the write end; close ours so the drain goroutine gets EOF at the
+	// wrapper's exec. Called from every post-start path (exec.go and
+	// exec_stream.go, hybrid and wrapper-only), exactly once.
+	if extra.wrapperLogChild != nil {
+		_ = extra.wrapperLogChild.Close()
+		extra.wrapperLogChild = nil
+	}
+	if extra.wrapperLogParent != nil {
+		_ = startWrapperLogDrain(extra.wrapperLogParent, slog.Default(), extra.notifySessionID, extra.origCommand)
+		extra.wrapperLogParent = nil
 	}
 	if extra.notifyParentSock != nil {
 		startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker, extra.execveHandler, extra.fileMonitorCfg, extra.landlockEnabled, extra.blockList, ptraceReady)
