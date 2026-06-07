@@ -412,8 +412,13 @@ func filterSignalSockFD(env []string) []string {
 // socketpair, so the wrapper must not try to open that fd.
 func assembleWrapperEnv(base []string, argv0 string, wrapperEnv, envInject map[string]string) []string {
 	// Copy so appends never alias the caller's backing array (Apply may
-	// return base unchanged when envInject is empty).
-	env := append([]string(nil), envinject.Apply(base, envInject)...)
+	// return base unchanged when envInject is empty). Re-run the
+	// internal-marker filter AFTER Apply: env_inject is operator
+	// controlled and applied verbatim, and os.Getenv returns the FIRST
+	// duplicate — an injected AGENTSH_WRAPPER_LOG_FD / signal-fd /
+	// argv0 would otherwise shadow the authoritative values appended
+	// below (issue #415).
+	env := append([]string(nil), filterShimInternalEnv(envinject.Apply(base, envInject))...)
 	env = append(env, "AGENTSH_NOTIFY_SOCK_FD=3")
 	// Plumb the original invocation name (e.g. "/bin/sh") through to the
 	// wrapper so it can override argv[0] when execve'ing the real shell.

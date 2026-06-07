@@ -1134,6 +1134,20 @@ func TestInstall_PassesWrapperLogFDAndCreatesStateLogFile(t *testing.T) {
 	}
 }
 
+func TestAssembleWrapperEnv_EnvInjectCannotShadowWrapperLogFD(t *testing.T) {
+	env := assembleWrapperEnv(
+		[]string{"PATH=/bin"},
+		"",
+		nil,
+		map[string]string{wrapperlog.EnvKey: "9"}, // operator env_inject
+	)
+	for _, e := range env {
+		if strings.HasPrefix(e, wrapperlog.EnvKey+"=") {
+			t.Fatalf("env_inject value for %s survived into wrapper env: %v", wrapperlog.EnvKey, env)
+		}
+	}
+}
+
 // findModuleRoot walks up from the current working directory to find go.mod.
 func findModuleRoot(t *testing.T) string {
 	t.Helper()

@@ -213,6 +213,10 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		envInject = make(map[string]string)
 	}
 	envInject["AGENTSH_PTRACE_SYNC"] = ptraceSyncValue
+	// The wrapper log fd is set authoritatively in wrappedReq.Env /
+	// extraCfg.env by the pipe block below; an operator env_inject copy
+	// would shadow it in the child env (issue #415).
+	delete(envInject, wrapperlog.EnvKey)
 
 	extraCfg := &extraProcConfig{
 		extraFiles:       []*os.File{sp.child},
