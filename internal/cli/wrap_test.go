@@ -235,6 +235,10 @@ func TestSetupWrapInterception_CallsWrapInit(t *testing.T) {
 		t.Skip("wrap interception requires Linux or macOS")
 	}
 
+	// Redirect the state dir: platformSetupWrap opens the wrapper log
+	// file (issue #415) and must not touch the real ~/.local/state.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
 	mc := &mockWrapClient{
 		wrapInitResp: types.WrapInitResponse{
 			WrapperBinary: "/bin/true",
@@ -263,7 +267,8 @@ func TestSetupWrapInterception_CallsWrapInit(t *testing.T) {
 		assert.Equal(t, "/bin/true", lcfg.command, "command should be the wrapper binary")
 		assert.Equal(t, []string{"--", "/bin/echo", "hello"}, lcfg.args, "args should be -- agent-cmd agent-args")
 		assert.NotNil(t, lcfg.extraFiles, "extra files should be set (socket pair child)")
-		assert.GreaterOrEqual(t, len(lcfg.extraFiles), 1, "should have at least one extra file (child socket); log file may also be appended")
+		// notify child + wrapper log file (state dir redirected above).
+		assert.Len(t, lcfg.extraFiles, 2)
 		assert.NotNil(t, lcfg.postStart, "postStart should be set")
 	} else if runtime.GOOS == "darwin" {
 		// On macOS with a wrapper binary, we get the wrapper command + args, but no extraFiles/postStart
