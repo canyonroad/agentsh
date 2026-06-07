@@ -13,6 +13,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/client"
 	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/testcontainers/testcontainers-go"
 )
 
 // TestExecPath_WrapperLogRoutedOffCommandStderr is the end-to-end
@@ -110,26 +111,48 @@ func TestExecPath_WrapperLogRoutedOffCommandStderr(t *testing.T) {
 		t.Fatalf("wrapper diagnostic leaked onto command stderr (issue #415 regression):\n%s", res.Result.Stderr)
 	}
 
-	// (b) The diagnostic landed in the server log instead, at default
-	// level (logging.level=info in the test config). The drained line
-	// is embedded as the `line` attr of the server's "unixwrap" record;
-	// the substring survives TextHandler quoting.
+	// (b) The diagnostic lands in the server log at default level
+	// (logging.level=info in the test config). The drain goroutine is
+	// asynchronous to the Exec response (fire-and-forget in
+	// startWrapperHandlers) and Docker's log driver adds its own
+	// propagation delay, so poll rather than read once.
 	logsCtx, logsCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer logsCancel()
-	logsReader, err := ctr.Logs(logsCtx)
-	if err != nil {
-		t.Fatalf("container logs: %v", err)
+	var serverLog string
+	for {
+		serverLog = readContainerLogs(t, logsCtx, ctr)
+		if strings.Contains(serverLog, "seccomp: filter loaded") && strings.Contains(serverLog, "wait_killable") {
+			break
+		}
+		select {
+		case <-logsCtx.Done():
+			// fall through to the assertions below with the last read,
+			// so the failure message carries the full server log.
+		case <-time.After(500 * time.Millisecond):
+			continue
+		}
+		break
 	}
-	defer logsReader.Close()
-	logBytes, err := io.ReadAll(logsReader)
-	if err != nil {
-		t.Fatalf("read container logs: %v", err)
-	}
-	serverLog := string(logBytes)
 	if !strings.Contains(serverLog, "seccomp: filter loaded") {
 		t.Fatalf("wrapper diagnostic missing from server log (acceptance criterion #2)\nserver log:\n%s", serverLog)
 	}
 	if !strings.Contains(serverLog, "wait_killable") {
 		t.Fatalf("wait_killable field missing from drained diagnostic\nserver log:\n%s", serverLog)
 	}
+}
+
+// readContainerLogs returns the container's full log history; Logs
+// streams from the start on every call, so each poll sees everything.
+func readContainerLogs(t *testing.T, ctx context.Context, ctr testcontainers.Container) string {
+	t.Helper()
+	reader, err := ctr.Logs(ctx)
+	if err != nil {
+		t.Fatalf("container logs: %v", err)
+	}
+	defer reader.Close()
+	b, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read container logs: %v", err)
+	}
+	return string(b)
 }
