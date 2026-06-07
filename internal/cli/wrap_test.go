@@ -263,7 +263,7 @@ func TestSetupWrapInterception_CallsWrapInit(t *testing.T) {
 		assert.Equal(t, "/bin/true", lcfg.command, "command should be the wrapper binary")
 		assert.Equal(t, []string{"--", "/bin/echo", "hello"}, lcfg.args, "args should be -- agent-cmd agent-args")
 		assert.NotNil(t, lcfg.extraFiles, "extra files should be set (socket pair child)")
-		assert.Len(t, lcfg.extraFiles, 1, "should have exactly one extra file (child socket)")
+		assert.GreaterOrEqual(t, len(lcfg.extraFiles), 1, "should have at least one extra file (child socket); log file may also be appended")
 		assert.NotNil(t, lcfg.postStart, "postStart should be set")
 	} else if runtime.GOOS == "darwin" {
 		// On macOS with a wrapper binary, we get the wrapper command + args, but no extraFiles/postStart

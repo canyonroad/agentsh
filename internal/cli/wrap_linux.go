@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -17,6 +18,7 @@ import (
 	"github.com/agentsh/agentsh/internal/envinject"
 	"github.com/agentsh/agentsh/internal/wrapenv"
 	"github.com/agentsh/agentsh/internal/wraphandoff"
+	"github.com/agentsh/agentsh/internal/wrapperlog"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
@@ -160,6 +162,21 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 	extraFiles := []*os.File{childFile}
 	if hasSignalSocket {
 		extraFiles = append(extraFiles, signalChildFile)
+	}
+
+	// Wrapper log routing (issue #415): the CLI's stderr is the user's
+	// terminal, so route wrapper diagnostics to the state-dir log file.
+	// fd number = next ExtraFiles slot (4, or 5 with the signal socket).
+	// Silent stderr fallback on open failure — warning here would
+	// reintroduce the exact noise this removes. wrap.go closes every
+	// extraFiles entry after Start, so no extra cleanup is needed.
+	if logFile, err := wrapperlog.OpenStateLogFile(); err == nil {
+		// os.Getenv returns the FIRST duplicate, so drop any copy of
+		// the key carried in by the inherited environment, env_inject,
+		// or server WrapperEnv before appending the authoritative one.
+		env = stripEnvKey(env, wrapperlog.EnvKey)
+		env = append(env, fmt.Sprintf("%s=%d", wrapperlog.EnvKey, 3+len(extraFiles)))
+		extraFiles = append(extraFiles, logFile)
 	}
 
 	return &wrapLaunchConfig{
@@ -320,4 +337,20 @@ func isTerminal(fd uintptr) bool {
 func reclaimTerminal() {
 	pgid := int32(unix.Getpgrp())
 	_, _, _ = unix.Syscall(unix.SYS_IOCTL, os.Stdin.Fd(), unix.TIOCSPGRP, uintptr(unsafe.Pointer(&pgid)))
+}
+
+// stripEnvKey returns env without any KEY=... entries for key.
+// The env slice is filtered in-place (env[:0] alias) which is safe here
+// because env is locally owned via append chains and no reference to the
+// pre-strip slice is used afterward.
+func stripEnvKey(env []string, key string) []string {
+	out := env[:0]
+	prefix := key + "="
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }

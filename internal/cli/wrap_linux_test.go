@@ -14,6 +14,15 @@ import (
 	"github.com/agentsh/agentsh/internal/wraphandoff"
 )
 
+func TestStripEnvKey(t *testing.T) {
+	in := []string{"A=1", "AGENTSH_WRAPPER_LOG_FD=9", "B=2", "AGENTSH_WRAPPER_LOG_FD=10"}
+	out := stripEnvKey(in, "AGENTSH_WRAPPER_LOG_FD")
+	want := []string{"A=1", "B=2"}
+	if len(out) != len(want) || out[0] != want[0] || out[1] != want[1] {
+		t.Fatalf("stripEnvKey = %v, want %v", out, want)
+	}
+}
+
 func TestForwardNotifyFDWithPIDWaitsForServerOK(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "notify.sock")
