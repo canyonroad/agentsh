@@ -167,10 +167,15 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 	// Wrapper log routing (issue #415): the CLI's stderr is the user's
 	// terminal, so route wrapper diagnostics to the state-dir log file.
 	// fd number = next ExtraFiles slot (4, or 5 with the signal socket).
-	// Silent stderr fallback on open failure — warning here would
-	// reintroduce the exact noise this removes. wrap.go closes every
-	// extraFiles entry after Start, so no extra cleanup is needed.
-	if logFile, err := wrapperlog.OpenStateLogFile(); err == nil {
+	// Debug-level fallback note on open failure — a Warn would reintroduce
+	// the exact noise this removes. wrap.go closes every extraFiles entry
+	// after Start, so no extra cleanup is needed.
+	logFile, logErr := wrapperlog.OpenStateLogFile()
+	if logErr != nil {
+		// Debug, not Warn: the CLI's stderr is the user's terminal and
+		// the wrapper falls back to it anyway (legacy behavior).
+		slog.Debug("wrap: wrapper log file unavailable; wrapper diagnostics stay on stderr", "error", logErr)
+	} else {
 		// os.Getenv returns the FIRST duplicate, so drop any copy of
 		// the key carried in by the inherited environment, env_inject,
 		// or server WrapperEnv before appending the authoritative one.
@@ -340,9 +345,8 @@ func reclaimTerminal() {
 }
 
 // stripEnvKey returns env without any KEY=... entries for key.
-// The env slice is filtered in-place (env[:0] alias) which is safe here
-// because env is locally owned via append chains and no reference to the
-// pre-strip slice is used afterward.
+// WARNING: filters in place via env[:0] — it mutates the input slice's
+// backing array, so callers must pass a slice they exclusively own.
 func stripEnvKey(env []string, key string) []string {
 	out := env[:0]
 	prefix := key + "="
