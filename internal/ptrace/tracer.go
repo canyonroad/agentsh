@@ -526,6 +526,33 @@ func (t *Tracer) ResumePID(pid int) error {
 	return nil
 }
 
+// BindSession promotes an already-traced, sessionless process to a named
+// session. It finds all TraceeState entries whose TID or TGID matches pid,
+// sets SessionID to sessionID, and clears SessionlessPIDAttach. This is the
+// correct path for attach_mode=pid + shim: when the shim forks a child shell
+// that is auto-inherited by the tracer via PTRACE_O_TRACEFORK, the child
+// carries SessionlessPIDAttach=true (no session yet). BindSession wires the
+// session the shim's wrap-init handshake established, so subsequent HandleExecve
+// calls for that shell and its descendants reach the policy engine rather than
+// passing through as "sessionless_pid_attach". Issue #416.
+func (t *Tracer) BindSession(pid int, sessionID string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	found := false
+	for _, state := range t.tracees {
+		if state.TID == pid || state.TGID == pid {
+			state.SessionID = sessionID
+			state.SessionlessPIDAttach = false
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("BindSession: pid %d not found in active tracees", pid)
+	}
+	return nil
+}
+
 // signalAttachDone signals the WaitAttached channel for a PID, if one exists.
 func (t *Tracer) signalAttachDone(pid int, err error) {
 	if v, ok := t.attachDone.Load(pid); ok {
