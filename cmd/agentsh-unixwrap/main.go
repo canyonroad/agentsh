@@ -29,19 +29,22 @@ import (
 
 func main() {
 	log.SetFlags(0)
+	// Route diagnostics off the wrapped command's stderr before anything
+	// can log (issue #415).
+	setupLogging()
 	if len(os.Args) < 3 || os.Args[1] != "--" {
-		log.Fatalf("usage: %s -- <command> [args...]", os.Args[0])
+		fatalf("usage: %s -- <command> [args...]", os.Args[0])
 	}
 
 	sockFD, err := notifySockFD()
 	if err != nil {
-		log.Fatalf("notify fd: %v", err)
+		fatalf("notify fd: %v", err)
 	}
 
 	// Load config from environment.
 	cfg, err := loadConfig()
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		fatalf("load config: %v", err)
 	}
 
 	// Authorize the server process to read our memory via ProcessVMReadv.
@@ -90,7 +93,7 @@ func main() {
 	cmd := os.Args[2]
 	cmdPath, err := resolveCommandPath(cmd)
 	if err != nil {
-		log.Fatalf("resolve command %q: %v", cmd, err)
+		fatalf("resolve command %q: %v", cmd, err)
 	}
 	args := applyArgv0Override(os.Args[2:], os.Getenv("AGENTSH_UNIXWRAP_ARGV0"))
 
@@ -118,7 +121,7 @@ func main() {
 		os.Exit(0)
 	}
 	if err != nil {
-		log.Fatalf("install seccomp filter: %v", err)
+		fatalf("install seccomp filter: %v", err)
 	}
 	defer filt.Close()
 
@@ -136,7 +139,7 @@ func main() {
 				// Without a working notification handler, the command cannot
 				// function at all — fail fast with a clear error.
 				filt.Close()
-				log.Fatalf("seccomp notify handler cannot operate: %v\n"+
+				fatalf("seccomp notify handler cannot operate: %v\n"+
 					"The seccomp filter was installed but the notification receive ioctl is\n"+
 					"blocked (likely by AppArmor or container security policy). Without a\n"+
 					"working notification handler, all intercepted syscalls will fail.\n"+
@@ -156,14 +159,14 @@ func main() {
 	// the filter returns fd=-1 and there is nothing to hand off.
 	if notifFD >= 0 {
 		if err := sendFD(sockFD, notifFD); err != nil {
-			log.Fatalf("send fd: %v", err)
+			fatalf("send fd: %v", err)
 		}
 
 		// Wait for ACK from the server confirming it has received the notify fd
 		// and started the handler. This prevents a race where we exec before the
 		// handler is ready to process seccomp notifications.
 		if err := waitForACK(func(b []byte) (int, error) { return unix.Read(sockFD, b) }); err != nil {
-			log.Fatalf("ACK handshake failed: %v", err)
+			fatalf("ACK handshake failed: %v", err)
 		}
 	}
 
@@ -179,7 +182,7 @@ func main() {
 			sigFD := sigFilter.NotifFD()
 			if sigFD >= 0 {
 				if err := sendFD(sigSockFD, sigFD); err != nil {
-					log.Fatalf("send signal fd: %v", err)
+					fatalf("send signal fd: %v", err)
 				}
 			}
 		}
@@ -199,7 +202,7 @@ func main() {
 	// Only runs when notifFD >= 0 (seccomp is active) and AGENTSH_PTRACE_SYNC=1.
 	if notifFD >= 0 && os.Getenv("AGENTSH_PTRACE_SYNC") == "1" {
 		if _, err := unix.Write(sockFD, []byte{'R'}); err != nil {
-			log.Fatalf("send READY byte: %v", err)
+			fatalf("send READY byte: %v", err)
 		}
 		// Set 30s receive timeout to prevent hanging if server crashes.
 		_ = unix.SetsockoptTimeval(sockFD, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Sec: 30})
@@ -212,10 +215,10 @@ func main() {
 			}
 			return n, err
 		}); err != nil {
-			log.Fatalf("wait for GO byte (30s timeout): %v", err)
+			fatalf("wait for GO byte (30s timeout): %v", err)
 		}
 		if goBuf[0] != 'G' {
-			log.Fatalf("unexpected GO byte: got 0x%02x, expected 'G'", goBuf[0])
+			fatalf("unexpected GO byte: got 0x%02x, expected 'G'", goBuf[0])
 		}
 	}
 
@@ -254,7 +257,7 @@ func main() {
 	// faccessat2 — see #283 bug B) do not get intercepted by the
 	// file-monitor notify handler.
 	if err := syscall.Exec(cmdPath, args, os.Environ()); err != nil {
-		log.Fatalf("exec %s failed: %v", cmd, err)
+		fatalf("exec %s failed: %v", cmd, err)
 	}
 }
 
