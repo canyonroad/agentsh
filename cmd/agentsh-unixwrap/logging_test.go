@@ -3,14 +3,20 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/wrapperlog"
 	"golang.org/x/sys/unix"
 )
@@ -151,5 +157,75 @@ func TestWriteFatal_DualWritesWhenRouted(t *testing.T) {
 	}
 	if !strings.Contains(string(errOut), "boom: 42") {
 		t.Errorf("stderr missing message: %q", errOut)
+	}
+}
+
+// wrapperFMHelperEnv gates the re-exec child body for
+// TestSetupLogging_NoSelfDeadlockUnderFileMonitor. Never set it outside
+// the parent->child dispatch: the child installs a real seccomp filter.
+const wrapperFMHelperEnv = "AGENTSH_TEST_WRAPPER_FM_HELPER"
+
+// TestSetupLogging_NoSelfDeadlockUnderFileMonitor re-execs the test
+// binary to reproduce the #415/PR#419 CI hang: with diagnostics routed
+// (AGENTSH_WRAPPER_LOG_FD set) and a file-monitor seccomp filter
+// installed, the first routed slog record must not perform a trapped
+// syscall (lazy tzdata openat) while nobody drains the notify fd —
+// that self-deadlocks the wrapper. The child routes its logs, installs
+// a FileMonitorEnabled filter, emits one slog record, and exits 0; the
+// parent fails if the child does not finish within a generous timeout.
+func TestSetupLogging_NoSelfDeadlockUnderFileMonitor(t *testing.T) {
+	if os.Getenv(wrapperFMHelperEnv) == "1" {
+		// Child: route diagnostics to the inherited fd (set by parent),
+		// install a file-monitor filter, then log — exactly the
+		// production sequence that deadlocked when tzdata loaded lazily.
+		setupLogging()
+		cfg := unixmon.FilterConfig{FileMonitorEnabled: true, InterceptMetadata: true}
+		if _, err := unixmon.InstallFilterWithConfig(cfg); err != nil {
+			// Mirror the skip conditions the parent checks for.
+			fmt.Fprintf(os.Stderr, "install filter: %v\n", err)
+			os.Exit(3)
+		}
+		slog.Info("post-filter routed record")
+		os.Exit(0)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+
+	logR, logW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer logR.Close()
+	defer logW.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestSetupLogging_NoSelfDeadlockUnderFileMonitor$")
+	cmd.ExtraFiles = []*os.File{logW} // fd 3 in the child
+	cmd.Env = append(os.Environ(),
+		wrapperFMHelperEnv+"=1",
+		wrapperlog.EnvKey+"=3",
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	runErr := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("child deadlocked under file-monitor filter (#415 tz lazy-load regression)\noutput:\n%s", out.String())
+	}
+	if runErr != nil {
+		if ee, ok := runErr.(*exec.ExitError); ok && ee.ExitCode() == 3 {
+			lower := strings.ToLower(out.String())
+			if strings.Contains(lower, "permission denied") ||
+				strings.Contains(lower, "operation not permitted") ||
+				strings.Contains(lower, "unsupported") {
+				t.Skipf("host cannot install seccomp filter; skipping.\n%s", out.String())
+			}
+		}
+		t.Fatalf("child failed: %v\noutput:\n%s", runErr, out.String())
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/wrapperlog"
 	"golang.org/x/sys/unix"
@@ -58,6 +59,17 @@ func setupLogging() {
 		log.Printf("warning: cannot adopt %s=%d; wrapper diagnostics stay on stderr", wrapperlog.EnvKey, fd)
 		return
 	}
+	// Warm the Local timezone cache NOW, before any seccomp filter
+	// exists. slog's TextHandler lazily loads tzdata (openat of
+	// /etc/localtime or zoneinfo) on its first time-formatted record —
+	// and the wrapper's first routed record ("seccomp: filter loaded")
+	// is emitted between filter load and notify-fd handoff. With the
+	// file monitor trapping openat and nobody draining notifications
+	// yet, that lazy load self-deadlocks the wrapper (#415 / PR #419
+	// CI: TestAlpineEnvInject hang). The pre-#415 stderr path never
+	// formatted time (stdlib log with SetFlags(0)), so this window was
+	// previously syscall-free.
+	_ = time.Now().Format(time.RFC3339)
 	log.SetOutput(f)
 	slog.SetDefault(slog.New(slog.NewTextHandler(f, nil)))
 	logDest = f
