@@ -7,7 +7,6 @@ import (
 	"log"
 	"log/slog"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,11 +32,17 @@ func TestSetupLogging_RoutesBothSinksAndSetsCloexec(t *testing.T) {
 		t.Fatalf("pipe: %v", err)
 	}
 	defer r.Close()
-	// Keep w reachable for the whole test: logDest wraps the same fd
-	// number, and w's finalizer must not close it mid-test.
-	defer runtime.KeepAlive(w)
+	defer w.Close()
 
-	t.Setenv(wrapperlog.EnvKey, strconv.Itoa(int(w.Fd())))
+	// Hand setupLogging a dup of the write end so logDest owns its fd
+	// exclusively; w keeps owning the original. Without the dup, two
+	// *os.File values share one fd and w's finalizer would re-close a
+	// possibly-reused fd number after logDest.Close().
+	dupFD, err := unix.Dup(int(w.Fd()))
+	if err != nil {
+		t.Fatalf("dup: %v", err)
+	}
+	t.Setenv(wrapperlog.EnvKey, strconv.Itoa(dupFD))
 
 	setupLogging()
 
@@ -47,7 +52,7 @@ func TestSetupLogging_RoutesBothSinksAndSetsCloexec(t *testing.T) {
 	if logDest == nil {
 		t.Fatal("logDest not set for a valid fd")
 	}
-	flags, err := unix.FcntlInt(w.Fd(), unix.F_GETFD, 0)
+	flags, err := unix.FcntlInt(uintptr(dupFD), unix.F_GETFD, 0)
 	if err != nil {
 		t.Fatalf("fcntl(F_GETFD): %v", err)
 	}
@@ -58,7 +63,8 @@ func TestSetupLogging_RoutesBothSinksAndSetsCloexec(t *testing.T) {
 	log.Printf("stdlib-marker")
 	slog.Info("slog-marker")
 
-	logDest.Close() // closes the shared fd; reader gets EOF
+	logDest.Close() // closes the dup — its sole owner
+	w.Close()       // close the original write end too so the reader sees EOF
 	out, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -76,17 +82,10 @@ func TestSetupLogging_InvalidFDFallsBackToStderr(t *testing.T) {
 	orig := slog.Default()
 	defer resetLogging(orig)
 
-	// Learn a definitely-closed fd number. NOTE: this assumes the fd
-	// number is not reused by another goroutine between Close and the
-	// Fstat inside setupLogging — a tiny window we accept; if this test
-	// ever flakes, switch to a number above the process rlimit.
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	closedFD := int(w.Fd())
-	r.Close()
-	w.Close()
+	// Use an fd number far above any plausible rlimit so Fstat is
+	// guaranteed to fail with EBADF — no fd-reuse race window, unlike
+	// probing with a just-closed real fd.
+	const closedFD = 1 << 20
 
 	t.Setenv(wrapperlog.EnvKey, strconv.Itoa(closedFD))
 	setupLogging()
