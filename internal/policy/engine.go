@@ -880,7 +880,7 @@ func isReadOperation(op string) bool {
 // divert wired in even when the global audit mode is not soft_delete.
 func (e *Engine) HasSoftDeleteFileRule() bool {
 	for _, r := range e.compiledFileRules {
-		if r.rule.Decision == string(types.DecisionSoftDelete) {
+		if types.Decision(strings.ToLower(r.rule.Decision)) == types.DecisionSoftDelete {
 			return true
 		}
 	}

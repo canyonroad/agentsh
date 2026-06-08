@@ -546,4 +546,19 @@ func TestEngine_HasSoftDeleteFileRule(t *testing.T) {
 	if eng2.HasSoftDeleteFileRule() {
 		t.Fatal("expected HasSoftDeleteFileRule() == false when no soft_delete rule exists")
 	}
+
+	mixedCase := &Policy{
+		Version: 1,
+		Name:    "mixed-case-soft-delete",
+		FileRules: []FileRule{
+			{Name: "sd", Paths: []string{"/workspace/**"}, Operations: []string{"*"}, Decision: "Soft_Delete"},
+		},
+	}
+	eng3, err := NewEngine(mixedCase, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eng3.HasSoftDeleteFileRule() {
+		t.Fatal("expected HasSoftDeleteFileRule() == true for a case-variant 'Soft_Delete' decision")
+	}
 }
