@@ -22,6 +22,7 @@ agentsh sits *under* your agent/tooling—intercepting **file**, **network**, **
   - process start/exit
   - PTY activity
   - LLM API requests with DLP and usage tracking
+  - Postgres-family database traffic through declared `db_services`
   - signal send/block (Linux enforced, macOS/Windows audit)
   - database queries via the embedded **PostgreSQL proxy** — per-statement classification and policy
   - Route outbound HTTP API calls through declared services (**http_services**) with per-method, per-path rules, approval gating, and fail-closed host enforcement
@@ -487,6 +488,24 @@ The same proxy also dispatches declared `http_services` entries — named API up
 
 ---
 
+### Database Access Control (Postgres only today)
+
+agentsh can enforce policy on declared database services through `db_services`, `database_connection_rules`, and `database_rules`. The current implementation is Postgres-family only: PostgreSQL is the supported target, with Aurora Postgres using the same path and Redshift/CockroachDB treated as Postgres-compatible dialects with beta coverage. MySQL, MongoDB, Snowflake, BigQuery, Databricks, ClickHouse, MSSQL, Cassandra, Redis, and Oracle are roadmap items, not current runtime support.
+
+Current Postgres support includes:
+- Connection allow/deny/approve/audit decisions.
+- Statement classification for PostgreSQL wire protocol v3, including Simple Query, Extended Query, SQL prepared statements, COPY, FunctionCall denial, transaction state, and CancelRequest mapping.
+- Strict per-object policy coverage with deny precedence.
+- Catalog-backed relation/function selectors for resolved-object policies.
+- Safe runtime `redirect` for read-only Postgres relation replacement.
+- Bypass detection and real-Postgres Docker E2E coverage in CI.
+
+The Postgres proxy runtime is Linux-only in-process code today. Use native Linux, WSL2, or a Linux VM environment for database enforcement.
+
+See [Database Access Control](docs/agentsh-db-access-spec.md) and [Policy documentation](docs/operations/policies.md#database-access-policies-postgres-only-today).
+
+---
+
 ### Policy Generation
 
 Generate restrictive policies from observed session behavior ("profile-then-lock" workflow):
@@ -737,6 +756,7 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * Default policy: [`configs/policies/default.yaml`](configs/policies/default.yaml)
 * Example Dockerfile (with shim): [`Dockerfile.example`](Dockerfile.example)
 * **Policy documentation:** [`docs/operations/policies.md`](docs/operations/policies.md) - policy variables, signal rules, network redirect
+* **Database access control:** [`docs/agentsh-db-access-spec.md`](docs/agentsh-db-access-spec.md) - Postgres-only database enforcement scope, policy semantics, redirect behavior, and roadmap
 * **Command policies cookbook:** [`docs/cookbook/command-policies.md`](docs/cookbook/command-policies.md) - how to allow a new binary, when to use `wrap` instead of `exec`, and how to debug a denial
 * **HTTP services cookbook:** [`docs/cookbook/http-services.md`](docs/cookbook/http-services.md) - recipes for routing outbound HTTP API calls through declared services with rules and approval gating
 * **Sandbox SDK integrations cookbook:** [`docs/cookbook/sandbox-sdk-integrations.md`](docs/cookbook/sandbox-sdk-integrations.md) - `shim_install` config for Tensorlake / E2B / Modal / Daytona where commands run as siblings of the agentsh server

@@ -1,12 +1,12 @@
 # DB Phase 2 Roadmap Design
 
-**Status:** Approved by operator direction on 2026-05-14.
+**Status:** Implemented through DB Plan 12 on 2026-05-15.
 **Owner:** Canyon Road
-**Source spec:** `docs/agentsh-db-access-spec.md` v0.8, Phase 2 row.
+**Source spec:** `docs/agentsh-db-access-spec.md`, Phase 2 row.
 
-This document decomposes DB Phase 2 into sequential implementation plans. Phase 1 is now complete: the Postgres proxy, policy evaluator, CancelRequest mapping, unavoidability bundle, lifecycle events, and real-Postgres CI integration have all landed on `main`.
+This document decomposes DB Phase 2 into sequential implementation plans. Phase 1 and Phase 2 are now complete for the Postgres-family database support scope: the Postgres proxy, policy evaluator, CancelRequest mapping, unavoidability bundle, lifecycle events, catalog-backed resolution, policy ergonomics, redirect planner/runtime, and real-Postgres CI integration have all landed on `main`.
 
-Phase 2 starts from that working proxy and adds three capabilities:
+Phase 2 added three capabilities:
 
 1. Catalog-backed object resolution.
 2. Postgres `redirect` decisions implemented as statement rewriting.
@@ -92,7 +92,7 @@ Deliverables:
 - Fallback behavior: if catalog data cannot be obtained, keep Phase 1 syntactic objects and fail closed under `match_object_resolution` policies.
 - Coverage split: real Postgres integration covers schema-qualified, unqualified, view, and missing-object catalog resolution; lower-level proxy/classifier coverage handles temp-shadowed and function-resolution cases.
 
-External behavior: operators can write stricter policies that require catalog-backed resolution, while existing syntactic policies keep working. Plan 09 is implemented and ready for DB Plan 10 policy ergonomics.
+External behavior: operators can write stricter policies that require catalog-backed resolution, while existing syntactic policies keep working. Plan 09 is implemented.
 
 ### DB Plan 10 - Policy Ergonomics
 
@@ -106,7 +106,7 @@ Deliverables:
 - Sample policies that show Phase 1 syntactic rules next to Phase 2 resolved-object rules.
 - Documentation updates for operator workflows.
 
-External behavior: policy authoring and debugging improve; default enforcement semantics remain strict. Plan 10 is implemented and ready for DB Plan 11 redirect planner work.
+External behavior: policy authoring and debugging improve; default enforcement semantics remain strict. Plan 10 is implemented.
 
 ### DB Plan 11 - Redirect Planner
 
@@ -121,7 +121,7 @@ Deliverables:
 - Rejection reasons for writes, DDL, COPY, procedural statements, FunctionCall frames, unresolved objects, multi-statement batches, and missing redirect targets.
 - Pure tests over AST input and expected rewritten SQL.
 
-External behavior: policy files can be validated for redirect support, but the proxy does not execute redirects yet.
+External behavior at the Plan 11 checkpoint: policy files can be validated for redirect support, but the proxy does not execute redirects until Plan 12.
 
 ### DB Plan 12 - Redirect Runtime And Integration
 
@@ -135,15 +135,17 @@ Deliverables:
 - Approval/audit interaction: redirect remains an allow-like action with explicit event fields; deny still wins.
 - Real Postgres tests for Simple Query, Extended Query, prepared statements, policy reload, and unsupported rewrite forms.
 
-External behavior: `decision: redirect` becomes usable for read-only Postgres relation replacement.
+External behavior: `decision: redirect` is usable for read-only Postgres relation replacement.
 
 ---
 
 ## 4. Recommended Next Work
 
-Start with DB Plan 08. It is the dependency for the rest of Phase 2, has no runtime behavior change, and lets the team settle the canonical identity model before touching the proxy.
+Phase 2 is complete. The next database roadmap item is Phase 3 (MySQL/MariaDB adapter) unless operator priorities move credential broker work ahead of adapter expansion.
 
-Success criteria for Plan 08:
+The original Phase 2 starting point was DB Plan 08. It was the dependency for the rest of Phase 2, had no runtime behavior change, and let the team settle the canonical identity model before touching the proxy.
+
+Historical success criteria for Plan 08:
 
 - The catalog package builds on every platform.
 - Postgres-specific SQL remains isolated behind a small query interface.
@@ -155,7 +157,7 @@ Success criteria for Plan 08:
 
 ## 5. Open Design Decisions
 
-These should be settled in the relevant implementation plans, not in this roadmap:
+These were open when the roadmap was written and were settled or deferred in the relevant implementation plans:
 
 - Whether the catalog snapshot refresh is time-based, invalidation-based, or both.
 - Whether redirect should support cross-service routing after same-service relation replacement is stable.
@@ -163,4 +165,4 @@ These should be settled in the relevant implementation plans, not in this roadma
 - Whether policy explain should live under `agentsh policy db explain` or extend `cmd/dbclassify-pg`.
 - Whether resolved object metadata should be stored directly on `effects.ObjectRef` or in a parallel `ResolvedObjectRef` slice during the transition.
 
-The first Plan 08 implementation should prefer the transition-friendly parallel metadata model unless the code review shows that extending `ObjectRef` is simpler and does not break existing JSON consumers.
+The Plan 08 implementation used the transition-friendly parallel metadata model to avoid breaking existing event JSON consumers.

@@ -1,7 +1,7 @@
-# AgentSH Database Access Control — v0.8
+# AgentSH Database Access Control - v0.9
 
-**Status:** PHASE 1 IMPLEMENTED. Supersedes v0.7.
-**Implementation target:** PostgreSQL Phase 1 is complete; Phase 2 planning is tracked in `docs/superpowers/specs/2026-05-14-db-phase-2-roadmap-design.md`.
+**Status:** POSTGRES PHASE 1 + PHASE 2 IMPLEMENTED. Supersedes v0.8.
+**Implementation target:** Current database enforcement is Postgres-family only. The implemented scope covers PostgreSQL wire-protocol enforcement through catalog-backed object resolution and safe runtime `redirect` execution for read-only relation replacement. MySQL, MongoDB, Snowflake, BigQuery, Databricks, ClickHouse, MSSQL, Cassandra, Redis, and Oracle remain future phases.
 **Owner:** Canyon Road
 **Scope:** AgentSH OSS, Watchtower commercial control plane
 
@@ -24,7 +24,7 @@ All v0.8 changes by R-number:
 - **R7 §14.2 `upstream_dirty_since_sync` reset wording.** Per-Sync-window scope made explicit.
 - **R8 §5.2 / §6 / §8 external_endpoint structure.** Connection-string objects are now `{kind: "external_endpoint", host, port}`. Raw connection strings parsed and discarded at classification time; no embedded credentials in events.
 - **R9 §13.2 SNI footnote.** SNI under passthrough is best-effort; many Postgres drivers don't set it.
-- **R10 §12.4 / new §12.5 proxy identity and listener authentication.** §12.4's hand-wavy process-token language replaced with SessionID-keyed mechanism. New §12.5 covers Unix-socket listener authentication via SO_PEERCRED. Phase 1 dependency on `NetworkRule` schema work made prominent.
+- **R10 §12.4 / new §12.5 proxy identity and listener authentication.** §12.4's hand-wavy process-token language replaced with SessionID-keyed mechanism. New §12.5 covers Unix-socket listener authentication via SO_PEERCRED. DB proxy unavoidability wiring made prominent.
 - **R11 §12.6 bypass-attempt rate limiting.** Dedup per `(session_id, process_identity, destination_tuple)` within a 60s window.
 - **R12 §6.1 / §6.5 temp-shadow direction.** False-negative-is-unsafe semantics made explicit. `deny CREATE TEMP TABLE` promoted to default in the high-assurance bundle.
 - **R13 §9.4 audit-on-dangerous warning.** Config-load emits a non-fatal warning when `decision: audit` is paired with operations of risk tier ≥ high; silenced by `acknowledge_audit_on_dangerous: true`.
@@ -60,33 +60,34 @@ The thesis:
 
 Unavoidability rests on AgentSH's existing primitives: process interception, network rules, file rules over Unix sockets, and DNS interception. §12 spells out the threat model in full.
 
-**Spec revision:** v0.8. **Implementation target:** Phase 1 implemented; Phase 2 planned separately.
+**Spec revision:** v0.9. **Implementation target:** Postgres-family Phase 1 + Phase 2 implemented; non-Postgres database adapters remain future roadmap work.
 
 ---
 
 ## 2. Scope
 
-### 2.1 Phase 1 implementation scope
+### 2.1 Current implementation scope
 
 - PostgreSQL wire protocol v3, normal frontend/backend mode.
 - Dialects: `postgres` (full), `aurora_postgres` (full), `redshift` (beta), `cockroachdb` (beta).
 - TLS modes: `terminate_reissue`, `passthrough` (connection-level rules only), `terminate_plaintext_upstream`.
-- Decision verbs: `allow`, `deny`, `approve`, `audit`, plus statement-level `redirect` policy/planner metadata. Runtime redirect execution is DB Plan 12.
+- Decision verbs: `allow`, `deny`, `approve`, `audit`, plus statement-level `redirect` for safe read-only Postgres relation replacement.
 - Two rule families: `database_rules` (statement-level), `database_connection_rules` (connection-level).
 - Per-effect policy evaluation with strict multi-object semantics.
 - CancelRequest correlation (§15).
 - Startup-packet handling for SSLRequest / GSSENCRequest / CancelRequest / StartupMessage (§11.1).
+- Catalog-backed relation and function identity metadata for Postgres policy selectors.
+- Runtime execution of safe Postgres `redirect` decisions in Simple Query and Extended Query `Parse`.
 
-Plan 11 extends this scope by accepting statement-level redirect policy/planner metadata; proxy execution of redirected Simple Query and Extended Query traffic remains DB Plan 12.
+The database proxy runtime is Linux-only today. Non-Linux builds compile with a stub; use Linux, WSL2, or a Linux VM environment for database enforcement.
 
-### 2.2 Out of scope for Phase 1
+### 2.2 Out of scope for current implementation
 
 - Replication protocol (CopyBoth, `START_REPLICATION`, walsender, logical decoding). Default-deny per §11.1.
 - GSSAPI encryption (default-deny per §11.1).
 - Column-level masking, row redaction, result-set DLP (Phase 7).
-- Runtime statement rewriting / proxy execution for `redirect` (DB Plan 12).
 - Credential brokering (Phase 4).
-- Catalog-aware metadata controls (Phase 7).
+- Catalog-aware column/result metadata controls (Phase 7).
 - ORM-level rules.
 - MySQL, MongoDB, MSSQL, Oracle, Cassandra, Redis (Phases 3, 5, 8).
 - BigQuery, Databricks, ClickHouse, Snowflake (Phase 6).
@@ -95,8 +96,8 @@ Plan 11 extends this scope by accepting statement-level redirect policy/planner 
 
 | Phase | Adds |
 |-------|------|
-| Phase 1 | PostgreSQL adapter: classifier, policy evaluation, proxy, CancelRequest mapping, unavoidability bundle, and real-Postgres CI integration. |
-| Phase 2 | Object resolution via upstream catalog. Runtime Postgres `redirect` execution / statement rewriting. Improved policy ergonomics. |
+| Phase 1 | Implemented: PostgreSQL adapter, classifier, policy evaluation, proxy, CancelRequest mapping, unavoidability bundle, and real-Postgres CI integration. |
+| Phase 2 | Implemented: object resolution via upstream catalog, runtime Postgres `redirect` execution / statement rewriting, and improved policy ergonomics. |
 | Phase 3 | MySQL adapter. |
 | Phase 4 | Credential broker. |
 | Phase 5 | MongoDB adapter. |
@@ -447,15 +448,15 @@ Cache size: 4096 LRU per connection. Same cap as the wire-protocol Extended Quer
 
 **FunctionCall default behavior.** The proxy synthesizes `ErrorResponse(SQLSTATE 42501, message="FunctionCall sub-protocol denied by AgentSH policy")` followed by `ReadyForQuery(I)`. The FunctionCall message is not forwarded upstream. Event: `operation_group: procedural`, `operation_subtype: function_call_protocol`, `decision: deny`, `result.error_code: FUNCTION_CALL_PROTOCOL_DENIED`.
 
-Per-service opt-in via `allow_function_call_protocol: true`. When enabled, classified as `procedural` subtype `function_call_protocol`; OID resolution is Phase 2.
+Per-service opt-in via `allow_function_call_protocol: true`. When enabled, classified as `procedural` subtype `function_call_protocol`; catalog resolution attaches function identity metadata when the function OID is present in the snapshot.
 
-**Describe leakage.** For allowed prepared statements, Postgres `Describe` returns column-level metadata of the result set. Phase 1 treats this metadata as part of the allowed statement surface — once a `read` is allowed, the proxy does not separately gate the metadata response.
+**Describe leakage.** For allowed prepared statements, Postgres `Describe` returns column-level metadata of the result set. The current implementation treats this metadata as part of the allowed statement surface — once a `read` is allowed, the proxy does not separately gate the metadata response.
 
-Phase 1 mitigation for operators who need to hide column metadata: **don't grant the agent role access to those relations**. If the agent can `SELECT` from a table, it can prepare statements against it and observe column types via `Describe`. Withholding row-level read access is the only durable Phase 1 defense; column-level metadata filtering and view-based projection enforcement are deferred to Phase 7's catalog-aware policy.
+Current mitigation for operators who need to hide column metadata: **don't grant the agent role access to those relations**. If the agent can `SELECT` from a table, it can prepare statements against it and observe column types via `Describe`. Withholding row-level read access is the only durable current defense; column-level metadata filtering and view-based projection enforcement are deferred to Phase 7's catalog-aware policy.
 
 ### 7.6 Optional: function-call escalation
 
-`SELECT volatile_function()` is syntactically `read` but may have arbitrary side effects. Phase 1 ships an opt-in mode controlled by `policies.db.escalate_unknown_functions`:
+`SELECT volatile_function()` is syntactically `read` but may have arbitrary side effects. The current implementation ships an opt-in mode controlled by `policies.db.escalate_unknown_functions`:
 
 - `false` (default): `SELECT f()` is `read` regardless of `f`.
 - `true`: `SELECT f()` is `procedural` unless `f` is in `policies.db.safe_function_allowlist`.
@@ -616,7 +617,7 @@ db_services:
 
 | Service field | Required | Notes |
 |---------------|----------|-------|
-| `family` | yes | `postgres` (Phase 1). |
+| `family` | yes | `postgres` (current runtime support). |
 | `dialect` | yes | `postgres`, `aurora_postgres`, `redshift`, `cockroachdb`. |
 | `upstream` | yes | `host:port`. |
 | `tls_mode` | yes | `passthrough`, `terminate_reissue`, `terminate_plaintext_upstream`. No default. |
@@ -706,7 +707,7 @@ database_rules:
 | `match_object_resolution` | no | One of the resolution tags or `*`. Matches against the effect's per-effect resolution tag. |
 | `require_where` | no | Boolean. When true, this rule covers Postgres `modify`/`delete` effects only if the top-level `UPDATE` or `DELETE` statement has a syntactic `WHERE` clause. Valid only when `operations` expands exclusively to `modify` and/or `delete`. |
 | `decision` | yes | `allow`, `deny`, `approve`, `audit`, `redirect`. `redirect` is statement-level only and requires `redirect.relation`, `relations`, `match_object_resolution: catalog_resolved`, read-only operations, and an eligible terminate-mode Postgres service. |
-| `redirect.relation` | only for `decision: redirect` | Canonical target relation formatted as `schema.name`. Plan 11 supports one source relation selected by a canonical `relations` entry and one target relation. Runtime execution is wired in DB Plan 12. |
+| `redirect.relation` | only for `decision: redirect` | Canonical target relation formatted as `schema.name`. Redirect currently supports one source relation selected by a canonical `relations` entry and one target relation. Runtime execution is implemented for safe read-only Postgres Simple Query and Extended Query `Parse` paths. |
 | `message` | no | Template with `{{.Operation}}, {{.Subtype}}, {{.Schema}}, {{.Object}}, {{.Verb}}, {{.StatementPreview}}`. |
 | `timeout` | only for `approve` | Default 60 seconds. Sized to be safe inside open transactions (§14.5). Operators with long-form approval workflows opt up explicitly per rule. |
 | `acknowledge_audit_on_dangerous` | no | Required `true` to silence the load-time warning emitted when `decision: audit` is paired with operations of risk tier ≥ high (§9.4, R13). |
@@ -796,9 +797,7 @@ Connection rules evaluate **before** any statement is classified. A connection-l
 | `deny` | Synthesize `ErrorResponse` (SQLSTATE 42501). See §14. | See §13.3. |
 | `approve` | Held; approval flow. On approval, forward. On denial/timeout, behaves as `deny`. | Held until approval. |
 | `audit` | Forward, tag event. Functionally equivalent to allow at the wire; differs only in event labeling and downstream alerting/handling. | Connection established with audit tag. |
-| `redirect` | Statement-level policy decision with structured redirect metadata. Runtime Simple Query and Extended Query execution is DB Plan 12. | Invalid; connection-level redirect is not available. |
-
-Plan 11 accepts valid statement-level `redirect` rules and returns redirect policy/planner metadata. Runtime proxy execution remains DB Plan 12.
+| `redirect` | Statement-level policy decision with structured redirect metadata. Safe read-only Postgres relation replacement is executed by the proxy for Simple Query and Extended Query `Parse`. Unsupported redirect forms fail closed. | Invalid; connection-level redirect is not available. |
 
 > **Operator note: `audit` is allow-with-observation, not block-with-observation.** A statement whose final decision is `audit` is **forwarded to the database**. The agent gets a normal response. The only difference from `allow` is that the event carries `decision.verb: "audit"` and downstream Watchtower alerting policies can treat it differently (e.g., page on-call, send to a dedicated SOC queue). Operators who want "observe but block" should use `approve` (which holds the statement until a human decides) or `deny` (which blocks unconditionally). This is a common point of confusion; repeat it wherever sample policies appear.
 
@@ -863,7 +862,7 @@ deny  ≡  implicit_deny  >  approve  >  redirect  >  audit  >  allow
 
 A final decision of `audit` forwards the statement unchanged to upstream. The difference from `allow` is event labeling (`decision.verb: "audit"`) and downstream alerting policies in Watchtower.
 
-A final decision of `redirect` carries structured redirect metadata for the statement. Runtime proxy execution of redirected Simple Query and Extended Query traffic remains DB Plan 12.
+A final decision of `redirect` carries structured redirect metadata for the statement. The proxy forwards rewritten SQL only when the Postgres redirect planner returns a safe plan; unsupported redirect forms fail closed instead of falling back to the original SQL.
 
 A final decision of `approve` holds the statement until a human decides. After approval, the forwarded event carries `decision.verb: "approve"`. Audit-tagged rules that co-cover the object set are recorded in `decision.contributing_audit_rules` (array of rule names) but do not change the verb. Watchtower alerting that targets `decision.verb == audit` does not fire on approved events; alerting that targets `contributing_audit_rules` does.
 
@@ -1066,7 +1065,7 @@ Three explicit scoping clauses:
 
 Inside this scope, the threat model and defenses below apply. Outside this scope, AgentSH makes no claim. Customer-facing material should always pair the unavoidability claim with these scoping clauses.
 
-For declared Phase 1 Postgres services, `policies.db.unavoidability: enforce` is the high-assurance recommendation once the Plan 07c real-Postgres integration suite is passing in CI. The claim is scoped to processes inside the AgentSH-governed process tree, declared DB services, and an uncompromised AgentSH supervisor plus DB proxy. Aurora Postgres, Redshift, CockroachDB, MySQL, and MariaDB remain outside the automated high-assurance CI claim for Phase 1.
+For declared PostgreSQL services, `policies.db.unavoidability: enforce` is the high-assurance recommendation. The automated CI claim is strongest for real PostgreSQL E2E coverage; Aurora Postgres, Redshift, and CockroachDB use the Postgres-family path but may need environment-specific validation. MySQL, MariaDB, MongoDB, Snowflake, BigQuery, Databricks, ClickHouse, MSSQL, Cassandra, Redis, and Oracle are outside the current runtime database enforcement scope.
 
 ### 12.2 Threat model
 
@@ -1102,7 +1101,7 @@ The proxy egress exemption is keyed on **AgentSH SessionID**, the existing proce
 3. SessionID is supervisor-assigned at session creation. A child process inherits its parent's SessionID via ptrace tracking; an agent process cannot spawn a child with a different SessionID without supervisor cooperation. The unavoidability bundle prevents the agent from escaping its ptrace tree.
 4. Forging a SessionID at the rule-evaluation API requires either compromising the supervisor (out of model per §12.1) or escaping the ptrace tree (which the unavoidability primitives prevent). An agent cannot grant itself the exemption by renaming a binary, launching a process named `agentsh-db-proxy`, or any other in-band trick.
 
-> **Phase 1 dependency.** v0.7's `NetworkRule` schema does not carry per-rule SessionID matchability beyond what the existing per-session policy engine provides. Building the SessionID-exempt egress denial — auto-generated from `db_services` config — is part of the Phase 1 deliverable. §23.4 implementation order item 10 ("Unavoidability bundle generation from `db_services` config") includes this work; it is not pre-existing infrastructure that the spec relies on. Operators reading §12 should expect this rule generation to ship in the same release that adds DB awareness.
+> **Implementation note.** The SessionID-exempt egress denial is auto-generated from `db_services` config. The generated bundle denies direct agent egress to declared database destinations while exempting the DB proxy's own SessionID so the proxy can reach upstream databases.
 
 ### 12.5 Listener authentication
 
@@ -1398,13 +1397,13 @@ The default config bundle includes a sample `CREATE ROLE` script for Postgres th
 |-------|-------|--------|
 | 0 | This spec, reviewed and approved. | done |
 | 1 | Postgres adapter. Operation taxonomy with subtypes. Per-effect evaluation with strict object coverage. Two rule families. Event emission. Unavoidability bundle. Transaction correctness. SQL PREPARE/EXECUTE. FunctionCall default-deny. CancelRequest translation. Startup-packet handling. Replication & GSSENC default-deny. | done |
-| 2 | Object resolution via upstream catalog. Runtime Postgres `redirect` execution / statement rewriting. Improved policy ergonomics. | next |
-| 3 | MySQL adapter. | |
-| 4 | Credential broker (resolves SCRAM-SHA-256-PLUS channel binding). | |
-| 5 | MongoDB adapter. | |
-| 6 | Snowflake / BigQuery / Databricks / ClickHouse handlers via `http_services`. | |
-| 7 | Result-set DLP. Row-count caps. Catalog-aware metadata controls (subsumes Describe-leakage). | |
-| 8 | MSSQL TDS, Cassandra CQL, Redis RESP, Oracle TNS. | |
+| 2 | Object resolution via upstream catalog. Runtime Postgres `redirect` execution / statement rewriting. Improved policy ergonomics. | done |
+| 3 | MySQL adapter. | planned |
+| 4 | Credential broker (resolves SCRAM-SHA-256-PLUS channel binding). | planned |
+| 5 | MongoDB adapter. | planned |
+| 6 | Snowflake / BigQuery / Databricks / ClickHouse handlers via `http_services`. | planned |
+| 7 | Result-set DLP. Row-count caps. Catalog-aware metadata controls (subsumes Describe-leakage). | planned |
+| 8 | MSSQL TDS, Cassandra CQL, Redis RESP, Oracle TNS. | planned |
 | Future | Logical/physical replication protocol support. |
 
 ---
@@ -1683,15 +1682,15 @@ Required test categories:
 8. CancelRequest mapping.
 9. Transaction state tracking and `deny_mode_in_tx`.
 10. Unavoidability bundle generation from `db_services` config.
-11. Required CI integration tests against real Postgres; Aurora PG, Redshift, and CockroachDB remain best-effort/manual validation targets outside the automated Phase 1 high-assurance claim.
+11. Required CI integration tests against real Postgres; Aurora PG, Redshift, and CockroachDB remain best-effort/manual validation targets outside the strongest automated high-assurance claim.
 
-The first four steps can be built and tested without any socket code. That's the right place to start.
+This sequence has landed for the current Postgres-family scope. Future database adapters should start with a new roadmap and per-adapter implementation plans rather than extending the Postgres proxy contract in place.
 
 ---
 
 ## Appendix A: Roadmap protocol mappings (design only)
 
-These mappings are part of v0.7 design scope (so the architecture is coherent), but no code is shipped for them in Phase 1. Each becomes its own implementation spec in later phases.
+These mappings are roadmap design notes so the architecture stays coherent, but no runtime code is shipped for them in the current implementation. Each becomes its own implementation spec in later phases.
 
 ### A.1 MySQL / MariaDB (Phase 3)
 

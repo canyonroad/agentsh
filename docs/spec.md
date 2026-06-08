@@ -40,6 +40,7 @@
 | Error handling | Text error messages | Structured errors with suggestions |
 | Security | User-level permissions | Policy-based, operation-level control |
 | Visibility | Command-level only | Full I/O and network interception |
+| Database access | Invisible SQL traffic | Postgres-family DB proxy with connection and statement policy |
 | Session state | Implicit | Explicit, inspectable, persistent |
 | Risk awareness | None | Built-in risk assessment |
 
@@ -187,6 +188,7 @@ An agent execution environment must provide:
 | Sandbox | Isolated execution environment per session |
 | FUSE Workspace | Intercept all file operations |
 | Network Proxy | Intercept all network traffic and DNS |
+| DB Proxy | Enforce Postgres-family `db_services`, `database_connection_rules`, and `database_rules` on Linux |
 | Namespace | Linux namespace isolation (mount, net, PID, UTS) |
 
 ### 4.3 Technology Choices

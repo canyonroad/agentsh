@@ -8,6 +8,8 @@ This document provides a comprehensive comparison of agentsh capabilities across
 
 > **Note on macOS Lima:** The "macOS Lima" column applies to both deployment modes. When running agentsh **inside** the Lima VM, you get 100% Linux-equivalent security. When running agentsh on macOS **orchestrating** the Lima VM, you get 85% due to VM boundary overhead. See [Lima Deployment Modes](#lima-deployment-modes) for details.
 
+> **Database access note:** Current database enforcement is Postgres-family only and the runtime DB proxy is Linux-only. Use native Linux, WSL2, or a Linux VM environment for `db_services` enforcement. Native macOS and native Windows builds compile the DB packages but the Postgres proxy runtime returns unsupported.
+
 | Feature | Linux | macOS ESF+NE | macOS Lima | Win Native | Win WSL2 |
 |---------|:-----:|:------------:|:----------:|:----------:|:--------:|
 | **Filesystem Interception** | | | | | |

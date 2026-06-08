@@ -196,6 +196,8 @@ Ptrace mode exposes Prometheus metrics at the `/metrics` endpoint:
 
 `http_services` enforcement runs entirely in the userspace proxy layer. It is not tied to any kernel primitive and applies identically on macOS, Linux, and Windows regardless of the active security mode.
 
+Database access control is narrower today. The runtime DB proxy is Linux-only and targets Postgres-family services only; non-Linux builds include stubs that return unsupported for the proxy. Use native Linux, WSL2, or a Linux VM environment when you need `db_services`, `database_rules`, and `database_connection_rules` enforcement. MySQL, MongoDB, Snowflake, BigQuery, Databricks, ClickHouse, MSSQL, Cassandra, Redis, and Oracle are roadmap items, not current database enforcement targets.
+
 ### Landlock ABI Versions
 
 | ABI | Kernel | Features Added |
