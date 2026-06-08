@@ -140,6 +140,12 @@ func TestFUSE_PerPathAllow_UnderMonitorMode(t *testing.T) {
 		t.Fatalf("os.Remove returned %v; expected nil", err)
 	}
 
+	// Primary signal: under allow+monitor the delete is real, so the backing
+	// file must be gone (not diverted to trash).
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("expected backing file to be really deleted; stat err=%v", err)
+	}
+
 	trashDir := filepath.Join(workspace, ".agentsh_trash")
 	if entries, err := os.ReadDir(trashDir); err == nil && len(entries) > 0 {
 		t.Fatalf("expected no trash under allow+monitor, found %d entries", len(entries))
