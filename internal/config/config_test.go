@@ -2354,3 +2354,29 @@ sandbox:
 		t.Fatalf("sandbox.cgroups.best_effort: got false, want true")
 	}
 }
+
+func TestWarnUnknownFUSEKeys(t *testing.T) {
+	good := []byte(`
+sandbox:
+  fuse:
+    enabled: true
+    audit:
+      mode: soft_delete
+`)
+	if got := unknownFUSEKeys(good); len(got) != 0 {
+		t.Fatalf("expected no unknown keys for valid config, got %v", got)
+	}
+
+	bad := []byte(`
+sandbox:
+  fuse:
+    enabled: true
+    session:
+      mode: soft_delete
+      trash_path: /var/lib/agentsh/trash
+`)
+	got := unknownFUSEKeys(bad)
+	if len(got) != 1 || got[0] != "session" {
+		t.Fatalf("expected [session], got %v", got)
+	}
+}
