@@ -10,7 +10,9 @@ import (
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/fsmonitor/audit"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/trash"
+	"github.com/agentsh/agentsh/pkg/types"
 )
 
 type stubSink struct {
@@ -133,5 +135,25 @@ func TestApplyAuditPolicy_RecordsSizeAndNlink(t *testing.T) {
 	}
 	if ev.LinkCount == 0 {
 		t.Fatalf("expected nlink recorded, got 0")
+	}
+}
+
+func TestResolveOpMode(t *testing.T) {
+	cases := []struct {
+		name   string
+		dec    policy.Decision
+		global string
+		want   string
+	}{
+		{"per-path soft_delete upgrades under monitor", policy.Decision{PolicyDecision: types.DecisionSoftDelete}, "monitor", "soft_delete"},
+		{"allow under monitor stays monitor", policy.Decision{PolicyDecision: types.DecisionAllow}, "monitor", "monitor"},
+		{"allow under global soft_delete keeps soft_delete", policy.Decision{PolicyDecision: types.DecisionAllow}, "soft_delete", "soft_delete"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveOpMode(tc.dec, tc.global); got != tc.want {
+				t.Fatalf("resolveOpMode(%+v, %q) = %q, want %q", tc.dec, tc.global, got, tc.want)
+			}
+		})
 	}
 }
