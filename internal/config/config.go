@@ -1530,6 +1530,10 @@ func LoadWithSource(path string, source ConfigSource) (*Config, ConfigSource, er
 	}
 
 	applyDefaultsWithSource(&cfg, source, path)
+	for _, k := range unknownFUSEKeys([]byte(expanded)) {
+		slog.Warn("unknown key under sandbox.fuse ignored; check the config schema",
+			"key", k, "hint", "soft-delete uses sandbox.fuse.audit.mode and sandbox.fuse.audit.trash_path")
+	}
 	if source == ConfigSourceBundle {
 		resolveRelativePaths(&cfg, GetUserDataDir())
 	}

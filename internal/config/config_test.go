@@ -2380,3 +2380,35 @@ sandbox:
 		t.Fatalf("expected [session], got %v", got)
 	}
 }
+
+// TestLoadWithSource_WarnsUnknownFUSEKeys verifies that LoadWithSource (the
+// server code path) successfully loads a config that contains an unrecognized
+// sandbox.fuse key (the exact #417 scenario) without returning an error.
+// The warning itself goes to slog and is not captured here, but the call
+// must survive to prove the warning path is reachable.
+func TestLoadWithSource_WarnsUnknownFUSEKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := []byte(`
+sandbox:
+  fuse:
+    enabled: true
+    session:
+      mode: soft_delete
+      trash_path: /var/lib/agentsh/trash
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, source, err := LoadWithSource(configPath, ConfigSourceUser)
+	if err != nil {
+		t.Fatalf("LoadWithSource() error = %v; want successful load with warning", err)
+	}
+	if source != ConfigSourceUser {
+		t.Errorf("LoadWithSource() source = %v, want %v", source, ConfigSourceUser)
+	}
+	if !cfg.Sandbox.FUSE.Enabled {
+		t.Errorf("LoadWithSource() cfg.Sandbox.FUSE.Enabled = false, want true")
+	}
+}
