@@ -27,7 +27,7 @@ func TestApplyAuditPolicy_Monitor(t *testing.T) {
 	sink := &stubSink{}
 	cfg := config.FUSEAuditConfig{Mode: "monitor"}
 	called := false
-	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: sink, Config: cfg}, "sess", "unlink", "/workspace/a", "", "", nil, func() syscall.Errno {
+	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: sink, Config: cfg}, "sess", cfg.Mode, "unlink", "/workspace/a", "", "", nil, func() syscall.Errno {
 		called = true
 		return 0
 	})
@@ -46,7 +46,7 @@ func TestApplyAuditPolicy_SoftBlock(t *testing.T) {
 	sink := &stubSink{}
 	cfg := config.FUSEAuditConfig{Mode: "soft_block"}
 	called := false
-	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: sink, Config: cfg}, "sess", "unlink", "/workspace/a", "", "", nil, func() syscall.Errno {
+	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: sink, Config: cfg}, "sess", cfg.Mode, "unlink", "/workspace/a", "", "", nil, func() syscall.Errno {
 		called = true
 		return 0
 	})
@@ -64,7 +64,7 @@ func TestApplyAuditPolicy_SoftBlock(t *testing.T) {
 func TestApplyAuditPolicy_StrictLoggingFailure(t *testing.T) {
 	sink := &stubSink{err: errors.New("queue full")}
 	cfg := config.FUSEAuditConfig{Mode: "strict"}
-	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: sink, Config: cfg}, "sess", "unlink", "/workspace/a", "", "", nil, func() syscall.Errno {
+	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: sink, Config: cfg}, "sess", cfg.Mode, "unlink", "/workspace/a", "", "", nil, func() syscall.Errno {
 		return 0
 	})
 	if errno != syscall.EIO {
@@ -76,7 +76,7 @@ func TestApplyAuditPolicy_Disabled(t *testing.T) {
 	enabled := false
 	cfg := config.FUSEAuditConfig{Enabled: &enabled, Mode: "soft_block"}
 	called := false
-	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: &stubSink{}, Config: cfg}, "sess", "unlink", "/workspace/a", "", "", nil, func() syscall.Errno {
+	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: &stubSink{}, Config: cfg}, "sess", cfg.Mode, "unlink", "/workspace/a", "", "", nil, func() syscall.Errno {
 		called = true
 		return 0
 	})
@@ -92,7 +92,7 @@ func TestApplyAuditPolicy_SoftDeleteUsesDivert(t *testing.T) {
 	sink := &stubSink{}
 	cfg := config.FUSEAuditConfig{Mode: "soft_delete"}
 	divertCalled := false
-	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: sink, Config: cfg}, "sess", "unlink", "/workspace/a", "", "/real/a", func() (*trash.Entry, error) {
+	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: sink, Config: cfg}, "sess", cfg.Mode, "unlink", "/workspace/a", "", "/real/a", func() (*trash.Entry, error) {
 		divertCalled = true
 		return &trash.Entry{Token: "tok1"}, nil
 	}, func() syscall.Errno {
@@ -118,7 +118,7 @@ func TestApplyAuditPolicy_RecordsSizeAndNlink(t *testing.T) {
 	}
 	sink := &stubSink{}
 	cfg := config.FUSEAuditConfig{Mode: "monitor"}
-	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: sink, Config: cfg}, "sess", "unlink", "/workspace/f.txt", "", fp, nil, func() syscall.Errno {
+	errno := applyAuditPolicy(context.Background(), &FUSEAuditHooks{Sink: sink, Config: cfg}, "sess", cfg.Mode, "unlink", "/workspace/f.txt", "", fp, nil, func() syscall.Errno {
 		return 0
 	})
 	if errno != 0 {
