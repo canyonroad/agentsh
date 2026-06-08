@@ -875,6 +875,18 @@ func isReadOperation(op string) bool {
 	}
 }
 
+// HasSoftDeleteFileRule reports whether any compiled file rule uses the
+// soft_delete decision. Used to decide whether the FUSE layer needs a trash
+// divert wired in even when the global audit mode is not soft_delete.
+func (e *Engine) HasSoftDeleteFileRule() bool {
+	for _, r := range e.compiledFileRules {
+		if types.Decision(strings.ToLower(r.rule.Decision)) == types.DecisionSoftDelete {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) CheckFile(p string, operation string) Decision {
 	operation = strings.ToLower(operation)
 	for _, r := range e.compiledFileRules {

@@ -2354,3 +2354,61 @@ sandbox:
 		t.Fatalf("sandbox.cgroups.best_effort: got false, want true")
 	}
 }
+
+func TestWarnUnknownFUSEKeys(t *testing.T) {
+	good := []byte(`
+sandbox:
+  fuse:
+    enabled: true
+    audit:
+      mode: soft_delete
+`)
+	if got := unknownFUSEKeys(good); len(got) != 0 {
+		t.Fatalf("expected no unknown keys for valid config, got %v", got)
+	}
+
+	bad := []byte(`
+sandbox:
+  fuse:
+    enabled: true
+    session:
+      mode: soft_delete
+      trash_path: /var/lib/agentsh/trash
+`)
+	got := unknownFUSEKeys(bad)
+	if len(got) != 1 || got[0] != "session" {
+		t.Fatalf("expected [session], got %v", got)
+	}
+}
+
+// TestLoadWithSource_WarnsUnknownFUSEKeys verifies that LoadWithSource (the
+// server code path) successfully loads a config that contains an unrecognized
+// sandbox.fuse key (the exact #417 scenario) without returning an error.
+// The warning itself goes to slog and is not captured here, but the call
+// must survive to prove the warning path is reachable.
+func TestLoadWithSource_WarnsUnknownFUSEKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := []byte(`
+sandbox:
+  fuse:
+    enabled: true
+    session:
+      mode: soft_delete
+      trash_path: /var/lib/agentsh/trash
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, source, err := LoadWithSource(configPath, ConfigSourceUser)
+	if err != nil {
+		t.Fatalf("LoadWithSource() error = %v; want successful load with warning", err)
+	}
+	if source != ConfigSourceUser {
+		t.Errorf("LoadWithSource() source = %v, want %v", source, ConfigSourceUser)
+	}
+	if !cfg.Sandbox.FUSE.Enabled {
+		t.Errorf("LoadWithSource() cfg.Sandbox.FUSE.Enabled = false, want true")
+	}
+}

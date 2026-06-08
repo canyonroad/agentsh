@@ -515,3 +515,50 @@ command_rules:
 	assert.Equal(t, []string{"myrunner", "custom-wrapper"}, p.TransparentCommands.Add)
 	assert.Equal(t, []string{"sudo"}, p.TransparentCommands.Remove)
 }
+
+func TestEngine_HasSoftDeleteFileRule(t *testing.T) {
+	withRule := &Policy{
+		Version: 1,
+		Name:    "with-soft-delete",
+		FileRules: []FileRule{
+			{Name: "sd", Paths: []string{"/workspace/**"}, Operations: []string{"*"}, Decision: "soft_delete"},
+		},
+	}
+	eng, err := NewEngine(withRule, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eng.HasSoftDeleteFileRule() {
+		t.Fatal("expected HasSoftDeleteFileRule() == true when a soft_delete rule exists")
+	}
+
+	withoutRule := &Policy{
+		Version: 1,
+		Name:    "no-soft-delete",
+		FileRules: []FileRule{
+			{Name: "allow", Paths: []string{"/workspace/**"}, Operations: []string{"*"}, Decision: "allow"},
+		},
+	}
+	eng2, err := NewEngine(withoutRule, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eng2.HasSoftDeleteFileRule() {
+		t.Fatal("expected HasSoftDeleteFileRule() == false when no soft_delete rule exists")
+	}
+
+	mixedCase := &Policy{
+		Version: 1,
+		Name:    "mixed-case-soft-delete",
+		FileRules: []FileRule{
+			{Name: "sd", Paths: []string{"/workspace/**"}, Operations: []string{"*"}, Decision: "Soft_Delete"},
+		},
+	}
+	eng3, err := NewEngine(mixedCase, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eng3.HasSoftDeleteFileRule() {
+		t.Fatal("expected HasSoftDeleteFileRule() == true for a case-variant 'Soft_Delete' decision")
+	}
+}

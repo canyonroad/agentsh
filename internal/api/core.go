@@ -1270,8 +1270,14 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 		SymlinkEscapeDeny: a.cfg.Policies.SymlinkEscapeDeny(),
 	}
 
-	// Configure soft-delete/trash if enabled
-	if a.cfg.Sandbox.FUSE.Audit.Mode == "soft_delete" {
+	// Configure soft-delete/trash. Trash must be available to FUSE when the
+	// global mode is soft_delete OR when the policy contains any per-path
+	// soft_delete rule (which upgrades matching deletes individually). The
+	// configured global mode is always passed through so default monitor
+	// behavior is preserved for non-matching deletes.
+	globalAuditMode := a.cfg.Sandbox.FUSE.Audit.Mode
+	fsCfg.AuditMode = globalAuditMode
+	if globalAuditMode == "soft_delete" || (p.engine != nil && p.engine.HasSoftDeleteFileRule()) {
 		fsCfg.TrashConfig = &platform.TrashConfig{
 			Enabled:        true,
 			TrashDir:       a.cfg.Sandbox.FUSE.Audit.TrashPath,

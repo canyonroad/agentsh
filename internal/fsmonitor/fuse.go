@@ -156,7 +156,7 @@ func (n *node) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 	n.emitFileEvent(ctx, "file_delete", virt, "delete", 0, dec, false, nil)
 	realPath, _ := n.realPath(virt, false)
-	return applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "unlink", virt, "", realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
+	return applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), resolveOpMode(dec, n.globalAuditMode()), "unlink", virt, "", realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
 		return n.LoopbackNode.Unlink(ctx, name)
 	})
 }
@@ -171,7 +171,7 @@ func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
 	}
 	n.emitFileEvent(ctx, "dir_delete", virt, "rmdir", 0, dec, false, nil)
 	realPath, _ := n.realPath(virt, false)
-	return applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "rmdir", virt, "", realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
+	return applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), resolveOpMode(dec, n.globalAuditMode()), "rmdir", virt, "", realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
 		return n.LoopbackNode.Rmdir(ctx, name)
 	})
 }
@@ -214,12 +214,12 @@ func (n *node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 
 	// Cross-mount inside -> outside: treat as a delete.
 	if crossMount && !intoMount {
-		return applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "unlink", virtFrom, "", realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
+		return applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), resolveOpMode(decFrom, n.globalAuditMode()), "unlink", virtFrom, "", realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
 			return n.LoopbackNode.Rename(ctx, name, newParent, newName, flags)
 		})
 	}
 
-	errno := applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "rename", virtFrom, virtTo, realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
+	errno := applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), n.globalAuditMode(), "rename", virtFrom, virtTo, realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
 		return n.LoopbackNode.Rename(ctx, name, newParent, newName, flags)
 	})
 	if errno != 0 {
@@ -704,6 +704,14 @@ func (n *node) auditHooks() *FUSEAuditHooks {
 		return nil
 	}
 	return n.hooks.FUSEAudit
+}
+
+func (n *node) globalAuditMode() string {
+	h := n.auditHooks()
+	if h == nil {
+		return ""
+	}
+	return h.Config.Mode
 }
 
 func (n *node) hooksSessionID() string {

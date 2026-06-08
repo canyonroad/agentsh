@@ -397,6 +397,11 @@ type SandboxLimitsConfig struct {
 	MaxNetworkMbps int `yaml:"max_network_mbps"`
 }
 
+// SandboxFUSEConfig configures the FUSE workspace mount.
+//
+// NOTE: adding a yaml-tagged field here requires adding its tag to
+// knownFUSEKeys in this file, or unknownFUSEKeys will emit a spurious
+// "unknown key under sandbox.fuse" warning for configs that use it.
 type SandboxFUSEConfig struct {
 	Enabled  bool            `yaml:"enabled"`
 	Deferred bool            `yaml:"deferred"`
@@ -1394,6 +1399,10 @@ func Load(path string) (*Config, error) {
 	}
 
 	applyDefaults(&cfg)
+	for _, k := range unknownFUSEKeys([]byte(expanded)) {
+		slog.Warn("unknown key under sandbox.fuse ignored; check the config schema",
+			"key", k, "hint", "soft-delete uses sandbox.fuse.audit.mode and sandbox.fuse.audit.trash_path")
+	}
 	applyEnvOverrides(&cfg)
 	if err := validateConfig(&cfg); err != nil {
 		return nil, err
@@ -1441,6 +1450,69 @@ func yamlMappingPathExists(node *yaml.Node, path ...string) bool {
 	return true
 }
 
+// yamlMappingNode returns the mapping node at the given key path, or nil.
+func yamlMappingNode(node *yaml.Node, path ...string) *yaml.Node {
+	if node == nil {
+		return nil
+	}
+	if node.Kind == yaml.DocumentNode {
+		if len(node.Content) == 0 {
+			return nil
+		}
+		node = node.Content[0]
+	}
+	for _, want := range path {
+		if node == nil || node.Kind != yaml.MappingNode {
+			return nil
+		}
+		var next *yaml.Node
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == want {
+				next = node.Content[i+1]
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		node = next
+	}
+	return node
+}
+
+// knownFUSEKeys are the recognized keys under sandbox.fuse (see SandboxFUSEConfig).
+var knownFUSEKeys = map[string]struct{}{
+	"enabled":                 {},
+	"deferred":                {},
+	"audit":                   {},
+	"mount_base_dir":          {},
+	"deferred_marker_file":    {},
+	"deferred_enable_command": {},
+	"max_background":          {},
+}
+
+// unknownFUSEKeys returns keys present under sandbox.fuse that are not
+// recognized by SandboxFUSEConfig. Used to surface silent misconfiguration
+// (e.g. fuse.session.mode) since the YAML loader is non-strict.
+func unknownFUSEKeys(data []byte) []string {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil
+	}
+	fuse := yamlMappingNode(&root, "sandbox", "fuse")
+	if fuse == nil || fuse.Kind != yaml.MappingNode {
+		return nil
+	}
+	var unknown []string
+	for i := 0; i+1 < len(fuse.Content); i += 2 {
+		key := fuse.Content[i].Value
+		if _, ok := knownFUSEKeys[key]; !ok {
+			unknown = append(unknown, key)
+		}
+	}
+	return unknown
+}
+
 // LoadWithSource loads config from path and returns the config along with its source.
 // The source parameter indicates where this config path came from.
 func LoadWithSource(path string, source ConfigSource) (*Config, ConfigSource, error) {
@@ -1463,6 +1535,10 @@ func LoadWithSource(path string, source ConfigSource) (*Config, ConfigSource, er
 	}
 
 	applyDefaultsWithSource(&cfg, source, path)
+	for _, k := range unknownFUSEKeys([]byte(expanded)) {
+		slog.Warn("unknown key under sandbox.fuse ignored; check the config schema",
+			"key", k, "hint", "soft-delete uses sandbox.fuse.audit.mode and sandbox.fuse.audit.trash_path")
+	}
 	if source == ConfigSourceBundle {
 		resolveRelativePaths(&cfg, GetUserDataDir())
 	}

@@ -8,7 +8,9 @@ import (
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/fsmonitor/audit"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/trash"
+	"github.com/agentsh/agentsh/pkg/types"
 )
 
 type auditSink interface {
@@ -25,7 +27,7 @@ type FUSEAuditHooks struct {
 
 // applyAuditPolicy enforces the configured mode for a destructive operation and logs it.
 // It returns an errno to use for the FUSE handler.
-func applyAuditPolicy(ctx context.Context, hooks *FUSEAuditHooks, sessionID string, op string, path string, dest string, realPath string, divert func() (*trash.Entry, error), run func() syscall.Errno) syscall.Errno {
+func applyAuditPolicy(ctx context.Context, hooks *FUSEAuditHooks, sessionID string, opMode string, op string, path string, dest string, realPath string, divert func() (*trash.Entry, error), run func() syscall.Errno) syscall.Errno {
 	if hooks == nil {
 		return run()
 	}
@@ -34,7 +36,7 @@ func applyAuditPolicy(ctx context.Context, hooks *FUSEAuditHooks, sessionID stri
 		return run()
 	}
 
-	mode := hooks.Config.Mode
+	mode := opMode
 	if mode == "" {
 		mode = "monitor"
 	}
@@ -110,4 +112,14 @@ func applyAuditPolicy(ctx context.Context, hooks *FUSEAuditHooks, sessionID stri
 		}
 		return handleSendErr(errno, send(res, "", ""))
 	}
+}
+
+// resolveOpMode picks the audit mode for a single destructive operation. A
+// per-path soft_delete policy decision upgrades the operation to soft_delete
+// regardless of the global configured mode; otherwise the global mode applies.
+func resolveOpMode(dec policy.Decision, globalMode string) string {
+	if dec.PolicyDecision == types.DecisionSoftDelete {
+		return string(types.DecisionSoftDelete)
+	}
+	return globalMode
 }

@@ -100,6 +100,13 @@ type FSConfig struct {
 	// Interceptor handles synchronous interception (hold/redirect/approve)
 	Interceptor InterceptionManager
 
+	// AuditMode is the global configured FUSE audit mode
+	// ("monitor" | "soft_block" | "soft_delete" | "strict"; "" means
+	// monitor). The FUSE layer uses it as the default per-operation mode;
+	// a per-path soft_delete policy decision upgrades an individual
+	// destructive operation regardless of this value.
+	AuditMode string
+
 	// TrashConfig configures soft-delete behavior (optional)
 	TrashConfig *TrashConfig
 
