@@ -397,6 +397,11 @@ type SandboxLimitsConfig struct {
 	MaxNetworkMbps int `yaml:"max_network_mbps"`
 }
 
+// SandboxFUSEConfig configures the FUSE workspace mount.
+//
+// NOTE: adding a yaml-tagged field here requires adding its tag to
+// knownFUSEKeys in this file, or unknownFUSEKeys will emit a spurious
+// "unknown key under sandbox.fuse" warning for configs that use it.
 type SandboxFUSEConfig struct {
 	Enabled  bool            `yaml:"enabled"`
 	Deferred bool            `yaml:"deferred"`
