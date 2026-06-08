@@ -1277,7 +1277,7 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 	// behavior is preserved for non-matching deletes.
 	globalAuditMode := a.cfg.Sandbox.FUSE.Audit.Mode
 	fsCfg.AuditMode = globalAuditMode
-	if globalAuditMode == "soft_delete" || p.engine != nil && p.engine.HasSoftDeleteFileRule() {
+	if globalAuditMode == "soft_delete" || (p.engine != nil && p.engine.HasSoftDeleteFileRule()) {
 		fsCfg.TrashConfig = &platform.TrashConfig{
 			Enabled:        true,
 			TrashDir:       a.cfg.Sandbox.FUSE.Audit.TrashPath,
