@@ -272,11 +272,17 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 		SymlinkEscapeDeny: cfg.SymlinkEscapeDeny,
 	}
 
-	// Set up trash/soft-delete if configured
+	// Set up trash/soft-delete if configured. The audit Mode reflects the
+	// global configured mode (default monitor); a per-path soft_delete policy
+	// decision upgrades individual destructive ops in the fsmonitor layer.
 	if cfg.TrashConfig != nil && cfg.TrashConfig.Enabled {
+		mode := cfg.AuditMode
+		if mode == "" {
+			mode = "monitor"
+		}
 		hooks.FUSEAudit = &fsmonitor.FUSEAuditHooks{
 			Config: config.FUSEAuditConfig{
-				Mode:      "soft_delete",
+				Mode:      mode,
 				TrashPath: cfg.TrashConfig.TrashDir,
 			},
 			HashLimitBytes:   cfg.TrashConfig.HashLimitBytes,
