@@ -56,17 +56,33 @@ func buildSet(entries []string) *ipset.Set {
 	return s
 }
 
+// dedupeStrings returns in with duplicates removed, preserving first-seen order.
+func dedupeStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
 // Syncer periodically refreshes a Policy's relay set from onionoo
 // sources + local lists. Modeled on internal/threatfeed.Syncer.
 type Syncer struct {
-	pol      *Policy
-	sources  []string
-	locals   []string
-	interval time.Duration
-	cacheDir string
-	client   *http.Client
-	logger   *slog.Logger
-	lastGood map[string][]string // per-source ("local:"+path for files) last-good IPs
+	pol       *Policy
+	sources   []string
+	locals    []string
+	interval  time.Duration
+	cacheDir  string
+	client    *http.Client
+	logger    *slog.Logger
+	lastGood  map[string][]string // per-source ("local:"+path for files) last-good IPs
+	cacheSeed []string            // flat disk cache, folded in until every source proves fresh
+	proven    map[string]bool     // sources/locals that have succeeded ≥once this lifetime
 }
 
 // NewSyncer builds a relay-feed syncer for the given Policy.
@@ -88,6 +104,7 @@ func NewSyncer(pol *Policy, logger *slog.Logger) *Syncer {
 		client:   &http.Client{Timeout: 60 * time.Second},
 		logger:   logger,
 		lastGood: make(map[string][]string),
+		proven:   map[string]bool{},
 	}
 }
 
@@ -95,6 +112,7 @@ func NewSyncer(pol *Policy, logger *slog.Logger) *Syncer {
 // the configured interval until ctx is cancelled.
 func (s *Syncer) Run(ctx context.Context) {
 	if cached := s.loadCache(); len(cached) > 0 {
+		s.cacheSeed = cached
 		s.pol.SetRelays(buildSet(cached))
 		s.logger.Info("tor relay cache loaded", "ips", len(cached))
 	}
@@ -115,6 +133,9 @@ func (s *Syncer) sync(ctx context.Context) {
 	if s.lastGood == nil {
 		s.lastGood = make(map[string][]string)
 	}
+	if s.proven == nil {
+		s.proven = map[string]bool{}
+	}
 	var all []string
 	for _, src := range s.sources {
 		ips, err := s.fetch(ctx, src)
@@ -125,6 +146,7 @@ func (s *Syncer) sync(ctx context.Context) {
 			continue
 		}
 		s.lastGood[src] = ips
+		s.proven[src] = true
 		all = append(all, ips...)
 	}
 	for _, path := range s.locals {
@@ -137,8 +159,17 @@ func (s *Syncer) sync(ctx context.Context) {
 			continue
 		}
 		s.lastGood[key] = ips
+		s.proven[key] = true
 		all = append(all, ips...)
 	}
+	totalSources := len(s.sources) + len(s.locals)
+	if len(s.proven) < totalSources {
+		// Not every source has reported fresh yet this lifetime: keep the
+		// disk-cache seed in play so a restart + a transient single-source
+		// failure cannot shrink the enforced set below what was persisted.
+		all = append(all, s.cacheSeed...)
+	}
+	all = dedupeStrings(all)
 	// An empty merged result is a non-success: retain the prior applied set
 	// (and the immutable seed in Policy). Covers all-sources-failed AND a
 	// source returning 200 with zero relays.

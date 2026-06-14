@@ -180,3 +180,103 @@ func TestSyncer_EmptyResultRetainsPrior(t *testing.T) {
 		t.Fatal("empty 200 response must retain prior set, not wipe it")
 	}
 }
+
+func TestSyncer_RestartPartialFailureRetainsCachedRelays(t *testing.T) {
+	// Simulate a restart: cacheSeed is populated (as Run would from disk),
+	// per-source lastGood is empty, and one of two sources fails on the
+	// first sync. The cached relay IP of the failed source must remain
+	// enforced (folded from the cache seed), not be wiped.
+	bFail := false
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"relays":[{"or_addresses":["198.51.100.1:9001"]}]}`))
+	}))
+	defer srvA.Close()
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if bFail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"relays":[{"or_addresses":["203.0.113.1:443"]}]}`))
+	}))
+	defer srvB.Close()
+
+	cfg := config.ResolveTorConfig(config.TorConfig{})
+	cfg.RelayFeed.Enabled = true
+	cfg.RelayFeed.Sources = []string{srvA.URL, srvB.URL}
+	pol, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s := NewSyncer(pol, nil)
+	// Emulate Run() having loaded a disk cache that contains B's relay IP.
+	s.cacheSeed = []string{"203.0.113.1"}
+	pol.SetRelays(buildSet(s.cacheSeed))
+
+	bFail = true
+	s.sync(t.Context()) // first post-restart sync: A ok, B fails
+	if _, ok := pol.EvalConnect(net.ParseIP("203.0.113.1"), 443); !ok {
+		t.Fatal("cached relay IP of the failed source must remain enforced after restart+partial failure")
+	}
+	if _, ok := pol.EvalConnect(net.ParseIP("198.51.100.1"), 9001); !ok {
+		t.Fatal("healthy source relay must be enforced")
+	}
+
+	// Once B recovers and all sources are proven, the stale cache seed is no
+	// longer folded; fresh per-source data takes over.
+	bFail = false
+	s.sync(t.Context())
+	if _, ok := pol.EvalConnect(net.ParseIP("203.0.113.1"), 443); !ok {
+		t.Fatal("B relay should still be enforced from its own fresh data")
+	}
+}
+
+func TestSyncer_CacheSeedDroppedAfterAllProven(t *testing.T) {
+	// A stale cache-seed IP that no live source serves must disappear once
+	// every source has reported fresh at least once (no unbounded staleness).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"relays":[{"or_addresses":["192.0.2.10:9001"]}]}`))
+	}))
+	defer srv.Close()
+	cfg := config.ResolveTorConfig(config.TorConfig{})
+	cfg.RelayFeed.Enabled = true
+	cfg.RelayFeed.Sources = []string{srv.URL}
+	pol, _ := New(cfg)
+	s := NewSyncer(pol, nil)
+	s.cacheSeed = []string{"198.51.100.222"} // stale, not served by any source
+	pol.SetRelays(buildSet(s.cacheSeed))
+
+	s.sync(t.Context()) // single source succeeds → all proven → seed dropped
+	if _, ok := pol.EvalConnect(net.ParseIP("192.0.2.10"), 9001); !ok {
+		t.Fatal("fresh relay must be enforced")
+	}
+	if _, ok := pol.EvalConnect(net.ParseIP("198.51.100.222"), 9001); ok {
+		t.Fatal("stale cache-seed IP must be dropped once all sources are proven")
+	}
+}
+
+func TestSyncer_DedupesMergedSet(t *testing.T) {
+	body := `{"relays":[{"or_addresses":["192.0.2.1:9001"]},{"or_addresses":["192.0.2.1:443"]}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	cfg := config.ResolveTorConfig(config.TorConfig{})
+	cfg.RelayFeed.Enabled = true
+	cfg.RelayFeed.Sources = []string{srv.URL}
+	dir := t.TempDir()
+	cfg.RelayFeed.CacheDir = dir
+	pol, _ := New(cfg)
+	s := NewSyncer(pol, nil)
+	s.sync(t.Context())
+	// 192.0.2.1 appears twice in the source; the persisted cache must contain it once.
+	loaded := s.loadCache()
+	count := 0
+	for _, ip := range loaded {
+		if ip == "192.0.2.1" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected 192.0.2.1 once in deduped cache, got %d (%v)", count, loaded)
+	}
+}
