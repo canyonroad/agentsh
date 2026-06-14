@@ -15,7 +15,13 @@ func TestBuildControlEvent(t *testing.T) {
 	if ev.Fields["vector"] != "process" || ev.Fields["decision"] != "deny" {
 		t.Fatalf("fields wrong: %+v", ev.Fields)
 	}
+	if ev.Fields["mode"] != "deny" || ev.Fields["target"] != "/usr/bin/tor" || ev.Fields["rule"] != "tor" {
+		t.Fatalf("fields mode/target/rule wrong: %+v", ev.Fields)
+	}
 	if ev.PID != 4242 {
 		t.Fatalf("PID=%d, want 4242", ev.PID)
+	}
+	if ev.ID == "" || ev.Timestamp.IsZero() {
+		t.Fatalf("ID/Timestamp not populated: id=%q ts=%v", ev.ID, ev.Timestamp)
 	}
 }
