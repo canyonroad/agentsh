@@ -77,6 +77,13 @@ Vectors 1–4 do not depend on any feed. Vector 5 uses a built-in
 directory-authority seed (feed-independent) plus an optional onionoo
 relay feed.
 
+The `.onion` DNS (3) and `.onion` HTTP (4) rows are two enforcement
+points and two distinct `tor_control` event vectors (`onion_dns`,
+`onion_http`), but they share a single `vectors.onion` config toggle:
+blocking `.onion` over DNS while permitting it over the HTTP proxy is
+incoherent, so one toggle governs both. The other vectors remain
+independently toggleable.
+
 ## Non-Goals
 
 - **Per-`.onion` allow/deny in Phase 1.** Allowing `a.onion` while
@@ -128,8 +135,7 @@ tor:
   vectors:
     processes:   true
     socks_ports: true
-    onion_dns:   true
-    onion_http:  true
+    onion:       true   # one toggle for both .onion DNS and .onion HTTP
     relay_ips:   true
 
   client_binaries: [tor, obfs4proxy, snowflake-client, lyrebird, meek-client, torsocks]
@@ -232,8 +238,10 @@ enforcement points each gain a short pre-check that calls the relevant
   (a user `deny` still denies).
 - In `allow` mode the Tor vectors are no-ops; normal network policy is
   unchanged for non-Tor traffic.
-- Vectors 1–4 are independent of any feed and of each other; each holds
-  even if the others or the feed are unavailable.
+- Vectors 1–4 are independent of any feed; each holds even if the
+  others or the feed are unavailable. (The `.onion` DNS and HTTP
+  enforcement points share the single `vectors.onion` toggle — see "The
+  five vectors" — but are otherwise independent doors.)
 - If the relay feed fails to load: fall back to last-good disk cache →
   built-in directory-authority seed + `local_lists`. Never silent
   fail-open. A `tor_control` feed-status warning is logged/metered.
