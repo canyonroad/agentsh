@@ -41,6 +41,19 @@ func TestSet_IPv6(t *testing.T) {
 	}
 }
 
+func TestSet_IPv6Exact(t *testing.T) {
+	s := New()
+	if err := s.Add("2001:db8::1"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if !s.Contains(net.ParseIP("2001:db8::1")) {
+		t.Fatal("expected bare IPv6 /128 to be a member")
+	}
+	if s.Contains(net.ParseIP("2001:db8::2")) {
+		t.Fatal("did not expect sibling 2001:db8::2 to be a member")
+	}
+}
+
 func TestSet_NilAndEmpty(t *testing.T) {
 	s := New()
 	if s.Contains(nil) {
