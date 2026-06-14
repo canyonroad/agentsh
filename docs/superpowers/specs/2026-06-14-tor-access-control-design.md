@@ -97,6 +97,14 @@ independently toggleable.
   dials a local SOCKS port). Relay-IP blocking is defense-in-depth for
   the daemon's *direct* egress, not the sole control. Documented, not
   pretended.
+- **Per-port precision on relay IPs.** Relay-IP matching (vector 5) is
+  IP-based and **port-agnostic**: a connection to *any* port of a seed
+  or feed relay IP is treated as Tor. A few directory-authority IPs sit
+  in netblocks shared with non-Tor services, so under deny-by-default a
+  sandboxed agent that legitimately dials such an IP on an unrelated
+  port is blocked as `relay_ip`. This is the intended conservative
+  posture (the same trade-off as the bridge limitation); the operator's
+  escape hatch is `vectors.relay_ips: false` or `tor.mode: audit`.
 - **Deep Tor protocol fingerprinting** (recognizing the Tor link
   handshake on an arbitrary TLS connection). Out of scope; the five
   vectors above are cheaper and sufficient.
@@ -297,6 +305,16 @@ Fields: `vector` (`process|socks_port|onion_dns|onion_http|relay_ip`),
 standard base process fields (pid, process name, executable, cmdline,
 uid/gid, username). `audit` mode emits the same event with
 `decision: audit`.
+
+**Attribution caveat.** The `pid`/`command_id` fields are populated only
+where the firing enforcement layer knows the originating process. The
+ptrace execve and network paths carry a real `pid` (with an empty
+`command_id`, matching the sibling `ptrace_execve`/`ptrace_network`
+events). The DNS, HTTP-proxy, and transparent-TCP layers operate on a
+query/connection and emit `pid: 0`, because the originating PID is not
+resolved at that layer; those records are correlated by session and
+`target` instead. Threading a PID into those layers is possible future
+work, not a Phase 1 guarantee.
 
 **Registration requirement.** Any new `events.EventType` must also be
 added to `internal/ocsf/registry.go` (`pendingTypes` or a real OCSF
