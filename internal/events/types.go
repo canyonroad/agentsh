@@ -27,6 +27,7 @@ const (
 	EventDNSRedirect             EventType = "dns_redirect"
 	EventConnectRedirect         EventType = "connect_redirect"
 	EventConnectRedirectFallback EventType = "connect_redirect_fallback"
+	EventTorControl              EventType = "tor_control"
 )
 
 // Process operation events.
@@ -197,6 +198,7 @@ var EventCategory = map[EventType]string{
 	EventDNSRedirect:             "network",
 	EventConnectRedirect:         "network",
 	EventConnectRedirectFallback: "network",
+	EventTorControl:              "network",
 
 	// Process
 	EventProcessStart: "process",
@@ -290,6 +292,7 @@ var AllEventTypes = []EventType{
 	// Network
 	EventDNSQuery, EventNetConnect, EventNetListen, EventNetAccept,
 	EventDNSRedirect, EventConnectRedirect, EventConnectRedirectFallback,
+	EventTorControl,
 	// Process
 	EventProcessStart, EventProcessSpawn, EventProcessExit, EventProcessTree,
 	// Environment

@@ -66,6 +66,7 @@ var pendingTypes = map[string]struct{}{
 	"transparent_net_failed": {},
 	"transparent_net_ready":  {},
 	"transparent_net_setup":  {},
+	"tor_control":            {},
 	"mcp_network_connection": {},
 	// HTTP Activity (4002) — Task 19
 	"http":                       {},

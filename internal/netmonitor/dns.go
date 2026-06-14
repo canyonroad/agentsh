@@ -14,6 +14,7 @@ import (
 	"github.com/agentsh/agentsh/internal/netmonitor/redirect"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/tor"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
@@ -118,6 +119,14 @@ func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 		dec.Rule = "dns-monitor-only"
 	}
 	dec = d.maybeApprove(ctx, commandID, dec, "dns", domain)
+
+	if dec.Tor != nil && d.emit != nil {
+		tev := tor.BuildControlEvent(d.sessionID, commandID, 0, tor.Verdict{
+			Vector: dec.Tor.Vector, Mode: dec.Tor.Mode, Decision: dec.Tor.Decision, Target: dec.Tor.Target,
+		})
+		_ = d.emit.AppendEvent(context.Background(), tev)
+		d.emit.Publish(tev)
+	}
 
 	ev := types.Event{
 		ID:        uuid.NewString(),

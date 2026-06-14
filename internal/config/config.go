@@ -35,6 +35,7 @@ type Config struct {
 	Landlock          LandlockConfig          `yaml:"landlock"`
 	LinuxCapabilities CapabilitiesConfig      `yaml:"capabilities"`
 	ThreatFeeds       ThreatFeedsConfig       `yaml:"threat_feeds"`
+	Tor               TorConfig               `yaml:"tor"`
 	PackageChecks     PackageChecksConfig     `yaml:"package_checks"`
 	Skillcheck        SkillcheckConfig        `yaml:"skillcheck"`
 	PolicySocket      PolicySocketConfig      `yaml:"policy_socket"`
