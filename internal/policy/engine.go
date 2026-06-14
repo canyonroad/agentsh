@@ -1104,6 +1104,19 @@ func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) (
 			defer func() { dec.Tor = &tv }() // audit: attach, don't loosen (returns below must assign named dec)
 		}
 	}
+	if e.torChecker != nil {
+		if ip := net.ParseIP(domain); ip != nil {
+			if v, ok := e.torChecker.EvalConnect(ip, port); ok {
+				tv := v
+				if v.Decision == "deny" {
+					d := e.wrapDecision(string(types.DecisionDeny), "tor:"+v.Vector, "blocked by Tor policy", nil)
+					d.Tor = &tv
+					return d
+				}
+				defer func() { dec.Tor = &tv }() // audit: attach, don't loosen (returns below must assign named dec)
+			}
+		}
+	}
 
 	// Threat feed pre-check (skip for empty domain, consistent with CheckNetworkIP).
 	var threatResult *ThreatCheckResult

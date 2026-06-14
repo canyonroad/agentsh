@@ -1,6 +1,7 @@
 package tor_test
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -40,5 +41,14 @@ func TestE2E_TorBlocksAllVectors(t *testing.T) {
 	}
 	if d := e.CheckNetworkCtx(nil, "abc.onion", 53); d.EffectiveDecision != types.DecisionDeny || d.Tor == nil {
 		t.Fatalf("onion_dns vector: %+v", d)
+	}
+
+	// ptrace connect path: CheckNetworkCtx with an IP-literal domain must also
+	// reach EvalConnect (this is the path the ptrace runtime actually uses).
+	if dec := e.CheckNetworkCtx(context.Background(), "127.0.0.1", 9050); dec.EffectiveDecision != types.DecisionDeny || dec.Tor == nil {
+		t.Fatalf("ptrace path: loopback :9050 must deny via CheckNetworkCtx, got dec=%+v tor=%+v", dec.EffectiveDecision, dec.Tor)
+	}
+	if dec := e.CheckNetworkCtx(context.Background(), "128.31.0.39", 443); dec.EffectiveDecision != types.DecisionDeny || dec.Tor == nil {
+		t.Fatalf("ptrace path: relay seed IP must deny via CheckNetworkCtx, got dec=%+v tor=%+v", dec.EffectiveDecision, dec.Tor)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	dbevents "github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/tor"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
@@ -133,6 +134,13 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 	}
 
 	dec := t.checkConnectNetwork(context.Background(), commandID, domain, redirectHostPort, dstIP, dstPort, redirectResult)
+	if dec.Tor != nil && t.emit != nil {
+		tev := tor.BuildControlEvent(t.sessionID, commandID, 0, tor.Verdict{
+			Vector: dec.Tor.Vector, Mode: dec.Tor.Mode, Decision: dec.Tor.Decision, Target: dec.Tor.Target,
+		})
+		_ = t.emit.AppendEvent(context.Background(), tev)
+		t.emit.Publish(tev)
+	}
 	eventFields := map[string]any{}
 	if redirectResult != nil {
 		if redirectResult.RedirectTo != "" {

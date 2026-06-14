@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -85,6 +86,50 @@ func TestCheckNetworkCtx_TorOnionDeny(t *testing.T) {
 	dec := e.CheckNetworkCtx(nil, "x.onion", 53)
 	if dec.EffectiveDecision != types.DecisionDeny || dec.Tor == nil {
 		t.Fatalf("want onion deny, got dec=%+v tor=%+v", dec.EffectiveDecision, dec.Tor)
+	}
+}
+
+func TestCheckNetworkCtx_TorDenySocksPort_LivePath(t *testing.T) {
+	// The ptrace connect path goes through CheckNetworkCtx with an IP-literal
+	// domain — NOT CheckNetworkIP. This is the path that was Tor-blind.
+	e := newAllowAllEngine(t)
+	e.SetTorPolicy(&fakeTor{connect: &TorVerdict{Vector: "socks_port", Mode: "deny", Decision: "deny", Target: "127.0.0.1:9050"}})
+	dec := e.CheckNetworkCtx(context.Background(), "127.0.0.1", 9050)
+	if dec.EffectiveDecision != types.DecisionDeny || dec.Tor == nil || dec.Tor.Vector != "socks_port" {
+		t.Fatalf("want socks_port deny via CheckNetworkCtx, got dec=%+v tor=%+v", dec.EffectiveDecision, dec.Tor)
+	}
+}
+
+func TestCheckNetworkCtx_TorDenyRelayIP_LivePath(t *testing.T) {
+	e := newAllowAllEngine(t)
+	e.SetTorPolicy(&fakeTor{connect: &TorVerdict{Vector: "relay_ip", Mode: "deny", Decision: "deny", Target: "1.2.3.4:443"}})
+	dec := e.CheckNetworkCtx(context.Background(), "1.2.3.4", 443)
+	if dec.EffectiveDecision != types.DecisionDeny || dec.Tor == nil || dec.Tor.Vector != "relay_ip" {
+		t.Fatalf("want relay_ip deny via CheckNetworkCtx, got dec=%+v tor=%+v", dec.EffectiveDecision, dec.Tor)
+	}
+}
+
+func TestCheckNetworkCtx_TorAuditConnectAttachesOnAllow(t *testing.T) {
+	// audit must attach .Tor without changing an allow, on the connect path.
+	e := newAllowAllEngine(t) // allows port 9050
+	e.SetTorPolicy(&fakeTor{connect: &TorVerdict{Vector: "relay_ip", Mode: "audit", Decision: "audit", Target: "1.2.3.4:9050"}})
+	dec := e.CheckNetworkCtx(context.Background(), "1.2.3.4", 9050)
+	if dec.EffectiveDecision != types.DecisionAllow {
+		t.Fatalf("audit must not change allow; got %v", dec.EffectiveDecision)
+	}
+	if dec.Tor == nil || dec.Tor.Decision != "audit" {
+		t.Fatalf("audit verdict must attach on connect-allow; got %+v", dec.Tor)
+	}
+}
+
+func TestCheckNetworkCtx_TorOnionStillWorks(t *testing.T) {
+	// Regression guard: the onion pre-check must still fire (the new connect
+	// block must not shadow it for non-IP domains).
+	e := newAllowAllEngine(t)
+	e.SetTorPolicy(&fakeTor{onion: &TorVerdict{Vector: "onion_dns", Mode: "deny", Decision: "deny", Target: "x.onion"}})
+	dec := e.CheckNetworkCtx(context.Background(), "x.onion", 53)
+	if dec.EffectiveDecision != types.DecisionDeny || dec.Tor == nil || dec.Tor.Vector != "onion_dns" {
+		t.Fatalf("onion deny must still work, got dec=%+v tor=%+v", dec.EffectiveDecision, dec.Tor)
 	}
 }
 
