@@ -1,7 +1,7 @@
 # Tor Access Control — Design
 
 **Date:** 2026-06-14
-**Status:** Draft, awaiting user review
+**Status:** Approved — Phase 1 implemented
 **Related:** `internal/policy/engine.go` (`CheckExecve`, `CheckNetworkIP`,
 `CheckNetworkCtx`), `internal/netmonitor/dns.go`, `internal/netmonitor/proxy.go`,
 `internal/netmonitor/transparent_tcp.go`, `internal/threatfeed/`,
@@ -153,6 +153,25 @@ mirrors the `*bool` tri-state already used for `WaitKillable` and the
 **Escape hatches.** `tor.enabled: false` disables Tor controls
 entirely; `tor.mode: allow` permits Tor (and, in Phase 2, scopes it
 via `onion_rules`).
+
+**Upgrade / migration note (deny-by-default activates on upgrade).**
+Because `tor:` is deny-by-default, an existing deployment whose config
+has **no `tor:` block** will, on upgrade to a build containing this
+feature, immediately begin denying all five Tor vectors — client
+binaries, the local SOCKS/control ports (`9050/9150/9051`), `.onion`
+DNS/HTTP, and the built-in directory-authority IPs — for agents that
+never opted in. This is the intended posture, not a regression. An
+operator who needs Tor, or who wants a gentler rollout, must set one of
+the following **before** upgrading:
+
+- `tor.mode: audit` — observe via `tor_control{decision:audit}` events
+  without blocking, then tighten to `deny` once the impact is understood;
+  or
+- `tor.enabled: false` — disable the Tor controls entirely.
+
+This default-on, high-impact behavior change **must be called out in the
+release notes** for the version that ships Phase 1, so operators can opt
+out ahead of time.
 
 ## Architecture
 
