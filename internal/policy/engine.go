@@ -531,7 +531,7 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) (dec Decisio
 				d.Tor = &tv
 				return d
 			}
-			defer func() { dec.Tor = &tv }()
+			defer func() { dec.Tor = &tv }() // audit: attach, don't loosen (returns below must assign named dec)
 		}
 	}
 	if e.policy == nil {
@@ -1101,7 +1101,7 @@ func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) (
 				d.Tor = &tv
 				return d
 			}
-			defer func() { dec.Tor = &tv }()
+			defer func() { dec.Tor = &tv }() // audit: attach, don't loosen (returns below must assign named dec)
 		}
 	}
 

@@ -87,3 +87,17 @@ func TestCheckNetworkCtx_TorOnionDeny(t *testing.T) {
 		t.Fatalf("want onion deny, got dec=%+v tor=%+v", dec.EffectiveDecision, dec.Tor)
 	}
 }
+
+func TestCheckNetworkIP_TorAuditAttachesOnAllow(t *testing.T) {
+	// Audit verdict over an allow-all policy: decision stays allow, but the
+	// verdict must ride along via the deferred attach (the common case).
+	e := newAllowAllEngine(t)
+	e.SetTorPolicy(&fakeTor{connect: &TorVerdict{Vector: "relay_ip", Mode: "audit", Decision: "audit", Target: "1.2.3.4:443"}})
+	dec := e.CheckNetworkIP("", net.ParseIP("1.2.3.4"), 9050)
+	if dec.EffectiveDecision != types.DecisionAllow {
+		t.Fatalf("audit must not change an allow; got %v", dec.EffectiveDecision)
+	}
+	if dec.Tor == nil || dec.Tor.Decision != "audit" {
+		t.Fatalf("audit verdict must attach on allow; got %+v", dec.Tor)
+	}
+}
