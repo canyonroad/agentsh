@@ -23,6 +23,12 @@ func TestResolveTorConfig_AbsentBlockDeniesByDefault(t *testing.T) {
 	if len(got.ClientBinaries) == 0 || len(got.SocksPorts) == 0 {
 		t.Fatal("client_binaries and socks_ports must have defaults")
 	}
+	if len(got.ControlPorts) == 0 {
+		t.Fatal("control_ports must have defaults")
+	}
+	if !got.SocksLoopbackOnly {
+		t.Fatal("socks_loopback_only must default true")
+	}
 }
 
 func TestResolveTorConfig_ExplicitDisable(t *testing.T) {
