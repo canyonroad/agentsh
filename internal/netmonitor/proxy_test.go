@@ -3,6 +3,7 @@ package netmonitor
 import (
 	"context"
 	"net"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,11 +11,13 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/internal/config"
 	dbevents "github.com/agentsh/agentsh/internal/db/events"
 	dbservice "github.com/agentsh/agentsh/internal/db/service"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/tor"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -807,4 +810,88 @@ func TestMCPConnectionTaggingNilEmitter(t *testing.T) {
 
 	// Should not panic with nil emitter
 	emitMCPConnectionIfMatched(context.Background(), sess, nil, "test-session", "cmd", "mcp.example.com", "mcp.example.com:443", 443)
+}
+
+// TestProxyHandleHTTPOnionRemapsVectorToOnionHTTP drives handleHTTP against a
+// .onion host and asserts the emitted tor_control event carries
+// vector == "onion_http". CheckNetworkCtx tags the Tor verdict with the
+// onion_dns vector (EvalOnionName always returns VectorOnionDNS); the HTTP
+// proxy path in handleHTTP (proxy.go:392-401) is the layer responsible for
+// relabeling it to onion_http. This guards that remap — the only non-trivial
+// logic among the five emit sites.
+func TestProxyHandleHTTPOnionRemapsVectorToOnionHTTP(t *testing.T) {
+	// Deny-by-default Tor policy with the onion vector on (zero TorConfig
+	// resolves to enabled, mode=deny, all vectors true).
+	torPol, err := tor.New(config.ResolveTorConfig(config.TorConfig{}))
+	if err != nil {
+		t.Fatalf("tor.New: %v", err)
+	}
+
+	// Allow-all base policy so the only deny comes from the Tor checker.
+	basePolicy := &policy.Policy{
+		Version: 1,
+		Name:    "allow-all",
+		NetworkRules: []policy.NetworkRule{
+			{Name: "allow-all", Domains: []string{"*"}, Decision: "allow"},
+		},
+	}
+	engine, err := policy.NewEngine(basePolicy, false, false)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	engine.SetTorPolicy(&tor.PolicyAdapter{Policy: torPol})
+
+	em := &stubEmitter{}
+	p := &Proxy{sessionID: "tor-session", policy: engine, emit: em}
+
+	// EvalOnionName matches any .onion suffix; use a syntactically valid
+	// v3-style onion host.
+	const onionHost = "abcdefghij234567abcdefghij234567abcdefghij234567abcdefghij234567.onion"
+	req := httptest.NewRequest("GET", "http://"+onionHost+"/", nil)
+
+	client, server := net.Pipe()
+
+	done := make(chan struct{})
+	go func() {
+		_ = p.handleHTTP(server, req)
+		close(done)
+	}()
+
+	// Drain the client side so handleHTTP's 403 write doesn't block the pipe.
+	go func() {
+		_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 512)
+		for {
+			if _, e := client.Read(buf); e != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleHTTP did not return")
+	}
+	client.Close()
+
+	var torEv *types.Event
+	for i := range em.events {
+		if em.events[i].Type == "tor_control" {
+			torEv = &em.events[i]
+			break
+		}
+	}
+	if torEv == nil {
+		t.Fatalf("no tor_control event emitted; got %d events: %+v", len(em.events), em.events)
+	}
+	if torEv.Type != "tor_control" {
+		t.Fatalf("event type = %q, want tor_control", torEv.Type)
+	}
+	if got := torEv.Fields["vector"]; got != "onion_http" {
+		t.Fatalf("vector = %v, want onion_http (the handleHTTP remap from onion_dns)", got)
+	}
+	if got := torEv.Fields["decision"]; got != "deny" {
+		t.Fatalf("decision = %v, want deny", got)
+	}
 }
