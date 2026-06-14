@@ -43,6 +43,7 @@ import (
 	"github.com/agentsh/agentsh/internal/store/sqlite"
 	"github.com/agentsh/agentsh/internal/store/webhook"
 	"github.com/agentsh/agentsh/internal/threatfeed"
+	"github.com/agentsh/agentsh/internal/tor"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -77,6 +78,8 @@ type Server struct {
 
 	threatSyncer *threatfeed.Syncer
 	threatStore  *threatfeed.Store
+
+	torSyncer *tor.Syncer
 
 	skillcheckDaemon *skillcheck.Daemon // nil when skillcheck.enabled=false
 
@@ -195,6 +198,24 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 		engine.SetThreatStore(&threatfeed.PolicyAdapter{Store: threatStore}, cfg.ThreatFeeds.Action)
 		threatSyncer = threatfeed.NewSyncer(threatStore, cfg.ThreatFeeds, slog.Default())
+	}
+
+	torCfg := config.ResolveTorConfig(cfg.Tor)
+	var torSyncer *tor.Syncer
+	if torCfg.Enabled {
+		// Default the relay-feed cache dir alongside the threat-feed cache.
+		if torCfg.RelayFeed.Enabled && torCfg.RelayFeed.CacheDir == "" {
+			torCfg.RelayFeed.CacheDir = filepath.Join(config.GetDataDir(), "tor-relays")
+		}
+		torPol, err := tor.New(torCfg)
+		if err != nil {
+			return nil, fmt.Errorf("tor policy: %w", err)
+		}
+		engine.SetTorPolicy(&tor.PolicyAdapter{Policy: torPol})
+		slog.Info("tor access control enabled", "mode", torCfg.Mode)
+		if torPol.RelayFeedEnabled() {
+			torSyncer = tor.NewSyncer(torPol, slog.Default())
+		}
 	}
 
 	limits := engine.Limits()
@@ -758,6 +779,7 @@ func New(cfg *config.Config) (*Server, error) {
 		reapInterval:     reapInterval,
 		threatSyncer:     threatSyncer,
 		threatStore:      threatStore,
+		torSyncer:        torSyncer,
 		skillcheckDaemon: skillcheckDaemon,
 		app:              app,
 		kmsProvider:      kmsProvider,
@@ -1061,6 +1083,20 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
+	var torSyncerDone chan struct{}
+	if s.torSyncer != nil {
+		torSyncerDone = make(chan struct{})
+		go func() {
+			defer close(torSyncerDone)
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("tor syncer panicked", "panic", r)
+				}
+			}()
+			s.torSyncer.Run(ctx)
+		}()
+	}
+
 	var skillcheckDone chan struct{}
 	if s.skillcheckDaemon != nil {
 		skillcheckDone = make(chan struct{})
@@ -1123,6 +1159,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if syncerDone != nil {
 			<-syncerDone
+		}
+		if torSyncerDone != nil {
+			<-torSyncerDone
 		}
 		if skillcheckDone != nil {
 			<-skillcheckDone
