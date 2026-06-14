@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/ipset"
 )
 
 func newDenyPolicy(t *testing.T) *Policy {
@@ -97,5 +98,46 @@ func TestPolicy_DisabledVector(t *testing.T) {
 	// other vectors still active
 	if _, ok := p.EvalOnionName("x.onion"); !ok {
 		t.Fatal("onion_dns still enabled: should match")
+	}
+}
+
+func TestPolicy_EvalConnect_ControlPort(t *testing.T) {
+	p := newDenyPolicy(t)
+	v, ok := p.EvalConnect(net.ParseIP("127.0.0.1"), 9051) // default control port
+	if !ok || v.Vector != "socks_port" || v.Decision != "deny" {
+		t.Fatalf("loopback :9051 control port should deny: ok=%v v=%+v", ok, v)
+	}
+}
+
+func TestPolicy_EvalOnionName_Normalization(t *testing.T) {
+	p := newDenyPolicy(t)
+	for _, host := range []string{"ABCDEF.onion", "abcdef.onion.", "  abc.onion  ", "onion"} {
+		if _, ok := p.EvalOnionName(host); !ok {
+			t.Fatalf("expected %q to match after normalization", host)
+		}
+	}
+	for _, host := range []string{"notonion", "foo.onionx", "onion.com"} {
+		if _, ok := p.EvalOnionName(host); ok {
+			t.Fatalf("did not expect %q to match", host)
+		}
+	}
+}
+
+func TestPolicy_SetRelays_HotSwapMatch(t *testing.T) {
+	p := newDenyPolicy(t)
+	// A non-seed public IP is initially not a relay.
+	ip := net.ParseIP("203.0.113.50")
+	if _, ok := p.EvalConnect(ip, 443); ok {
+		t.Fatal("IP should not match before feed swap")
+	}
+	// Swap in a relay set containing it; the next Eval must see it.
+	s := ipset.New()
+	if err := s.Add("203.0.113.0/24"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	p.SetRelays(s)
+	v, ok := p.EvalConnect(ip, 443)
+	if !ok || v.Vector != "relay_ip" || v.Decision != "deny" {
+		t.Fatalf("post-swap relay match failed: ok=%v v=%+v", ok, v)
 	}
 }
