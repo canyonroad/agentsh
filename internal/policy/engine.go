@@ -35,6 +35,24 @@ type ThreatChecker interface {
 	Check(domain string) (ThreatCheckResult, bool)
 }
 
+// TorVerdict mirrors tor.Verdict at the policy layer (avoids a policy→tor
+// import). tor.PolicyAdapter translates between the two.
+type TorVerdict struct {
+	Vector   string
+	Mode     string
+	Decision string // "deny" or "audit"
+	Target   string
+}
+
+// TorChecker is the optional Tor coordinator. internal/tor.PolicyAdapter
+// satisfies it. All methods return (verdict, true) only on a Tor match
+// the caller should act on (deny short-circuits; audit attaches+continues).
+type TorChecker interface {
+	EvalExecve(filename string, argv []string) (TorVerdict, bool)
+	EvalConnect(ip net.IP, port int) (TorVerdict, bool)
+	EvalOnionName(host string) (TorVerdict, bool)
+}
+
 type Engine struct {
 	policy           *Policy
 	enforceApprovals bool
@@ -71,6 +89,9 @@ type Engine struct {
 	// Optional threat feed store for domain checking
 	threatStore  ThreatChecker
 	threatAction string
+
+	// Optional Tor coordinator (deny-by-default Tor controls).
+	torChecker TorChecker
 }
 
 type Limits struct {
@@ -141,7 +162,8 @@ type Decision struct {
 	EnvPolicy         ResolvedEnvPolicy
 	ThreatFeed        string
 	ThreatMatch       string
-	ThreatAction      string // "deny" or "audit" — set when a threat feed matched
+	ThreatAction      string      // "deny" or "audit" — set when a threat feed matched
+	Tor               *TorVerdict // non-nil when a Tor vector matched (deny or audit)
 }
 
 func NewEngine(p *Policy, enforceApprovals bool, enforceRedirects bool) (*Engine, error) {
@@ -403,6 +425,11 @@ func (e *Engine) SetThreatStore(store ThreatChecker, action string) {
 	default:
 		e.threatAction = "deny"
 	}
+}
+
+// SetTorPolicy installs the optional Tor coordinator. Pass nil to disable.
+func (e *Engine) SetTorPolicy(tc TorChecker) {
+	e.torChecker = tc
 }
 
 // expandPolicy creates a copy of the policy with all variables expanded.
