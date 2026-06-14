@@ -522,7 +522,18 @@ func (e *Engine) Limits() Limits {
 
 // CheckNetworkIP evaluates network_rules using a known destination IP (no DNS resolution).
 // If domain is empty, only CIDR/port-based rules can match.
-func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
+func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) (dec Decision) {
+	if e.torChecker != nil {
+		if v, ok := e.torChecker.EvalConnect(ip, port); ok {
+			tv := v
+			if v.Decision == "deny" {
+				d := e.wrapDecision(string(types.DecisionDeny), "tor:"+v.Vector, "blocked by Tor policy", nil)
+				d.Tor = &tv
+				return d
+			}
+			defer func() { dec.Tor = &tv }()
+		}
+	}
 	if e.policy == nil {
 		return Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
@@ -533,7 +544,7 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 	if e.threatStore != nil && domain != "" {
 		if result, matched := e.threatStore.Check(domain); matched {
 			if e.threatAction == "deny" {
-				dec := e.wrapDecision("deny", "threat-feed:"+result.FeedName,
+				dec = e.wrapDecision("deny", "threat-feed:"+result.FeedName,
 					"domain matched threat feed: "+result.FeedName+" (matched: "+result.MatchedDomain+")", nil)
 				dec.ThreatFeed = result.FeedName
 				dec.ThreatMatch = result.MatchedDomain
@@ -590,7 +601,7 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 			}
 		}
 
-		dec := e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
+		dec = e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
 		if threatResult != nil {
 			dec.ThreatFeed = threatResult.FeedName
 			dec.ThreatMatch = threatResult.MatchedDomain
@@ -599,7 +610,7 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 		return dec
 	}
 
-	dec := e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "", nil)
+	dec = e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "", nil)
 	if threatResult != nil {
 		dec.ThreatFeed = threatResult.FeedName
 		dec.ThreatMatch = threatResult.MatchedDomain
@@ -1080,15 +1091,26 @@ func (e *Engine) CheckNetwork(domain string, port int) Decision {
 // CheckNetworkCtx evaluates network_rules against a domain and port with context support.
 // If a rule requires CIDR matching and the domain is not an IP literal, DNS resolution
 // will be performed using the provided context for cancellation.
-func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) Decision {
+func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) (dec Decision) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
+	if e.torChecker != nil {
+		if v, ok := e.torChecker.EvalOnionName(domain); ok {
+			tv := v
+			if v.Decision == "deny" {
+				d := e.wrapDecision(string(types.DecisionDeny), "tor:"+v.Vector, "blocked by Tor policy", nil)
+				d.Tor = &tv
+				return d
+			}
+			defer func() { dec.Tor = &tv }()
+		}
+	}
 
 	// Threat feed pre-check (skip for empty domain, consistent with CheckNetworkIP).
 	var threatResult *ThreatCheckResult
 	if e.threatStore != nil && domain != "" {
 		if entry, matched := e.threatStore.Check(domain); matched {
 			if e.threatAction == "deny" {
-				dec := e.wrapDecision("deny", "threat-feed:"+entry.FeedName,
+				dec = e.wrapDecision("deny", "threat-feed:"+entry.FeedName,
 					"domain matched threat feed: "+entry.FeedName+" (matched: "+entry.MatchedDomain+")", nil)
 				dec.ThreatFeed = entry.FeedName
 				dec.ThreatMatch = entry.MatchedDomain
@@ -1168,7 +1190,7 @@ func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) D
 		}
 
 		// If rule has no selectors, it matches (e.g., approve unknown https by port only).
-		dec := e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
+		dec = e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
 		if threatResult != nil {
 			dec.ThreatFeed = threatResult.FeedName
 			dec.ThreatMatch = threatResult.MatchedDomain
@@ -1177,7 +1199,7 @@ func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) D
 		return dec
 	}
 
-	dec := e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "", nil)
+	dec = e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "", nil)
 	if threatResult != nil {
 		dec.ThreatFeed = threatResult.FeedName
 		dec.ThreatMatch = threatResult.MatchedDomain
@@ -1381,7 +1403,19 @@ func (e *Engine) EvaluateConnectRedirect(hostPort string) *ConnectRedirectResult
 // CheckExecve evaluates an execve call against command rules with depth context support.
 // Returns the decision from the first matching rule, or default deny if none match.
 // The depth parameter represents the ancestry depth: 0 = direct (user-typed), 1+ = nested (script-spawned).
-func (e *Engine) CheckExecve(filename string, argv []string, depth int) Decision {
+func (e *Engine) CheckExecve(filename string, argv []string, depth int) (dec Decision) {
+	if e.torChecker != nil {
+		if v, ok := e.torChecker.EvalExecve(filename, argv); ok {
+			tv := v
+			if v.Decision == "deny" {
+				d := e.wrapDecision(string(types.DecisionDeny), "tor:"+v.Vector, "blocked by Tor policy", nil)
+				d.Tor = &tv
+				d.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, CommandRule{})
+				return d
+			}
+			defer func() { dec.Tor = &tv }() // audit: attach, don't loosen
+		}
+	}
 	cmdLower := strings.ToLower(filename)
 	cmdBase := strings.ToLower(filepath.Base(filename))
 
@@ -1450,13 +1484,13 @@ func (e *Engine) CheckExecve(filename string, argv []string, depth int) Decision
 			}
 		}
 
-		dec := e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, r.rule.RedirectTo)
+		dec = e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, r.rule.RedirectTo)
 		dec.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, r.rule)
 		return dec
 	}
 
 	// Default deny (consistent with other Check* methods)
-	dec := e.wrapDecision(string(types.DecisionDeny), "default-deny-execve", "", nil)
+	dec = e.wrapDecision(string(types.DecisionDeny), "default-deny-execve", "", nil)
 	dec.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, CommandRule{})
 	return dec
 }
