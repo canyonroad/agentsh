@@ -102,3 +102,81 @@ func TestSyncer_FetchAndSync(t *testing.T) {
 		t.Fatalf("want vector %q, got %q", VectorRelayIP, v.Vector)
 	}
 }
+
+func TestSyncer_PartialFailureRetainsLastGood(t *testing.T) {
+	// Source A and B both serve valid relays initially; then A starts failing.
+	// A's relay IP must remain enforced (substituted from per-source last-good)
+	// rather than being silently dropped because A failed this run.
+	aFail := false
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if aFail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"relays":[{"or_addresses":["198.51.100.1:9001"]}]}`))
+	}))
+	defer srvA.Close()
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"relays":[{"or_addresses":["203.0.113.1:443"]}]}`))
+	}))
+	defer srvB.Close()
+
+	cfg := config.ResolveTorConfig(config.TorConfig{})
+	cfg.RelayFeed.Enabled = true
+	cfg.RelayFeed.Sources = []string{srvA.URL, srvB.URL}
+	pol, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s := NewSyncer(pol, nil)
+
+	s.sync(t.Context()) // first sync: both succeed
+	if _, ok := pol.EvalConnect(net.ParseIP("198.51.100.1"), 9001); !ok {
+		t.Fatal("A relay should match after first sync")
+	}
+	if _, ok := pol.EvalConnect(net.ParseIP("203.0.113.1"), 443); !ok {
+		t.Fatal("B relay should match after first sync")
+	}
+
+	aFail = true
+	s.sync(t.Context()) // second sync: A fails, B succeeds
+	if _, ok := pol.EvalConnect(net.ParseIP("198.51.100.1"), 9001); !ok {
+		t.Fatal("A relay must STILL match after A fails (per-source last-good substitution)")
+	}
+	if _, ok := pol.EvalConnect(net.ParseIP("203.0.113.1"), 443); !ok {
+		t.Fatal("B relay should still match after second sync")
+	}
+}
+
+func TestSyncer_EmptyResultRetainsPrior(t *testing.T) {
+	// A single source first serves a relay, then returns 200 with zero relays.
+	// The empty merged result must NOT wipe the enforced set.
+	empty := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if empty {
+			_, _ = w.Write([]byte(`{"relays":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"relays":[{"or_addresses":["192.0.2.50:9001"]}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := config.ResolveTorConfig(config.TorConfig{})
+	cfg.RelayFeed.Enabled = true
+	cfg.RelayFeed.Sources = []string{srv.URL}
+	pol, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s := NewSyncer(pol, nil)
+
+	s.sync(t.Context())
+	if _, ok := pol.EvalConnect(net.ParseIP("192.0.2.50"), 9001); !ok {
+		t.Fatal("relay should match after first sync")
+	}
+	empty = true
+	s.sync(t.Context())
+	if _, ok := pol.EvalConnect(net.ParseIP("192.0.2.50"), 9001); !ok {
+		t.Fatal("empty 200 response must retain prior set, not wipe it")
+	}
+}

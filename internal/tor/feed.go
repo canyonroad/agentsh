@@ -66,7 +66,7 @@ type Syncer struct {
 	cacheDir string
 	client   *http.Client
 	logger   *slog.Logger
-	lastGood []string
+	lastGood map[string][]string // per-source ("local:"+path for files) last-good IPs
 }
 
 // NewSyncer builds a relay-feed syncer for the given Policy.
@@ -87,6 +87,7 @@ func NewSyncer(pol *Policy, logger *slog.Logger) *Syncer {
 		cacheDir: cfg.CacheDir,
 		client:   &http.Client{Timeout: 60 * time.Second},
 		logger:   logger,
+		lastGood: make(map[string][]string),
 	}
 }
 
@@ -95,7 +96,6 @@ func NewSyncer(pol *Policy, logger *slog.Logger) *Syncer {
 func (s *Syncer) Run(ctx context.Context) {
 	if cached := s.loadCache(); len(cached) > 0 {
 		s.pol.SetRelays(buildSet(cached))
-		s.lastGood = cached
 		s.logger.Info("tor relay cache loaded", "ips", len(cached))
 	}
 	s.sync(ctx)
@@ -112,34 +112,41 @@ func (s *Syncer) Run(ctx context.Context) {
 }
 
 func (s *Syncer) sync(ctx context.Context) {
+	if s.lastGood == nil {
+		s.lastGood = make(map[string][]string)
+	}
 	var all []string
-	anySucceeded := false
 	for _, src := range s.sources {
 		ips, err := s.fetch(ctx, src)
 		if err != nil {
-			s.logger.Warn("tor relay feed fetch failed", "source", src, "error", err)
+			s.logger.Warn("tor relay feed fetch failed, using last-good",
+				"source", src, "error", err, "last_good_ips", len(s.lastGood[src]))
+			all = append(all, s.lastGood[src]...) // substitute this source's last-good
 			continue
 		}
-		anySucceeded = true
+		s.lastGood[src] = ips
 		all = append(all, ips...)
 	}
 	for _, path := range s.locals {
+		key := "local:" + path
 		ips, err := s.parseLocal(path)
 		if err != nil {
-			s.logger.Warn("tor relay local list failed", "path", path, "error", err)
+			s.logger.Warn("tor relay local list failed, using last-good",
+				"path", path, "error", err, "last_good_ips", len(s.lastGood[key]))
+			all = append(all, s.lastGood[key]...)
 			continue
 		}
-		anySucceeded = true
+		s.lastGood[key] = ips
 		all = append(all, ips...)
 	}
-	if !anySucceeded {
-		// Keep last-good (already applied); seed in Policy still enforces.
-		s.logger.Warn("tor relay feed: all sources failed, retaining cache+seed",
-			"cached_ips", len(s.lastGood))
+	// An empty merged result is a non-success: retain the prior applied set
+	// (and the immutable seed in Policy). Covers all-sources-failed AND a
+	// source returning 200 with zero relays.
+	if len(all) == 0 {
+		s.logger.Warn("tor relay feed: empty merged result, retaining prior set+seed")
 		return
 	}
 	s.pol.SetRelays(buildSet(all))
-	s.lastGood = all
 	if err := s.saveCache(all); err != nil {
 		s.logger.Warn("tor relay cache save failed", "error", err)
 	}
