@@ -15,6 +15,7 @@ import (
 	"github.com/agentsh/agentsh/internal/ptrace"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
+	"github.com/agentsh/agentsh/internal/tor"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
@@ -131,6 +132,14 @@ func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecCo
 	}
 	_ = r.store.AppendEvent(ctx, ev)
 	r.broker.Publish(ev)
+
+	if decision.Tor != nil {
+		tev := tor.BuildControlEvent(ec.SessionID, "", ec.PID, tor.Verdict{
+			Vector: decision.Tor.Vector, Mode: decision.Tor.Mode, Decision: decision.Tor.Decision, Target: decision.Tor.Target,
+		})
+		_ = r.store.AppendEvent(ctx, tev)
+		r.broker.Publish(tev)
+	}
 
 	switch decision.EffectiveDecision {
 	case types.DecisionDeny:
@@ -321,6 +330,14 @@ func (r *ptraceHandlerRouter) HandleNetwork(ctx context.Context, nc ptrace.Netwo
 	}
 	_ = r.store.AppendEvent(ctx, ev)
 	r.broker.Publish(ev)
+
+	if decision.Tor != nil {
+		tev := tor.BuildControlEvent(nc.SessionID, "", nc.PID, tor.Verdict{
+			Vector: decision.Tor.Vector, Mode: decision.Tor.Mode, Decision: decision.Tor.Decision, Target: decision.Tor.Target,
+		})
+		_ = r.store.AppendEvent(ctx, tev)
+		r.broker.Publish(tev)
+	}
 
 	switch decision.EffectiveDecision {
 	case types.DecisionDeny:

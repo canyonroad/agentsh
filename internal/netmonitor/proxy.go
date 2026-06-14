@@ -17,6 +17,7 @@ import (
 	dbevents "github.com/agentsh/agentsh/internal/db/events"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/tor"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
@@ -388,6 +389,17 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 	ctx := req.Context()
 	dec := p.checkNetwork(ctx, host, port)
 	dec = p.maybeApprove(ctx, commandID, dec, "network", host)
+	if dec.Tor != nil && p.emit != nil {
+		vector := dec.Tor.Vector
+		if vector == tor.VectorOnionDNS {
+			vector = tor.VectorOnionHTTP
+		}
+		tev := tor.BuildControlEvent(p.sessionID, commandID, 0, tor.Verdict{
+			Vector: vector, Mode: dec.Tor.Mode, Decision: dec.Tor.Decision, Target: dec.Tor.Target,
+		})
+		_ = p.emit.AppendEvent(context.Background(), tev)
+		p.emit.Publish(tev)
+	}
 	connectEv := p.emitNetEvent(context.Background(), "net_connect", commandID, host, host, port, dec, map[string]any{
 		"method":      req.Method,
 		"resolved_ip": resolvedIP,

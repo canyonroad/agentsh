@@ -338,3 +338,86 @@ func (s *stubThreatChecker) Check(domain string) (policy.ThreatCheckResult, bool
 	}
 	return policy.ThreatCheckResult{}, false
 }
+
+// stubTorChecker implements policy.TorChecker for testing the onion_dns
+// enforcement point. It denies any host ending in .onion.
+type stubTorChecker struct{}
+
+func (stubTorChecker) EvalExecve(filename string, argv []string) (policy.TorVerdict, bool) {
+	return policy.TorVerdict{}, false
+}
+
+func (stubTorChecker) EvalConnect(ip net.IP, port int) (policy.TorVerdict, bool) {
+	return policy.TorVerdict{}, false
+}
+
+func (stubTorChecker) EvalOnionName(host string) (policy.TorVerdict, bool) {
+	if strings.HasSuffix(host, ".onion") {
+		return policy.TorVerdict{
+			Vector:   "onion_dns",
+			Mode:     "deny",
+			Decision: "deny",
+			Target:   host,
+		}, true
+	}
+	return policy.TorVerdict{}, false
+}
+
+func TestDNSInterceptor_OnionEmitsTorControl(t *testing.T) {
+	up := startUDPUpstream(t)
+	defer up.Close()
+
+	serverPC, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("udp listen not permitted in this environment: %v", err)
+		}
+		t.Fatal(err)
+	}
+	defer serverPC.Close()
+
+	pol := &policy.Policy{
+		Version: 1,
+		Name:    "test",
+		NetworkRules: []policy.NetworkRule{
+			{Name: "allow-all", Domains: []string{"*"}, Ports: []int{53}, Decision: "allow"},
+		},
+	}
+	engine, err := policy.NewEngine(pol, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.SetTorPolicy(stubTorChecker{})
+
+	em := &captureEmitter{}
+	d := &DNSInterceptor{
+		sessionID: "session-test",
+		pc:        serverPC,
+		upstream:  up.LocalAddr().String(),
+		emit:      em,
+		policy:    engine,
+	}
+
+	query := makeDNSQuery(t, "abcdefghij.onion", 0x0F0F)
+	_ = d.handle(serverPC.LocalAddr(), query)
+
+	var torEv *types.Event
+	for i := range em.events {
+		if em.events[i].Type == "tor_control" {
+			torEv = &em.events[i]
+			break
+		}
+	}
+	if torEv == nil {
+		t.Fatalf("expected a tor_control event, got %d events", len(em.events))
+	}
+	if got := torEv.Fields["vector"]; got != "onion_dns" {
+		t.Errorf("expected vector onion_dns, got %v", got)
+	}
+	if got := torEv.Fields["decision"]; got != "deny" {
+		t.Errorf("expected decision deny, got %v", got)
+	}
+	if got := torEv.Fields["target"]; got != "abcdefghij.onion" {
+		t.Errorf("expected target abcdefghij.onion, got %v", got)
+	}
+}
