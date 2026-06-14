@@ -123,6 +123,42 @@ func TestPolicy_EvalOnionName_Normalization(t *testing.T) {
 	}
 }
 
+func TestPolicy_OnionVectorDisabled(t *testing.T) {
+	tr, f := true, false
+	p, _ := New(config.ResolveTorConfig(config.TorConfig{Enabled: &tr, Vectors: config.TorVectors{Onion: &f}}))
+	if _, ok := p.EvalOnionName("x.onion"); ok {
+		t.Fatal("onion vector disabled: .onion must not match")
+	}
+	// other vectors unaffected
+	if _, ok := p.EvalConnect(net.ParseIP("127.0.0.1"), 9050); !ok {
+		t.Fatal("socks_port vector should still match")
+	}
+}
+
+func TestPolicy_EvalExecve_PathAndGlob(t *testing.T) {
+	tr := true
+	p, _ := New(config.ResolveTorConfig(config.TorConfig{
+		Enabled:        &tr,
+		ClientBinaries: []string{"tor", "/opt/tor/bin/torbrowser", "obfs*"},
+	}))
+	// exact basename still works
+	if _, ok := p.EvalExecve("/usr/bin/tor", []string{"tor"}); !ok {
+		t.Fatal("exact basename must match")
+	}
+	// full-path entry matches the full path
+	if _, ok := p.EvalExecve("/opt/tor/bin/torbrowser", []string{"torbrowser"}); !ok {
+		t.Fatal("full-path client_binary entry must match")
+	}
+	// glob matches the basename
+	if _, ok := p.EvalExecve("/usr/bin/obfs4proxy", []string{"obfs4proxy"}); !ok {
+		t.Fatal("glob client_binary entry must match basename")
+	}
+	// non-Tor stays unmatched
+	if _, ok := p.EvalExecve("/usr/bin/curl", []string{"curl"}); ok {
+		t.Fatal("curl must not match")
+	}
+}
+
 func TestPolicy_SetRelays_HotSwapMatch(t *testing.T) {
 	p := newDenyPolicy(t)
 	// A non-seed public IP is initially not a relay.

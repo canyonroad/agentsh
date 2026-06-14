@@ -22,8 +22,7 @@ type TorConfig struct {
 type TorVectors struct {
 	Processes  *bool `yaml:"processes"`
 	SocksPorts *bool `yaml:"socks_ports"`
-	OnionDNS   *bool `yaml:"onion_dns"`
-	OnionHTTP  *bool `yaml:"onion_http"`
+	Onion      *bool `yaml:"onion"`
 	RelayIPs   *bool `yaml:"relay_ips"`
 }
 
@@ -51,13 +50,17 @@ type ResolvedTorConfig struct {
 }
 
 type ResolvedTorVectors struct {
-	Processes, SocksPorts, OnionDNS, OnionHTTP, RelayIPs bool
+	Processes, SocksPorts, Onion, RelayIPs bool
 }
 
 // DefaultTorClientBinaries is the recommended client-binary deny list.
 var DefaultTorClientBinaries = []string{
 	"tor", "obfs4proxy", "snowflake-client", "lyrebird", "meek-client", "torsocks",
 }
+
+// DefaultOnionooSource is the canonical relay-feed source used when the
+// feed is enabled but no sources/local lists are configured.
+const DefaultOnionooSource = "https://onionoo.torproject.org/details"
 
 // ResolveTorConfig applies deny-by-default semantics. Absent block (zero
 // value) → enabled, mode=deny, all vectors on, default binaries/ports.
@@ -80,8 +83,7 @@ func ResolveTorConfig(in TorConfig) ResolvedTorConfig {
 		Vectors: ResolvedTorVectors{
 			Processes:  boolOr(in.Vectors.Processes, true),
 			SocksPorts: boolOr(in.Vectors.SocksPorts, true),
-			OnionDNS:   boolOr(in.Vectors.OnionDNS, true),
-			OnionHTTP:  boolOr(in.Vectors.OnionHTTP, true),
+			Onion:      boolOr(in.Vectors.Onion, true),
 			RelayIPs:   boolOr(in.Vectors.RelayIPs, true),
 		},
 		ClientBinaries:    in.ClientBinaries,
@@ -98,6 +100,9 @@ func ResolveTorConfig(in TorConfig) ResolvedTorConfig {
 	}
 	if len(out.ControlPorts) == 0 {
 		out.ControlPorts = []int{9051}
+	}
+	if out.RelayFeed.Enabled && len(out.RelayFeed.Sources) == 0 && len(out.RelayFeed.LocalLists) == 0 {
+		out.RelayFeed.Sources = []string{DefaultOnionooSource}
 	}
 	return out
 }

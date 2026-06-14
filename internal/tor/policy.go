@@ -40,6 +40,7 @@ type Verdict struct {
 type Policy struct {
 	cfg          config.ResolvedTorConfig
 	binBasenames map[string]struct{}
+	binPatterns  []string // lowercased raw client_binary entries, for glob matching
 	socksPorts   map[int]struct{}
 	controlPorts map[int]struct{}
 	seed         *ipset.Set                // directory-authority seed (immutable)
@@ -57,7 +58,9 @@ func New(cfg config.ResolvedTorConfig) (*Policy, error) {
 		seed:         ipset.New(),
 	}
 	for _, b := range cfg.ClientBinaries {
-		p.binBasenames[strings.ToLower(b)] = struct{}{}
+		lb := strings.ToLower(b)
+		p.binBasenames[lb] = struct{}{}
+		p.binPatterns = append(p.binPatterns, lb)
 	}
 	for _, port := range cfg.SocksPorts {
 		p.socksPorts[port] = struct{}{}
@@ -97,7 +100,9 @@ func (p *Policy) verdict(vector, target string) (Verdict, bool) {
 	}, true
 }
 
-// EvalExecve reports whether filename is a Tor client binary.
+// EvalExecve reports whether filename is a Tor client binary. Configured
+// entries match by exact basename (O(1) map) or as a path/basename glob
+// (filepath.Match against the full lowercased path and the basename).
 func (p *Policy) EvalExecve(filename string, argv []string) (Verdict, bool) {
 	if !p.active() || !p.cfg.Vectors.Processes {
 		return Verdict{}, false
@@ -105,6 +110,15 @@ func (p *Policy) EvalExecve(filename string, argv []string) (Verdict, bool) {
 	base := strings.ToLower(filepath.Base(filename))
 	if _, ok := p.binBasenames[base]; ok {
 		return p.verdict(VectorProcess, filename)
+	}
+	lf := strings.ToLower(filename)
+	for _, pat := range p.binPatterns {
+		if m, err := filepath.Match(pat, base); err == nil && m {
+			return p.verdict(VectorProcess, filename)
+		}
+		if m, err := filepath.Match(pat, lf); err == nil && m {
+			return p.verdict(VectorProcess, filename)
+		}
 	}
 	return Verdict{}, false
 }
@@ -132,10 +146,12 @@ func (p *Policy) EvalConnect(ip net.IP, port int) (Verdict, bool) {
 	return Verdict{}, false
 }
 
-// EvalOnionName reports whether host is a .onion address. vector is
-// onion_dns; callers in the HTTP path relabel to onion_http.
+// EvalOnionName reports whether host is a .onion address. The single
+// vectors.onion toggle governs both the DNS and HTTP enforcement points
+// (both flow through this method); events still tag the firing layer —
+// the DNS path uses onion_dns and the HTTP proxy relabels to onion_http.
 func (p *Policy) EvalOnionName(host string) (Verdict, bool) {
-	if !p.active() || !p.cfg.Vectors.OnionDNS {
+	if !p.active() || !p.cfg.Vectors.Onion {
 		return Verdict{}, false
 	}
 	h := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))

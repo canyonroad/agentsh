@@ -13,7 +13,7 @@ func TestResolveTorConfig_AbsentBlockDeniesByDefault(t *testing.T) {
 	}
 	for name, on := range map[string]bool{
 		"processes": got.Vectors.Processes, "socks_ports": got.Vectors.SocksPorts,
-		"onion_dns": got.Vectors.OnionDNS, "onion_http": got.Vectors.OnionHTTP,
+		"onion": got.Vectors.Onion,
 		"relay_ips": got.Vectors.RelayIPs,
 	} {
 		if !on {
@@ -62,5 +62,37 @@ func TestResolveTorConfig_InvalidModeFallsBackToDeny(t *testing.T) {
 	got := ResolveTorConfig(TorConfig{Mode: "banana"})
 	if got.Mode != "deny" {
 		t.Fatalf("invalid mode must fall back to deny, got %q", got.Mode)
+	}
+}
+
+func TestResolveTorConfig_RelayFeedEnabledDefaultsOnionooSource(t *testing.T) {
+	got := ResolveTorConfig(TorConfig{RelayFeed: TorRelayFeed{Enabled: true}})
+	if len(got.RelayFeed.Sources) != 1 || got.RelayFeed.Sources[0] != DefaultOnionooSource {
+		t.Fatalf("enabled feed with no sources must default to onionoo, got %v", got.RelayFeed.Sources)
+	}
+}
+
+func TestResolveTorConfig_RelayFeedExplicitSourcesPreserved(t *testing.T) {
+	got := ResolveTorConfig(TorConfig{RelayFeed: TorRelayFeed{Enabled: true, Sources: []string{"https://example/relays"}}})
+	if len(got.RelayFeed.Sources) != 1 || got.RelayFeed.Sources[0] != "https://example/relays" {
+		t.Fatalf("explicit sources must be preserved, got %v", got.RelayFeed.Sources)
+	}
+}
+
+func TestResolveTorConfig_RelayFeedDisabledNoDefaultSource(t *testing.T) {
+	got := ResolveTorConfig(TorConfig{RelayFeed: TorRelayFeed{Enabled: false}})
+	if len(got.RelayFeed.Sources) != 0 {
+		t.Fatalf("disabled feed must not gain a default source, got %v", got.RelayFeed.Sources)
+	}
+}
+
+func TestResolveTorConfig_OnionVectorDisable(t *testing.T) {
+	f := false
+	got := ResolveTorConfig(TorConfig{Vectors: TorVectors{Onion: &f}})
+	if got.Vectors.Onion {
+		t.Fatal("vectors.onion:false must disable the onion vector")
+	}
+	if !got.Vectors.Processes || !got.Vectors.RelayIPs {
+		t.Fatal("disabling onion must not affect other vectors")
 	}
 }
