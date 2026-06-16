@@ -60,9 +60,16 @@ func (d *productionDialer) Dial(ctx context.Context) (transport.Conn, error) {
 	}
 
 	streamCtx := ctx
-	if d.opts.AuthBearer != "" {
-		streamCtx = metadata.AppendToOutgoingContext(streamCtx,
-			"authorization", "Bearer "+d.opts.AuthBearer)
+	if d.opts.CredentialSource != nil {
+		bearer, err := d.opts.CredentialSource.Bearer(ctx)
+		if err != nil {
+			_ = cc.Close()
+			return nil, fmt.Errorf("watchtower: resolve credential: %w", err)
+		}
+		if bearer != "" {
+			streamCtx = metadata.AppendToOutgoingContext(streamCtx,
+				"authorization", "Bearer "+bearer)
+		}
 	}
 
 	stream, err := wtpv1.NewWatchtowerClient(cc).Stream(streamCtx)

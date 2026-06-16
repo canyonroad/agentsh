@@ -212,7 +212,7 @@ func buildWatchtowerStore(
 		TLSCertFile:             cfg.TLS.ClientCertFile,
 		TLSKeyFile:              cfg.TLS.ClientKeyFile,
 		TLSInsecure:             cfg.TLS.InsecureSkipVerify,
-		AuthBearer:              authBearer,
+		CredentialSource:        watchtower.NewStaticCredentialSource(authBearer),
 		Filter:                  filter,
 		EmitExtendedLossReasons: cfg.EmitExtendedLossReasons,
 		CompressionAlgo:         cfg.Batch.Compression,

@@ -80,7 +80,13 @@ type Options struct {
 	TLSCertFile   string
 	TLSKeyFile    string
 	TLSInsecure   bool
-	AuthBearer    string
+	// CredentialSource yields the bearer credential presented to
+	// Watchtower on each Dial (authorization: Bearer <kid>.<secret>).
+	// Nil means "no bearer credential" (anonymous, or mTLS via
+	// TLSCertFile). Mutually exclusive with TLSCertFile. Fetched
+	// per-Dial so a Phase-2 rotating/attested source drops in with no
+	// transport change.
+	CredentialSource CredentialSource
 
 	// HeartbeatEvery controls how often the transport sends a ClientHeartbeat
 	// to the server. Zero means "use the spec default" (5 s). The config layer
@@ -321,7 +327,7 @@ func (o *Options) validate() error {
 	if o.DrainDeadline < 0 {
 		return errors.New("watchtower: DrainDeadline must be >= 0")
 	}
-	if o.TLSCertFile != "" && o.AuthBearer != "" {
+	if o.TLSCertFile != "" && o.CredentialSource != nil {
 		return errors.New("watchtower: TLS client cert and bearer auth are mutually exclusive")
 	}
 	// TLS coherence: cert and key are paired — one without the other
