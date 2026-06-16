@@ -13,6 +13,7 @@ import (
 	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
+	wtpv1 "github.com/canyonroad/wtp-protos/gen/go/canyonroad/wtp/v1"
 )
 
 // Options configures a watchtower Store.
@@ -58,6 +59,9 @@ type Options struct {
 	AgentID        string
 	SessionID      string
 	KeyFingerprint string
+
+	// DecisionContext is forwarded to transport.Options.DecisionContext.
+	DecisionContext *wtpv1.DecisionContext
 
 	// HMAC integrity chain config.
 	HMACKeyID     string

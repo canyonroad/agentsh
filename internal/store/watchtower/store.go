@@ -419,6 +419,7 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		EmitExtendedLossReasons: opts.EmitExtendedLossReasons,
 		Compressor:              compressor,
 		OnPolicyPushed:          opts.OnPolicyPushed,
+		DecisionContext:         opts.DecisionContext,
 	})
 	if err != nil {
 		_ = w.Close()

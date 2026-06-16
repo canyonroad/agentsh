@@ -987,6 +987,10 @@ type AuditWatchtowerConfig struct {
 	Backoff   WatchtowerBackoffConfig   `yaml:"backoff"`
 	Filter    WatchtowerFilterConfig    `yaml:"filter"`
 
+	// DecisionContext is reported to Watchtower on SessionInit so the
+	// server can resolve the bound policy from identity + environment.
+	DecisionContext WatchtowerDecisionContextConfig `yaml:"decision_context"`
+
 	// EmitExtendedLossReasons controls whether the WTP client emits
 	// TransportLoss frames with the six reason values added in the
 	// 2026-04-27 spec: MAPPER_FAILURE, INVALID_MAPPER, INVALID_TIMESTAMP,
@@ -1082,6 +1086,20 @@ type WatchtowerFilterConfig struct {
 	IncludeCategories []string `yaml:"include_categories"`
 	ExcludeCategories []string `yaml:"exclude_categories"`
 	MinRiskLevel      string   `yaml:"min_risk_level"`
+}
+
+type WatchtowerDecisionContextConfig struct {
+	Tags      []string                  `yaml:"tags"`
+	Tailscale WatchtowerTailscaleConfig `yaml:"tailscale"`
+	Extra     map[string]string         `yaml:"extra"`
+}
+
+type WatchtowerTailscaleConfig struct {
+	// Enabled is tri-state: nil => default (resolved at store construction:
+	// enabled, but the source self-disables when the socket is absent),
+	// false => never query tailscaled, true => always attempt.
+	Enabled *bool  `yaml:"enabled"`
+	Socket  string `yaml:"socket"` // optional tailscaled socket path override
 }
 
 func (w *AuditWatchtowerConfig) applyDefaults() {
