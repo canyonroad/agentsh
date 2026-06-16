@@ -22,7 +22,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.10
 	github.com/aws/smithy-go v1.24.2
-	github.com/canyonroad/wtp-protos/gen/go v0.1.0
+	github.com/canyonroad/wtp-protos/gen/go v0.2.0
 	github.com/cilium/ebpf v0.20.0
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/creack/pty v1.1.18
@@ -208,6 +208,3 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 )
-
-// DEV-ONLY: local wtp-protos with DecisionContext. When v0.2.0 is published, bump the require to v0.2.0 AND remove this replace together (removing replace alone breaks the build — go.sum has no v0.1.0 checksum).
-replace github.com/canyonroad/wtp-protos/gen/go => /home/eran/work/wtp-protos/gen/go
