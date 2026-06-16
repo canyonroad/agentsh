@@ -70,3 +70,18 @@ type Config struct {
 	TailscaleEnabled bool
 	TailscaleSocket  string // "" => platform default
 }
+
+// NewResolver builds the default source chain. Order matters: os-user
+// writes the User slot, then tailscale overrides it when enabled+up.
+func NewResolver(c Config) *Resolver {
+	srcs := []Source{
+		hostnameSource{},
+		newTagsSource(c.Tags),
+		osUserSource{},
+		extraSource{extra: c.Extra},
+	}
+	if c.TailscaleEnabled {
+		srcs = append(srcs, newTailscaleSource(c.TailscaleSocket, defaultTailscaleStatus))
+	}
+	return &Resolver{sources: srcs}
+}

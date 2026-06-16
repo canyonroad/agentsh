@@ -92,3 +92,23 @@ func (s staticOSUser) Resolve(_ context.Context, into *DecisionContext) error {
 	into.User = User{Value: string(s), Source: SourceOS}
 	return nil
 }
+
+func TestNewResolver_IncludesTailscaleWhenEnabled(t *testing.T) {
+	r := NewResolver(Config{Tags: []string{"x"}, TailscaleEnabled: true})
+	if !hasSource(r, "tailscale") {
+		t.Errorf("tailscale source missing when enabled")
+	}
+	r2 := NewResolver(Config{TailscaleEnabled: false})
+	if hasSource(r2, "tailscale") {
+		t.Errorf("tailscale source present when disabled")
+	}
+}
+
+func hasSource(r *Resolver, name string) bool {
+	for _, s := range r.sources {
+		if s.Name() == name {
+			return true
+		}
+	}
+	return false
+}
