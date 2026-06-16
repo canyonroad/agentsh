@@ -186,6 +186,10 @@ type Options struct {
 	// TotalChained is the count of records the sink has chained so far.
 	// Running count from chain.SinkChain; supplied by sink integration.
 	TotalChained uint64
+	// DecisionContext, when non-nil, is reported on SessionInit so the
+	// server can resolve the bound policy. Owned by the agent's
+	// decisionctx resolver; nil is permitted (field omitted).
+	DecisionContext *wtpv1.DecisionContext
 
 	// OnPolicyPushed is invoked when the server's SessionAck carries a
 	// resolved policy (policy_id != ""). The callback runs synchronously
@@ -693,6 +697,7 @@ func (t *Transport) sessionInit() *wtpv1.ClientMessage {
 				AgentId:             t.opts.AgentID,
 				AgentVersion:        t.opts.AgentVersion,
 				TotalChained:        t.opts.TotalChained,
+				DecisionContext:     t.opts.DecisionContext,
 			},
 		},
 	}
