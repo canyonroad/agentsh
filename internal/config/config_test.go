@@ -2412,3 +2412,41 @@ sandbox:
 		t.Errorf("LoadWithSource() cfg.Sandbox.FUSE.Enabled = false, want true")
 	}
 }
+
+func TestAuditWatchtowerConfig_DecisionContext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yml := `
+audit:
+  watchtower:
+    enabled: true
+    endpoint: "wt:443"
+    auth:
+      token_env: "WTP_TOKEN"
+    chain:
+      key_env: "WTP_CHAIN_KEY"
+    decision_context:
+      tags: ["team-a", "prod"]
+      tailscale:
+        enabled: true
+      extra:
+        region: "us-east"
+`
+	if err := os.WriteFile(path, []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	dc := cfg.Audit.Watchtower.DecisionContext
+	if len(dc.Tags) != 2 || dc.Tags[0] != "team-a" {
+		t.Errorf("tags = %v", dc.Tags)
+	}
+	if dc.Tailscale.Enabled == nil || !*dc.Tailscale.Enabled {
+		t.Errorf("tailscale.enabled not parsed")
+	}
+	if dc.Extra["region"] != "us-east" {
+		t.Errorf("extra = %v", dc.Extra)
+	}
+}
