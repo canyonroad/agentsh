@@ -21,6 +21,7 @@ import (
 	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/audit/kms"
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/decisionctx"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/policy/signing"
 	"github.com/agentsh/agentsh/internal/store"
@@ -28,6 +29,7 @@ import (
 	"github.com/agentsh/agentsh/internal/store/watchtower"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
+	wtpv1 "github.com/canyonroad/wtp-protos/gen/go/canyonroad/wtp/v1"
 )
 
 // resolveLogGoawayMessage applies the three-state (nil / false / true)
@@ -128,6 +130,23 @@ func buildWatchtowerStore(
 
 	agentID := resolveAgentID(cfg)
 
+	tsEnabled := true
+	if cfg.DecisionContext.Tailscale.Enabled != nil {
+		tsEnabled = *cfg.DecisionContext.Tailscale.Enabled
+	}
+	resolver := decisionctx.NewResolver(decisionctx.Config{
+		Tags:             cfg.DecisionContext.Tags,
+		Extra:            cfg.DecisionContext.Extra,
+		TailscaleEnabled: tsEnabled,
+		TailscaleSocket:  cfg.DecisionContext.Tailscale.Socket,
+	})
+	dc, _ := resolver.Resolve(ctx)
+	slog.Info("watchtower: resolved decision context",
+		"hostname", dc.Hostname,
+		"tag_count", len(dc.Tags),
+		"user_source", dc.User.Source)
+	wireDC := toWireDecisionContext(dc)
+
 	// Auto-generate SessionID when config field is empty. Config docs say
 	// session_id is optional; an empty value must not cause a startup failure.
 	sessionID := cfg.SessionID
@@ -195,6 +214,7 @@ func buildWatchtowerStore(
 		CompressionAlgo:         cfg.Batch.Compression,
 		ZstdLevel:               cfg.Batch.ZstdLevel,
 		GzipLevel:               cfg.Batch.GzipLevel,
+		DecisionContext:         wireDC,
 	}
 	transport.SetEncoderEmitExtendedReasons(opts.EmitExtendedLossReasons)
 
@@ -326,6 +346,27 @@ func ResolveAuthBearerForTest(auth config.WatchtowerAuthConfig) (string, error) 
 // in buildWatchtowerStore.
 func ResolveAgentIDForTest(cfg config.AuditWatchtowerConfig) string {
 	return resolveAgentID(cfg)
+}
+
+// toWireDecisionContext converts an internal decisionctx.DecisionContext into
+// the wtpv1.DecisionContext proto message suitable for sending on the wire.
+func toWireDecisionContext(dc decisionctx.DecisionContext) *wtpv1.DecisionContext {
+	src := wtpv1.UserSource_USER_SOURCE_UNSPECIFIED
+	switch dc.User.Source {
+	case decisionctx.SourceOS:
+		src = wtpv1.UserSource_USER_SOURCE_OS
+	case decisionctx.SourceTailscale:
+		src = wtpv1.UserSource_USER_SOURCE_TAILSCALE
+	}
+	out := &wtpv1.DecisionContext{
+		Hostname: dc.Hostname,
+		Tags:     dc.Tags,
+		Extra:    dc.Extra,
+	}
+	if dc.User.Value != "" || src != wtpv1.UserSource_USER_SOURCE_UNSPECIFIED {
+		out.User = &wtpv1.DecisionContext_User{Value: dc.User.Value, Source: src}
+	}
+	return out
 }
 
 // makePolicyInstallHook returns the OnPolicyPushed callback that runs
