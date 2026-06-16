@@ -220,6 +220,27 @@ func (s *Server) AssertSequenceRange(first, last uint64) error {
 	return nil
 }
 
+// AssertDecisionContext verifies that the SessionInit carried the expected
+// hostname and user value. Pass "" to skip a field.
+//
+// Returns nil iff the assertion holds. Error cases:
+//  1. decision_context is nil on the SessionInit.
+//  2. wantHostname is non-empty and does not match dc.GetHostname().
+//  3. wantUser is non-empty and does not match dc.GetUser().GetValue().
+func AssertDecisionContext(init *wtpv1.SessionInit, wantHostname, wantUser string) error {
+	dc := init.GetDecisionContext()
+	if dc == nil {
+		return fmt.Errorf("SessionInit.decision_context is nil")
+	}
+	if wantHostname != "" && dc.GetHostname() != wantHostname {
+		return fmt.Errorf("hostname = %q, want %q", dc.GetHostname(), wantHostname)
+	}
+	if wantUser != "" && dc.GetUser().GetValue() != wantUser {
+		return fmt.Errorf("user = %q, want %q", dc.GetUser().GetValue(), wantUser)
+	}
+	return nil
+}
+
 // AssertReplayObserved verifies that every sequence in [first, last]
 // (inclusive) was observed in some batch. Unlike AssertSequenceRange,
 // this helper tolerates additional sequences outside the range (e.g.
