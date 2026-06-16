@@ -15,6 +15,7 @@ import (
 	wtpv1 "github.com/canyonroad/wtp-protos/gen/go/canyonroad/wtp/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 )
@@ -45,6 +46,10 @@ type Server struct {
 	// server receives, in arrival order. Tests assert against this slice
 	// to verify the carrier emitted the expected TransportLoss frames.
 	transportLosses []*wtpv1.TransportLoss
+
+	// firstAuthMetadata captures the "authorization" metadata value from
+	// the first accepted stream's context, for auth handshake tests.
+	firstAuthMetadata string
 
 	// sessionInits counts the number of SessionInit frames the server has
 	// accepted. Useful for asserting that a scenario did NOT cause the
@@ -210,6 +215,14 @@ func (s *Server) WaitForFirstSessionInit(timeout time.Duration) (*wtpv1.SessionI
 	}
 }
 
+// FirstAuthorizationMetadata returns the "authorization" metadata value
+// captured from the first accepted stream, or "" if none was present.
+func (s *Server) FirstAuthorizationMetadata() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.firstAuthMetadata
+}
+
 // TransportLosses returns a deep-copy of every TransportLoss frame the
 // server has received since New(). Safe to call concurrently with the
 // stream handler.
@@ -373,6 +386,11 @@ func (h *srvHandler) Stream(stream grpc.BidiStreamingServer[wtpv1.ClientMessage,
 			h.s.mu.Lock()
 			if h.s.firstSessionInit == nil {
 				h.s.firstSessionInit = proto.Clone(x.SessionInit).(*wtpv1.SessionInit)
+				if md, ok := metadata.FromIncomingContext(stream.Context()); ok {
+					if vals := md.Get("authorization"); len(vals) > 0 {
+						h.s.firstAuthMetadata = vals[0]
+					}
+				}
 				close(h.s.sessionInitReady)
 			}
 			h.s.sessionInits++

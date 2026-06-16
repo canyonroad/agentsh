@@ -44,3 +44,9 @@ func (b *Backoff) Next() time.Duration {
 
 // Reset returns the backoff to its initial value.
 func (b *Backoff) Reset() { b.current = b.opts.Initial }
+
+// ClampToMax forces the next Next() to return the max interval (with
+// jitter), short-circuiting the exponential ramp. Used by the reconnect
+// loop on an authentication rejection so a bad/revoked credential retries
+// no faster than once per BackoffMax instead of storming the server.
+func (b *Backoff) ClampToMax() { b.current = b.opts.Max }

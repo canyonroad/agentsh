@@ -166,6 +166,7 @@ func buildWatchtowerStore(
 	if cfg.TLS.Insecure {
 		slog.Warn("watchtower: TLS disabled via tls.insecure=true; traffic is plaintext — do not use in production")
 	}
+	warnIfCredentialOverPlaintext(slog.Default(), authBearer, cfg.TLS.Insecure)
 
 	// Resolve LogGoawayMessage three-state to the transport.Options bool.
 	// Defaulting MUST happen here (NOT in config.go's Validate/applyDefaults)
@@ -212,7 +213,7 @@ func buildWatchtowerStore(
 		TLSCertFile:             cfg.TLS.ClientCertFile,
 		TLSKeyFile:              cfg.TLS.ClientKeyFile,
 		TLSInsecure:             cfg.TLS.InsecureSkipVerify,
-		AuthBearer:              authBearer,
+		CredentialSource:        watchtower.NewStaticCredentialSource(authBearer),
 		Filter:                  filter,
 		EmitExtendedLossReasons: cfg.EmitExtendedLossReasons,
 		CompressionAlgo:         cfg.Batch.Compression,
@@ -307,6 +308,18 @@ func resolveAuthBearer(auth config.WatchtowerAuthConfig) (string, error) {
 	}
 	// ClientCertAuth: no bearer token; the caller uses TLS client cert.
 	return "", nil
+}
+
+// warnIfCredentialOverPlaintext logs a loud startup WARN when a bearer
+// credential is configured together with a plaintext transport
+// (tls.insecure=true). It is warn-only by design — the credential still
+// traverses the network unencrypted, but operators may legitimately run
+// plaintext against a local/dev Watchtower. The credential value is never
+// logged.
+func warnIfCredentialOverPlaintext(logger *slog.Logger, token string, insecure bool) {
+	if token != "" && insecure {
+		logger.Warn("watchtower: bearer credential configured over plaintext transport (tls.insecure=true); the credential will traverse the network unencrypted")
+	}
 }
 
 // BuildWatchtowerStoreForTest is a thin export of buildWatchtowerStore

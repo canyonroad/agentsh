@@ -581,6 +581,7 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 type WTPSessionFailureReason string
 
 const (
+	WTPSessionFailureReasonAuthRejected      WTPSessionFailureReason = "auth_rejected"
 	WTPSessionFailureReasonInvalidUTF8       WTPSessionFailureReason = "invalid_utf8"
 	WTPSessionFailureReasonSendFailed        WTPSessionFailureReason = "send_failed"
 	WTPSessionFailureReasonRecvFailed        WTPSessionFailureReason = "recv_failed"
@@ -590,6 +591,7 @@ const (
 )
 
 var wtpSessionFailureReasonsValid = map[WTPSessionFailureReason]struct{}{
+	WTPSessionFailureReasonAuthRejected:      {},
 	WTPSessionFailureReasonInvalidUTF8:       {},
 	WTPSessionFailureReasonSendFailed:        {},
 	WTPSessionFailureReasonRecvFailed:        {},
@@ -603,6 +605,7 @@ var wtpSessionFailureReasonsValid = map[WTPSessionFailureReason]struct{}{
 // emitWTPMetrics emit zero-valued series for reasons that have not yet
 // fired (always-emit contract).
 var wtpSessionFailureReasonsEmitOrder = []WTPSessionFailureReason{
+	WTPSessionFailureReasonAuthRejected,
 	WTPSessionFailureReasonInvalidUTF8,
 	WTPSessionFailureReasonRecvFailed,
 	WTPSessionFailureReasonRejected,

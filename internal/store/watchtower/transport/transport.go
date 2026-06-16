@@ -1185,6 +1185,18 @@ func (t *Transport) logEmittedLossIfApplicable(ctx context.Context, msg *wtpv1.C
 // entry on the next connect cycle. rep is also consumed (cleared to
 // nil) at the top of StateLive so a subsequent Live entry after a
 // reconnect picks up the fresh value (or nil if no replay ran).
+
+// backoffAfterConnectError computes the sleep before the next reconnect
+// attempt after a StateConnecting error. An authentication rejection
+// clamps the backoff to its max (no fast ramp); all other errors use the
+// normal exponential progression.
+func (t *Transport) backoffAfterConnectError(bo *Backoff, err error) time.Duration {
+	if errors.Is(err, ErrAuthRejected) {
+		bo.ClampToMax()
+	}
+	return bo.Next()
+}
+
 func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start uint64) (*wal.Reader, error), liveOpts LiveOptions) error {
 	// Single-use guard: Run owns the close of t.runDone, so a second
 	// invocation would panic on close-of-closed-channel. Reject the
@@ -1256,7 +1268,7 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 				case sr := <-t.stopCh:
 					t.handleOuterStop(sr)
 					return nil
-				case <-time.After(bo.Next()):
+				case <-time.After(t.backoffAfterConnectError(bo, err)):
 				}
 				continue
 			}
