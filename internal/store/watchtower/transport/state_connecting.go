@@ -37,6 +37,10 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 
 	conn, err := t.opts.Dialer.Dial(ctx)
 	if err != nil {
+		if IsAuthReject(err) {
+			t.metrics.IncSessionInitFailures(metrics.WTPSessionFailureReasonAuthRejected)
+			return StateConnecting, fmt.Errorf("dial (%w): %v", ErrAuthRejected, err)
+		}
 		return StateConnecting, fmt.Errorf("dial: %w", err)
 	}
 	t.conn = conn
@@ -52,6 +56,10 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 	if err != nil {
 		_ = conn.Close()
 		t.conn = nil
+		if IsAuthReject(err) {
+			t.metrics.IncSessionInitFailures(metrics.WTPSessionFailureReasonAuthRejected)
+			return StateConnecting, fmt.Errorf("recv SessionAck (%w): %v", ErrAuthRejected, err)
+		}
 		t.metrics.IncSessionInitFailures(metrics.WTPSessionFailureReasonRecvFailed)
 		return StateConnecting, fmt.Errorf("recv SessionAck: %w", err)
 	}
