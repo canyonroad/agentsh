@@ -1268,7 +1268,7 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(gen uint32, start u
 				case sr := <-t.stopCh:
 					t.handleOuterStop(sr)
 					return nil
-				case <-time.After(bo.Next()):
+				case <-time.After(t.backoffAfterConnectError(bo, err)):
 				}
 				continue
 			}
