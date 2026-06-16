@@ -34,6 +34,20 @@ func TestTailscaleSource_AbsentLeavesOSUser(t *testing.T) {
 	}
 }
 
+func TestTailscaleSource_AvailableButEmptyLogin(t *testing.T) {
+	fake := func(_ context.Context, _ string) (string, bool, error) {
+		return "", true, nil
+	}
+	dc := DecisionContext{User: User{Value: "alice", Source: SourceOS}}
+	src := newTailscaleSource("", fake)
+	if err := src.Resolve(context.Background(), &dc); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if dc.User.Value != "alice" || dc.User.Source != SourceOS {
+		t.Errorf("user = %+v, want unchanged {alice os}", dc.User)
+	}
+}
+
 func TestParseTailscaleStatus(t *testing.T) {
 	js := []byte(`{"Self":{"UserID":12345},"User":{"12345":{"LoginName":"eran@example.com"}}}`)
 	login, ok := parseTailscaleStatus(js)
@@ -42,5 +56,8 @@ func TestParseTailscaleStatus(t *testing.T) {
 	}
 	if _, ok := parseTailscaleStatus([]byte(`{"Self":null}`)); ok {
 		t.Errorf("expected ok=false when Self is null")
+	}
+	if _, ok := parseTailscaleStatus([]byte("not json")); ok {
+		t.Errorf("expected ok=false for malformed JSON")
 	}
 }

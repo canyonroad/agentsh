@@ -27,6 +27,7 @@ func defaultTailscaleStatus(ctx context.Context, socket string) (string, bool, e
 			},
 		},
 	}
+	defer client.CloseIdleConnections()
 	// Host is ignored by the unix dialer but required to form a valid URL.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		"http://local-tailscaled.sock/localapi/v0/status", nil)
@@ -35,7 +36,7 @@ func defaultTailscaleStatus(ctx context.Context, socket string) (string, bool, e
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", false, err // tailscaled not running => unavailable
+		return "", false, nil // dial/connect failure => tailscaled absent, not an error
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
