@@ -25,8 +25,11 @@ func newTailscaleSource(socket string, status tailscaleStatusFunc) tailscaleSour
 func (tailscaleSource) Name() string { return "tailscale" }
 
 func (s tailscaleSource) Resolve(ctx context.Context, into *DecisionContext) error {
-	login, ok, _ := s.status(ctx, s.socket) // unavailability is not fatal
-	if ok && login != "" {
+	login, ok, err := s.status(ctx, s.socket)
+	if !ok {
+		return err // nil for "not available"; non-nil real error is logged by Resolver
+	}
+	if login != "" {
 		into.User = User{Value: login, Source: SourceTailscale}
 	}
 	return nil

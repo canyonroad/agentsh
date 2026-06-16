@@ -134,4 +134,7 @@ func TestDecisionContext_ReachesWireSessionInit(t *testing.T) {
 	if err := testserver.AssertDecisionContext(captured, "itest-host", "itest@user"); err != nil {
 		t.Fatalf("AssertDecisionContext: %v", err)
 	}
+	if src := captured.GetDecisionContext().GetUser().GetSource(); src != wtpv1.UserSource_USER_SOURCE_TAILSCALE {
+		t.Errorf("user source = %v, want TAILSCALE", src)
+	}
 }

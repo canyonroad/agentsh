@@ -22,12 +22,27 @@ func TestTailscaleSource_OverridesOSUser(t *testing.T) {
 
 func TestTailscaleSource_AbsentLeavesOSUser(t *testing.T) {
 	fake := func(_ context.Context, _ string) (string, bool, error) {
-		return "", false, errors.New("dial: no such file")
+		return "", false, nil
 	}
 	dc := DecisionContext{User: User{Value: "alice", Source: SourceOS}}
 	src := newTailscaleSource("", fake)
 	if err := src.Resolve(context.Background(), &dc); err != nil {
-		t.Fatalf("Resolve should swallow unavailability: %v", err)
+		t.Fatalf("Resolve should return nil for unavailable tailscale: %v", err)
+	}
+	if dc.User.Value != "alice" || dc.User.Source != SourceOS {
+		t.Errorf("user = %+v, want unchanged {alice os}", dc.User)
+	}
+}
+
+func TestTailscaleSource_RealErrorPropagates(t *testing.T) {
+	realErr := errors.New("read: connection reset")
+	fake := func(_ context.Context, _ string) (string, bool, error) {
+		return "", false, realErr
+	}
+	dc := DecisionContext{User: User{Value: "alice", Source: SourceOS}}
+	src := newTailscaleSource("", fake)
+	if err := src.Resolve(context.Background(), &dc); err != realErr {
+		t.Fatalf("Resolve error = %v, want %v", err, realErr)
 	}
 	if dc.User.Value != "alice" || dc.User.Source != SourceOS {
 		t.Errorf("user = %+v, want unchanged {alice os}", dc.User)
