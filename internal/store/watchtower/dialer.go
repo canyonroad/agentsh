@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync/atomic"
 
@@ -14,6 +15,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // productionDialer dials the configured Watchtower endpoint over gRPC,
@@ -27,6 +29,17 @@ func newGRPCDialerProd(opts Options) transport.Dialer {
 }
 
 func (d *productionDialer) Dial(ctx context.Context) (transport.Conn, error) {
+	// Resolve the credential first so a credential error fails fast
+	// without opening a socket.
+	var bearer string
+	if d.opts.CredentialSource != nil {
+		b, err := d.opts.CredentialSource.Bearer(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("watchtower: resolve credential: %w", err)
+		}
+		bearer = b
+	}
+
 	var dialOpts []grpc.DialOption
 	if d.opts.TLSEnabled {
 		tlsCfg := &tls.Config{InsecureSkipVerify: d.opts.TLSInsecure} //nolint:gosec
@@ -60,24 +73,32 @@ func (d *productionDialer) Dial(ctx context.Context) (transport.Conn, error) {
 	}
 
 	streamCtx := ctx
-	if d.opts.CredentialSource != nil {
-		bearer, err := d.opts.CredentialSource.Bearer(ctx)
-		if err != nil {
-			_ = cc.Close()
-			return nil, fmt.Errorf("watchtower: resolve credential: %w", err)
-		}
-		if bearer != "" {
-			streamCtx = metadata.AppendToOutgoingContext(streamCtx,
-				"authorization", "Bearer "+bearer)
-		}
+	if bearer != "" {
+		d.logger().Debug("wtp: presenting credential",
+			"kid", credLogID(bearer), "endpoint", d.opts.Endpoint)
+		streamCtx = metadata.AppendToOutgoingContext(streamCtx,
+			"authorization", "Bearer "+bearer)
 	}
 
 	stream, err := wtpv1.NewWatchtowerClient(cc).Stream(streamCtx)
 	if err != nil {
 		_ = cc.Close()
+		if transport.IsAuthReject(err) {
+			d.logger().Error("wtp: authentication rejected by Watchtower at stream open",
+				"kid", credLogID(bearer), "code", status.Code(err).String())
+			return nil, fmt.Errorf("%w: %v", transport.ErrAuthRejected, err)
+		}
 		return nil, err
 	}
 	return &grpcStreamConn{stream: stream, cc: cc}, nil
+}
+
+// logger returns the configured slog handle or the default.
+func (d *productionDialer) logger() *slog.Logger {
+	if d.opts.Logger != nil {
+		return d.opts.Logger
+	}
+	return slog.Default()
 }
 
 type grpcStreamConn struct {
