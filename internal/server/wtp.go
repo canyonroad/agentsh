@@ -141,10 +141,14 @@ func buildWatchtowerStore(
 		TailscaleSocket:  cfg.DecisionContext.Tailscale.Socket,
 	})
 	dc, _ := resolver.Resolve(ctx)
+	userSource := string(dc.User.Source)
+	if userSource == "" {
+		userSource = "none"
+	}
 	slog.Info("watchtower: resolved decision context",
 		"hostname", dc.Hostname,
 		"tag_count", len(dc.Tags),
-		"user_source", dc.User.Source)
+		"user_source", userSource)
 	wireDC := toWireDecisionContext(dc)
 
 	// Auto-generate SessionID when config field is empty. Config docs say
