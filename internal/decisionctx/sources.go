@@ -31,6 +31,7 @@ func newTagsSource(tags []string) tagsSource {
 func (tagsSource) Name() string { return "config-tags" }
 func (s tagsSource) Resolve(_ context.Context, into *DecisionContext) error {
 	if len(s.tags) > 0 {
+		// copy again so callers can't mutate s.tags via the returned dc
 		into.Tags = append([]string(nil), s.tags...)
 	}
 	return nil

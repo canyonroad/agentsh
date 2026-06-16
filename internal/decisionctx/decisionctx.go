@@ -4,19 +4,26 @@
 // WTP proto types; conversion to the wire shape happens in the caller.
 package decisionctx
 
-import "context"
+import (
+	"context"
+	"log/slog"
+)
+
+// UserSource identifies which signal produced a User value so the server
+// can weigh trust (tailscale is stronger than os).
+type UserSource string
 
 // Source labels for User.Source.
 const (
-	SourceOS        = "os"
-	SourceTailscale = "tailscale"
+	SourceOS        UserSource = "os"
+	SourceTailscale UserSource = "tailscale"
 )
 
 // User is the identity slot. Source records which signal produced Value
 // so the server can weigh trust (tailscale is stronger than os).
 type User struct {
 	Value  string
-	Source string
+	Source UserSource
 }
 
 // DecisionContext is the bundle reported to Watchtower. Fields are
@@ -48,7 +55,10 @@ type Resolver struct {
 func (r *Resolver) Resolve(ctx context.Context) (DecisionContext, error) {
 	dc := DecisionContext{}
 	for _, s := range r.sources {
-		_ = s.Resolve(ctx, &dc) // partial context on error; never fatal
+		if err := s.Resolve(ctx, &dc); err != nil {
+			slog.Debug("decisionctx: source resolution failed (partial context)",
+				"source", s.Name(), "error", err)
+		}
 	}
 	return dc, nil
 }
