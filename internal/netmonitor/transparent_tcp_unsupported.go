@@ -20,4 +20,6 @@ func StartTransparentTCP(listenAddr string, sessionID string, sess *session.Sess
 
 func (t *TransparentTCP) SetDBBypassEmitter(em *dbevents.BypassEmitter) {}
 
+func (t *TransparentTCP) SetTorGateway(pol TorGatewayPolicy, upstream string, socksPorts []int) {}
+
 func (t *TransparentTCP) Close() error { return nil }

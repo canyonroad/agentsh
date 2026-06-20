@@ -202,15 +202,17 @@ func New(cfg *config.Config) (*Server, error) {
 
 	torCfg := config.ResolveTorConfig(cfg.Tor)
 	var torSyncer *tor.Syncer
+	var torPol *tor.Policy
 	if torCfg.Enabled {
 		// Default the relay-feed cache dir alongside the threat-feed cache.
 		if torCfg.RelayFeed.Enabled && torCfg.RelayFeed.CacheDir == "" {
 			torCfg.RelayFeed.CacheDir = filepath.Join(config.GetDataDir(), "tor-relays")
 		}
-		torPol, err := tor.New(torCfg)
+		p, err := tor.New(torCfg)
 		if err != nil {
 			return nil, fmt.Errorf("tor policy: %w", err)
 		}
+		torPol = p
 		engine.SetTorPolicy(&tor.PolicyAdapter{Policy: torPol})
 		slog.Info("tor access control enabled", "mode", torCfg.Mode)
 		if torPol.RelayFeedEnabled() {
@@ -553,7 +555,7 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 	}
 
-	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader, cgroupMgr)
+	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader, cgroupMgr, torPol)
 	// Publish to the WTP install hook so subsequent pushed-policy
 	// receipts can SwapPolicy in-process (next CheckCommand sees the
 	// new rules without an agentsh restart).

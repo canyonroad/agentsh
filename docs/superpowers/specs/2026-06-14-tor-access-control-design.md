@@ -1,7 +1,7 @@
 # Tor Access Control — Design
 
 **Date:** 2026-06-14
-**Status:** Approved — Phase 1 implemented
+**Status:** Approved — Phase 1 + Phase 2 implemented
 **Related:** `internal/policy/engine.go` (`CheckExecve`, `CheckNetworkIP`,
 `CheckNetworkCtx`), `internal/netmonitor/dns.go`, `internal/netmonitor/proxy.go`,
 `internal/netmonitor/transparent_tcp.go`, `internal/threatfeed/`,
@@ -353,7 +353,7 @@ surface to one new type.
 - `GOOS=windows go build ./...` cross-compile (per CLAUDE.md / AGENTS.md).
 - roborev between tasks; fix everything above low before proceeding.
 
-## Phase 2 (sketch — documented, not built)
+## Phase 2 (onion gateway — implemented)
 
 When `tor.mode: allow` and an `onion_rules:` list is present, agentsh
 becomes a **managed Tor egress**:
@@ -382,3 +382,16 @@ tor:
     - onion: "*"
       decision: deny
 ```
+
+**Honest scope (Phase 2).** Per-`.onion` filtering applies to Tor SOCKS
+connections that reach agentsh's transparent-TCP interceptor (original
+destination = a configured `socks_ports` entry). A `.onion`/clearnet target
+matching no `onion_rules` entry is denied (fail-closed); allowed targets are
+forwarded to the real Tor SOCKS daemon at `127.0.0.1:<socks_ports[0]>`. In
+sandbox modes where the app reaches a loopback Tor daemon that is *not* within
+agentsh's interception, allow-mode degrades to Phase-1 allow (Tor permitted,
+unfiltered) — the operator must route the Tor SOCKS port through agentsh's
+transparent interception for the gateway to take effect. The gateway emits one
+`tor_control{vector: onion, decision: allow|deny}` event per CONNECT; like the
+other connection-layer vectors it reports `pid: 0` and is correlated by session
+and target.

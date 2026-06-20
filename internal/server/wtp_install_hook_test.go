@@ -42,10 +42,10 @@ func (memEventStore) Close() error { return nil }
 type installHookFixture struct {
 	policiesDir string
 	trustDir    string
-	keyID       string                    // hex(sha256(pub))
+	keyID       string // hex(sha256(pub))
 	privKey     ed25519.PrivateKey
-	manager     *policy.Manager           // points at policiesDir
-	appHolder   *atomic.Pointer[api.App]  // intentionally empty; SwapPolicy skipped
+	manager     *policy.Manager          // points at policiesDir
+	appHolder   *atomic.Pointer[api.App] // intentionally empty; SwapPolicy skipped
 }
 
 // newInstallHookFixture writes a real ed25519 keypair into the trust
@@ -271,14 +271,14 @@ func TestMakePolicyInstallHook_NoTrustStore_ReturnsNil(t *testing.T) {
 //
 // Two arms:
 //
-//   1. EngineSwapped path: pm + a non-nil App in the appHolder so the
-//      first call reaches SwapPolicy and flips the dedup gate. The
-//      second call with matching (id, hash) MUST short-circuit; the
-//      proof is that a file deleted between the two calls stays gone.
+//  1. EngineSwapped path: pm + a non-nil App in the appHolder so the
+//     first call reaches SwapPolicy and flips the dedup gate. The
+//     second call with matching (id, hash) MUST short-circuit; the
+//     proof is that a file deleted between the two calls stays gone.
 //
-//   2. EngineNotSwapped path: appHolder.Load() returns nil so the
-//      first call skips SwapPolicy. The second call MUST re-run the
-//      install — dedup requires engineSwapped=true.
+//  2. EngineNotSwapped path: appHolder.Load() returns nil so the
+//     first call skips SwapPolicy. The second call MUST re-run the
+//     install — dedup requires engineSwapped=true.
 func TestMakePolicyInstallHook_IdempotentReinstall(t *testing.T) {
 	t.Run("dedups after engine swap", func(t *testing.T) {
 		f := newInstallHookFixture(t)
@@ -295,7 +295,7 @@ func TestMakePolicyInstallHook_IdempotentReinstall(t *testing.T) {
 			composite.New(memEventStore{}, nil),
 			initial,
 			events.NewBroker(),
-			nil, nil, nil, nil, nil, nil,
+			nil, nil, nil, nil, nil, nil, nil,
 		)
 		f.appHolder.Store(app)
 
@@ -370,7 +370,7 @@ func TestMakePolicyInstallHook_IdempotentReinstall(t *testing.T) {
 			composite.New(memEventStore{}, nil),
 			initial,
 			events.NewBroker(),
-			nil, nil, nil, nil, nil, nil,
+			nil, nil, nil, nil, nil, nil, nil,
 		)
 		f.appHolder.Store(app)
 
@@ -471,7 +471,7 @@ command_rules:
 		composite.New(memEventStore{}, nil),
 		engineP1,
 		events.NewBroker(),
-		nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil,
 	)
 	f.appHolder.Store(app)
 

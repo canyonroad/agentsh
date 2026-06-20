@@ -27,7 +27,7 @@ func newTestAppForWrap(t *testing.T, cfg *config.Config) (*App, *session.Manager
 	mgr := session.NewManager(5)
 	store := composite.New(mockEventStore{}, nil)
 	broker := events.NewBroker()
-	app := NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil, nil, nil, nil)
 	return app, mgr
 }
 
@@ -474,7 +474,7 @@ func TestWrapInit_UnixSocketsDisabledWithPolicyLimitsButNoCgroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil, nil)
 
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
@@ -519,7 +519,7 @@ func TestWrapNeedsCgroupBeforeAck_PolicyLimitsAloneInsufficient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil, nil)
 
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
@@ -590,7 +590,7 @@ func TestWrapInit_ShimMode_PolicyDeny(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil, nil)
 
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
@@ -634,7 +634,7 @@ func TestWrapInit_ShimMode_PolicyApprove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil, nil)
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -669,7 +669,7 @@ func TestWrapInit_ShimMode_PolicyRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil, nil)
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -709,7 +709,7 @@ func TestWrapInit_ShimMode_PolicySoftDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil, nil)
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -749,7 +749,7 @@ func TestWrapInit_ShimMode_PolicyAuditAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil, nil)
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -794,7 +794,7 @@ func TestWrapInit_ShimMode_PolicyAllow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil, nil)
 
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
@@ -838,7 +838,7 @@ func TestWrapInit_AgentMode_PolicyNotChecked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil, nil)
 
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
@@ -1368,7 +1368,7 @@ func newTestAppForWrapWithSignalPolicy(t *testing.T, cfg *config.Config) (*App, 
 	if err != nil {
 		t.Fatalf("create policy engine: %v", err)
 	}
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil, nil)
 	return app, mgr
 }
 

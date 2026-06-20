@@ -40,7 +40,7 @@ func newTestAppForWrapWithPermissivePolicy(t *testing.T, cfg *config.Config) (*A
 	mgr := session.NewManager(5)
 	store := composite.New(mockEventStore{}, nil)
 	broker := events.NewBroker()
-	app := NewApp(cfg, mgr, store, permissiveTestEngine(t), broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, permissiveTestEngine(t), broker, nil, nil, nil, nil, nil, nil, nil)
 	return app, mgr
 }
 

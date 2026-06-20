@@ -96,3 +96,34 @@ func TestResolveTorConfig_OnionVectorDisable(t *testing.T) {
 		t.Fatal("disabling onion must not affect other vectors")
 	}
 }
+
+func TestResolveTorConfig_OnionRules(t *testing.T) {
+	in := TorConfig{
+		Mode: "allow",
+		OnionRules: []TorOnionRule{
+			{Onion: "abc.onion", Decision: "allow"},
+			{Onion: "*", Decision: "deny"},
+			{Onion: "weird.onion", Decision: "bogus"}, // invalid → deny
+		},
+	}
+	out := ResolveTorConfig(in)
+	if len(out.OnionRules) != 3 {
+		t.Fatalf("want 3 onion rules, got %d", len(out.OnionRules))
+	}
+	if out.OnionRules[0].Decision != "allow" {
+		t.Errorf("rule0 decision = %q, want allow", out.OnionRules[0].Decision)
+	}
+	if out.OnionRules[1].Decision != "deny" {
+		t.Errorf("rule1 decision = %q, want deny", out.OnionRules[1].Decision)
+	}
+	if out.OnionRules[2].Decision != "deny" {
+		t.Errorf("rule2 (invalid) decision = %q, want deny", out.OnionRules[2].Decision)
+	}
+}
+
+func TestResolveTorConfig_OnionRulesAbsent(t *testing.T) {
+	out := ResolveTorConfig(TorConfig{Mode: "allow"})
+	if len(out.OnionRules) != 0 {
+		t.Fatalf("absent onion_rules should resolve empty, got %d", len(out.OnionRules))
+	}
+}

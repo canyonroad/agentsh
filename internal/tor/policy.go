@@ -25,13 +25,14 @@ const (
 	VectorOnionDNS  = "onion_dns"
 	VectorOnionHTTP = "onion_http"
 	VectorRelayIP   = "relay_ip"
+	VectorOnion     = "onion" // Phase 2 SOCKS gateway
 )
 
 // Verdict is the result of a positive Tor match.
 type Verdict struct {
 	Vector   string // one of the Vector* constants
 	Mode     string // resolved policy mode
-	Decision string // "deny" or "audit" (allow mode never yields a verdict)
+	Decision string // "deny" or "audit"; also "allow" for the Phase 2 onion gateway
 	Target   string // binary path, ip:port, or onion host
 }
 
@@ -45,6 +46,7 @@ type Policy struct {
 	controlPorts map[int]struct{}
 	seed         *ipset.Set                // directory-authority seed (immutable)
 	relays       atomic.Pointer[ipset.Set] // feed-populated, hot-swappable
+	onionRules   []onionRule               // Phase 2 gateway rules, compiled in order
 }
 
 // New builds a Policy from resolved config. Returns a Policy even when
@@ -70,6 +72,12 @@ func New(cfg config.ResolvedTorConfig) (*Policy, error) {
 	}
 	for _, ip := range DirectoryAuthoritySeed() {
 		_ = p.seed.Add(ip) // seed entries are known-valid
+	}
+	for _, r := range cfg.OnionRules {
+		p.onionRules = append(p.onionRules, onionRule{
+			pattern:  strings.ToLower(strings.TrimSpace(r.Onion)),
+			decision: r.Decision,
+		})
 	}
 	p.relays.Store(ipset.New())
 	return p, nil
