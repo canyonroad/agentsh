@@ -1,10 +1,14 @@
 package netmonitor
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"time"
+
+	"github.com/agentsh/agentsh/internal/tor"
 )
 
 // SOCKS5 reply codes (RFC 1928).
@@ -116,4 +120,117 @@ func encodeConnectReq(req socksReq) []byte {
 func writeSocksReply(w io.Writer, rep byte) error {
 	_, err := w.Write([]byte{socksVer, rep, 0x00, atypIPv4, 0, 0, 0, 0, 0, 0})
 	return err
+}
+
+// TorGatewayPolicy is the subset of *tor.Policy the SOCKS front-end needs.
+type TorGatewayPolicy interface {
+	GatewayActive() bool
+	EvalSocksTarget(host string, port int) (tor.Verdict, bool)
+}
+
+// handleTorSocks terminates a client SOCKS5 CONNECT, evaluates the target
+// against the onion gateway policy, and either proxies the stream to the
+// real Tor SOCKS daemon at upstreamAddr or replies "not allowed by ruleset".
+// Fail-closed on any error. Emits one tor_control{vector:onion} event.
+func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, emit Emitter, sessionID, commandID string) error {
+	defer conn.Close()
+
+	if err := readSocksGreeting(conn); err != nil {
+		return err
+	}
+	if err := writeSocksMethod(conn, 0x00); err != nil { // no-auth
+		return err
+	}
+	req, err := readSocksConnect(conn)
+	if err != nil {
+		_ = writeSocksReply(conn, socksRepGeneralFailure)
+		return err
+	}
+
+	v, ok := pol.EvalSocksTarget(req.host, req.port)
+	if ok {
+		emitOnionEvent(emit, sessionID, commandID, v)
+	}
+	if !ok || v.Decision != "allow" {
+		_ = writeSocksReply(conn, socksRepNotAllowed)
+		return nil
+	}
+
+	up, err := net.DialTimeout("tcp", upstreamAddr, 20*time.Second)
+	if err != nil {
+		_ = writeSocksReply(conn, socksRepGeneralFailure)
+		return err
+	}
+	defer up.Close()
+
+	// Act as a SOCKS5 client to the real Tor daemon for the same target.
+	if _, err := up.Write([]byte{socksVer, 0x01, 0x00}); err != nil { // greeting: 1 method, no-auth
+		_ = writeSocksReply(conn, socksRepGeneralFailure)
+		return err
+	}
+	if _, err := io.ReadFull(up, make([]byte, 2)); err != nil { // method selection
+		_ = writeSocksReply(conn, socksRepGeneralFailure)
+		return err
+	}
+	if _, err := up.Write(encodeConnectReq(req)); err != nil {
+		_ = writeSocksReply(conn, socksRepGeneralFailure)
+		return err
+	}
+	upReply, err := readSocksReply(up)
+	if err != nil {
+		_ = writeSocksReply(conn, socksRepGeneralFailure)
+		return err
+	}
+	// Relay the upstream's reply verbatim to the client.
+	if _, err := conn.Write(upReply); err != nil {
+		return err
+	}
+
+	splice(conn, up)
+	return nil
+}
+
+// readSocksReply reads a full SOCKS5 reply (VER REP RSV ATYP ADDR PORT).
+func readSocksReply(r io.Reader) ([]byte, error) {
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(r, head); err != nil {
+		return nil, err
+	}
+	var addrLen int
+	switch head[3] {
+	case atypIPv4:
+		addrLen = 4
+	case atypIPv6:
+		addrLen = 16
+	case atypDomain:
+		lb := make([]byte, 1)
+		if _, err := io.ReadFull(r, lb); err != nil {
+			return nil, err
+		}
+		head = append(head, lb[0])
+		addrLen = int(lb[0])
+	default:
+		return nil, fmt.Errorf("socks: bad reply atyp 0x%02x", head[3])
+	}
+	rest := make([]byte, addrLen+2) // addr + port
+	if _, err := io.ReadFull(r, rest); err != nil {
+		return nil, err
+	}
+	return append(head, rest...), nil
+}
+
+func splice(a, b net.Conn) {
+	errCh := make(chan error, 2)
+	go func() { _, e := io.Copy(a, b); errCh <- e }()
+	go func() { _, e := io.Copy(b, a); errCh <- e }()
+	<-errCh
+}
+
+func emitOnionEvent(emit Emitter, sessionID, commandID string, v tor.Verdict) {
+	if emit == nil {
+		return
+	}
+	ev := tor.BuildControlEvent(sessionID, commandID, 0, v)
+	_ = emit.AppendEvent(context.Background(), ev)
+	emit.Publish(ev)
 }
