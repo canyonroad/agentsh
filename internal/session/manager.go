@@ -98,6 +98,8 @@ type Session struct {
 	// Injected into spawned processes bypassing policy filtering.
 	// Nil if no services declare inject.env.
 	serviceEnvVars map[string]string
+
+	torGatewayAddr string // per-session Tor onion-gateway upstream addr (empty if none)
 }
 
 // SetPolicyEngine stores the session-specific policy engine with expanded variables.
@@ -136,6 +138,20 @@ func (s *Session) SetServiceEnvVars(env map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.serviceEnvVars = env
+}
+
+// SetTorGatewayAddr records the per-session Tor onion-gateway upstream addr.
+func (s *Session) SetTorGatewayAddr(addr string) {
+	s.mu.Lock()
+	s.torGatewayAddr = addr
+	s.mu.Unlock()
+}
+
+// TorGatewayAddr returns the recorded gateway upstream addr (empty if none).
+func (s *Session) TorGatewayAddr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.torGatewayAddr
 }
 
 // ServiceEnvVars returns a copy of the service env var map.
