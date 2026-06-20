@@ -171,9 +171,14 @@ func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, em
 		_ = writeSocksReply(conn, socksRepGeneralFailure)
 		return err
 	}
-	if _, err := io.ReadFull(up, make([]byte, 2)); err != nil { // method selection
+	methodReply := make([]byte, 2)
+	if _, err := io.ReadFull(up, methodReply); err != nil { // method selection
 		_ = writeSocksReply(conn, socksRepGeneralFailure)
 		return err
+	}
+	if methodReply[0] != socksVer || methodReply[1] != 0x00 { // upstream must accept no-auth
+		_ = writeSocksReply(conn, socksRepGeneralFailure)
+		return fmt.Errorf("socks: upstream selected auth method 0x%02x (want no-auth)", methodReply[1])
 	}
 	if _, err := up.Write(encodeConnectReq(req)); err != nil {
 		_ = writeSocksReply(conn, socksRepGeneralFailure)
@@ -228,12 +233,39 @@ func readSocksReply(r io.Reader) ([]byte, error) {
 	return append(head, rest...), nil
 }
 
-func splice(a, b net.Conn) {
-	errCh := make(chan error, 2)
-	go func() { _, e := io.Copy(a, b); errCh <- e }()
-	go func() { _, e := io.Copy(b, a); errCh <- e }()
-	<-errCh
-	<-errCh
+// splice copies bidirectionally between a and b, returning bytes copied
+// a->b and b->a. When one direction finishes it half-closes the write side
+// of that direction's destination (CloseWrite, or a full Close when the
+// conn has no CloseWrite, e.g. net.Pipe), so the peer sees EOF and the other
+// copy cannot hang on a half-open connection.
+func splice(a, b net.Conn) (ab, ba int64) {
+	done := make(chan struct{}, 2)
+	go func() {
+		n, _ := io.Copy(b, a)
+		ab = n
+		halfCloseWrite(b)
+		done <- struct{}{}
+	}()
+	go func() {
+		n, _ := io.Copy(a, b)
+		ba = n
+		halfCloseWrite(a)
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+	return ab, ba
+}
+
+// halfCloseWrite signals EOF on c's write side without tearing down its read
+// side when the conn supports it (TCP CloseWrite); otherwise falls back to a
+// full Close (e.g. net.Pipe in tests).
+func halfCloseWrite(c net.Conn) {
+	if cw, ok := c.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+		return
+	}
+	_ = c.Close()
 }
 
 func emitOnionEvent(emit Emitter, sessionID, commandID string, v tor.Verdict) {

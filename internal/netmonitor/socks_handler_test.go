@@ -196,3 +196,167 @@ func TestHandleTorSocks_UpstreamRefuses(t *testing.T) {
 	// The allow event should still have been emitted for the allowed target.
 	assertOneOnionEvent(t, emit, "allow")
 }
+
+// fakeTorUpstreamRequiresAuth is a fake upstream that rejects the method
+// negotiation by replying with method 0xFF (no acceptable method) — simulating
+// a misconfigured or auth-requiring upstream.
+func fakeTorUpstreamRequiresAuth(t *testing.T) (addr string, stop func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_ = readSocksGreeting(c)
+				// Reply with 0xFF — no acceptable method / auth required.
+				_ = writeSocksMethod(c, 0xFF)
+				// Do not read a CONNECT or send a CONNECT reply; just close.
+			}()
+		}
+	}()
+	return ln.Addr().String(), func() { _ = ln.Close() }
+}
+
+// TestHandleTorSocks_UpstreamRequiresAuth verifies that when the upstream
+// selects a non-zero (auth-requiring) method, the handler sends
+// socksRepGeneralFailure to the client and returns promptly — no splice.
+func TestHandleTorSocks_UpstreamRequiresAuth(t *testing.T) {
+	upstream, stop := fakeTorUpstreamRequiresAuth(t)
+	defer stop()
+
+	client, server := net.Pipe()
+	emit := &torCaptureEmitter{}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+	}()
+
+	// The client must get a general-failure reply — not a success, not a hang.
+	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+	rep := driveClient(t, client, "ok.onion", 443)
+	if rep != socksRepGeneralFailure {
+		t.Fatalf("auth-requiring upstream: client got reply 0x%02x, want general-failure (0x%02x)", rep, socksRepGeneralFailure)
+	}
+	client.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTorSocks did not return after upstream required auth (possible spurious splice)")
+	}
+
+	// Policy is evaluated (and the onion event emitted) before the upstream
+	// auth failure, so an allow event is still recorded.
+	assertOneOnionEvent(t, emit, "allow")
+}
+
+// TestSplice_HalfClose verifies that splice returns the correct byte counts and
+// does not hang when one direction EOF's. Uses a real TCP socket pair so that
+// CloseWrite is exercised (net.Pipe does not implement CloseWrite).
+func TestSplice_HalfClose(t *testing.T) {
+	// Set up a real TCP listener.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- c
+	}()
+
+	dialConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenConn := <-accepted
+
+	// We'll use a second real TCP pair as the "b" side of splice.
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln2.Close()
+
+	accepted2 := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln2.Accept()
+		if err != nil {
+			return
+		}
+		accepted2 <- c
+	}()
+
+	dialConn2, err := net.Dial("tcp", ln2.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenConn2 := <-accepted2
+
+	// a = listenConn  (receives from dialConn, sends to dialConn)
+	// b = listenConn2 (receives from dialConn2, sends to dialConn2)
+	// splice(a, b): ab = a->b, ba = b->a
+	//
+	// To drive bytes a->b: write on dialConn, then CloseWrite dialConn so
+	//   listenConn reads EOF (io.Copy a->b finishes).
+	// To drive bytes b->a: write on dialConn2, then CloseWrite dialConn2 so
+	//   listenConn2 reads EOF (io.Copy b->a finishes).
+
+	aPayload := []byte("hello from a")
+	bPayload := []byte("world from b")
+
+	// Write a->b side and close-write so splice can drain it.
+	if _, err := dialConn.Write(aPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := dialConn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	// Write b->a side and close-write.
+	if _, err := dialConn2.Write(bPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := dialConn2.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		ab, ba int64
+	}
+	ch := make(chan result, 1)
+	go func() {
+		ab, ba := splice(listenConn, listenConn2)
+		ch <- result{ab, ba}
+	}()
+
+	select {
+	case r := <-ch:
+		if r.ab != int64(len(aPayload)) {
+			t.Errorf("ab bytes = %d, want %d", r.ab, len(aPayload))
+		}
+		if r.ba != int64(len(bPayload)) {
+			t.Errorf("ba bytes = %d, want %d", r.ba, len(bPayload))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("splice did not return (half-close hang)")
+	}
+
+	dialConn.Close()
+	dialConn2.Close()
+	listenConn.Close()
+	listenConn2.Close()
+}

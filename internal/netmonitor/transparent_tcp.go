@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -182,20 +181,8 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 	}
 	defer up.Close()
 
-	var upBytes, downBytes int64
-	errCh := make(chan error, 2)
-	go func() {
-		n, e := io.Copy(up, conn)
-		upBytes = n
-		errCh <- e
-	}()
-	go func() {
-		n, e := io.Copy(conn, up)
-		downBytes = n
-		errCh <- e
-	}()
-	<-errCh
-	<-errCh
+	// conn->up = upBytes (sent), up->conn = downBytes (received).
+	upBytes, downBytes := splice(conn, up)
 
 	closeEv := t.netEvent("net_close", commandID, domain, remote, dstPort, dec, map[string]any{"bytes_sent": upBytes, "bytes_received": downBytes})
 	_ = t.emit.AppendEvent(context.Background(), closeEv)
