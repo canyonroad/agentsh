@@ -702,7 +702,6 @@ func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session
 	}
 	if pol, upstream, socksPorts, ok := a.torGateway(); ok {
 		tcp.SetTorGateway(pol, upstream, socksPorts)
-		s.SetTorGatewayAddr(upstream)
 		slog.Info("tor onion gateway active for session", "session", s.ID, "upstream", upstream)
 	}
 	dns, dnsPort, err := netmonitor.StartDNS("0.0.0.0:0", "8.8.8.8:53", s.ID, s, dnsCache, a.policy, a.approvals, em, correlationMap)

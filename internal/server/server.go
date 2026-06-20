@@ -80,7 +80,6 @@ type Server struct {
 	threatStore  *threatfeed.Store
 
 	torSyncer *tor.Syncer
-	torPol    *tor.Policy
 
 	skillcheckDaemon *skillcheck.Daemon // nil when skillcheck.enabled=false
 
@@ -783,7 +782,6 @@ func New(cfg *config.Config) (*Server, error) {
 		threatSyncer:     threatSyncer,
 		threatStore:      threatStore,
 		torSyncer:        torSyncer,
-		torPol:           torPol,
 		skillcheckDaemon: skillcheckDaemon,
 		app:              app,
 		kmsProvider:      kmsProvider,

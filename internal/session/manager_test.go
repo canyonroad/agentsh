@@ -674,14 +674,3 @@ func TestSessionCleanup_ClosesDBProxy(t *testing.T) {
 		t.Fatalf("DBProxySocketDir after cleanup = %q, want empty", got)
 	}
 }
-
-func TestSession_TorGatewayAddr(t *testing.T) {
-	s := &Session{}
-	if s.TorGatewayAddr() != "" {
-		t.Error("default gateway addr should be empty")
-	}
-	s.SetTorGatewayAddr("127.0.0.1:9050")
-	if s.TorGatewayAddr() != "127.0.0.1:9050" {
-		t.Errorf("got %q", s.TorGatewayAddr())
-	}
-}
