@@ -151,6 +151,9 @@ func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, em
 	if ok {
 		emitOnionEvent(emit, sessionID, commandID, v)
 	}
+	// Callers invoke handleTorSocks only when GatewayActive() is true.
+	// ok=false means the policy returned no verdict; treat as fail-closed
+	// (reply not-allowed, emit no event — there is no decision to report).
 	if !ok || v.Decision != "allow" {
 		_ = writeSocksReply(conn, socksRepNotAllowed)
 		return nil
@@ -184,6 +187,12 @@ func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, em
 	// Relay the upstream's reply verbatim to the client.
 	if _, err := conn.Write(upReply); err != nil {
 		return err
+	}
+
+	// Only enter bidirectional proxy when the upstream accepted the connection.
+	// A non-success reply means Tor refused it; do not splice a refused stream.
+	if len(upReply) < 2 || upReply[1] != socksRepSuccess {
+		return nil
 	}
 
 	splice(conn, up)
@@ -223,6 +232,7 @@ func splice(a, b net.Conn) {
 	errCh := make(chan error, 2)
 	go func() { _, e := io.Copy(a, b); errCh <- e }()
 	go func() { _, e := io.Copy(b, a); errCh <- e }()
+	<-errCh
 	<-errCh
 }
 

@@ -47,6 +47,13 @@ func (c *torCaptureEmitter) events() []types.Event {
 // fakeTorUpstream is a minimal SOCKS5 server that always succeeds and echoes.
 func fakeTorUpstream(t *testing.T) (addr string, stop func()) {
 	t.Helper()
+	return fakeTorUpstreamWithReply(t, socksRepSuccess)
+}
+
+// fakeTorUpstreamWithReply is like fakeTorUpstream but sends the given reply code.
+// When the reply is non-success, it closes after sending the reply (no echo).
+func fakeTorUpstreamWithReply(t *testing.T, rep byte) (addr string, stop func()) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -64,8 +71,10 @@ func fakeTorUpstream(t *testing.T) (addr string, stop func()) {
 				if _, err := readSocksConnect(c); err != nil {
 					return
 				}
-				_ = writeSocksReply(c, socksRepSuccess)
-				_, _ = io.Copy(c, c) // echo
+				_ = writeSocksReply(c, rep)
+				if rep == socksRepSuccess {
+					_, _ = io.Copy(c, c) // echo only on success
+				}
 			}()
 		}
 	}()
@@ -150,4 +159,40 @@ func assertOneOnionEvent(t *testing.T, emit *torCaptureEmitter, wantDecision str
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("no tor_control{vector:onion,decision:%s} event seen", wantDecision)
+}
+
+// TestHandleTorSocks_UpstreamRefuses verifies that when the upstream Tor daemon
+// replies with a non-success code, the handler forwards that reply to the client
+// and returns promptly without entering bidirectional proxy mode.
+func TestHandleTorSocks_UpstreamRefuses(t *testing.T) {
+	upstream, stop := fakeTorUpstreamWithReply(t, socksRepGeneralFailure)
+	defer stop()
+
+	client, server := net.Pipe()
+	emit := &torCaptureEmitter{}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+	}()
+
+	// Drive client: should receive the upstream's non-success reply.
+	rep := driveClient(t, client, "ok.onion", 443)
+	if rep != socksRepGeneralFailure {
+		t.Fatalf("upstream-refused target got reply 0x%02x, want general-failure (0x%02x)", rep, socksRepGeneralFailure)
+	}
+
+	// Close the client side; the handler must exit without hanging.
+	client.Close()
+
+	// Bound the wait so the test never hangs if splice is called unexpectedly.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTorSocks did not return after upstream refusal (possible spurious splice)")
+	}
+
+	// The allow event should still have been emitted for the allowed target.
+	assertOneOnionEvent(t, emit, "allow")
 }
