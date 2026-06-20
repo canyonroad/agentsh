@@ -34,6 +34,7 @@ import (
 	"github.com/agentsh/agentsh/internal/proxy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
+	"github.com/agentsh/agentsh/internal/tor"
 	"github.com/agentsh/agentsh/internal/trash"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/go-chi/chi/v5"
@@ -124,9 +125,12 @@ type App struct {
 	// "behavioral_probe", "behavioral_probe_error"). Consumed by the
 	// diagnostic log lines added in a later task.
 	waitKillableSource string
+
+	// torPolicy is the Phase 2 tor gateway policy; nil when tor is disabled.
+	torPolicy *tor.Policy
 }
 
-func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader, cgroupMgr *limits.CgroupManager) *App {
+func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader, cgroupMgr *limits.CgroupManager, torPolicy *tor.Policy) *App {
 	// Apply EBPF map size overrides once per process (global maps); no-op if zero values.
 	ebpftrace.SetMapSizeOverrides(
 		uint32(cfg.Sandbox.Network.EBPF.MapAllowEntries),
@@ -188,6 +192,7 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		metrics:      metricsCollector,
 		platform:     plat,
 		policyLoader: policyLoader,
+		torPolicy:    torPolicy,
 	}
 
 	// Compute the server-process WAIT_KILLABLE_RECV decision once at
@@ -242,6 +247,14 @@ func (a *App) SetSessionTracker(t interface {
 // Close releases resources held by the app (e.g., ptrace tracer).
 func (a *App) Close() {
 	a.closePtraceTracer()
+}
+
+// torGateway reports the Phase 2 onion-gateway wiring when active.
+func (a *App) torGateway() (pol *tor.Policy, upstream string, socksPorts []int, ok bool) {
+	if a == nil || a.torPolicy == nil || !a.torPolicy.GatewayActive() {
+		return nil, "", nil, false
+	}
+	return a.torPolicy, a.torPolicy.UpstreamSocksAddr(), a.torPolicy.ConfiguredSocksPorts(), true
 }
 
 type ctxKey string

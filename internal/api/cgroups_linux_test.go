@@ -62,6 +62,7 @@ func newAppWithFakeCgroupManager(t *testing.T, cfg *config.Config, cgPath string
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	app.cgroupMgr = &fakeCgroupManagerForAPITest{path: cgPath}
 	return app

@@ -114,7 +114,7 @@ func newDeferredTestApp(t *testing.T, sessions *session.Manager, store *composit
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
+	return NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil, nil, nil)
 }
 
 func newDeferredTestSession(t *testing.T, mgr *session.Manager) *session.Session {
@@ -364,7 +364,7 @@ func TestEnsureFUSEMount_NilPolicyAndEmitter(t *testing.T) {
 		},
 	}, false, true)
 
-	app := NewApp(cfg, mgr, store, engine, events.NewBroker(), nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, events.NewBroker(), nil, nil, nil, nil, nil, nil, nil)
 
 	mfs := &mockFilesystem{}
 	mfs.available.Store(true)
@@ -405,7 +405,7 @@ func TestMountFUSEForSession_DeferredEventField(t *testing.T) {
 		},
 	}, false, true)
 
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, metrics.New(), nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, metrics.New(), nil, nil, nil)
 
 	mfs := &mockFilesystem{}
 	mfs.available.Store(true)

@@ -30,7 +30,7 @@ func newProbeTestApp(t *testing.T) *App {
 	mgr := session.NewManager(5)
 	store := composite.New(mockEventStore{}, nil)
 	broker := events.NewBroker()
-	app := NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil, nil, nil, nil)
 	t.Cleanup(func() { app.closePtraceTracer() })
 	return app
 }

@@ -56,3 +56,11 @@ func (p *Policy) UpstreamSocksAddr() string {
 	}
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(p.cfg.SocksPorts[0]))
 }
+
+// ConfiguredSocksPorts returns the SOCKS ports treated as Tor (for routing).
+func (p *Policy) ConfiguredSocksPorts() []int {
+	if p == nil {
+		return nil
+	}
+	return append([]int(nil), p.cfg.SocksPorts...)
+}

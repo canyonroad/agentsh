@@ -157,7 +157,7 @@ func startTestServerWithLandlockDenyOpts(t *testing.T, denyPath string, extraAll
 	store := composite.New(mockEventStore{}, nil)
 	broker := events.NewBroker()
 
-	app := NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil, nil, nil, nil)
 
 	// Pre-create the session so wrap-init finds it.
 	ws := t.TempDir()

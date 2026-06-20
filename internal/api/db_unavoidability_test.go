@@ -510,7 +510,7 @@ func TestCreateSessionCore_NoPolicyDirUsesGlobalEngine(t *testing.T) {
 	cfg.Sessions.BaseDir = t.TempDir()
 	mgr := session.NewManager(10)
 	store := composite.New(mockEventStore{}, nil)
-	app := NewApp(cfg, mgr, store, globalEngine, appevents.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
+	app := NewApp(cfg, mgr, store, globalEngine, appevents.NewBroker(), nil, nil, nil, metrics.New(), nil, nil, nil)
 
 	snap, code, err := app.createSessionCore(context.Background(), types.CreateSessionRequest{
 		ID:        "sess-global-engine",
@@ -574,7 +574,7 @@ func newDBUnavoidabilityTestApp(t *testing.T, policyYAML string) (*App, *session
 	mgr := session.NewManager(10)
 	st := newSQLiteStore(t)
 	store := composite.New(st, st)
-	app := NewApp(cfg, mgr, store, nil, appevents.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
+	app := NewApp(cfg, mgr, store, nil, appevents.NewBroker(), nil, nil, nil, metrics.New(), nil, nil, nil)
 	return app, mgr
 }
 
@@ -596,7 +596,7 @@ func newDBCommandBypassFixture(t *testing.T) *dbCommandBypassFixture {
 	mgr := session.NewManager(5)
 	captured := &capturingEventStore{}
 	store := composite.New(captured, nil)
-	app := NewApp(cfg, mgr, store, nil, appevents.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
+	app := NewApp(cfg, mgr, store, nil, appevents.NewBroker(), nil, nil, nil, metrics.New(), nil, nil, nil)
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
