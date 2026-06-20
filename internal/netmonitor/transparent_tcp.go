@@ -33,6 +33,8 @@ type TransparentTCP struct {
 	emit      Emitter
 	dbBypass  atomic.Pointer[dbevents.BypassEmitter]
 
+	torGW atomic.Pointer[torGatewayConfig]
+
 	ln   net.Listener
 	wg   sync.WaitGroup
 	done chan struct{}
@@ -113,6 +115,10 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 		commandID = t.sess.CurrentCommandID()
 	}
 	engine := t.policyEngine()
+
+	if cfg, ok := t.torGatewayFor(dstPort); ok {
+		return handleTorSocks(conn, cfg.upstream, cfg.pol, t.emit, t.sessionID, commandID)
+	}
 
 	domain := dstIP.String()
 	if t.dnsCache != nil {
@@ -295,6 +301,43 @@ func (t *TransparentTCP) netEvent(evType string, commandID string, domain string
 		},
 	}
 	return ev
+}
+
+type torGatewayConfig struct {
+	pol        TorGatewayPolicy
+	upstream   string
+	socksPorts map[int]struct{}
+}
+
+// SetTorGateway enables (or, with nil/empty args, disables) Phase 2 onion
+// gateway routing for connections whose original destination is a Tor SOCKS
+// port. Safe to call concurrently.
+func (t *TransparentTCP) SetTorGateway(pol TorGatewayPolicy, upstream string, socksPorts []int) {
+	if t == nil {
+		return
+	}
+	if pol == nil || upstream == "" || len(socksPorts) == 0 {
+		t.torGW.Store(nil)
+		return
+	}
+	ports := make(map[int]struct{}, len(socksPorts))
+	for _, p := range socksPorts {
+		ports[p] = struct{}{}
+	}
+	t.torGW.Store(&torGatewayConfig{pol: pol, upstream: upstream, socksPorts: ports})
+}
+
+// torGatewayFor returns the gateway config when it is active and port is a
+// configured Tor SOCKS port.
+func (t *TransparentTCP) torGatewayFor(port int) (*torGatewayConfig, bool) {
+	cfg := t.torGW.Load()
+	if cfg == nil || !cfg.pol.GatewayActive() {
+		return nil, false
+	}
+	if _, ok := cfg.socksPorts[port]; !ok {
+		return nil, false
+	}
+	return cfg, true
 }
 
 func originalDst(c *net.TCPConn) (net.IP, int, error) {
