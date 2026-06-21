@@ -129,9 +129,13 @@ func (a *App) attachDenyTor(s *session.Session, deny *tor.Policy) bool {
 // No-op when the gateway is inactive or the interceptor came up (force-redirect
 // handled it). Emits one session-level gateway event recording the outcome.
 func (a *App) applyTorFailClosed(ctx context.Context, s *session.Session, interceptorUp bool) {
+	if a == nil || s == nil {
+		return
+	}
 	if a.torPolicy == nil || !a.torPolicy.GatewayActive() {
 		return
 	}
+	// interceptorUp == true means the force-redirect path already handled this session.
 	if gatewayBranchFor(true, interceptorUp) != gatewayFailClosed {
 		return
 	}
