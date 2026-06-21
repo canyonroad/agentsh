@@ -395,3 +395,10 @@ transparent interception for the gateway to take effect. The gateway emits one
 `tor_control{vector: onion, decision: allow|deny}` event per CONNECT; like the
 other connection-layer vectors it reports `pid: 0` and is correlated by session
 and target.
+
+**Phase 3 (fail-open gap closed — implemented).** The silent degrade described
+above is closed: in netns transparent mode a loopback-DNAT force-redirect steers
+the app's Tor SOCKS connection into the gateway automatically; in any mode where
+the gateway cannot be wired the session fails closed (Tor denied, `tor_control`
+`vector: gateway` audit event). See
+`docs/superpowers/specs/2026-06-20-tor-access-control-phase3-design.md`.

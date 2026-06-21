@@ -215,6 +215,9 @@ func New(cfg *config.Config) (*Server, error) {
 		torPol = p
 		engine.SetTorPolicy(&tor.PolicyAdapter{Policy: torPol})
 		slog.Info("tor access control enabled", "mode", torCfg.Mode)
+		if torCfg.Mode == "allow" && len(torCfg.OnionRules) > 0 && !cfg.Sandbox.Network.Transparent.Enabled {
+			slog.Warn("tor onion gateway configured (mode=allow + onion_rules) but transparent network is disabled; every session will fail-closed (Tor denied). Enable sandbox.network.transparent to use the gateway.")
+		}
 		if torPol.RelayFeedEnabled() {
 			torSyncer = tor.NewSyncer(torPol, slog.Default())
 		}
