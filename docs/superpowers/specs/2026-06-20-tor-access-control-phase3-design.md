@@ -95,7 +95,7 @@ iptables -t nat -A OUTPUT -d 127.0.0.1 -p tcp --dport <port> -j DNAT --to-destin
 and enable routing of loopback-originated packets inside the netns:
 
 ```
-sysctl -w net.ipv4.conf.<veth>.route_localnet=1
+sysctl -w net.ipv4.conf.all.route_localnet=1
 ```
 
 Result: the app's `connect(127.0.0.1:9050)` crosses the veth to the existing
@@ -114,9 +114,9 @@ install, the session MUST NOT proceed with "interceptor up, Tor unfiltered." It
 tears the partially-installed rules back to a known state and transitions to
 Branch 2 (fail-closed deny). A force-redirect is all-or-nothing.
 
-**route_localnet scope.** `route_localnet=1` is set on the netns veth only; its
-effect is contained to the sandbox network namespace and does not alter host
-routing.
+**route_localnet scope.** `route_localnet=1` is set on `net.ipv4.conf.all` inside the session netns; its
+effect is contained to the sandbox network namespace (the sysctl write occurs
+inside the per-session netns, so it does not alter host routing).
 
 ## Branch 2 — Fail-closed (gateway not wired)
 

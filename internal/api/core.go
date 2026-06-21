@@ -616,6 +616,11 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 		s.Mounts = mounts
 	}
 
+	// Profile sessions never wire the transparent interceptor; if the onion
+	// gateway is active for this session, fail closed (deny Tor) rather than
+	// allowing unfiltered Tor. No-op when the gateway is not active.
+	a.applyTorFailClosed(ctx, s, false)
+
 	return s.Snapshot(), http.StatusCreated, nil
 }
 
