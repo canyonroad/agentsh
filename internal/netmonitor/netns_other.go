@@ -18,7 +18,7 @@ type NetNS struct {
 	DNSUDPPort   int
 }
 
-func SetupNetNS(ctx context.Context, nsName string, subnetCIDR string, hostIf string, nsIf string, hostIPCIDR string, nsIPCIDR string, proxyTCPPort int, dnsUDPPort int) (*NetNS, error) {
+func SetupNetNS(ctx context.Context, nsName string, subnetCIDR string, hostIf string, nsIf string, hostIPCIDR string, nsIPCIDR string, proxyTCPPort int, dnsUDPPort int, torRedirectPorts []int) (*NetNS, error) {
 	return nil, fmt.Errorf("transparent netns not supported on this platform")
 }
 

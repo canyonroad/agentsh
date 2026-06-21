@@ -700,8 +700,10 @@ func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session
 	if err != nil {
 		return err
 	}
+	var torRedirectPorts []int
 	if pol, upstream, socksPorts, ok := a.torGateway(); ok {
 		tcp.SetTorGateway(pol, upstream, socksPorts)
+		torRedirectPorts = socksPorts
 		slog.Info("tor onion gateway active for session", "session", s.ID, "upstream", upstream)
 	}
 	dns, dnsPort, err := netmonitor.StartDNS("0.0.0.0:0", "8.8.8.8:53", s.ID, s, dnsCache, a.policy, a.approvals, em, correlationMap)
@@ -712,7 +714,7 @@ func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session
 
 	nsName := "agentsh-" + strings.TrimPrefix(s.ID, "session-")
 	subnetCIDR, hostIPCIDR, nsIPCIDR, hostIf, nsIf := netmonitor.AllocateSubnet(a.cfg.Sandbox.Network.Transparent.SubnetBase, nsName)
-	ns, err := netmonitor.SetupNetNS(ctx, nsName, subnetCIDR, hostIf, nsIf, hostIPCIDR, nsIPCIDR, tcpPort, dnsPort)
+	ns, err := netmonitor.SetupNetNS(ctx, nsName, subnetCIDR, hostIf, nsIf, hostIPCIDR, nsIPCIDR, tcpPort, dnsPort, torRedirectPorts)
 	if err != nil {
 		_ = tcp.Close()
 		_ = dns.Close()
