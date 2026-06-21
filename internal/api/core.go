@@ -565,6 +565,7 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 		}
 		s.ProjectRoot = policyVars["PROJECT_ROOT"]
 		s.GitRoot = policyVars["GIT_ROOT"]
+		a.attachSessionTor(engine)
 		s.SetPolicyEngine(engine)
 		if err := a.startSessionDBProxy(ctx, s, dbRuleSet, dbStateDir); err != nil {
 			a.cleanupCreatedSession(s)
@@ -755,6 +756,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	// Store roots and session-specific policy engine
 	s.ProjectRoot = policyVars["PROJECT_ROOT"]
 	s.GitRoot = policyVars["GIT_ROOT"]
+	a.attachSessionTor(engine)
 	s.SetPolicyEngine(engine)
 
 	// Apply real-paths mode if requested
@@ -1497,6 +1499,7 @@ func (a *App) ensureFUSEMount(ctx context.Context, s *session.Session) {
 
 	// Store session-specific engine if session doesn't have one yet
 	if s.PolicyEngine() == nil {
+		a.attachSessionTor(engine)
 		s.SetPolicyEngine(engine)
 	}
 

@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/tor"
 )
 
 // policyEngineFor returns the effective policy engine to consult for the given
@@ -77,4 +78,20 @@ func (a *App) execveEnforcementActive() bool {
 // config (sandbox.seccomp.shellc.opaque) for command pre-checks. Issue #378.
 func (a *App) shellCOpaqueMode() policy.ShellCOpaqueMode {
 	return policy.ParseShellCOpaqueMode(a.cfg.Sandbox.Seccomp.Shellc.Opaque)
+}
+
+// attachSessionTor installs the shared Tor coordinator on a per-session engine.
+// The process-global engine already carries it (set once at server start in
+// server.go); sessions that compiled their own engine from a named policy file
+// would otherwise have torChecker == nil, silently skipping the ptrace
+// connect/execve Tor vectors. Guarded so the shared global engine is never
+// re-written (SetTorPolicy is unsynchronized).
+func (a *App) attachSessionTor(eng *policy.Engine) {
+	if a == nil || a.torPolicy == nil || eng == nil {
+		return
+	}
+	if eng == a.Policy() {
+		return
+	}
+	eng.SetTorPolicy(&tor.PolicyAdapter{Policy: a.torPolicy})
 }
