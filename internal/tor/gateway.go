@@ -19,6 +19,19 @@ func (p *Policy) GatewayActive() bool {
 	return p != nil && p.cfg.Enabled && p.cfg.Mode == ModeAllow && len(p.onionRules) > 0
 }
 
+// DenyModeClone returns a sibling Policy built from the same resolved config
+// but with Mode forced to deny. Used for fail-closed sessions where the onion
+// gateway cannot be wired: the session enforces Phase-1 Tor deny instead of
+// silently allowing unfiltered Tor. The receiver is not modified.
+func (p *Policy) DenyModeClone() (*Policy, error) {
+	if p == nil {
+		return nil, nil
+	}
+	cfg := p.cfg // value copy; New only reads the (shared) slices
+	cfg.Mode = ModeDeny
+	return New(cfg)
+}
+
 // EvalSocksTarget evaluates a SOCKS CONNECT target host:port against the
 // onion rules. When the gateway is active it always returns ok=true with a
 // concrete allow/deny decision; an unmatched target fails closed (deny).

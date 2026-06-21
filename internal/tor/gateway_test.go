@@ -79,3 +79,34 @@ func TestUpstreamSocksAddr(t *testing.T) {
 		t.Errorf("UpstreamSocksAddr = %q, want 127.0.0.1:9050", got)
 	}
 }
+
+func TestDenyModeClone_ForcesDenyWithoutMutatingOriginal(t *testing.T) {
+	allow, err := New(config.ResolvedTorConfig{
+		Enabled:        true,
+		Mode:           ModeAllow,
+		ClientBinaries: []string{"tor"},
+		SocksPorts:     []int{9050, 9150},
+		Vectors:        config.ResolvedTorVectors{Processes: true, SocksPorts: true, Onion: true, RelayIPs: true},
+		OnionRules:     []config.TorOnionRule{{Onion: "*", Decision: "deny"}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	deny, err := allow.DenyModeClone()
+	if err != nil {
+		t.Fatalf("DenyModeClone: %v", err)
+	}
+	if deny.Mode() != ModeDeny {
+		t.Fatalf("clone mode = %q, want deny", deny.Mode())
+	}
+	if allow.Mode() != ModeAllow {
+		t.Fatalf("original mutated: mode = %q, want allow", allow.Mode())
+	}
+	// Deny-mode clone enforces the Phase-1 execve vector; allow-mode never does.
+	if _, ok := deny.EvalExecve("/usr/bin/tor", nil); !ok {
+		t.Fatal("deny clone should match the tor binary via EvalExecve")
+	}
+	if _, ok := allow.EvalExecve("/usr/bin/tor", nil); ok {
+		t.Fatal("allow-mode original should not produce an execve verdict")
+	}
+}

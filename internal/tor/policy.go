@@ -25,7 +25,8 @@ const (
 	VectorOnionDNS  = "onion_dns"
 	VectorOnionHTTP = "onion_http"
 	VectorRelayIP   = "relay_ip"
-	VectorOnion     = "onion" // Phase 2 SOCKS gateway
+	VectorOnion     = "onion"   // Phase 2 SOCKS gateway
+	VectorGateway   = "gateway" // Phase 3 session-level onion-gateway wiring outcome
 )
 
 // Verdict is the result of a positive Tor match.
