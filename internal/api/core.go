@@ -565,6 +565,7 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 		}
 		s.ProjectRoot = policyVars["PROJECT_ROOT"]
 		s.GitRoot = policyVars["GIT_ROOT"]
+		a.attachSessionTor(engine)
 		s.SetPolicyEngine(engine)
 		if err := a.startSessionDBProxy(ctx, s, dbRuleSet, dbStateDir); err != nil {
 			a.cleanupCreatedSession(s)
@@ -614,6 +615,11 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 		// Update session with resolved mounts
 		s.Mounts = mounts
 	}
+
+	// Profile sessions never wire the transparent interceptor; if the onion
+	// gateway is active for this session, fail closed (deny Tor) rather than
+	// allowing unfiltered Tor. No-op when the gateway is not active.
+	a.applyTorFailClosed(ctx, s, false)
 
 	return s.Snapshot(), http.StatusCreated, nil
 }
@@ -755,6 +761,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	// Store roots and session-specific policy engine
 	s.ProjectRoot = policyVars["PROJECT_ROOT"]
 	s.GitRoot = policyVars["GIT_ROOT"]
+	a.attachSessionTor(engine)
 	s.SetPolicyEngine(engine)
 
 	// Apply real-paths mode if requested
@@ -809,6 +816,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	}
 
 	// Optional: start transparent network interception; fall back to explicit proxy on failure.
+	interceptorUp := false
 	if a.cfg.Sandbox.Network.Transparent.Enabled {
 		if err := a.tryStartTransparentNetwork(ctx, s); err != nil {
 			fail := types.Event{
@@ -827,6 +835,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 				a.startExplicitProxy(ctx, s)
 			}
 		} else {
+			interceptorUp = true
 			okEv := types.Event{
 				ID:        uuid.NewString(),
 				Timestamp: time.Now().UTC(),
@@ -839,6 +848,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	} else if a.cfg.Sandbox.Network.Enabled {
 		a.startExplicitProxy(ctx, s)
 	}
+	a.applyTorFailClosed(ctx, s, interceptorUp)
 
 	// Start embedded LLM proxy if configured
 	if a.cfg.Proxy.Mode == "embedded" || a.cfg.Proxy.IsMCPOnly() {
@@ -1497,6 +1507,7 @@ func (a *App) ensureFUSEMount(ctx context.Context, s *session.Session) {
 
 	// Store session-specific engine if session doesn't have one yet
 	if s.PolicyEngine() == nil {
+		a.attachSessionTor(engine)
 		s.SetPolicyEngine(engine)
 	}
 

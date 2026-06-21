@@ -249,6 +249,26 @@ func (a *App) Close() {
 	a.closePtraceTracer()
 }
 
+type gatewayBranch int
+
+const (
+	gatewayNone gatewayBranch = iota
+	gatewayForceRedirect
+	gatewayFailClosed
+)
+
+// gatewayBranchFor selects the Phase 3 branch from the per-session predicate.
+func gatewayBranchFor(gatewayActive, interceptorUp bool) gatewayBranch {
+	switch {
+	case !gatewayActive:
+		return gatewayNone
+	case interceptorUp:
+		return gatewayForceRedirect
+	default:
+		return gatewayFailClosed
+	}
+}
+
 // torGateway reports the Phase 2 onion-gateway wiring when active.
 func (a *App) torGateway() (pol *tor.Policy, upstream string, socksPorts []int, ok bool) {
 	if a == nil || a.torPolicy == nil || !a.torPolicy.GatewayActive() {
@@ -700,8 +720,10 @@ func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session
 	if err != nil {
 		return err
 	}
+	var torRedirectPorts []int
 	if pol, upstream, socksPorts, ok := a.torGateway(); ok {
 		tcp.SetTorGateway(pol, upstream, socksPorts)
+		torRedirectPorts = socksPorts
 		slog.Info("tor onion gateway active for session", "session", s.ID, "upstream", upstream)
 	}
 	dns, dnsPort, err := netmonitor.StartDNS("0.0.0.0:0", "8.8.8.8:53", s.ID, s, dnsCache, a.policy, a.approvals, em, correlationMap)
@@ -712,7 +734,7 @@ func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session
 
 	nsName := "agentsh-" + strings.TrimPrefix(s.ID, "session-")
 	subnetCIDR, hostIPCIDR, nsIPCIDR, hostIf, nsIf := netmonitor.AllocateSubnet(a.cfg.Sandbox.Network.Transparent.SubnetBase, nsName)
-	ns, err := netmonitor.SetupNetNS(ctx, nsName, subnetCIDR, hostIf, nsIf, hostIPCIDR, nsIPCIDR, tcpPort, dnsPort)
+	ns, err := netmonitor.SetupNetNS(ctx, nsName, subnetCIDR, hostIf, nsIf, hostIPCIDR, nsIPCIDR, tcpPort, dnsPort, torRedirectPorts)
 	if err != nil {
 		_ = tcp.Close()
 		_ = dns.Close()
@@ -744,6 +766,11 @@ func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session
 	}
 	_ = a.store.AppendEvent(ctx, ev)
 	a.broker.Publish(ev)
+	if len(torRedirectPorts) > 0 {
+		gw := tor.BuildGatewayEvent(s.ID, "allow", "force_redirect_installed", true)
+		_ = a.store.AppendEvent(ctx, gw)
+		a.broker.Publish(gw)
+	}
 	return nil
 }
 
