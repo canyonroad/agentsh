@@ -811,6 +811,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	}
 
 	// Optional: start transparent network interception; fall back to explicit proxy on failure.
+	interceptorUp := false
 	if a.cfg.Sandbox.Network.Transparent.Enabled {
 		if err := a.tryStartTransparentNetwork(ctx, s); err != nil {
 			fail := types.Event{
@@ -829,6 +830,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 				a.startExplicitProxy(ctx, s)
 			}
 		} else {
+			interceptorUp = true
 			okEv := types.Event{
 				ID:        uuid.NewString(),
 				Timestamp: time.Now().UTC(),
@@ -841,6 +843,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	} else if a.cfg.Sandbox.Network.Enabled {
 		a.startExplicitProxy(ctx, s)
 	}
+	a.applyTorFailClosed(ctx, s, interceptorUp)
 
 	// Start embedded LLM proxy if configured
 	if a.cfg.Proxy.Mode == "embedded" || a.cfg.Proxy.IsMCPOnly() {
