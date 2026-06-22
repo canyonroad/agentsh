@@ -155,7 +155,8 @@ func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, em
 	switch req.cmd {
 	case socksCmdConnect:
 		return gatewayConnect(conn, upstreamAddr, pol, emit, sessionID, commandID, req)
-	// case socksCmdResolve is added in Task 2.
+	case socksCmdResolve:
+		return gatewayResolve(conn, upstreamAddr, pol, emit, sessionID, commandID, req)
 	default:
 		// RESOLVE_PTR (0xF1), BIND, UDP ASSOCIATE, etc. — deliberately
 		// unsupported. Reply the correct SOCKS code and close; no event,
@@ -290,6 +291,47 @@ func halfCloseWrite(c net.Conn) {
 		return
 	}
 	_ = c.Close()
+}
+
+// gatewayResolve handles a SOCKS RESOLVE (0xF0): it filters the target through
+// the same onion_rules as CONNECT and, when allowed, forwards the RESOLVE to
+// the upstream Tor daemon and relays its single reply verbatim. RESOLVE is a
+// request/reply exchange, not a tunnel — there is no splice. Emits one
+// tor_control{vector: onion, socks_cmd: resolve} event.
+func gatewayResolve(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, emit Emitter, sessionID, commandID string, req socksReq) error {
+	v, ok := pol.EvalSocksTarget(req.host, req.port)
+	if ok {
+		emitOnionEvent(emit, sessionID, commandID, v, "resolve")
+	}
+	if !ok || v.Decision != "allow" {
+		_ = writeSocksReply(conn, socksRepNotAllowed)
+		return nil
+	}
+
+	up, err := net.DialTimeout("tcp", upstreamAddr, 20*time.Second)
+	if err != nil {
+		_ = writeSocksReply(conn, socksRepGeneralFailure)
+		return err
+	}
+	defer up.Close()
+
+	if err := upstreamHandshake(up); err != nil {
+		_ = writeSocksReply(conn, socksRepGeneralFailure)
+		return err
+	}
+	if _, err := up.Write(encodeReq(req)); err != nil {
+		_ = writeSocksReply(conn, socksRepGeneralFailure)
+		return err
+	}
+	reply, err := readSocksReply(up)
+	if err != nil {
+		_ = writeSocksReply(conn, socksRepGeneralFailure)
+		return err
+	}
+	// Relay Tor's reply verbatim — success carries the resolved address, an
+	// error carries Tor's REP code. No splice: RESOLVE is request/reply.
+	_, err = conn.Write(reply)
+	return err
 }
 
 func emitOnionEvent(emit Emitter, sessionID, commandID string, v tor.Verdict, socksCmd string) {
