@@ -68,7 +68,7 @@ func fakeTorUpstreamWithReply(t *testing.T, rep byte) (addr string, stop func())
 				defer c.Close()
 				_ = readSocksGreeting(c)
 				_ = writeSocksMethod(c, 0x00)
-				if _, err := readSocksConnect(c); err != nil {
+				if _, err := readSocksRequest(c); err != nil {
 					return
 				}
 				_ = writeSocksReply(c, rep)
@@ -81,6 +81,46 @@ func fakeTorUpstreamWithReply(t *testing.T, rep byte) (addr string, stop func())
 	return ln.Addr().String(), func() { _ = ln.Close() }
 }
 
+// assertOnionEvent waits for one tor_control{vector:onion} event and asserts
+// both its decision and its socks_cmd field.
+func assertOnionEvent(t *testing.T, emit *torCaptureEmitter, wantDecision, wantCmd string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, ev := range emit.events() {
+			if ev.Type == "tor_control" && ev.Fields["vector"] == tor.VectorOnion {
+				if ev.Fields["decision"] != wantDecision {
+					t.Fatalf("event decision = %v, want %v", ev.Fields["decision"], wantDecision)
+				}
+				if ev.Fields["socks_cmd"] != wantCmd {
+					t.Fatalf("event socks_cmd = %v, want %v", ev.Fields["socks_cmd"], wantCmd)
+				}
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no tor_control{vector:onion,decision:%s,socks_cmd:%s} event seen", wantDecision, wantCmd)
+}
+
+// driveCmd sends a SOCKS5 request with an explicit command byte and returns the
+// reply's REP code (reply is the fixed 10-byte IPv4-form reply for the cases
+// exercised here).
+func driveCmd(t *testing.T, conn net.Conn, cmd byte, host string, port int) byte {
+	t.Helper()
+	_, _ = conn.Write([]byte{0x05, 0x01, 0x00}) // greeting
+	method := make([]byte, 2)
+	if _, err := io.ReadFull(conn, method); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = conn.Write(encodeReq(socksReq{cmd: cmd, atyp: atypDomain, addr: []byte(host), host: host, port: port}))
+	reply := make([]byte, 10)
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatal(err)
+	}
+	return reply[1]
+}
+
 // driveClient runs a SOCKS5 client handshake for host:port over conn and returns the reply code.
 func driveClient(t *testing.T, conn net.Conn, host string, port int) byte {
 	t.Helper()
@@ -89,7 +129,7 @@ func driveClient(t *testing.T, conn net.Conn, host string, port int) byte {
 	if _, err := io.ReadFull(conn, method); err != nil {
 		t.Fatal(err)
 	}
-	_, _ = conn.Write(encodeConnectReq(socksReq{atyp: atypDomain, addr: []byte(host), host: host, port: port}))
+	_, _ = conn.Write(encodeReq(socksReq{cmd: socksCmdConnect, atyp: atypDomain, addr: []byte(host), host: host, port: port}))
 	reply := make([]byte, 10)
 	if _, err := io.ReadFull(conn, reply); err != nil {
 		t.Fatal(err)
@@ -123,7 +163,7 @@ func TestHandleTorSocks_Allowed(t *testing.T) {
 	}
 	client.Close()
 
-	assertOneOnionEvent(t, emit, "allow")
+	assertOnionEvent(t, emit, "allow", "connect")
 }
 
 func TestHandleTorSocks_Denied(t *testing.T) {
@@ -141,24 +181,7 @@ func TestHandleTorSocks_Denied(t *testing.T) {
 		t.Fatalf("denied target got reply 0x%02x, want not-allowed", rep)
 	}
 	client.Close()
-	assertOneOnionEvent(t, emit, "deny")
-}
-
-func assertOneOnionEvent(t *testing.T, emit *torCaptureEmitter, wantDecision string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		for _, ev := range emit.events() {
-			if ev.Type == "tor_control" && ev.Fields["vector"] == tor.VectorOnion {
-				if ev.Fields["decision"] != wantDecision {
-					t.Fatalf("event decision = %v, want %v", ev.Fields["decision"], wantDecision)
-				}
-				return
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("no tor_control{vector:onion,decision:%s} event seen", wantDecision)
+	assertOnionEvent(t, emit, "deny", "connect")
 }
 
 // TestHandleTorSocks_UpstreamRefuses verifies that when the upstream Tor daemon
@@ -194,7 +217,7 @@ func TestHandleTorSocks_UpstreamRefuses(t *testing.T) {
 	}
 
 	// The allow event should still have been emitted for the allowed target.
-	assertOneOnionEvent(t, emit, "allow")
+	assertOnionEvent(t, emit, "allow", "connect")
 }
 
 // fakeTorUpstreamRequiresAuth is a fake upstream that rejects the method
@@ -256,7 +279,34 @@ func TestHandleTorSocks_UpstreamRequiresAuth(t *testing.T) {
 
 	// Policy is evaluated (and the onion event emitted) before the upstream
 	// auth failure, so an allow event is still recorded.
-	assertOneOnionEvent(t, emit, "allow")
+	assertOnionEvent(t, emit, "allow", "connect")
+}
+
+// TestHandleTorSocks_UnsupportedCommand verifies a non-CONNECT/non-RESOLVE
+// command (here BIND 0x02) gets command-not-supported (0x07), no upstream dial,
+// and emits no event.
+func TestHandleTorSocks_UnsupportedCommand(t *testing.T) {
+	client, server := net.Pipe()
+	emit := &torCaptureEmitter{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// upstreamAddr is unreachable on purpose; it must never be dialed.
+		_ = handleTorSocks(server, "127.0.0.1:1", fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+	}()
+	rep := driveCmd(t, client, 0x02 /* BIND */, "ok.onion", 443)
+	if rep != socksRepCmdNotSupported {
+		t.Fatalf("BIND got reply 0x%02x, want command-not-supported (0x%02x)", rep, socksRepCmdNotSupported)
+	}
+	client.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTorSocks did not return for unsupported command")
+	}
+	if len(emit.events()) != 0 {
+		t.Fatalf("unsupported command emitted %d events, want 0", len(emit.events()))
+	}
 }
 
 // TestSplice_HalfClose verifies that splice returns the correct byte counts and
@@ -359,4 +409,129 @@ func TestSplice_HalfClose(t *testing.T) {
 	dialConn2.Close()
 	listenConn.Close()
 	listenConn2.Close()
+}
+
+// fakeTorResolveUpstream answers a forwarded RESOLVE (0xF0) with a fixed
+// resolved IPv4 address (REP success). It asserts the forwarded command is
+// RESOLVE; on any other command it closes without replying.
+func fakeTorResolveUpstream(t *testing.T, resolved net.IP) (addr string, stop func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_ = readSocksGreeting(c)
+				_ = writeSocksMethod(c, 0x00)
+				req, err := readSocksRequest(c)
+				if err != nil || req.cmd != socksCmdResolve {
+					return
+				}
+				ip4 := resolved.To4()
+				reply := []byte{socksVer, socksRepSuccess, 0x00, atypIPv4}
+				reply = append(reply, ip4...)
+				reply = append(reply, 0, 0) // port
+				_, _ = c.Write(reply)
+			}()
+		}
+	}()
+	return ln.Addr().String(), func() { _ = ln.Close() }
+}
+
+// driveResolve sends a SOCKS5 RESOLVE for host and returns the full 10-byte
+// IPv4-form reply (VER REP RSV ATYP ADDR PORT).
+func driveResolve(t *testing.T, conn net.Conn, host string) []byte {
+	t.Helper()
+	_, _ = conn.Write([]byte{0x05, 0x01, 0x00}) // greeting
+	method := make([]byte, 2)
+	if _, err := io.ReadFull(conn, method); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = conn.Write(encodeReq(socksReq{cmd: socksCmdResolve, atyp: atypDomain, addr: []byte(host), host: host}))
+	reply := make([]byte, 10)
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatal(err)
+	}
+	return reply
+}
+
+// TestHandleTorSocks_ResolveAllowed verifies an allowed RESOLVE is forwarded to
+// upstream Tor and its reply (resolved IP) relayed verbatim, with no splice.
+func TestHandleTorSocks_ResolveAllowed(t *testing.T) {
+	upstream, stop := fakeTorResolveUpstream(t, net.IPv4(1, 2, 3, 4))
+	defer stop()
+
+	client, server := net.Pipe()
+	emit := &torCaptureEmitter{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+	}()
+
+	reply := driveResolve(t, client, "ok.onion")
+	if reply[1] != socksRepSuccess {
+		t.Fatalf("RESOLVE reply REP = 0x%02x, want success", reply[1])
+	}
+	if reply[3] != atypIPv4 || !net.IP(reply[4:8]).Equal(net.IPv4(1, 2, 3, 4)) {
+		t.Fatalf("RESOLVE reply addr = %v (atyp 0x%02x), want 1.2.3.4/IPv4", net.IP(reply[4:8]), reply[3])
+	}
+	client.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTorSocks did not return after RESOLVE (possible spurious splice)")
+	}
+	assertOnionEvent(t, emit, "allow", "resolve")
+}
+
+// TestHandleTorSocks_ResolveDenied verifies a denied RESOLVE replies not-allowed
+// with no upstream dial.
+func TestHandleTorSocks_ResolveDenied(t *testing.T) {
+	client, server := net.Pipe()
+	emit := &torCaptureEmitter{}
+	go func() {
+		// upstreamAddr unreachable on purpose; a denied RESOLVE must not dial.
+		_ = handleTorSocks(server, "127.0.0.1:1", fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+	}()
+	reply := driveResolve(t, client, "blocked.onion")
+	if reply[1] != socksRepNotAllowed {
+		t.Fatalf("denied RESOLVE reply REP = 0x%02x, want not-allowed", reply[1])
+	}
+	client.Close()
+	assertOnionEvent(t, emit, "deny", "resolve")
+}
+
+// TestHandleTorSocks_ResolveUpstreamError verifies a non-success RESOLVE reply
+// from upstream Tor is relayed verbatim (the client sees Tor's error code) and
+// the handler returns without splicing.
+func TestHandleTorSocks_ResolveUpstreamError(t *testing.T) {
+	upstream, stop := fakeTorUpstreamWithReply(t, 0x04) // host unreachable
+	defer stop()
+
+	client, server := net.Pipe()
+	emit := &torCaptureEmitter{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+	}()
+	reply := driveResolve(t, client, "ok.onion")
+	if reply[1] != 0x04 {
+		t.Fatalf("RESOLVE reply REP = 0x%02x, want host-unreachable (0x04)", reply[1])
+	}
+	client.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTorSocks did not return after RESOLVE upstream error")
+	}
+	assertOnionEvent(t, emit, "allow", "resolve")
 }

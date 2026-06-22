@@ -5,49 +5,53 @@ import (
 	"testing"
 )
 
-func TestReadSocksConnect_Domain(t *testing.T) {
+func TestReadSocksRequest_Domain(t *testing.T) {
 	// VER CMD RSV ATYP LEN "ab.onion" PORT(443)
 	host := "ab.onion"
 	buf := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
 	buf = append(buf, []byte(host)...)
 	buf = append(buf, 0x01, 0xBB) // 443
-	req, err := readSocksConnect(bytes.NewReader(buf))
+	req, err := readSocksRequest(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.host != "ab.onion" || req.port != 443 || req.atyp != 0x03 {
-		t.Fatalf("got host=%q port=%d atyp=%d", req.host, req.port, req.atyp)
+	if req.host != "ab.onion" || req.port != 443 || req.atyp != 0x03 || req.cmd != 0x01 {
+		t.Fatalf("got host=%q port=%d atyp=%d cmd=%d", req.host, req.port, req.atyp, req.cmd)
 	}
 }
 
-func TestReadSocksConnect_IPv4(t *testing.T) {
+func TestReadSocksRequest_IPv4(t *testing.T) {
 	buf := []byte{0x05, 0x01, 0x00, 0x01, 10, 0, 0, 7, 0x00, 0x50} // 10.0.0.7:80
-	req, err := readSocksConnect(bytes.NewReader(buf))
+	req, err := readSocksRequest(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.host != "10.0.0.7" || req.port != 80 {
-		t.Fatalf("got host=%q port=%d", req.host, req.port)
+	if req.host != "10.0.0.7" || req.port != 80 || req.cmd != 0x01 {
+		t.Fatalf("got host=%q port=%d cmd=%d", req.host, req.port, req.cmd)
 	}
 }
 
-func TestReadSocksConnect_RejectsNonConnect(t *testing.T) {
+func TestReadSocksRequest_AcceptsNonConnect(t *testing.T) {
 	buf := []byte{0x05, 0x02, 0x00, 0x01, 1, 1, 1, 1, 0, 80} // CMD=2 (bind)
-	if _, err := readSocksConnect(bytes.NewReader(buf)); err == nil {
-		t.Fatal("expected error for non-CONNECT command")
+	req, err := readSocksRequest(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.cmd != 0x02 {
+		t.Fatalf("expected readSocksRequest to accept non-CONNECT, got cmd=%d", req.cmd)
 	}
 }
 
-func TestEncodeConnectReq_RoundTrips(t *testing.T) {
+func TestEncodeReq_RoundTrips(t *testing.T) {
 	host := "x.onion"
 	in := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
 	in = append(in, []byte(host)...)
 	in = append(in, 0x01, 0xBB)
-	req, err := readSocksConnect(bytes.NewReader(in))
+	req, err := readSocksRequest(bytes.NewReader(in))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := encodeConnectReq(req); !bytes.Equal(got, in) {
+	if got := encodeReq(req); !bytes.Equal(got, in) {
 		t.Fatalf("re-encode mismatch:\n got %v\nwant %v", got, in)
 	}
 }
