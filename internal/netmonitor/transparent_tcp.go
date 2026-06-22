@@ -141,13 +141,7 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 	}
 
 	dec := t.checkConnectNetwork(context.Background(), commandID, domain, redirectHostPort, dstIP, dstPort, redirectResult)
-	if dec.Tor != nil && t.emit != nil {
-		tev := tor.BuildControlEvent(t.sessionID, commandID, 0, tor.Verdict{
-			Vector: dec.Tor.Vector, Mode: dec.Tor.Mode, Decision: dec.Tor.Decision, Target: dec.Tor.Target,
-		})
-		_ = t.emit.AppendEvent(context.Background(), tev)
-		t.emit.Publish(tev)
-	}
+	t.emitTorControl(commandID, pid, dec.Tor)
 	eventFields := map[string]any{}
 	if redirectResult != nil {
 		if redirectResult.RedirectTo != "" {
@@ -238,6 +232,20 @@ func (t *TransparentTCP) emitDBBypassAttempt(ctx context.Context, commandID stri
 		RuleName:        ruleName,
 		Reason:          reason,
 	})
+}
+
+// emitTorControl publishes a tor_control event for a Tor verdict carried on a
+// connect decision. pid is the session's current command-process PID (root of
+// the running command's process tree), not necessarily the exact leaf caller.
+func (t *TransparentTCP) emitTorControl(commandID string, pid int, tv *policy.TorVerdict) {
+	if tv == nil || t.emit == nil {
+		return
+	}
+	tev := tor.BuildControlEvent(t.sessionID, commandID, pid, tor.Verdict{
+		Vector: tv.Vector, Mode: tv.Mode, Decision: tv.Decision, Target: tv.Target,
+	})
+	_ = t.emit.AppendEvent(context.Background(), tev)
+	t.emit.Publish(tev)
 }
 
 func (t *TransparentTCP) maybeApprove(ctx context.Context, commandID string, dec policy.Decision, kind string, target string) policy.Decision {
