@@ -11,13 +11,16 @@ import (
 	"github.com/agentsh/agentsh/internal/tor"
 )
 
-// SOCKS5 reply codes (RFC 1928).
+// SOCKS5 reply / command codes (RFC 1928) and Tor's RESOLVE extension.
 const (
-	socksVer               = 0x05
-	socksCmdConnect        = 0x01
-	socksRepSuccess        = 0x00
-	socksRepGeneralFailure = 0x01
-	socksRepNotAllowed     = 0x02 // connection not allowed by ruleset
+	socksVer                = 0x05
+	socksCmdConnect         = 0x01
+	socksCmdResolve         = 0xF0 // Tor RESOLVE extension
+	socksCmdResolvePtr      = 0xF1 // Tor RESOLVE_PTR extension (deliberately unsupported)
+	socksRepSuccess         = 0x00
+	socksRepGeneralFailure  = 0x01
+	socksRepNotAllowed      = 0x02 // connection not allowed by ruleset
+	socksRepCmdNotSupported = 0x07 // command not supported
 
 	atypIPv4   = 0x01
 	atypDomain = 0x03
@@ -50,14 +53,17 @@ func writeSocksMethod(w io.Writer, method byte) error {
 }
 
 type socksReq struct {
+	cmd  byte
 	atyp byte
 	addr []byte // raw address bytes (domain text, or 4/16-byte IP)
 	host string
 	port int
 }
 
-// readSocksConnect reads a CONNECT request: VER CMD RSV ATYP ADDR PORT.
-func readSocksConnect(r io.Reader) (socksReq, error) {
+// readSocksRequest reads a SOCKS5 request: VER CMD RSV ATYP ADDR PORT. The
+// command byte is captured verbatim into req.cmd; the caller dispatches on it
+// (CONNECT and RESOLVE are handled, others get command-not-supported).
+func readSocksRequest(r io.Reader) (socksReq, error) {
 	head := make([]byte, 4)
 	if _, err := io.ReadFull(r, head); err != nil {
 		return socksReq{}, err
@@ -65,10 +71,8 @@ func readSocksConnect(r io.Reader) (socksReq, error) {
 	if head[0] != socksVer {
 		return socksReq{}, fmt.Errorf("socks: bad version 0x%02x", head[0])
 	}
-	if head[1] != socksCmdConnect {
-		return socksReq{}, fmt.Errorf("socks: unsupported command 0x%02x", head[1])
-	}
 	var req socksReq
+	req.cmd = head[1]
 	req.atyp = head[3]
 	switch req.atyp {
 	case atypIPv4:
@@ -104,9 +108,10 @@ func readSocksConnect(r io.Reader) (socksReq, error) {
 	return req, nil
 }
 
-// encodeConnectReq re-serializes a CONNECT request for the upstream Tor SOCKS.
-func encodeConnectReq(req socksReq) []byte {
-	out := []byte{socksVer, socksCmdConnect, 0x00, req.atyp}
+// encodeReq re-serializes req (preserving its command byte) for the upstream
+// Tor SOCKS daemon.
+func encodeReq(req socksReq) []byte {
+	out := []byte{socksVer, req.cmd, 0x00, req.atyp}
 	if req.atyp == atypDomain {
 		out = append(out, byte(len(req.addr)))
 	}
@@ -128,10 +133,10 @@ type TorGatewayPolicy interface {
 	EvalSocksTarget(host string, port int) (tor.Verdict, bool)
 }
 
-// handleTorSocks terminates a client SOCKS5 CONNECT, evaluates the target
-// against the onion gateway policy, and either proxies the stream to the
-// real Tor SOCKS daemon at upstreamAddr or replies "not allowed by ruleset".
-// Fail-closed on any error. Emits one tor_control{vector:onion} event.
+// handleTorSocks terminates a client SOCKS5 handshake, reads the request, and
+// dispatches on the command: CONNECT tunnels through the onion gateway,
+// RESOLVE is filtered-and-forwarded, and every other command is rejected with
+// command-not-supported. Fail-closed on any error.
 func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, emit Emitter, sessionID, commandID string) error {
 	defer conn.Close()
 
@@ -141,19 +146,34 @@ func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, em
 	if err := writeSocksMethod(conn, 0x00); err != nil { // no-auth
 		return err
 	}
-	req, err := readSocksConnect(conn)
+	req, err := readSocksRequest(conn)
 	if err != nil {
 		_ = writeSocksReply(conn, socksRepGeneralFailure)
 		return err
 	}
 
+	switch req.cmd {
+	case socksCmdConnect:
+		return gatewayConnect(conn, upstreamAddr, pol, emit, sessionID, commandID, req)
+	// case socksCmdResolve is added in Task 2.
+	default:
+		// RESOLVE_PTR (0xF1), BIND, UDP ASSOCIATE, etc. — deliberately
+		// unsupported. Reply the correct SOCKS code and close; no event,
+		// since no onion_rules decision was made.
+		_ = writeSocksReply(conn, socksRepCmdNotSupported)
+		return nil
+	}
+}
+
+// gatewayConnect handles a SOCKS CONNECT: evaluate the target against the onion
+// gateway policy, and either proxy the stream to the real Tor SOCKS daemon or
+// reply not-allowed. Fail-closed on any error. Emits one tor_control{vector:
+// onion, socks_cmd: connect} event.
+func gatewayConnect(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, emit Emitter, sessionID, commandID string, req socksReq) error {
 	v, ok := pol.EvalSocksTarget(req.host, req.port)
 	if ok {
-		emitOnionEvent(emit, sessionID, commandID, v)
+		emitOnionEvent(emit, sessionID, commandID, v, "connect")
 	}
-	// Callers invoke handleTorSocks only when GatewayActive() is true.
-	// ok=false means the policy returned no verdict; treat as fail-closed
-	// (reply not-allowed, emit no event — there is no decision to report).
 	if !ok || v.Decision != "allow" {
 		_ = writeSocksReply(conn, socksRepNotAllowed)
 		return nil
@@ -166,21 +186,11 @@ func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, em
 	}
 	defer up.Close()
 
-	// Act as a SOCKS5 client to the real Tor daemon for the same target.
-	if _, err := up.Write([]byte{socksVer, 0x01, 0x00}); err != nil { // greeting: 1 method, no-auth
+	if err := upstreamHandshake(up); err != nil {
 		_ = writeSocksReply(conn, socksRepGeneralFailure)
 		return err
 	}
-	methodReply := make([]byte, 2)
-	if _, err := io.ReadFull(up, methodReply); err != nil { // method selection
-		_ = writeSocksReply(conn, socksRepGeneralFailure)
-		return err
-	}
-	if methodReply[0] != socksVer || methodReply[1] != 0x00 { // upstream must accept no-auth
-		_ = writeSocksReply(conn, socksRepGeneralFailure)
-		return fmt.Errorf("socks: upstream selected auth method 0x%02x (want no-auth)", methodReply[1])
-	}
-	if _, err := up.Write(encodeConnectReq(req)); err != nil {
+	if _, err := up.Write(encodeReq(req)); err != nil {
 		_ = writeSocksReply(conn, socksRepGeneralFailure)
 		return err
 	}
@@ -193,14 +203,28 @@ func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, em
 	if _, err := conn.Write(upReply); err != nil {
 		return err
 	}
-
-	// Only enter bidirectional proxy when the upstream accepted the connection.
-	// A non-success reply means Tor refused it; do not splice a refused stream.
+	// Only tunnel when the upstream accepted the connection.
 	if len(upReply) < 2 || upReply[1] != socksRepSuccess {
 		return nil
 	}
-
 	splice(conn, up)
+	return nil
+}
+
+// upstreamHandshake performs the SOCKS5 no-auth client handshake with the real
+// Tor daemon (greeting with one method, no-auth, then method-selection reply
+// validation). Returns an error if the upstream does not accept no-auth.
+func upstreamHandshake(up net.Conn) error {
+	if _, err := up.Write([]byte{socksVer, 0x01, 0x00}); err != nil { // greeting: 1 method, no-auth
+		return err
+	}
+	methodReply := make([]byte, 2)
+	if _, err := io.ReadFull(up, methodReply); err != nil {
+		return err
+	}
+	if methodReply[0] != socksVer || methodReply[1] != 0x00 {
+		return fmt.Errorf("socks: upstream selected auth method 0x%02x (want no-auth)", methodReply[1])
+	}
 	return nil
 }
 
@@ -268,11 +292,12 @@ func halfCloseWrite(c net.Conn) {
 	_ = c.Close()
 }
 
-func emitOnionEvent(emit Emitter, sessionID, commandID string, v tor.Verdict) {
+func emitOnionEvent(emit Emitter, sessionID, commandID string, v tor.Verdict, socksCmd string) {
 	if emit == nil {
 		return
 	}
 	ev := tor.BuildControlEvent(sessionID, commandID, 0, v)
+	ev.Fields["socks_cmd"] = socksCmd
 	_ = emit.AppendEvent(context.Background(), ev)
 	emit.Publish(ev)
 }
