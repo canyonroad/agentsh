@@ -94,8 +94,10 @@ func (d *DNSInterceptor) loop() {
 func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 	domain := parseDNSDomain(query)
 	commandID := ""
+	pid := 0
 	if d.sess != nil {
 		commandID = d.sess.CurrentCommandID()
+		pid = d.sess.CurrentProcessPID() // command-process PID, not necessarily the leaf caller
 	}
 
 	// Use timeout context for DNS handling
@@ -121,7 +123,7 @@ func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 	dec = d.maybeApprove(ctx, commandID, dec, "dns", domain)
 
 	if dec.Tor != nil && d.emit != nil {
-		tev := tor.BuildControlEvent(d.sessionID, commandID, 0, tor.Verdict{
+		tev := tor.BuildControlEvent(d.sessionID, commandID, pid, tor.Verdict{
 			Vector: dec.Tor.Vector, Mode: dec.Tor.Mode, Decision: dec.Tor.Decision, Target: dec.Tor.Target,
 		})
 		_ = d.emit.AppendEvent(context.Background(), tev)
