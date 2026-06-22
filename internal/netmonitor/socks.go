@@ -137,7 +137,7 @@ type TorGatewayPolicy interface {
 // dispatches on the command: CONNECT tunnels through the onion gateway,
 // RESOLVE is filtered-and-forwarded, and every other command is rejected with
 // command-not-supported. Fail-closed on any error.
-func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, emit Emitter, sessionID, commandID string) error {
+func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, emit Emitter, sessionID, commandID string, pid int) error {
 	defer conn.Close()
 
 	if err := readSocksGreeting(conn); err != nil {
@@ -154,9 +154,9 @@ func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, em
 
 	switch req.cmd {
 	case socksCmdConnect:
-		return gatewayConnect(conn, upstreamAddr, pol, emit, sessionID, commandID, req)
+		return gatewayConnect(conn, upstreamAddr, pol, emit, sessionID, commandID, pid, req)
 	case socksCmdResolve:
-		return gatewayResolve(conn, upstreamAddr, pol, emit, sessionID, commandID, req)
+		return gatewayResolve(conn, upstreamAddr, pol, emit, sessionID, commandID, pid, req)
 	default:
 		// RESOLVE_PTR (0xF1), BIND, UDP ASSOCIATE, etc. — deliberately
 		// unsupported. Reply the correct SOCKS code and close; no event,
@@ -170,10 +170,10 @@ func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, em
 // gateway policy, and either proxy the stream to the real Tor SOCKS daemon or
 // reply not-allowed. Fail-closed on any error. Emits one tor_control{vector:
 // onion, socks_cmd: connect} event.
-func gatewayConnect(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, emit Emitter, sessionID, commandID string, req socksReq) error {
+func gatewayConnect(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, emit Emitter, sessionID, commandID string, pid int, req socksReq) error {
 	v, ok := pol.EvalSocksTarget(req.host, req.port)
 	if ok {
-		emitOnionEvent(emit, sessionID, commandID, v, "connect")
+		emitOnionEvent(emit, sessionID, commandID, pid, v, "connect")
 	}
 	if !ok || v.Decision != "allow" {
 		_ = writeSocksReply(conn, socksRepNotAllowed)
@@ -298,10 +298,10 @@ func halfCloseWrite(c net.Conn) {
 // the upstream Tor daemon and relays its single reply verbatim. RESOLVE is a
 // request/reply exchange, not a tunnel — there is no splice. Emits one
 // tor_control{vector: onion, socks_cmd: resolve} event.
-func gatewayResolve(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, emit Emitter, sessionID, commandID string, req socksReq) error {
+func gatewayResolve(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, emit Emitter, sessionID, commandID string, pid int, req socksReq) error {
 	v, ok := pol.EvalSocksTarget(req.host, req.port)
 	if ok {
-		emitOnionEvent(emit, sessionID, commandID, v, "resolve")
+		emitOnionEvent(emit, sessionID, commandID, pid, v, "resolve")
 	}
 	if !ok || v.Decision != "allow" {
 		_ = writeSocksReply(conn, socksRepNotAllowed)
@@ -334,11 +334,13 @@ func gatewayResolve(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, em
 	return err
 }
 
-func emitOnionEvent(emit Emitter, sessionID, commandID string, v tor.Verdict, socksCmd string) {
+func emitOnionEvent(emit Emitter, sessionID, commandID string, pid int, v tor.Verdict, socksCmd string) {
 	if emit == nil {
 		return
 	}
-	ev := tor.BuildControlEvent(sessionID, commandID, 0, v)
+	// pid is the session's current command-process PID (root of the running
+	// command's process tree), not necessarily the exact leaf caller.
+	ev := tor.BuildControlEvent(sessionID, commandID, pid, v)
 	ev.Fields["socks_cmd"] = socksCmd
 	_ = emit.AppendEvent(context.Background(), ev)
 	emit.Publish(ev)

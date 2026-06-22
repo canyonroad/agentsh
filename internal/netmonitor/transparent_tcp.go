@@ -110,13 +110,15 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 	remote := net.JoinHostPort(dstIP.String(), fmt.Sprintf("%d", dstPort))
 
 	commandID := ""
+	pid := 0
 	if t.sess != nil {
 		commandID = t.sess.CurrentCommandID()
+		pid = t.sess.CurrentProcessPID() // command-process PID; reused by the relay_ip/socks_port emit below
 	}
 	engine := t.policyEngine()
 
 	if cfg, ok := t.torGatewayFor(dstPort); ok {
-		return handleTorSocks(conn, cfg.upstream, cfg.pol, t.emit, t.sessionID, commandID)
+		return handleTorSocks(conn, cfg.upstream, cfg.pol, t.emit, t.sessionID, commandID, pid)
 	}
 
 	domain := dstIP.String()
