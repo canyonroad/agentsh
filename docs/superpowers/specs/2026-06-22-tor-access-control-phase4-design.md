@@ -1,6 +1,6 @@
 # Tor Access Control — Phase 4 Design (SOCKS RESOLVE in the onion gateway)
 
-**Status:** Draft — proposed
+**Status:** Implemented (PR pending)
 
 **Builds on:** [Tor Access Control — Design](2026-06-14-tor-access-control-design.md) (Phase 1 deny/audit, PR #424; Phase 2 onion gateway, PR #428) and [Phase 3 — fail-open gap closed](2026-06-20-tor-access-control-phase3-design.md) (PR #429).
 

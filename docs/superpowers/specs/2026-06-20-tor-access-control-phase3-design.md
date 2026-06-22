@@ -246,10 +246,10 @@ unit-testable without root; netns/iptables end-to-end is gated integration.
 
 These remain candidates for later, independent of this gap:
 
-- **Gateway SOCKS protocol completeness** — `handleTorSocks` accepts only SOCKS
-  `CONNECT` (0x01); Tor's `RESOLVE` (0xF0) / `RESOLVE_PTR` (0xF1) extensions are
-  rejected as "unsupported command." Apps resolving `.onion` names over SOCKS
-  break or route around policy.
+- **Gateway SOCKS protocol completeness** — `handleTorSocks` now filters and
+  forwards `RESOLVE` (0xF0) through `onion_rules` (Phase 4,
+  `2026-06-22-tor-access-control-phase4-design.md`); `RESOLVE_PTR` (0xF1)
+  remains deliberately unsupported (`command not supported`), tracked there.
 - **Stream isolation / SOCKS-auth pass-through** — the gateway forces upstream
   no-auth; operators relying on per-stream isolation via SOCKS
   username/password (`IsolateSOCKSAuth`) cannot use it through the gateway.
