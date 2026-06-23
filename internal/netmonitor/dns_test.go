@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -389,9 +390,13 @@ func TestDNSInterceptor_OnionEmitsTorControl(t *testing.T) {
 	}
 	engine.SetTorPolicy(stubTorChecker{})
 
+	sess := &session.Session{ID: "session-test"}
+	sess.SetCurrentProcessPID(4242)
+
 	em := &captureEmitter{}
 	d := &DNSInterceptor{
 		sessionID: "session-test",
+		sess:      sess,
 		pc:        serverPC,
 		upstream:  up.LocalAddr().String(),
 		emit:      em,
@@ -419,5 +424,8 @@ func TestDNSInterceptor_OnionEmitsTorControl(t *testing.T) {
 	}
 	if got := torEv.Fields["target"]; got != "abcdefghij.onion" {
 		t.Errorf("expected target abcdefghij.onion, got %v", got)
+	}
+	if torEv.PID != 4242 {
+		t.Errorf("event PID = %d, want 4242", torEv.PID)
 	}
 }

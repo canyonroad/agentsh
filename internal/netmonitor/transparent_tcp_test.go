@@ -186,6 +186,41 @@ func TestTransparentTCPUsesSessionPolicyEngineForNetworkChecks(t *testing.T) {
 	}
 }
 
+func TestTransparentTCP_TorControlCarriesCommandPID(t *testing.T) {
+	em := &captureEmitter{}
+	tcp := &TransparentTCP{sessionID: "s", emit: em}
+	tcp.emitTorControl("cmd-1", 4242, &policy.TorVerdict{
+		Vector: "relay_ip", Mode: "deny", Decision: "deny", Target: "10.0.0.1:443",
+	})
+	if len(em.events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(em.events))
+	}
+	ev := em.events[0]
+	if ev.Type != "tor_control" {
+		t.Fatalf("type = %q, want tor_control", ev.Type)
+	}
+	if ev.PID != 4242 {
+		t.Fatalf("PID = %d, want 4242", ev.PID)
+	}
+	if ev.Fields["vector"] != "relay_ip" {
+		t.Fatalf("vector = %v, want relay_ip", ev.Fields["vector"])
+	}
+}
+
+func TestTransparentTCP_TorControlIdlePIDZero(t *testing.T) {
+	em := &captureEmitter{}
+	tcp := &TransparentTCP{sessionID: "s", emit: em}
+	tcp.emitTorControl("", 0, &policy.TorVerdict{
+		Vector: "socks_port", Mode: "deny", Decision: "deny", Target: "127.0.0.1:9050",
+	})
+	if len(em.events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(em.events))
+	}
+	if em.events[0].PID != 0 {
+		t.Fatalf("PID = %d, want 0", em.events[0].PID)
+	}
+}
+
 func newTransparentDBRedirectEngine(t *testing.T, includeRedirectMetadata bool) *policy.Engine {
 	t.Helper()
 

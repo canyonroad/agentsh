@@ -841,8 +841,11 @@ func TestProxyHandleHTTPOnionRemapsVectorToOnionHTTP(t *testing.T) {
 	}
 	engine.SetTorPolicy(&tor.PolicyAdapter{Policy: torPol})
 
+	sess := &session.Session{ID: "tor-session"}
+	sess.SetCurrentProcessPID(4242)
+
 	em := &stubEmitter{}
-	p := &Proxy{sessionID: "tor-session", policy: engine, emit: em}
+	p := &Proxy{sessionID: "tor-session", sess: sess, policy: engine, emit: em}
 
 	// EvalOnionName matches any .onion suffix; use a syntactically valid
 	// v3-style onion host.
@@ -890,6 +893,9 @@ func TestProxyHandleHTTPOnionRemapsVectorToOnionHTTP(t *testing.T) {
 	}
 	if got := torEv.Fields["vector"]; got != "onion_http" {
 		t.Fatalf("vector = %v, want onion_http (the handleHTTP remap from onion_dns)", got)
+	}
+	if torEv.PID != 4242 {
+		t.Fatalf("event PID = %d, want 4242", torEv.PID)
 	}
 	if got := torEv.Fields["decision"]; got != "deny" {
 		t.Fatalf("decision = %v, want deny", got)

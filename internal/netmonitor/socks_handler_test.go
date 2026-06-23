@@ -82,8 +82,8 @@ func fakeTorUpstreamWithReply(t *testing.T, rep byte) (addr string, stop func())
 }
 
 // assertOnionEvent waits for one tor_control{vector:onion} event and asserts
-// both its decision and its socks_cmd field.
-func assertOnionEvent(t *testing.T, emit *torCaptureEmitter, wantDecision, wantCmd string) {
+// its decision, socks_cmd field, and PID.
+func assertOnionEvent(t *testing.T, emit *torCaptureEmitter, wantDecision, wantCmd string, wantPID int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -94,6 +94,9 @@ func assertOnionEvent(t *testing.T, emit *torCaptureEmitter, wantDecision, wantC
 				}
 				if ev.Fields["socks_cmd"] != wantCmd {
 					t.Fatalf("event socks_cmd = %v, want %v", ev.Fields["socks_cmd"], wantCmd)
+				}
+				if ev.PID != wantPID {
+					t.Fatalf("event PID = %d, want %d", ev.PID, wantPID)
 				}
 				return
 			}
@@ -144,7 +147,7 @@ func TestHandleTorSocks_Allowed(t *testing.T) {
 	client, server := net.Pipe()
 	emit := &torCaptureEmitter{}
 	go func() {
-		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1", 4242)
 	}()
 
 	rep := driveClient(t, client, "ok.onion", 443)
@@ -163,7 +166,7 @@ func TestHandleTorSocks_Allowed(t *testing.T) {
 	}
 	client.Close()
 
-	assertOnionEvent(t, emit, "allow", "connect")
+	assertOnionEvent(t, emit, "allow", "connect", 4242)
 }
 
 func TestHandleTorSocks_Denied(t *testing.T) {
@@ -173,7 +176,7 @@ func TestHandleTorSocks_Denied(t *testing.T) {
 	client, server := net.Pipe()
 	emit := &torCaptureEmitter{}
 	go func() {
-		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1", 4242)
 	}()
 
 	rep := driveClient(t, client, "blocked.onion", 443)
@@ -181,7 +184,7 @@ func TestHandleTorSocks_Denied(t *testing.T) {
 		t.Fatalf("denied target got reply 0x%02x, want not-allowed", rep)
 	}
 	client.Close()
-	assertOnionEvent(t, emit, "deny", "connect")
+	assertOnionEvent(t, emit, "deny", "connect", 4242)
 }
 
 // TestHandleTorSocks_UpstreamRefuses verifies that when the upstream Tor daemon
@@ -197,7 +200,7 @@ func TestHandleTorSocks_UpstreamRefuses(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1", 4242)
 	}()
 
 	// Drive client: should receive the upstream's non-success reply.
@@ -217,7 +220,7 @@ func TestHandleTorSocks_UpstreamRefuses(t *testing.T) {
 	}
 
 	// The allow event should still have been emitted for the allowed target.
-	assertOnionEvent(t, emit, "allow", "connect")
+	assertOnionEvent(t, emit, "allow", "connect", 4242)
 }
 
 // fakeTorUpstreamRequiresAuth is a fake upstream that rejects the method
@@ -260,7 +263,7 @@ func TestHandleTorSocks_UpstreamRequiresAuth(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1", 4242)
 	}()
 
 	// The client must get a general-failure reply — not a success, not a hang.
@@ -279,7 +282,7 @@ func TestHandleTorSocks_UpstreamRequiresAuth(t *testing.T) {
 
 	// Policy is evaluated (and the onion event emitted) before the upstream
 	// auth failure, so an allow event is still recorded.
-	assertOnionEvent(t, emit, "allow", "connect")
+	assertOnionEvent(t, emit, "allow", "connect", 4242)
 }
 
 // TestHandleTorSocks_UnsupportedCommand verifies a non-CONNECT/non-RESOLVE
@@ -292,7 +295,7 @@ func TestHandleTorSocks_UnsupportedCommand(t *testing.T) {
 	go func() {
 		defer close(done)
 		// upstreamAddr is unreachable on purpose; it must never be dialed.
-		_ = handleTorSocks(server, "127.0.0.1:1", fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+		_ = handleTorSocks(server, "127.0.0.1:1", fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1", 4242)
 	}()
 	rep := driveCmd(t, client, 0x02 /* BIND */, "ok.onion", 443)
 	if rep != socksRepCmdNotSupported {
@@ -473,7 +476,7 @@ func TestHandleTorSocks_ResolveAllowed(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1", 4242)
 	}()
 
 	reply := driveResolve(t, client, "ok.onion")
@@ -489,7 +492,7 @@ func TestHandleTorSocks_ResolveAllowed(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("handleTorSocks did not return after RESOLVE (possible spurious splice)")
 	}
-	assertOnionEvent(t, emit, "allow", "resolve")
+	assertOnionEvent(t, emit, "allow", "resolve", 4242)
 }
 
 // TestHandleTorSocks_ResolveDenied verifies a denied RESOLVE replies not-allowed
@@ -499,14 +502,14 @@ func TestHandleTorSocks_ResolveDenied(t *testing.T) {
 	emit := &torCaptureEmitter{}
 	go func() {
 		// upstreamAddr unreachable on purpose; a denied RESOLVE must not dial.
-		_ = handleTorSocks(server, "127.0.0.1:1", fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+		_ = handleTorSocks(server, "127.0.0.1:1", fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1", 4242)
 	}()
 	reply := driveResolve(t, client, "blocked.onion")
 	if reply[1] != socksRepNotAllowed {
 		t.Fatalf("denied RESOLVE reply REP = 0x%02x, want not-allowed", reply[1])
 	}
 	client.Close()
-	assertOnionEvent(t, emit, "deny", "resolve")
+	assertOnionEvent(t, emit, "deny", "resolve", 4242)
 }
 
 // TestHandleTorSocks_ResolveUpstreamError verifies a non-success RESOLVE reply
@@ -521,7 +524,7 @@ func TestHandleTorSocks_ResolveUpstreamError(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1")
+		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1", 4242)
 	}()
 	reply := driveResolve(t, client, "ok.onion")
 	if reply[1] != 0x04 {
@@ -533,5 +536,20 @@ func TestHandleTorSocks_ResolveUpstreamError(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("handleTorSocks did not return after RESOLVE upstream error")
 	}
-	assertOnionEvent(t, emit, "allow", "resolve")
+	assertOnionEvent(t, emit, "allow", "resolve", 4242)
+}
+
+func TestHandleTorSocks_IdleSessionPIDZero(t *testing.T) {
+	upstream, stop := fakeTorUpstream(t)
+	defer stop()
+	client, server := net.Pipe()
+	emit := &torCaptureEmitter{}
+	go func() {
+		_ = handleTorSocks(server, upstream, fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "", 0)
+	}()
+	if rep := driveClient(t, client, "ok.onion", 443); rep != 0x00 {
+		t.Fatalf("rep = 0x%02x, want 0x00", rep)
+	}
+	assertOnionEvent(t, emit, "allow", "connect", 0)
+	client.Close()
 }
