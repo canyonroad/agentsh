@@ -354,9 +354,9 @@ func buildDNSRedirectResponse(query []byte, ip net.IP) []byte {
 	binary.BigEndian.PutUint16(resp[2:4], flags)
 
 	// Set counts: QDCOUNT=1, ANCOUNT=1, NSCOUNT=0, ARCOUNT=0
-	binary.BigEndian.PutUint16(resp[4:6], 1)  // QDCOUNT
-	binary.BigEndian.PutUint16(resp[6:8], 1)  // ANCOUNT
-	binary.BigEndian.PutUint16(resp[8:10], 0) // NSCOUNT
+	binary.BigEndian.PutUint16(resp[4:6], 1)   // QDCOUNT
+	binary.BigEndian.PutUint16(resp[6:8], 1)   // ANCOUNT
+	binary.BigEndian.PutUint16(resp[8:10], 0)  // NSCOUNT
 	binary.BigEndian.PutUint16(resp[10:12], 0) // ARCOUNT
 
 	// Build answer section
