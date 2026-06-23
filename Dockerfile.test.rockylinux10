@@ -18,7 +18,15 @@ ARG AGENTSH_REPO=canyonroad/agentsh
 ARG AGENTSH_TAG=v0.10.1
 
 # Install dependencies: curl for downloading, bash for shim tests, jq for JSON parsing.
+#
+# Rocky's default repos resolve packages via mirrors.rockylinux.org/mirrorlist,
+# which intermittently returns an empty list ("Cannot prepare internal
+# mirrorlist: No URLs in mirrorlist") and breaks `dnf install` in CI with no
+# bearing on what we're testing. Pin to Rocky's canonical content CDN
+# (dl.rockylinux.org) by switching the repo files from mirrorlist= to the
+# shipped baseurl=, exactly as the repo file's own comment recommends.
 RUN set -eux; \
+  sed -i -e 's|^mirrorlist=|#mirrorlist=|g' -e 's|^#baseurl=|baseurl=|g' /etc/yum.repos.d/*.repo; \
   dnf install -y curl bash jq libseccomp; \
   dnf clean all
 
