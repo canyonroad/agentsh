@@ -1,6 +1,6 @@
 # Onion / Connection-Vector Event PID Attribution — Design
 
-**Status:** Draft
+**Status:** Implemented (PR pending)
 
 **Builds on:** [Tor Access Control — Design](2026-06-14-tor-access-control-design.md)
 (Phase 1 deny/audit, PR #424; Phase 2 onion gateway, PR #428), [Phase 3 —
@@ -120,16 +120,14 @@ command), `CurrentProcessPID()` returns 0 and `CurrentCommandID()` returns `""`.
 We emit `pid: 0` honestly in that case — there is no command process to
 attribute — exactly as `commandID` is already empty there. No special-casing.
 
-## PID-namespace checkpoint (verify during implementation)
+## PID-namespace verification (confirmed)
 
-`CurrentProcessPID()` is written by the exec handlers; the ptrace-path events use
-`nc.PID` from the ptrace subsystem. For the two event families to cross-reference
-on `pid`, both must be host-side PIDs in the same namespace. This is near-certain
-(both are PIDs agentsh observes from the host), but the implementation will
-confirm the exec-handler write records the host PID before relying on the
-cross-reference claim. If they were ever to differ, the value is still a correct,
-useful identifier on its own — the checkpoint only governs the cross-reference
-wording, not whether to ship.
+`SetCurrentProcessPID` is called with `cmd.Process.Pid` (`internal/api/exec.go:357`,
+`internal/api/exec_stream.go:434`) and `ps.PID()` (`internal/api/pty_core.go:202`)
+— all host-side PIDs of the command process as agentsh observes it. The
+ptrace-path Tor events use `nc.PID`, also a host-side PID from the ptrace
+subsystem. Both event families therefore carry `pid` in the same namespace and
+cross-reference cleanly.
 
 ## Events / observability
 
