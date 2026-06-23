@@ -326,8 +326,10 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 	}
 
 	commandID := ""
+	pid := 0
 	if p.sess != nil {
 		commandID = p.sess.CurrentCommandID()
+		pid = p.sess.CurrentProcessPID() // command-process PID, not necessarily the leaf caller
 	}
 	engine := p.policyEngine()
 
@@ -394,7 +396,7 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 		if vector == tor.VectorOnionDNS {
 			vector = tor.VectorOnionHTTP
 		}
-		tev := tor.BuildControlEvent(p.sessionID, commandID, 0, tor.Verdict{
+		tev := tor.BuildControlEvent(p.sessionID, commandID, pid, tor.Verdict{
 			Vector: vector, Mode: dec.Tor.Mode, Decision: dec.Tor.Decision, Target: dec.Tor.Target,
 		})
 		_ = p.emit.AppendEvent(context.Background(), tev)
