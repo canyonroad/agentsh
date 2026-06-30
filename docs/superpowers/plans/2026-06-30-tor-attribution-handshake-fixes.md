@@ -50,40 +50,30 @@ Create `internal/session/manager_attribution_test.go`:
 package session
 
 import (
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 )
 
 // TestCurrentCommandAttribution_AtomicSnapshot asserts the combined getter
-// never returns a torn (commandID, pid) pair from two different commands.
-// A "cmd-i" snapshot is only ever observed with pid 0 (launching, before
-// SetCurrentProcessPID) or pid 1000+i (running) — never with another
-// command's pid. A two-call getter would (probabilistically) observe torn
-// pairs across the launch/release boundary; the combined getter cannot.
+// returns a consistent (commandID, pid) pair: it never mixes data from two
+// different commands.
+//
+// The writer sets the pair atomically (under s.mu, via the unexported fields
+// this same-package test can reach) so the only writer states ever created
+// are (cmd-A, 1) and (cmd-B, 2). A two-call getter — reading commandID then
+// pid in two separate locks — can observe the torn cross-transition pair
+// ("cmd-A", 2) or ("cmd-B", 1); a single-lock combined getter cannot. This
+// makes the test a reliable discriminator, not a probabilistic one. Run with
+// -race so any unsynchronized field access also fails the detector.
 func TestCurrentCommandAttribution_AtomicSnapshot(t *testing.T) {
 	s := &Session{ID: "attribution-test"}
 
-	const commands = 300
+	const cycles = 1000000
 	const readers = 8
-
-	// valid: (cid, pid) belong to the same command i, or the session is idle.
-	valid := func(cid string, pid int) bool {
-		if cid == "" {
-			return pid == 0 // idle (after LockExec release clears both)
-		}
-		for i := 0; i < commands; i++ {
-			if cid == "cmd-"+strconv.Itoa(i) {
-				return pid == 0 || pid == 1000+i // launching or running
-			}
-		}
-		return false
-	}
 
 	var stop atomic.Bool
 	var bad atomic.Int64
-
 	var wg sync.WaitGroup
 	for r := 0; r < readers; r++ {
 		wg.Add(1)
@@ -91,20 +81,25 @@ func TestCurrentCommandAttribution_AtomicSnapshot(t *testing.T) {
 			defer wg.Done()
 			for !stop.Load() {
 				cid, pid := s.CurrentCommandAttribution()
-				if !valid(cid, pid) {
+				// Writer only ever creates (cmd-A,1) and (cmd-B,2); these mixed
+				// pairs can only come from a torn two-call read.
+				if (cid == "cmd-A" && pid == 2) || (cid == "cmd-B" && pid == 1) {
 					bad.Add(1)
 				}
 			}
 		}()
 	}
 
-	// Writer cycles through commands, mirroring real launch: LockExec, set
-	// commandID, then (separately) set the PID once "known", then release.
-	for i := 0; i < commands; i++ {
-		unlock := s.LockExec()
-		s.SetCurrentCommandID("cmd-" + strconv.Itoa(i))
-		s.SetCurrentProcessPID(1000 + i)
-		unlock()
+	// Writer flips the pair atomically between the two consistent states.
+	for i := 0; i < cycles; i++ {
+		s.mu.Lock()
+		s.currentCommandID = "cmd-A"
+		s.currentProcPID = 1
+		s.mu.Unlock()
+		s.mu.Lock()
+		s.currentCommandID = "cmd-B"
+		s.currentProcPID = 2
+		s.mu.Unlock()
 	}
 	stop.Store(true)
 	wg.Wait()
@@ -139,7 +134,7 @@ func (s *Session) CurrentCommandAttribution() (commandID string, pid int) {
 - [ ] **Step 4: Run the test to verify it passes (with the race detector)**
 
 Run: `go test -race ./internal/session/ -run TestCurrentCommandAttribution_AtomicSnapshot -v`
-Expected: PASS.
+Expected: PASS (combined getter produces 0 torn snapshots). Sanity check the discriminator is real: temporarily reverting the getter to two calls (`cid := s.CurrentCommandID(); pid := s.CurrentProcessPID(); return cid, pid`) makes this test FAIL with thousands of torn snapshots — confirming it catches the regression.
 
 - [ ] **Step 5: Commit**
 
@@ -208,7 +203,7 @@ func TestProxyHandleConnect_DBBypassCarriesCommandPID(t *testing.T) {
 	p := &Proxy{sessionID: "sess-bypass", sess: sess, policy: engine, emit: &stubEmitter{}}
 	p.SetDBBypassEmitter(dbevents.NewBypassEmitter(capture))
 
-	req := &http.Request{Method: "CONNECT", Host: "127.0.0.1:5432"}
+	req := httptest.NewRequest("CONNECT", "http://127.0.0.1:5432", nil)
 
 	client, server := net.Pipe()
 	go io.Copy(io.Discard, client) // drain the 403 so the handler's write never blocks
@@ -284,7 +279,7 @@ func TestProxyHandleHTTP_DBBypassCarriesCommandPID(t *testing.T) {
 }
 ```
 
-Note: `proxy_test.go` already imports `context`, `io`, `net`, `net/http`, `net/http/httptest`, `testing`, `time`, `policy`, `dbevents`, `session`, `types`. Confirm during the run that `net/http/httptest` and `dservice` are imported; add any missing imports (`net/http`, `net/http/httptest`, `internal/db/events`/`dbevents`, `internal/dbservice` as the existing `newNetmonitorDBUnavoidabilityEngine` helper already uses them).
+Note: `proxy_test.go` already imports `net/http/httptest` (used here), plus `io`, `net`, `context`, `testing`, `time`, `policy`, `dbevents`, `dbservice`, `session`, `types`. No new imports are needed — the CONNECT test uses `httptest.NewRequest("CONNECT", ...)` (already-imported) instead of `&http.Request{}` to avoid adding a `net/http` import. Confirm during the run that the file compiles.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
