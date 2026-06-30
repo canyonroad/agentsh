@@ -109,11 +109,9 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 	}
 	remote := net.JoinHostPort(dstIP.String(), fmt.Sprintf("%d", dstPort))
 
-	commandID := ""
-	pid := 0
+	commandID, pid := "", 0
 	if t.sess != nil {
-		commandID = t.sess.CurrentCommandID()
-		pid = t.sess.CurrentProcessPID() // command-process PID; reused by the relay_ip/socks_port emit below
+		commandID, pid = t.sess.CurrentCommandAttribution() // atomic snapshot; pid reused by the relay_ip/socks_port emit below
 	}
 	engine := t.policyEngine()
 
@@ -160,7 +158,7 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 	t.emit.Publish(connectEv)
 
 	if dec.EffectiveDecision == types.DecisionDeny {
-		t.emitDBBypassAttempt(context.Background(), commandID, 0, dec.Rule, dec.Message)
+		t.emitDBBypassAttempt(context.Background(), commandID, pid, dec.Rule, dec.Message)
 		return nil
 	}
 

@@ -158,9 +158,9 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	}
 	port := mustAtoi(portStr, 443)
 
-	commandID := ""
+	commandID, pid := "", 0
 	if p.sess != nil {
-		commandID = p.sess.CurrentCommandID()
+		commandID, pid = p.sess.CurrentCommandAttribution() // atomic snapshot; pid threads into db_bypass events
 	}
 	engine := p.policyEngine()
 
@@ -191,7 +191,7 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 			netConnectEv := p.emitNetEvent(context.Background(), "net_connect", commandID, host, hostPort, port, failClosedDec, failClosedFields)
 			_ = p.emit.AppendEvent(context.Background(), netConnectEv)
 			p.emit.Publish(netConnectEv)
-			p.emitDBBypassAttempt(context.Background(), commandID, 0, failClosedDec.Rule, failClosedDec.Message)
+			p.emitDBBypassAttempt(context.Background(), commandID, pid, failClosedDec.Rule, failClosedDec.Message)
 			p.emitHTTPServiceDeniedDirect(context.Background(), commandID, svcName, envVar, host, "", "CONNECT")
 			return nil
 		}
@@ -238,7 +238,7 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 		_, _ = io.WriteString(client, "HTTP/1.1 403 Forbidden\r\n\r\n")
 		_ = p.emit.AppendEvent(context.Background(), connectEv)
 		p.emit.Publish(connectEv)
-		p.emitDBBypassAttempt(context.Background(), commandID, 0, dec.Rule, dec.Message)
+		p.emitDBBypassAttempt(context.Background(), commandID, pid, dec.Rule, dec.Message)
 		return nil
 	}
 	_ = p.emit.AppendEvent(context.Background(), connectEv)
@@ -325,11 +325,9 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 		port = 443
 	}
 
-	commandID := ""
-	pid := 0
+	commandID, pid := "", 0
 	if p.sess != nil {
-		commandID = p.sess.CurrentCommandID()
-		pid = p.sess.CurrentProcessPID() // command-process PID, not necessarily the leaf caller
+		commandID, pid = p.sess.CurrentCommandAttribution() // atomic snapshot
 	}
 	engine := p.policyEngine()
 
@@ -360,7 +358,7 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 			netConnectEv := p.emitNetEvent(context.Background(), "net_connect", commandID, host, host, port, failClosedDec, failClosedFields)
 			_ = p.emit.AppendEvent(context.Background(), netConnectEv)
 			p.emit.Publish(netConnectEv)
-			p.emitDBBypassAttempt(context.Background(), commandID, 0, failClosedDec.Rule, failClosedDec.Message)
+			p.emitDBBypassAttempt(context.Background(), commandID, pid, failClosedDec.Rule, failClosedDec.Message)
 			p.emitHTTPServiceDeniedDirect(context.Background(), commandID, svcName, envVar, host, "", req.Method)
 			return nil
 		}
@@ -411,7 +409,7 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 		_, _ = io.WriteString(client, resp)
 		_ = p.emit.AppendEvent(context.Background(), connectEv)
 		p.emit.Publish(connectEv)
-		p.emitDBBypassAttempt(context.Background(), commandID, 0, dec.Rule, dec.Message)
+		p.emitDBBypassAttempt(context.Background(), commandID, pid, dec.Rule, dec.Message)
 		return nil
 	}
 	_ = p.emit.AppendEvent(context.Background(), connectEv)

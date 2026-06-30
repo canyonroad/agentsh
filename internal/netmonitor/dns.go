@@ -93,11 +93,9 @@ func (d *DNSInterceptor) loop() {
 
 func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 	domain := parseDNSDomain(query)
-	commandID := ""
-	pid := 0
+	commandID, pid := "", 0
 	if d.sess != nil {
-		commandID = d.sess.CurrentCommandID()
-		pid = d.sess.CurrentProcessPID() // command-process PID, not necessarily the leaf caller
+		commandID, pid = d.sess.CurrentCommandAttribution() // atomic snapshot
 	}
 
 	// Use timeout context for DNS handling
