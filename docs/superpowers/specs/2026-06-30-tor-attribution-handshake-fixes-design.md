@@ -180,15 +180,16 @@ In `internal/netmonitor/socks.go`, bound the client handshake and clear before
 the tunnel/relay:
 
 ```go
-const socksHandshakeTimeout = 10 * time.Second
+// var (not const) so tests can shorten it.
+var socksHandshakeTimeout = 10 * time.Second
 
 func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy,
     emit Emitter, sessionID, commandID string, pid int) error {
     defer conn.Close()
 
     // Bound the handshake against slow clients. Cleared before the tunnel so
-    // long-lived CONNECT streams are unaffected. The error is ignored: some
-    // conns (net.Pipe in tests, wrapped conns) do not honor deadlines.
+    // long-lived CONNECT streams are unaffected. The error is ignored: wrapped
+    // conns may not honor deadlines (net.Pipe does honor them — see testing).
     _ = conn.SetReadDeadline(time.Now().Add(socksHandshakeTimeout))
     if err := readSocksGreeting(conn); err != nil {
         return err
@@ -239,13 +240,14 @@ both branches uniformly.
     `transparent_tcp_test.go`.
 
 - **#3 (slowloris):**
-  - Add a test using a **real TCP listener** (not `net.Pipe`, which ignores
-    deadlines): open a conn to the gateway, send only the SOCKS greeting, then
-    stall. Assert `handleTorSocks` returns within ~`socksHandshakeTimeout`
-    (with slack) and the goroutine/connection is released.
+  - `net.Pipe` **honors** `SetReadDeadline` (verified), so the test uses
+    `net.Pipe` (no real TCP listener needed): shorten `socksHandshakeTimeout`
+    via `t.Cleanup`-restored override, open a pipe, send only the SOCKS
+    greeting, then stall. Assert `handleTorSocks` returns within
+    ~`socksHandshakeTimeout` (with slack) and emits no event.
   - Assert a fully-sent handshake still tunnels/relays correctly (covered by
-    existing `TestHandleTorSocks_*` tests; verify they still pass with the new
-    deadline set/clear).
+    existing `TestHandleTorSocks_*` tests; verify they still pass under the
+    default 10s deadline with the new deadline set/clear).
 
 ## Non-goals (explicitly out of scope)
 
@@ -263,9 +265,13 @@ both branches uniformly.
 - **Combined getter vs existing getters:** additive only; no existing caller
   changes unless it adopts the new one. The 3 netmonitor sites are the only
   adoption in this change.
-- **Deadline on `net.Pipe`:** `net.Pipe` does not honor deadlines; the deadline
-  set is a no-op there and the clear is harmless. Existing `net.Pipe`-based
-  tests continue to pass (verify). The slowloris test uses a real TCP listener.
+- **Deadline on `net.Pipe`:** `net.Pipe` **honors** `SetReadDeadline`
+  (verified: a blocked read returns `i/o timeout` after the deadline), so the
+  slowloris test uses `net.Pipe` with a shortened timeout. Existing
+  `net.Pipe`-based tests complete the handshake far under the 10s default, so
+  the new set/clear is harmless to them (verify).
+- **`socksHandshakeTimeout` is a `var`:** so tests can shorten it (a `const`
+  would force a 10s test). Production behavior is identical (10s default).
 - **Ignored `SetReadDeadline` error:** a wrapped conn without the method would
   return an error; ignoring it is intentional and graceful (the conn simply
   remains unbounded, no worse than today).
