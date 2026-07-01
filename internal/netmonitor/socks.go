@@ -27,6 +27,11 @@ const (
 	atypIPv6   = 0x04
 )
 
+// socksHandshakeTimeout bounds the client-side SOCKS5 handshake reads in
+// handleTorSocks so a stalled client cannot hold a gateway goroutine + fd
+// indefinitely (slowloris). It is a var (not const) so tests can shorten it.
+var socksHandshakeTimeout = 10 * time.Second
+
 // readSocksGreeting consumes the client's method-selection greeting:
 // VER NMETHODS METHODS...
 func readSocksGreeting(r io.Reader) error {
@@ -140,6 +145,12 @@ type TorGatewayPolicy interface {
 func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, emit Emitter, sessionID, commandID string, pid int) error {
 	defer conn.Close()
 
+	// Bound the client handshake against slow/stalled clients (slowloris).
+	// Cleared before the tunnel/relay so long-lived CONNECT streams are
+	// unaffected. The error is ignored: some conns (net.Pipe in tests, wrapped
+	// conns) do not honor deadlines, in which case the conn simply stays
+	// unbounded — no worse than today.
+	_ = conn.SetReadDeadline(time.Now().Add(socksHandshakeTimeout))
 	if err := readSocksGreeting(conn); err != nil {
 		return err
 	}
@@ -151,6 +162,7 @@ func handleTorSocks(conn net.Conn, upstreamAddr string, pol TorGatewayPolicy, em
 		_ = writeSocksReply(conn, socksRepGeneralFailure)
 		return err
 	}
+	_ = conn.SetReadDeadline(time.Time{}) // handshake done; tunnel/relay unbounded
 
 	switch req.cmd {
 	case socksCmdConnect:

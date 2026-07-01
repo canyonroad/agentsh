@@ -553,3 +553,41 @@ func TestHandleTorSocks_IdleSessionPIDZero(t *testing.T) {
 	assertOnionEvent(t, emit, "allow", "connect", 0)
 	client.Close()
 }
+
+// TestHandleTorSocks_HandshakeDeadlineStallsSlowClient verifies a client that
+// sends only the greeting then stalls causes handleTorSocks to return within
+// the handshake deadline (rather than blocking forever on readSocksRequest),
+// emitting no event. net.Pipe honors SetReadDeadline, so no real TCP listener
+// is needed.
+func TestHandleTorSocks_HandshakeDeadlineStallsSlowClient(t *testing.T) {
+	orig := socksHandshakeTimeout
+	socksHandshakeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { socksHandshakeTimeout = orig })
+
+	client, server := net.Pipe()
+	emit := &torCaptureEmitter{}
+
+	go io.Copy(io.Discard, client) // drain handler writes so they never block
+	done := make(chan struct{})
+	go func() {
+		// upstreamAddr is unreachable on purpose; a stalled handshake must never dial it.
+		_ = handleTorSocks(server, "127.0.0.1:1", fakeGatewayPolicy{allow: "ok.onion"}, emit, "session-1", "cmd-1", 4242)
+		close(done)
+	}()
+
+	// Send only the greeting, then stall — readSocksRequest must time out.
+	if _, err := client.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTorSocks did not return after stalled handshake (no read deadline on handshake)")
+	}
+	client.Close()
+
+	if len(emit.events()) != 0 {
+		t.Fatalf("stalled handshake emitted %d events, want 0", len(emit.events()))
+	}
+}
