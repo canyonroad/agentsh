@@ -203,7 +203,7 @@ func TestProxyHandleConnect_DBBypassCarriesCommandPID(t *testing.T) {
 	p := &Proxy{sessionID: "sess-bypass", sess: sess, policy: engine, emit: &stubEmitter{}}
 	p.SetDBBypassEmitter(dbevents.NewBypassEmitter(capture))
 
-	req := httptest.NewRequest("CONNECT", "http://127.0.0.1:5432", nil)
+	req := httptest.NewRequest("CONNECT", "127.0.0.1:5432", nil) // authority-form: httptest.NewRequest mangles req.Host for CONNECT if given an http:// URL
 
 	client, server := net.Pipe()
 	go io.Copy(io.Discard, client) // drain the 403 so the handler's write never blocks
@@ -279,7 +279,7 @@ func TestProxyHandleHTTP_DBBypassCarriesCommandPID(t *testing.T) {
 }
 ```
 
-Note: `proxy_test.go` already imports `net/http/httptest` (used here), plus `io`, `net`, `context`, `testing`, `time`, `policy`, `dbevents`, `dbservice`, `session`, `types`. No new imports are needed — the CONNECT test uses `httptest.NewRequest("CONNECT", ...)` (already-imported) instead of `&http.Request{}` to avoid adding a `net/http` import. Confirm during the run that the file compiles.
+Note: `proxy_test.go` imports `net/http/httptest`, `net`, `context`, `testing`, `time`, `policy`, `dbevents`, `dbservice`, `session`, `types` — but **not** `io`. Add `"io"` to the import block (the new tests use `io.Copy(io.Discard, client)`). No `net/http` import is needed — the CONNECT test uses `httptest.NewRequest("CONNECT", "127.0.0.1:5432", nil)` in authority form (giving an `http://` URL mangles `req.Host` to `"http:"` for CONNECT, never reaching the deny path). Confirm the file compiles during the run.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
