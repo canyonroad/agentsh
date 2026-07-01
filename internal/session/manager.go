@@ -382,6 +382,16 @@ func (s *Session) CurrentProcessPID() int {
 	return s.currentProcPID
 }
 
+// CurrentCommandAttribution returns (commandID, pid) as a single snapshot
+// under one lock, so audit events cannot observe a torn pair across a command
+// start/release boundary. pid==0 during the launch window is an honest
+// "process not yet started" state, not a misattribution.
+func (s *Session) CurrentCommandAttribution() (commandID string, pid int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.currentCommandID, s.currentProcPID
+}
+
 // SetCurrentTraceContext stores the W3C trace context for the current command execution.
 func (s *Session) SetCurrentTraceContext(traceID, spanID, traceFlags string) {
 	s.mu.Lock()

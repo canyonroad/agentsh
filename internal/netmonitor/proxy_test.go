@@ -2,6 +2,7 @@ package netmonitor
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http/httptest"
 	"os"
@@ -899,5 +900,118 @@ func TestProxyHandleHTTPOnionRemapsVectorToOnionHTTP(t *testing.T) {
 	}
 	if got := torEv.Fields["decision"]; got != "deny" {
 		t.Fatalf("decision = %v, want deny", got)
+	}
+}
+
+// newDBUnavoidabilityIPEngine builds a DB-unavoidability engine whose deny
+// rules match a literal IP (127.0.0.1) so handler tests never perform a real
+// DNS lookup. The 5432 rule is for handleConnect (CONNECT), the 80 rule for
+// handleHTTP (plain HTTP).
+func newDBUnavoidabilityIPEngine(t *testing.T) *policy.Engine {
+	t.Helper()
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "test-db-unavoidability-ip",
+		Metadata: []policy.RuleMetadata{
+			{RuleName: "db-appdb-deny-direct", Source: dbservice.RuleSourceDBUnavoidability, DBService: "appdb", BypassMode: dbservice.BypassModeTCPDirect, Destination: "127.0.0.1:5432"},
+			{RuleName: "db-appdb-deny-http", Source: dbservice.RuleSourceDBUnavoidability, DBService: "appdb", BypassMode: dbservice.BypassModeTCPDirect, Destination: "127.0.0.1:80"},
+		},
+		NetworkRules: []policy.NetworkRule{
+			{Name: "db-appdb-deny-direct", Domains: []string{"127.0.0.1"}, Ports: []int{5432}, Decision: "deny", Message: "Direct database egress is blocked; use the AgentSH DB proxy"},
+			{Name: "db-appdb-deny-http", Domains: []string{"127.0.0.1"}, Ports: []int{80}, Decision: "deny", Message: "Direct database egress is blocked; use the AgentSH DB proxy"},
+		},
+	}
+	engine, err := policy.NewEngine(p, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	return engine
+}
+
+// TestProxyHandleConnect_DBBypassCarriesCommandPID drives a CONNECT to a
+// DB-unavoidability-denied target through handleConnect and asserts the
+// db_bypass_attempt event carries the session's command PID, not 0.
+func TestProxyHandleConnect_DBBypassCarriesCommandPID(t *testing.T) {
+	engine := newDBUnavoidabilityIPEngine(t)
+	sess := &session.Session{ID: "sess-bypass"}
+	sess.SetCurrentCommandID("cmd-bypass")
+	sess.SetCurrentProcessPID(4242)
+
+	capture := &captureDBBypassEmitter{}
+	p := &Proxy{sessionID: "sess-bypass", sess: sess, policy: engine, emit: &stubEmitter{}}
+	p.SetDBBypassEmitter(dbevents.NewBypassEmitter(capture))
+
+	req := httptest.NewRequest("CONNECT", "127.0.0.1:5432", nil) // authority-form: httptest.NewRequest mangles req.Host for CONNECT if given an http:// URL
+
+	client, server := net.Pipe()
+	go io.Copy(io.Discard, client) // drain the 403 so the handler's write never blocks
+	done := make(chan struct{})
+	go func() {
+		_ = p.handleConnect(server, req)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleConnect did not return")
+	}
+	client.Close()
+
+	if len(capture.events) != 1 {
+		t.Fatalf("db bypass events = %d, want 1 (events: %+v)", len(capture.events), capture.events)
+	}
+	ev := capture.events[0]
+	if ev.Type != "db_bypass_attempt" {
+		t.Fatalf("event type = %q, want db_bypass_attempt", ev.Type)
+	}
+	if ev.PID != 4242 {
+		t.Fatalf("bypass event PID = %d, want 4242", ev.PID)
+	}
+	if ev.Fields["rule_name"] != "db-appdb-deny-direct" {
+		t.Fatalf("rule_name = %v, want db-appdb-deny-direct", ev.Fields["rule_name"])
+	}
+}
+
+// TestProxyHandleHTTP_DBBypassCarriesCommandPID drives a plain-HTTP GET to a
+// DB-unavoidability-denied target through handleHTTP and asserts the
+// db_bypass_attempt event carries the session's command PID, not 0.
+func TestProxyHandleHTTP_DBBypassCarriesCommandPID(t *testing.T) {
+	engine := newDBUnavoidabilityIPEngine(t)
+	sess := &session.Session{ID: "sess-bypass"}
+	sess.SetCurrentCommandID("cmd-bypass")
+	sess.SetCurrentProcessPID(4242)
+
+	capture := &captureDBBypassEmitter{}
+	p := &Proxy{sessionID: "sess-bypass", sess: sess, policy: engine, emit: &stubEmitter{}}
+	p.SetDBBypassEmitter(dbevents.NewBypassEmitter(capture))
+
+	req := httptest.NewRequest("GET", "http://127.0.0.1/", nil)
+
+	client, server := net.Pipe()
+	go io.Copy(io.Discard, client) // drain the 403 so the handler's write never blocks
+	done := make(chan struct{})
+	go func() {
+		_ = p.handleHTTP(server, req)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleHTTP did not return")
+	}
+	client.Close()
+
+	if len(capture.events) != 1 {
+		t.Fatalf("db bypass events = %d, want 1 (events: %+v)", len(capture.events), capture.events)
+	}
+	ev := capture.events[0]
+	if ev.Type != "db_bypass_attempt" {
+		t.Fatalf("event type = %q, want db_bypass_attempt", ev.Type)
+	}
+	if ev.PID != 4242 {
+		t.Fatalf("bypass event PID = %d, want 4242", ev.PID)
+	}
+	if ev.Fields["rule_name"] != "db-appdb-deny-http" {
+		t.Fatalf("rule_name = %v, want db-appdb-deny-http", ev.Fields["rule_name"])
 	}
 }
