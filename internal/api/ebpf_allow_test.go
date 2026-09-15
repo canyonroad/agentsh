@@ -86,3 +86,32 @@ func TestBuildAllowedEndpoints_NonStrictOnCIDR(t *testing.T) {
 		t.Fatalf("expected cidr to be included")
 	}
 }
+
+func TestBuildAllowedEndpoints_PreservesCIDRPorts(t *testing.T) {
+	pol := &policy.Policy{
+		NetworkRules: []policy.NetworkRule{
+			{
+				Name:     "allow-cidr-ports",
+				CIDRs:    []string{"10.0.0.0/8"},
+				Ports:    []int{80, 443},
+				Decision: "allow",
+			},
+		},
+	}
+	engine, err := policy.NewEngine(pol, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, cidrs, _, _, _, _, _ := buildAllowedEndpoints(engine, 60*time.Second)
+	if len(cidrs) != 2 {
+		t.Fatalf("CIDR entries = %d, want 2", len(cidrs))
+	}
+	ports := map[uint16]bool{}
+	for _, cidr := range cidrs {
+		ports[cidr.Dport] = true
+	}
+	if !ports[80] || !ports[443] {
+		t.Fatalf("CIDR ports = %v, want 80 and 443", ports)
+	}
+}

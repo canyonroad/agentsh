@@ -162,7 +162,7 @@ func buildAllowedEndpoints(p *policy.Engine, maxTTL time.Duration) ([]ebpf.Allow
 			}
 		}
 
-		// CIDR entries could be approximated by skipping; do nothing but keep non-strict flag.
+		// CIDR entries are represented directly in the eBPF LPM maps.
 		for _, cidr := range r.CIDRs {
 			_, ipnet, err := net.ParseCIDR(cidr)
 			if err != nil || ipnet == nil {
@@ -220,7 +220,7 @@ func dedupCIDRs(in []ebpf.AllowCIDR) []ebpf.AllowCIDR {
 	seen := make(map[string]struct{}, len(in))
 	out := make([]ebpf.AllowCIDR, 0, len(in))
 	for _, k := range in {
-		key := fmt.Sprintf("%d-%d-%x", k.Family, k.PrefixLen, k.Addr)
+		key := fmt.Sprintf("%d-%d-%d-%x", k.Family, k.PrefixLen, k.Dport, k.Addr)
 		if _, ok := seen[key]; ok {
 			continue
 		}

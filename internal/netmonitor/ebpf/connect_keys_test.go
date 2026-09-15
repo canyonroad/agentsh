@@ -3,52 +3,108 @@
 package ebpf
 
 import (
+	"errors"
 	"testing"
+
+	ciliumebpf "github.com/cilium/ebpf"
 )
 
-// Ensure PopulateAllowlist inserts CIDR entries into LPM maps.
-func TestPopulateAllowlistCIDR(t *testing.T) {
+func TestPopulateRefreshAndCleanupCIDRs(t *testing.T) {
 	coll, err := LoadConnectProgram()
 	if err != nil {
 		t.Skipf("load bpf object: %v", err)
 	}
 	defer coll.Close()
 
-	cgid := uint64(1234)
-	cidrs := []AllowCIDR{{
-		Family:    2,
-		PrefixLen: 24,
-		Dport:     443,
-	}}
-	copy(cidrs[0].Addr[:4], []byte{10, 1, 2, 0})
-
-	if err := PopulateAllowlist(coll, cgid, nil, cidrs, nil, nil, false); err != nil {
-		t.Fatalf("populate: %v", err)
+	const (
+		cgroupID      = uint64(1234)
+		otherCgroupID = uint64(5678)
+	)
+	allowCIDRs := []AllowCIDR{
+		{Family: 2, PrefixLen: 24, Dport: 443, Addr: [16]byte{10, 1, 2, 0}},
+		{Family: 10, PrefixLen: 64, Dport: 443, Addr: [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 1}},
+	}
+	denyCIDRs := []AllowCIDR{
+		{Family: 2, PrefixLen: 24, Dport: 80, Addr: [16]byte{10, 2, 3, 0}},
+		{Family: 10, PrefixLen: 64, Dport: 80, Addr: [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 2}},
 	}
 
-	lpm4 := coll.Maps["lpm4_allow"]
-	if lpm4 == nil {
-		t.Fatalf("lpm4_allow missing")
+	for _, cgroupID := range []uint64{cgroupID, otherCgroupID} {
+		if err := PopulateAllowlist(coll, cgroupID, nil, allowCIDRs, nil, denyCIDRs, true); err != nil {
+			t.Fatalf("populate cgroup %d: %v", cgroupID, err)
+		}
 	}
 
-	type lpm4Key struct {
-		Prefixlen uint32
-		CgroupID  uint64
-		Addr      [4]byte
-		Dport     uint16
+	maps := []struct {
+		name string
+		key  any
+	}{
+		{name: "lpm4_allow", key: lpm4Key{Prefixlen: lpm4LookupPrefixBits, CgroupID: cgroupID, Dport: 443, Addr: [4]byte{10, 1, 2, 3}}},
+		{name: "lpm6_allow", key: lpm6Key{Prefixlen: lpm6LookupPrefixBits, CgroupID: cgroupID, Dport: 443, Addr: [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3}}},
+		{name: "lpm4_deny", key: lpm4Key{Prefixlen: lpm4LookupPrefixBits, CgroupID: cgroupID, Dport: 80, Addr: [4]byte{10, 2, 3, 3}}},
+		{name: "lpm6_deny", key: lpm6Key{Prefixlen: lpm6LookupPrefixBits, CgroupID: cgroupID, Dport: 80, Addr: [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3}}},
 	}
-	key := lpm4Key{Prefixlen: 64 + 24 + 16, CgroupID: cgid, Addr: [4]byte{10, 1, 2, 3}, Dport: 443}
-	var val uint8
-	if err := lpm4.Lookup(key, &val); err != nil {
-		t.Fatalf("lookup lpm: %v", err)
-	}
-	if val != 1 {
-		t.Fatalf("expected value 1, got %d", val)
+	for _, tt := range maps {
+		expectLPMMapEntry(t, coll.Maps[tt.name], tt.key, true)
 	}
 
-	// Should not match other port
-	key.Dport = 80
-	if err := lpm4.Lookup(key, &val); err == nil {
-		t.Fatalf("expected miss for different port")
+	if err := PopulateAllowlist(coll, cgroupID, nil, nil, nil, nil, false); err != nil {
+		t.Fatalf("refresh cgroup: %v", err)
+	}
+	for _, tt := range maps {
+		expectLPMMapEntry(t, coll.Maps[tt.name], tt.key, false)
+		otherKey := lpmKeyWithCgroup(t, tt.key, otherCgroupID)
+		expectLPMMapEntry(t, coll.Maps[tt.name], otherKey, true)
+	}
+
+	if err := PopulateAllowlist(coll, cgroupID, nil, allowCIDRs, nil, denyCIDRs, true); err != nil {
+		t.Fatalf("repopulate cgroup: %v", err)
+	}
+	if err := CleanupAllowlist(coll, cgroupID); err != nil {
+		t.Fatalf("cleanup cgroup: %v", err)
+	}
+	if err := CleanupAllowlist(coll, cgroupID); err != nil {
+		t.Fatalf("repeat cleanup cgroup: %v", err)
+	}
+	for _, tt := range maps {
+		expectLPMMapEntry(t, coll.Maps[tt.name], tt.key, false)
+		otherKey := lpmKeyWithCgroup(t, tt.key, otherCgroupID)
+		expectLPMMapEntry(t, coll.Maps[tt.name], otherKey, true)
+	}
+}
+
+func expectLPMMapEntry(t *testing.T, m *ciliumebpf.Map, key any, want bool) {
+	t.Helper()
+	if m == nil {
+		t.Fatal("LPM map is missing")
+	}
+	var value uint8
+	err := m.Lookup(key, &value)
+	if want {
+		if err != nil {
+			t.Fatalf("lookup %T: %v", key, err)
+		}
+		if value != 1 {
+			t.Fatalf("lookup %T value = %d, want 1", key, value)
+		}
+		return
+	}
+	if !errors.Is(err, ciliumebpf.ErrKeyNotExist) {
+		t.Fatalf("lookup %T error = %v, want ErrKeyNotExist", key, err)
+	}
+}
+
+func lpmKeyWithCgroup(t *testing.T, key any, cgroupID uint64) any {
+	t.Helper()
+	switch key := key.(type) {
+	case lpm4Key:
+		key.CgroupID = cgroupID
+		return key
+	case lpm6Key:
+		key.CgroupID = cgroupID
+		return key
+	default:
+		t.Fatalf("unsupported LPM key type %T", key)
+		return nil
 	}
 }
