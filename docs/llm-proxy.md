@@ -66,8 +66,48 @@ proxy:
 **Use cases:**
 - **LiteLLM/vLLM**: Route to self-hosted OpenAI-compatible endpoints
 - **Azure OpenAI**: Point to Azure OpenAI Service endpoints
+- **OrcaRouter Cyber Inference**: Route authorized security workloads to the OrcaRouter gateway
 - **Corporate gateways**: Route through internal proxies for compliance
 - **Local development**: Test against mock LLM servers
+
+### OrcaRouter Cyber Inference
+
+[OrcaRouter](https://www.orcarouter.ai) Cyber Inference is an OpenAI-compatible
+provider for security teams running authorized, scoped security work. It speaks
+the OpenAI dialect already supported by the proxy, so it is selected through
+`providers.openai` and authenticated with an `sk-orca-…` key:
+
+```yaml
+proxy:
+  mode: embedded
+  providers:
+    openai: https://api.orcarouter.ai/v1
+```
+
+The sandboxed agent keeps using the `OPENAI_BASE_URL` that agentsh injects and
+supplies `OPENAI_API_KEY=sk-orca-…`; the proxy forwards the request and the
+Bearer key to OrcaRouter, so DLP redaction, rate limits, usage tracking, and the
+audit trail apply exactly as they do for any other upstream.
+
+Model IDs keep their vendor namespace. The default is `orcarouter/auto`, which
+routes automatically and works with any key; `orcarouter/fusion` is the general
+fallback. Security teams whose organization has completed business verification
+can also select the dedicated OrcaCyber models for authorized work:
+
+| Model | Notes |
+| --- | --- |
+| `orcarouter/auto` | Default. Automatic routing, no tier requirement. |
+| `orcacyber-ultra-1.0` | OrcaCyber Ultra — security code scanning and multi-step reasoning over large codebases. |
+| `orcacyber-zero-1.5` | OrcaCyber Zero — OrcaCyber harness. |
+| `orcarouter/fusion` | General fallback. |
+
+See the [OrcaRouter Cyber Inference provider page](https://www.orcarouter.ai/cyber)
+and the [cyber model catalog](https://www.orcarouter.ai/models?tier=cyber) for
+tier availability.
+
+> **Path behaviour:** the proxy rewrites only the scheme and host and keeps the
+> incoming `/v1/...` path, so `https://api.orcarouter.ai/v1` and
+> `https://api.orcarouter.ai` are both valid values for `providers.openai` here.
 
 **ChatGPT login flow:** When `providers.openai` is set to the default URL (`https://api.openai.com`), OAuth tokens (non `sk-*` Bearer tokens) are automatically routed to the ChatGPT backend. Custom URLs route all traffic to the configured endpoint.
 
