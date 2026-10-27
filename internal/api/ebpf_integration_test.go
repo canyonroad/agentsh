@@ -52,7 +52,7 @@ func TestEBPFConnectEventFlow(t *testing.T) {
 	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil, nil, nil)
 
 	// Create command cgroup and attach ebpf via hook.
-	hook := app.cgroupHook(sess.ID, "cmd-test", policy.Limits{})
+	hook := app.cgroupHook(sess.ID, "cmd-test", policy.Limits{}, engine)
 	detach, err := hook(os.Getpid())
 	if err != nil {
 		t.Skipf("ebpf attach failed (likely missing object): %v", err)

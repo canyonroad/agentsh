@@ -3,8 +3,8 @@
 package ebpf
 
 import (
+	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	"github.com/cilium/ebpf"
@@ -68,44 +68,18 @@ func PopulateAllowlist(coll *ebpf.Collection, cgroupID uint64, allow []AllowKey,
 	lpm4deny := coll.Maps["lpm4_deny"]
 	lpm6deny := coll.Maps["lpm6_deny"]
 
-	// Clear existing LPM entries for this cgroup.
-	if lpm4 != nil {
-		type lpm4Key struct {
-			Prefixlen uint32
-			CgroupID  uint64
-			Addr      [4]byte
-			Dport     uint16
-		}
-		iter := lpm4.Iterate()
-		var k lpm4Key
-		var v uint8
-		for iter.Next(&k, &v) {
-			if k.CgroupID == cgroupID {
-				_ = lpm4.Delete(k)
-			}
-		}
-		if err := iter.Err(); err != nil {
-			return fmt.Errorf("iterate lpm4: %w", err)
-		}
+	// Clear existing LPM entries for this cgroup before replacing its policy.
+	if err := clearLPM4Entries(lpm4, cgroupID); err != nil {
+		return fmt.Errorf("clear lpm4 allow: %w", err)
 	}
-	if lpm6 != nil {
-		type lpm6Key struct {
-			Prefixlen uint32
-			CgroupID  uint64
-			Addr      [16]byte
-			Dport     uint16
-		}
-		iter := lpm6.Iterate()
-		var k lpm6Key
-		var v uint8
-		for iter.Next(&k, &v) {
-			if k.CgroupID == cgroupID {
-				_ = lpm6.Delete(k)
-			}
-		}
-		if err := iter.Err(); err != nil {
-			return fmt.Errorf("iterate lpm6: %w", err)
-		}
+	if err := clearLPM6Entries(lpm6, cgroupID); err != nil {
+		return fmt.Errorf("clear lpm6 allow: %w", err)
+	}
+	if err := clearLPM4Entries(lpm4deny, cgroupID); err != nil {
+		return fmt.Errorf("clear lpm4 deny: %w", err)
+	}
+	if err := clearLPM6Entries(lpm6deny, cgroupID); err != nil {
+		return fmt.Errorf("clear lpm6 deny: %w", err)
 	}
 
 	// Remove existing entries for this cgroup first to avoid stale allows after policy changes.
@@ -169,42 +143,22 @@ func PopulateAllowlist(coll *ebpf.Collection, cgroupID uint64, allow []AllowKey,
 	// Load CIDRs into LPM tries.
 	for _, c := range allowCIDRs {
 		if c.Family == 2 && lpm4 != nil {
-			type lpm4Key struct {
-				Prefixlen uint32
-				CgroupID  uint64
-				Addr      [4]byte
-				Dport     uint16
-			}
 			var key lpm4Key
-			if c.Dport != 0 {
-				key.Prefixlen = 64 + c.PrefixLen + 16
-			} else {
-				key.Prefixlen = 64 + c.PrefixLen
-			}
+			key.Prefixlen = lpmPrefixlen(c.PrefixLen)
 			key.CgroupID = cgroupID
-			copy(key.Addr[:], c.Addr[:4])
 			key.Dport = c.Dport
+			copy(key.Addr[:], c.Addr[:4])
 			val := uint8(1)
 			if err := lpm4.Put(key, val); err != nil {
 				return fmt.Errorf("put lpm4 allow: %w", err)
 			}
 			lpmAllowInserted++
 		} else if c.Family == 10 && lpm6 != nil {
-			type lpm6Key struct {
-				Prefixlen uint32
-				CgroupID  uint64
-				Addr      [16]byte
-				Dport     uint16
-			}
 			var key lpm6Key
-			if c.Dport != 0 {
-				key.Prefixlen = 64 + c.PrefixLen + 16
-			} else {
-				key.Prefixlen = 64 + c.PrefixLen
-			}
+			key.Prefixlen = lpmPrefixlen(c.PrefixLen)
 			key.CgroupID = cgroupID
-			copy(key.Addr[:], c.Addr[:])
 			key.Dport = c.Dport
+			copy(key.Addr[:], c.Addr[:])
 			val := uint8(1)
 			if err := lpm6.Put(key, val); err != nil {
 				return fmt.Errorf("put lpm6 allow: %w", err)
@@ -214,12 +168,6 @@ func PopulateAllowlist(coll *ebpf.Collection, cgroupID uint64, allow []AllowKey,
 	}
 	// Count LPM allow totals after insertion (best effort, may race)
 	if lpm4 != nil {
-		type lpm4Key struct {
-			Prefixlen uint32
-			CgroupID  uint64
-			Addr      [4]byte
-			Dport     uint16
-		}
 		iter := lpm4.Iterate()
 		var k lpm4Key
 		var v uint8
@@ -228,12 +176,6 @@ func PopulateAllowlist(coll *ebpf.Collection, cgroupID uint64, allow []AllowKey,
 		}
 	}
 	if lpm6 != nil {
-		type lpm6Key struct {
-			Prefixlen uint32
-			CgroupID  uint64
-			Addr      [16]byte
-			Dport     uint16
-		}
 		iter := lpm6.Iterate()
 		var k lpm6Key
 		var v uint8
@@ -243,42 +185,22 @@ func PopulateAllowlist(coll *ebpf.Collection, cgroupID uint64, allow []AllowKey,
 	}
 	for _, c := range denyCIDRs {
 		if c.Family == 2 && lpm4deny != nil {
-			type lpm4Key struct {
-				Prefixlen uint32
-				CgroupID  uint64
-				Addr      [4]byte
-				Dport     uint16
-			}
 			var key lpm4Key
-			if c.Dport != 0 {
-				key.Prefixlen = 64 + c.PrefixLen + 16
-			} else {
-				key.Prefixlen = 64 + c.PrefixLen
-			}
+			key.Prefixlen = lpmPrefixlen(c.PrefixLen)
 			key.CgroupID = cgroupID
-			copy(key.Addr[:], c.Addr[:4])
 			key.Dport = c.Dport
+			copy(key.Addr[:], c.Addr[:4])
 			val := uint8(1)
 			if err := lpm4deny.Put(key, val); err != nil {
 				return fmt.Errorf("put lpm4 deny: %w", err)
 			}
 			lpmDenyInserted++
 		} else if c.Family == 10 && lpm6deny != nil {
-			type lpm6Key struct {
-				Prefixlen uint32
-				CgroupID  uint64
-				Addr      [16]byte
-				Dport     uint16
-			}
 			var key lpm6Key
-			if c.Dport != 0 {
-				key.Prefixlen = 64 + c.PrefixLen + 16
-			} else {
-				key.Prefixlen = 64 + c.PrefixLen
-			}
+			key.Prefixlen = lpmPrefixlen(c.PrefixLen)
 			key.CgroupID = cgroupID
-			copy(key.Addr[:], c.Addr[:])
 			key.Dport = c.Dport
+			copy(key.Addr[:], c.Addr[:])
 			val := uint8(1)
 			if err := lpm6deny.Put(key, val); err != nil {
 				return fmt.Errorf("put lpm6 deny: %w", err)
@@ -287,12 +209,6 @@ func PopulateAllowlist(coll *ebpf.Collection, cgroupID uint64, allow []AllowKey,
 		}
 	}
 	if lpm4deny != nil {
-		type lpm4Key struct {
-			Prefixlen uint32
-			CgroupID  uint64
-			Addr      [4]byte
-			Dport     uint16
-		}
 		iter := lpm4deny.Iterate()
 		var k lpm4Key
 		var v uint8
@@ -301,12 +217,6 @@ func PopulateAllowlist(coll *ebpf.Collection, cgroupID uint64, allow []AllowKey,
 		}
 	}
 	if lpm6deny != nil {
-		type lpm6Key struct {
-			Prefixlen uint32
-			CgroupID  uint64
-			Addr      [16]byte
-			Dport     uint16
-		}
 		iter := lpm6deny.Iterate()
 		var k lpm6Key
 		var v uint8
@@ -356,43 +266,17 @@ func CleanupAllowlist(coll *ebpf.Collection, cgroupID uint64) error {
 			return err
 		}
 	}
-	if lpm4, ok := coll.Maps["lpm4_allow"]; ok {
-		type lpm4Key struct {
-			Prefixlen uint32
-			CgroupID  uint64
-			Addr      [4]byte
-			Dport     uint16
-		}
-		iter := lpm4.Iterate()
-		var k lpm4Key
-		var v uint8
-		for iter.Next(&k, &v) {
-			if k.CgroupID == cgroupID {
-				_ = lpm4.Delete(k)
-			}
-		}
-		if err := iter.Err(); err != nil {
-			return err
-		}
+	if err := clearLPM4Entries(coll.Maps["lpm4_allow"], cgroupID); err != nil {
+		return fmt.Errorf("clear lpm4 allow: %w", err)
 	}
-	if lpm6, ok := coll.Maps["lpm6_allow"]; ok {
-		type lpm6Key struct {
-			Prefixlen uint32
-			CgroupID  uint64
-			Addr      [16]byte
-			Dport     uint16
-		}
-		iter := lpm6.Iterate()
-		var k lpm6Key
-		var v uint8
-		for iter.Next(&k, &v) {
-			if k.CgroupID == cgroupID {
-				_ = lpm6.Delete(k)
-			}
-		}
-		if err := iter.Err(); err != nil {
-			return err
-		}
+	if err := clearLPM6Entries(coll.Maps["lpm6_allow"], cgroupID); err != nil {
+		return fmt.Errorf("clear lpm6 allow: %w", err)
+	}
+	if err := clearLPM4Entries(coll.Maps["lpm4_deny"], cgroupID); err != nil {
+		return fmt.Errorf("clear lpm4 deny: %w", err)
+	}
+	if err := clearLPM6Entries(coll.Maps["lpm6_deny"], cgroupID); err != nil {
+		return fmt.Errorf("clear lpm6 deny: %w", err)
 	}
 	if defdeny, ok := coll.Maps["default_deny"]; ok {
 		_ = defdeny.Delete(cgroupID)
@@ -400,11 +284,46 @@ func CleanupAllowlist(coll *ebpf.Collection, cgroupID uint64) error {
 	return nil
 }
 
-func isNoEntry(err error) bool {
-	if err == nil {
-		return false
+func clearLPM4Entries(m *ebpf.Map, cgroupID uint64) error {
+	if m == nil {
+		return nil
 	}
-	return strings.Contains(err.Error(), "no such file or directory") || strings.Contains(err.Error(), "not found")
+	iter := m.Iterate()
+	var key lpm4Key
+	var value uint8
+	for iter.Next(&key, &value) {
+		if key.CgroupID != cgroupID {
+			continue
+		}
+		if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("delete key: %w", err)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("iterate: %w", err)
+	}
+	return nil
+}
+
+func clearLPM6Entries(m *ebpf.Map, cgroupID uint64) error {
+	if m == nil {
+		return nil
+	}
+	iter := m.Iterate()
+	var key lpm6Key
+	var value uint8
+	for iter.Next(&key, &value) {
+		if key.CgroupID != cgroupID {
+			continue
+		}
+		if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("delete key: %w", err)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("iterate: %w", err)
+	}
+	return nil
 }
 
 // AddTemporaryAllowRule adds a single allow rule for a specific connection.
