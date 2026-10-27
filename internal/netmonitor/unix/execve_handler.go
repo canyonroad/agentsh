@@ -320,7 +320,9 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) (Execve
 		case "allow":
 			result := ExecveResult{Allow: true, Action: ActionContinue, Rule: chosenDecision.Rule, Decision: chosenDecision.Decision}
 			return result, h.buildEvent(ctx, result, chosenDecision.Rule)
-		case "approve", "redirect":
+		case "approve":
+			return h.requestApproval(goCtx, ctx, chosenDecision)
+		case "redirect":
 			result := ExecveResult{
 				Allow:    false,
 				Action:   ActionRedirect,
@@ -379,16 +381,11 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) (Execve
 		return result, h.buildEvent(ctx, result, decision.Rule)
 
 	case "approve":
-		// Redirect to agentsh-stub for approval workflow
-		result := ExecveResult{
-			Allow:    false,
-			Action:   ActionRedirect,
-			Rule:     decision.Rule,
-			Reason:   decision.Message,
-			Decision: decision.Decision,
-			Redirect: decision.Redirect,
+		result, ev := h.requestApproval(goCtx, ctx, decision)
+		if result.Allow && h.depthTracker != nil {
+			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
 		}
-		return result, h.buildEvent(ctx, result, decision.Rule)
+		return result, ev
 
 	case "redirect":
 		// Redirect execve to agentsh-stub
@@ -413,6 +410,44 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) (Execve
 		}
 		return result, h.buildEvent(ctx, result, "unknown")
 	}
+}
+
+// requestApproval asks the approver about an exec matched by an approve rule.
+// On approval the exec continues in place, inside the tracee's sandbox. No
+// approver, an error, a timeout, or a denial all deny with EACCES.
+//
+// ponytail: blocks the session's serial notify loop while waiting (as the
+// truncated-argv approval does), so other trapped syscalls in the session
+// stall until the approval resolves; answer the notification from a
+// goroutine if that becomes a problem.
+func (h *ExecveHandler) requestApproval(goCtx context.Context, ctx ExecveContext, decision PolicyDecision) (ExecveResult, *types.Event) {
+	result := ExecveResult{
+		Allow:    false,
+		Action:   ActionDeny,
+		Rule:     decision.Rule,
+		Errno:    int32(unix.EACCES),
+		Decision: decision.Decision,
+	}
+	if h.approver == nil {
+		result.Reason = "approval_no_approver"
+		return result, h.buildEvent(ctx, result, decision.Rule)
+	}
+	approved, err := h.approver.RequestExecApproval(goCtx, ApprovalRequest{
+		SessionID: ctx.SessionID,
+		Command:   ctx.Filename,
+		Args:      ctx.Argv,
+		Reason:    decision.Message,
+		Rule:      decision.Rule,
+	})
+	switch {
+	case err != nil:
+		result.Reason = "approval_error"
+	case !approved:
+		result.Reason = "approval_denied"
+	default:
+		result = ExecveResult{Allow: true, Action: ActionContinue, Rule: decision.Rule, Reason: decision.Message, Decision: decision.Decision}
+	}
+	return result, h.buildEvent(ctx, result, decision.Rule)
 }
 
 // buildEvent builds an execve audit event without emitting it.
