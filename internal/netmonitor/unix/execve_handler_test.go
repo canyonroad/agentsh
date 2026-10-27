@@ -198,28 +198,88 @@ func TestExecveHandler_Action(t *testing.T) {
 		assert.Equal(t, "deny", result.Decision)
 	})
 
-	t.Run("approve produces ActionRedirect", func(t *testing.T) {
-		cfg := ExecveHandlerConfig{}
-		pol := &mockPolicy{decision: PolicyDecision{
-			Decision:          "approve",
-			EffectiveDecision: "approve",
-			Rule:              "needs-approval",
-			Message:           "requires human approval",
-		}}
+	// approve must go through the approver and continue the exec in place;
+	// it must never redirect to the server-side stub, which would run the
+	// command outside the tracee's sandbox without asking anyone.
+	approvePol := &mockPolicy{decision: PolicyDecision{
+		Decision:          "approve",
+		EffectiveDecision: "approve",
+		Rule:              "needs-approval",
+		Message:           "requires human approval",
+	}}
+	approveCtx := ExecveContext{
+		PID:       1001,
+		ParentPID: 1000,
+		Filename:  "/usr/bin/rm",
+		Argv:      []string{"rm", "-rf", "/important"},
+	}
+
+	t.Run("approve without approver denies", func(t *testing.T) {
 		dt := NewDepthTracker()
 		dt.RegisterSession(1000, "sess-1")
-		h := NewExecveHandler(cfg, pol, dt, nil)
+		h := NewExecveHandler(ExecveHandlerConfig{}, approvePol, dt, nil)
 
-		result, _ := h.Handle(context.Background(), ExecveContext{
-			PID:       1001,
-			ParentPID: 1000,
-			Filename:  "/usr/bin/rm",
-			Argv:      []string{"rm", "-rf", "/important"},
-		})
+		result, _ := h.Handle(context.Background(), approveCtx)
 
 		require.False(t, result.Allow)
-		assert.Equal(t, ActionRedirect, result.Action)
+		assert.Equal(t, ActionDeny, result.Action)
+		assert.Equal(t, int32(unix.EACCES), result.Errno)
 		assert.Equal(t, "approve", result.Decision)
+	})
+
+	t.Run("approve approved continues in place", func(t *testing.T) {
+		dt := NewDepthTracker()
+		dt.RegisterSession(1000, "sess-1")
+		approver := &mockApprover{approved: true}
+		h := NewExecveHandler(ExecveHandlerConfig{}, approvePol, dt, nil)
+		h.SetApprover(approver)
+
+		result, _ := h.Handle(context.Background(), approveCtx)
+
+		require.True(t, approver.called)
+		assert.Equal(t, "sess-1", approver.gotReq.SessionID)
+		assert.Equal(t, "/usr/bin/rm", approver.gotReq.Command)
+		assert.Equal(t, []string{"rm", "-rf", "/important"}, approver.gotReq.Args)
+		assert.Equal(t, "needs-approval", approver.gotReq.Rule)
+		assert.True(t, result.Allow)
+		assert.Equal(t, ActionContinue, result.Action)
+		assert.Equal(t, "approve", result.Decision)
+		_, tracked := dt.Get(1001)
+		assert.True(t, tracked, "approved exec must be depth-tracked")
+	})
+
+	t.Run("approve denied denies", func(t *testing.T) {
+		dt := NewDepthTracker()
+		dt.RegisterSession(1000, "sess-1")
+		approver := &mockApprover{approved: false}
+		h := NewExecveHandler(ExecveHandlerConfig{}, approvePol, dt, nil)
+		h.SetApprover(approver)
+
+		result, _ := h.Handle(context.Background(), approveCtx)
+
+		require.True(t, approver.called)
+		require.False(t, result.Allow)
+		assert.Equal(t, ActionDeny, result.Action)
+		assert.Equal(t, int32(unix.EACCES), result.Errno)
+		assert.Equal(t, "approval_denied", result.Reason)
+	})
+
+	t.Run("approve error or timeout denies", func(t *testing.T) {
+		dt := NewDepthTracker()
+		dt.RegisterSession(1000, "sess-1")
+		// Unlike truncated-argv approval, ApprovalTimeoutAction never turns
+		// an approve rule into allow.
+		approver := &mockApprover{err: context.DeadlineExceeded}
+		h := NewExecveHandler(ExecveHandlerConfig{ApprovalTimeoutAction: "allow"}, approvePol, dt, nil)
+		h.SetApprover(approver)
+
+		result, _ := h.Handle(context.Background(), approveCtx)
+
+		require.True(t, approver.called)
+		require.False(t, result.Allow)
+		assert.Equal(t, ActionDeny, result.Action)
+		assert.Equal(t, int32(unix.EACCES), result.Errno)
+		assert.Equal(t, "approval_error", result.Reason)
 	})
 
 	t.Run("redirect produces ActionRedirect", func(t *testing.T) {
@@ -695,4 +755,46 @@ func TestExecveHandler_TransparentUnwrap_AuditFields(t *testing.T) {
 	require.NotNil(t, ev)
 	assert.Equal(t, "/usr/bin/env", ev.UnwrappedFrom)
 	assert.Equal(t, "git", ev.PayloadCommand)
+}
+
+func TestExecveHandler_TransparentUnwrap_ApprovePayload(t *testing.T) {
+	pol := &mockPolicyWithUnwrap{decisions: map[string]PolicyDecision{
+		"/usr/bin/env": {Decision: "allow", EffectiveDecision: "allow", Rule: "allow-env"},
+		"rm":           {Decision: "approve", EffectiveDecision: "approve", Rule: "approve-rm"},
+	}}
+	ectx := ExecveContext{
+		PID:       1001,
+		ParentPID: 1000,
+		Filename:  "/usr/bin/env",
+		Argv:      []string{"env", "rm", "-rf", "x"},
+	}
+
+	t.Run("denied", func(t *testing.T) {
+		dt := NewDepthTracker()
+		dt.RegisterSession(1000, "sess-1")
+		approver := &mockApprover{approved: false}
+		h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, nil)
+		h.SetApprover(approver)
+
+		result, _ := h.Handle(context.Background(), ectx)
+
+		require.True(t, approver.called)
+		assert.Equal(t, "approve-rm", approver.gotReq.Rule)
+		assert.False(t, result.Allow)
+		assert.Equal(t, ActionDeny, result.Action)
+	})
+
+	t.Run("approved", func(t *testing.T) {
+		dt := NewDepthTracker()
+		dt.RegisterSession(1000, "sess-1")
+		approver := &mockApprover{approved: true}
+		h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, nil)
+		h.SetApprover(approver)
+
+		result, _ := h.Handle(context.Background(), ectx)
+
+		require.True(t, approver.called)
+		assert.True(t, result.Allow)
+		assert.Equal(t, ActionContinue, result.Action)
+	})
 }

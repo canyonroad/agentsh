@@ -5,6 +5,7 @@ package unix
 import (
 	"testing"
 
+	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/stretchr/testify/require"
 	sysunix "golang.org/x/sys/unix"
 )
@@ -24,4 +25,15 @@ func TestCreateStubSocketPair(t *testing.T) {
 func TestSetStubBinaryPath(t *testing.T) {
 	SetStubBinaryPath("/usr/local/bin/agentsh-stub")
 	require.Equal(t, "/usr/local/bin/agentsh-stub", stubBinaryPath)
+}
+
+// A redirect with no target must be refused before anything touches the
+// tracee: falling back to the original command would run it server-side,
+// outside the tracee's sandbox.
+func TestHandleRedirect_NoTargetRefused(t *testing.T) {
+	ctx := ExecveContext{PID: 1, Filename: "/usr/local/lib/some-long-directory/probe"}
+	for _, r := range []*types.RedirectInfo{nil, {}} {
+		err := handleRedirect(-1, 0, ctx, 0, "/s", len(ctx.Filename), r)
+		require.ErrorIs(t, err, ErrRedirectNoTarget)
+	}
 }

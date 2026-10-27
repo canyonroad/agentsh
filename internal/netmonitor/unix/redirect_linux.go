@@ -23,6 +23,12 @@ var stubBinaryPath string
 // original filename length, making in-place memory overwrite impossible.
 var ErrRedirectPathTooLong = errors.New("stub symlink path longer than original filename")
 
+// ErrRedirectNoTarget is returned when a redirect has no target command. The
+// stub server runs its command in the agentsh server's context (outside the
+// tracee's sandbox), so it must only ever run an explicit redirect target,
+// never the original command.
+var ErrRedirectNoTarget = errors.New("redirect has no target command")
+
 // SetStubBinaryPath sets the path to the agentsh-stub binary.
 func SetStubBinaryPath(path string) {
 	stubBinaryPath = path
@@ -63,6 +69,10 @@ func createStubSocketPair() (stubRawFD int, srvConn net.Conn, err error) {
 //   - filenamePtr: the tracee memory address of the filename string (from execve arg0)
 //   - stubSymlinkPath: short path to a symlink that points to agentsh-stub
 func handleRedirect(notifFD int, reqID uint64, ctx ExecveContext, filenamePtr uint64, stubSymlinkPath string, originalFilenameLen int, redirect *types.RedirectInfo) error {
+	if redirect == nil || redirect.Command == "" {
+		return ErrRedirectNoTarget
+	}
+
 	// Validate the stub path fits within the original filename's memory.
 	// The original string at filenamePtr has originalFilenameLen+1 bytes (including null).
 	// We need len(stubSymlinkPath)+1 bytes for the replacement.
@@ -98,15 +108,11 @@ func handleRedirect(notifFD int, reqID uint64, ctx ExecveContext, filenamePtr ui
 
 	// Phase 3 (CONTINUE response) is handled by the caller after we return nil.
 
-	// Start server handler in background to run the original command
+	// Start server handler in background to run the redirect target
 	// and proxy I/O to the stub.
 	serveCfg := stub.ServeConfig{
-		Command: ctx.Filename,
-		Args:    ctx.Argv,
-	}
-	if redirect != nil && redirect.Command != "" {
-		serveCfg.Command = redirect.Command
-		serveCfg.Args = append(redirect.Args, redirect.ArgsAppend...)
+		Command: redirect.Command,
+		Args:    append(redirect.Args, redirect.ArgsAppend...),
 	}
 
 	stubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
