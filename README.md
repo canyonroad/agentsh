@@ -447,7 +447,7 @@ agentsh session logs <session-id> --type=llm
 
 **Features:**
 - **Automatic routing**: Sets `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` so agent SDKs route through the proxy
-- **Custom providers**: Route to LiteLLM, Azure OpenAI, vLLM, or corporate gateways
+- **Custom providers**: Route to LiteLLM, Azure OpenAI, vLLM, OrcaRouter Cyber Inference, or corporate gateways
 - **DLP redaction**: PII (emails, phone numbers, API keys, etc.) is redacted before reaching LLM providers
 - **Custom patterns**: Define organization-specific patterns for sensitive data
 - **Usage tracking**: Token counts extracted and logged for cost attribution
@@ -465,6 +465,7 @@ proxy:
     # Or use alternative providers:
     # openai: http://localhost:8000         # LiteLLM / vLLM
     # openai: https://your-resource.openai.azure.com  # Azure OpenAI
+    # openai: https://api.orcarouter.ai/v1  # OrcaRouter Cyber Inference (sk-orca-… key)
     # anthropic: https://llm.corp.example.com         # Corporate gateway
 ```
 

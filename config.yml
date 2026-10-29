@@ -320,6 +320,9 @@ proxy:
   #   # Azure OpenAI
   #   openai: "https://your-resource.openai.azure.com"
   #
+  #   # OrcaRouter Cyber Inference (OpenAI-compatible, sk-orca-… key)
+  #   openai: "https://api.orcarouter.ai/v1"
+  #
   #   # Corporate gateway
   #   anthropic: "https://llm-gateway.corp.example.com/anthropic"
 
