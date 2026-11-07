@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/platform"
+	"github.com/google/uuid"
 	"github.com/winfsp/cgofuse/fuse"
 )
 
@@ -36,9 +37,14 @@ func (f *fuseFS) checkPolicy(fusePath string, operation platform.FileOperation) 
 	if f.cfg.PolicyEngine == nil {
 		return platform.DecisionAllow
 	}
-	decision := f.cfg.PolicyEngine.CheckFile(f.realPath(fusePath), operation)
+	return f.applyApproval(fusePath, operation, f.cfg.PolicyEngine.CheckFile(f.realPath(fusePath), operation))
+}
+
+// applyApproval resolves an "approve" decision (already-made policy decision in),
+// so callers that must look at several paths can decide first and prompt once.
+func (f *fuseFS) applyApproval(fusePath string, operation platform.FileOperation, decision platform.Decision) platform.Decision {
 	if decision == platform.DecisionApprove {
-		return f.resolveApproval(fusePath, operation, decision)
+		return f.resolveApproval(fusePath, operation)
 	}
 	return decision
 }
@@ -47,14 +53,19 @@ func (f *fuseFS) checkPolicy(fusePath string, operation platform.FileOperation) 
 // and turns a missing approver, an error or a rejection into a deny, so every
 // operation in this backend (open, create, unlink, rename, chmod, symlink,
 // readlink, ...) fails closed instead of proceeding unprompted.
-func (f *fuseFS) resolveApproval(fusePath string, operation platform.FileOperation, decision platform.Decision) platform.Decision {
+func (f *fuseFS) resolveApproval(fusePath string, operation platform.FileOperation) platform.Decision {
 	if f.cfg.Approver == nil {
 		return platform.DecisionDeny
 	}
+	// The ID is minted here so the pending approval and the emitted file event
+	// share it. The platform Decision carries no rule/message, so those stay
+	// empty on this backend.
 	req := platform.ApprovalRequest{
+		ID:        "approval-" + uuid.NewString(),
 		SessionID: f.cfg.SessionID,
 		Kind:      "file",
 		Target:    f.virtPath(fusePath),
+		Rule:      "approve",
 		Op:        string(operation),
 	}
 	if f.cfg.CommandIDFunc != nil {
@@ -353,15 +364,36 @@ func (f *fuseFS) Rename(oldpath string, newpath string) int {
 	virtOldPath := f.virtPath(oldpath)
 	virtNewPath := f.virtPath(newpath)
 
-	decision := f.checkPolicy(oldpath, platform.FileOpRename)
-	if decision == platform.DecisionDeny {
-		f.emitEvent("file_rename", virtOldPath, platform.FileOpRename, decision, true)
+	// Both ends are evaluated before any approval is requested, so a rename
+	// into a denied destination does not consume a human approval first.
+	var decOld, decNew platform.Decision
+	if f.cfg.PolicyEngine == nil {
+		decOld, decNew = platform.DecisionAllow, platform.DecisionAllow
+	} else {
+		decOld = f.cfg.PolicyEngine.CheckFile(f.realPath(oldpath), platform.FileOpRename)
+		decNew = f.cfg.PolicyEngine.CheckFile(f.realPath(newpath), platform.FileOpRename)
+	}
+	if decOld == platform.DecisionDeny {
+		f.emitEvent("file_rename", virtOldPath, platform.FileOpRename, decOld, true)
 		return -fuse.EACCES
 	}
-	decision = f.checkPolicy(newpath, platform.FileOpRename)
-	if decision == platform.DecisionDeny {
-		f.emitEvent("file_rename", virtNewPath, platform.FileOpRename, decision, true)
+	if decNew == platform.DecisionDeny {
+		f.emitEvent("file_rename", virtNewPath, platform.FileOpRename, decNew, true)
 		return -fuse.EACCES
+	}
+	approvePath := oldpath
+	if decOld == platform.DecisionApprove {
+		approvePath = oldpath
+	} else if decNew == platform.DecisionApprove {
+		approvePath = newpath
+	}
+	decision := platform.DecisionAllow
+	if decOld == platform.DecisionApprove || decNew == platform.DecisionApprove {
+		decision = f.applyApproval(approvePath, platform.FileOpRename, platform.DecisionApprove)
+		if decision == platform.DecisionDeny {
+			f.emitEvent("file_rename", f.virtPath(approvePath), platform.FileOpRename, decision, true)
+			return -fuse.EACCES
+		}
 	}
 	f.emitEvent("file_rename", virtOldPath, platform.FileOpRename, decision, false)
 

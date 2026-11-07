@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/platform"
+	"github.com/winfsp/cgofuse/fuse"
 )
 
 func TestEmitEvent_WithChannel(t *testing.T) {
@@ -250,4 +251,69 @@ func TestCheckPolicy_ApproveDeniedByApprover(t *testing.T) {
 	if got := fs.checkPolicy("/.env", platform.FileOpWrite); got != platform.DecisionDeny {
 		t.Fatalf("checkPolicy = %q, want deny", got)
 	}
+}
+
+// A rename into a denied destination must not spend an approval on the source.
+func TestRename_DeniedDestinationDoesNotRequestApproval(t *testing.T) {
+	ap := &fakeApprover{}
+	fs := &fuseFS{cfg: Config{FSConfig: platform.FSConfig{
+		SessionID:    "s1",
+		MountPoint:   "/workspace",
+		PolicyEngine: pathPolicy{"/a": platform.DecisionApprove, "/b": platform.DecisionDeny},
+		Approver:     ap,
+	}}}
+	if got := fs.Rename("/a", "/b"); got != -fuse.EACCES {
+		t.Fatalf("Rename = %d, want EACCES", got)
+	}
+	if ap.calls != 0 {
+		t.Fatalf("approver called %d times, want 0", ap.calls)
+	}
+}
+
+// An approve on either side triggers exactly one approval.
+func TestRename_ApproveRequestsOnce(t *testing.T) {
+	ap := &fakeApprover{}
+	fs := &fuseFS{cfg: Config{FSConfig: platform.FSConfig{
+		SessionID:    "s1",
+		MountPoint:   "/workspace",
+		PolicyEngine: pathPolicy{"/a": platform.DecisionApprove, "/b": platform.DecisionAllow},
+		Approver:     ap,
+	}}}
+	// The rename itself will fail (paths do not exist); the approval count is
+	// what matters here.
+	_ = fs.Rename("/a", "/b")
+	if ap.calls != 1 {
+		t.Fatalf("approver called %d times, want 1", ap.calls)
+	}
+	if ap.last.ID == "" || ap.last.Rule == "" {
+		t.Fatalf("approval request lost ID/rule: %+v", ap.last)
+	}
+}
+
+// pathPolicy maps a real path to a decision for rename tests.
+type pathPolicy map[string]platform.Decision
+
+func (p pathPolicy) lookup(paths ...string) platform.Decision {
+	for _, path := range paths {
+		if d, ok := p[path]; ok {
+			return d
+		}
+	}
+	return platform.DecisionAllow
+}
+
+func (p pathPolicy) CheckFile(path string, op platform.FileOperation) platform.Decision {
+	return p.lookup(path)
+}
+func (p pathPolicy) CheckNetwork(addr string, port int, protocol string) platform.Decision {
+	return platform.DecisionAllow
+}
+func (p pathPolicy) CheckCommand(cmd string, args []string) platform.Decision {
+	return platform.DecisionAllow
+}
+func (p pathPolicy) CheckEnv(name string, op platform.EnvOperation) platform.Decision {
+	return platform.DecisionAllow
+}
+func (p pathPolicy) CheckRegistry(path string, op string) platform.Decision {
+	return platform.DecisionAllow
 }
