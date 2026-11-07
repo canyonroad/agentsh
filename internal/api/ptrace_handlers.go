@@ -112,6 +112,29 @@ func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecCo
 	if depth < 0 {
 		depth = 0
 	}
+	// argv was longer than what we read (slot/byte budget or an over-long
+	// element): the hidden tail can carry the token an args_pattern rule
+	// denies, so fail closed instead of evaluating a partial command line.
+	if ec.Truncated {
+		ev := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now().UTC(),
+			Type:      "ptrace_execve",
+			SessionID: ec.SessionID,
+			Fields: map[string]any{
+				"pid":       ec.PID,
+				"filename":  ec.Filename,
+				"argv":      ec.Argv,
+				"depth":     ec.Depth,
+				"decision":  string(types.DecisionDeny),
+				"rule":      "argv_truncated",
+				"truncated": true,
+			},
+		}
+		_ = r.store.AppendEvent(ctx, ev)
+		r.broker.Publish(ev)
+		return ptrace.ExecResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES), Rule: "argv_truncated"}
+	}
 	decision := pe.CheckExecve(ec.Filename, ec.Argv, depth)
 
 	// Emit audit event
@@ -194,6 +217,18 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 
 	decision := pe.CheckFile(fc.Path, fc.Operation)
 
+	// Dual-path syscalls (renameat2, linkat, symlinkat) also touch Path2. The
+	// policy must hold for both ends: a rename into a denied tree, or a hardlink
+	// of a denied-read file onto an allowed name, otherwise evades the rule.
+	if fc.Path2 != "" {
+		dec2 := pe.CheckFile(fc.Path2, fc.Operation)
+		if dec2.EffectiveDecision == types.DecisionDeny || dec2.PolicyDecision == types.DecisionDeny {
+			decision = dec2
+		} else if dec2.PolicyDecision == types.DecisionApprove && decision.PolicyDecision != types.DecisionDeny {
+			decision = dec2
+		}
+	}
+
 	ev := types.Event{
 		ID:        uuid.NewString(),
 		Timestamp: time.Now().UTC(),
@@ -202,6 +237,7 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 		Fields: map[string]any{
 			"pid":       fc.PID,
 			"path":      fc.Path,
+			"path2":     fc.Path2,
 			"operation": fc.Operation,
 			"decision":  string(decision.EffectiveDecision),
 			"rule":      decision.Rule,
