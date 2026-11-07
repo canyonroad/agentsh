@@ -18,9 +18,13 @@ type fuseFS struct {
 	fuse.FileSystemBase
 	realRoot  string
 	cfg       Config
-	openFiles sync.Map   // uint64 -> *openFile
-	nextFh    atomic.Uint64
-	mountedAt time.Time
+	openFiles sync.Map // uint64 -> *openFile
+
+	// approvalIDs maps a virtual path to the approval id requested for it, so
+	// the operation's file event can be correlated with the approval record.
+	approvalIDs sync.Map // string -> string
+	nextFh      atomic.Uint64
+	mountedAt   time.Time
 
 	// Stats
 	totalOps      atomic.Int64

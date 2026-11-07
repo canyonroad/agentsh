@@ -317,3 +317,28 @@ func (p pathPolicy) CheckEnv(name string, op platform.EnvOperation) platform.Dec
 func (p pathPolicy) CheckRegistry(path string, op string) platform.Decision {
 	return platform.DecisionAllow
 }
+
+// The event for an approve-gated operation must carry the approval id that was
+// requested, so the approval record and the file event correlate.
+func TestCheckPolicy_ApprovalIDReachesEvent(t *testing.T) {
+	ap := &fakeApprover{}
+	ch := make(chan platform.IOEvent, 1)
+	fs := &fuseFS{cfg: Config{FSConfig: platform.FSConfig{
+		SessionID:    "s1",
+		MountPoint:   "/workspace",
+		EventChannel: ch,
+		PolicyEngine: fakePolicy{decision: platform.DecisionApprove},
+		Approver:     ap,
+	}}}
+	decision := fs.checkPolicy("/.env", platform.FileOpWrite)
+	fs.emitEvent("file_open", "/workspace/.env", platform.FileOpWrite, decision, false)
+
+	select {
+	case ev := <-ch:
+		if ev.ApprovalID == "" || ev.ApprovalID != ap.last.ID {
+			t.Fatalf("event approval id = %q, request id = %q", ev.ApprovalID, ap.last.ID)
+		}
+	default:
+		t.Fatal("no event emitted")
+	}
+}

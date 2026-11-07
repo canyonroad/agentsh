@@ -60,18 +60,21 @@ func (f *fuseFS) resolveApproval(fusePath string, operation platform.FileOperati
 	// The ID is minted here so the pending approval and the emitted file event
 	// share it. The platform Decision carries no rule/message, so those stay
 	// empty on this backend.
+	virt := f.virtPath(fusePath)
 	req := platform.ApprovalRequest{
 		ID:        "approval-" + uuid.NewString(),
 		SessionID: f.cfg.SessionID,
 		Kind:      "file",
-		Target:    f.virtPath(fusePath),
+		Target:    virt,
 		Rule:      "approve",
 		Op:        string(operation),
 	}
 	if f.cfg.CommandIDFunc != nil {
 		req.CommandID = f.cfg.CommandIDFunc()
 	}
+	f.approvalIDs.Store(virt, req.ID)
 	if err := f.cfg.Approver.RequestApproval(context.Background(), req); err != nil {
+		f.approvalIDs.Delete(virt)
 		return platform.DecisionDeny
 	}
 	return platform.DecisionAllow
@@ -100,6 +103,10 @@ func (f *fuseFS) emitEvent(eventType, virtPath string, operation platform.FileOp
 		Operation: operation,
 		Decision:  decision,
 		Platform:  "fuse",
+	}
+	// Correlate the event with the approval that allowed this operation.
+	if id, ok := f.approvalIDs.LoadAndDelete(virtPath); ok {
+		event.ApprovalID, _ = id.(string)
 	}
 
 	// Get command ID if function is available
