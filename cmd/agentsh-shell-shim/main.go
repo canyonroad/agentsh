@@ -434,8 +434,9 @@ func containsCompoundOperator(s string) bool {
 		}
 	}
 	// Standalone '&' backgrounds everything before it, so "agentsh X & cmd"
-	// runs cmd unsupervised. Not a compound operator: ">&" / "<&" (fd dup),
-	// "&&" (handled above) and "&>" / "&>>" (bash redirect both streams).
+	// runs cmd unsupervised. Not a compound operator: ">&" / "<&" (fd dup) and
+	// "&&" (handled above). "&>" / "&>>" are NOT exempt: under POSIX sh they
+	// lex as "&" followed by ">", which backgrounds the first command.
 	for i := 0; i < len(s); i++ {
 		if s[i] != '&' {
 			continue
@@ -443,7 +444,7 @@ func containsCompoundOperator(s string) bool {
 		if i > 0 && (s[i-1] == '>' || s[i-1] == '<') {
 			continue
 		}
-		if i+1 < len(s) && (s[i+1] == '&' || s[i+1] == '>') {
+		if i+1 < len(s) && s[i+1] == '&' {
 			continue
 		}
 		return true

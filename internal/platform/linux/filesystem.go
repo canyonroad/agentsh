@@ -539,7 +539,17 @@ func (a *approverAdapter) RequestApproval(ctx context.Context, req approvals.Req
 	if sessionID == "" {
 		sessionID = a.sessionID
 	}
-	if err := a.inner.RequestApproval(ctx, sessionID, req.Kind, req.Target, req.Rule, req.Message, op); err != nil {
+	preq := platform.ApprovalRequest{
+		ID:        req.ID,
+		SessionID: sessionID,
+		CommandID: req.CommandID,
+		Kind:      req.Kind,
+		Target:    req.Target,
+		Rule:      req.Rule,
+		Message:   req.Message,
+		Op:        op,
+	}
+	if err := a.inner.RequestApproval(ctx, preq); err != nil {
 		return approvals.Resolution{Approved: false, Reason: err.Error(), At: time.Now().UTC()}, err
 	}
 	return approvals.Resolution{Approved: true, At: time.Now().UTC()}, nil

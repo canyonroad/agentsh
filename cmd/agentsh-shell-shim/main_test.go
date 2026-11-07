@@ -1588,6 +1588,9 @@ func TestContainsCompoundOperator(t *testing.T) {
 		"agentsh detect `id`",
 		"agentsh detect >(sh)",
 		"agentsh detect <(sh)",
+		// POSIX sh lexes &> as "&" + ">", so it backgrounds the first command.
+		"agentsh --version &>/dev/null touch /tmp/pwned",
+		"agentsh detect &>>/tmp/out",
 	}
 	for _, s := range compound {
 		if !containsCompoundOperator(s) {
@@ -1599,7 +1602,6 @@ func TestContainsCompoundOperator(t *testing.T) {
 		"agentsh detect 2>&1",
 		"agentsh detect >/tmp/out",
 		"agentsh detect 2>&1 >out.txt",
-		"agentsh detect &>/tmp/out",
 	}
 	for _, s := range simple {
 		if containsCompoundOperator(s) {

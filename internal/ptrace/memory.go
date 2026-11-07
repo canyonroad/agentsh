@@ -318,7 +318,11 @@ func (t *Tracer) readArgv(tid int, argvPtr uint64, maxArgc int, maxBytes int) ([
 	if err != nil {
 		return nil, false, err
 	}
+	return readArgvFrom(r, argvPtr, maxArgc, maxBytes)
+}
 
+// readArgvFrom is readArgv against an arbitrary reader (tests).
+func readArgvFrom(r memReader, argvPtr uint64, maxArgc int, maxBytes int) ([]string, bool, error) {
 	var args []string
 	totalBytes := 0
 	truncated := false
@@ -351,8 +355,13 @@ func (t *Tracer) readArgv(tid int, argvPtr uint64, maxArgc int, maxBytes int) ([
 		}
 		args = append(args, s)
 	}
-	// Exhausted the slot budget without a NULL terminator: more argv follows.
-	return args, true, nil
+	// Exhausted the slot budget: read the terminator to tell "exactly maxArgc
+	// arguments" (complete) from "more arguments follow" (truncated). A read
+	// error is reported as such rather than assumed to be truncation.
+	if err := r.read(argvPtr+uint64(maxArgc*8), ptrBuf); err != nil {
+		return args, true, err
+	}
+	return args, nativeEndianUint64(ptrBuf) != 0, nil
 }
 
 func nativeEndianUint64(b []byte) uint64 {

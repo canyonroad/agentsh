@@ -4,6 +4,8 @@
 package fuse
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -176,5 +178,76 @@ func TestEmitEvent_NoCommandIDFunc(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Error("Expected event but none received")
+	}
+}
+
+// fakePolicy returns a fixed decision, so the approve path can be tested.
+type fakePolicy struct{ decision platform.Decision }
+
+func (f fakePolicy) CheckFile(path string, op platform.FileOperation) platform.Decision {
+	return f.decision
+}
+func (f fakePolicy) CheckNetwork(addr string, port int, protocol string) platform.Decision {
+	return platform.DecisionAllow
+}
+func (f fakePolicy) CheckCommand(cmd string, args []string) platform.Decision {
+	return platform.DecisionAllow
+}
+func (f fakePolicy) CheckEnv(name string, op platform.EnvOperation) platform.Decision {
+	return platform.DecisionAllow
+}
+func (f fakePolicy) CheckRegistry(path string, op string) platform.Decision {
+	return platform.DecisionAllow
+}
+
+type fakeApprover struct {
+	err   error
+	calls int
+	last  platform.ApprovalRequest
+}
+
+func (f *fakeApprover) RequestApproval(ctx context.Context, req platform.ApprovalRequest) error {
+	f.calls++
+	f.last = req
+	return f.err
+}
+
+func TestCheckPolicy_ApproveFailsClosedWithoutApprover(t *testing.T) {
+	fs := &fuseFS{cfg: Config{FSConfig: platform.FSConfig{
+		SessionID:    "s1",
+		MountPoint:   "/workspace",
+		PolicyEngine: fakePolicy{decision: platform.DecisionApprove},
+	}}}
+	if got := fs.checkPolicy("/.env", platform.FileOpWrite); got != platform.DecisionDeny {
+		t.Fatalf("checkPolicy = %q, want deny", got)
+	}
+}
+
+func TestCheckPolicy_ApproveResolvedByApprover(t *testing.T) {
+	ap := &fakeApprover{}
+	fs := &fuseFS{cfg: Config{FSConfig: platform.FSConfig{
+		SessionID:     "s1",
+		MountPoint:    "/workspace",
+		PolicyEngine:  fakePolicy{decision: platform.DecisionApprove},
+		Approver:      ap,
+		CommandIDFunc: func() string { return "cmd-7" },
+	}}}
+	if got := fs.checkPolicy("/.env", platform.FileOpWrite); got != platform.DecisionAllow {
+		t.Fatalf("checkPolicy = %q, want allow", got)
+	}
+	if ap.calls != 1 || ap.last.CommandID != "cmd-7" || ap.last.Target != "/workspace/.env" || ap.last.Op != "write" {
+		t.Fatalf("approval request not forwarded: %+v (calls=%d)", ap.last, ap.calls)
+	}
+}
+
+func TestCheckPolicy_ApproveDeniedByApprover(t *testing.T) {
+	fs := &fuseFS{cfg: Config{FSConfig: platform.FSConfig{
+		SessionID:    "s1",
+		MountPoint:   "/workspace",
+		PolicyEngine: fakePolicy{decision: platform.DecisionApprove},
+		Approver:     &fakeApprover{err: errors.New("no")},
+	}}}
+	if got := fs.checkPolicy("/.env", platform.FileOpWrite); got != platform.DecisionDeny {
+		t.Fatalf("checkPolicy = %q, want deny", got)
 	}
 }

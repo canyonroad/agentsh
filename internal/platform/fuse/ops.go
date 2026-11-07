@@ -4,6 +4,7 @@
 package fuse
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"time"
@@ -35,7 +36,34 @@ func (f *fuseFS) checkPolicy(fusePath string, operation platform.FileOperation) 
 	if f.cfg.PolicyEngine == nil {
 		return platform.DecisionAllow
 	}
-	return f.cfg.PolicyEngine.CheckFile(f.realPath(fusePath), operation)
+	decision := f.cfg.PolicyEngine.CheckFile(f.realPath(fusePath), operation)
+	if decision == platform.DecisionApprove {
+		return f.resolveApproval(fusePath, operation, decision)
+	}
+	return decision
+}
+
+// resolveApproval asks the configured approver to resolve an "approve" decision
+// and turns a missing approver, an error or a rejection into a deny, so every
+// operation in this backend (open, create, unlink, rename, chmod, symlink,
+// readlink, ...) fails closed instead of proceeding unprompted.
+func (f *fuseFS) resolveApproval(fusePath string, operation platform.FileOperation, decision platform.Decision) platform.Decision {
+	if f.cfg.Approver == nil {
+		return platform.DecisionDeny
+	}
+	req := platform.ApprovalRequest{
+		SessionID: f.cfg.SessionID,
+		Kind:      "file",
+		Target:    f.virtPath(fusePath),
+		Op:        string(operation),
+	}
+	if f.cfg.CommandIDFunc != nil {
+		req.CommandID = f.cfg.CommandIDFunc()
+	}
+	if err := f.cfg.Approver.RequestApproval(context.Background(), req); err != nil {
+		return platform.DecisionDeny
+	}
+	return platform.DecisionAllow
 }
 
 // emitEvent emits a file event if an event channel is configured.

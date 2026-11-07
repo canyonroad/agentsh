@@ -221,12 +221,7 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 	// policy must hold for both ends: a rename into a denied tree, or a hardlink
 	// of a denied-read file onto an allowed name, otherwise evades the rule.
 	if fc.Path2 != "" {
-		dec2 := pe.CheckFile(fc.Path2, fc.Operation)
-		if dec2.EffectiveDecision == types.DecisionDeny || dec2.PolicyDecision == types.DecisionDeny {
-			decision = dec2
-		} else if dec2.PolicyDecision == types.DecisionApprove && decision.PolicyDecision != types.DecisionDeny {
-			decision = dec2
-		}
+		decision = mergeDualPathDecision(decision, pe.CheckFile(fc.Path2, fc.Operation))
 	}
 
 	ev := types.Event{
@@ -284,9 +279,43 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 		}
 		// Invalid redirect payload — deny to fail closed.
 		return ptrace.FileResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES)}
+	case types.DecisionApprove:
+		// Approvals are resolved out-of-band; ptrace has no synchronous prompt,
+		// so an unresolved "approve" must not fall through to allow.
+		return ptrace.FileResult{
+			Allow:  false,
+			Action: "deny",
+			Errno:  int32(syscall.EACCES),
+		}
 	default:
 		return ptrace.FileResult{Allow: true, Action: "allow"}
 	}
+}
+
+// mergeDualPathDecision picks the decision that has to hold for both paths of a
+// dual-path syscall (renameat2, linkat, symlinkat): deny wins, then approve.
+// ptrace can only rewrite the first path argument (redirectFile), so a
+// transformation that comes from the second path becomes a deny instead of
+// being silently dropped.
+func mergeDualPathDecision(primary, secondary policy.Decision) policy.Decision {
+	switch {
+	case secondary.EffectiveDecision == types.DecisionDeny:
+		return secondary
+	case primary.EffectiveDecision == types.DecisionDeny:
+		return primary
+	case secondary.PolicyDecision == types.DecisionApprove:
+		return secondary
+	case primary.EffectiveDecision == types.DecisionApprove:
+		return primary
+	case secondary.PolicyDecision == types.DecisionRedirect || secondary.PolicyDecision == types.DecisionSoftDelete:
+		return policy.Decision{
+			PolicyDecision:    secondary.PolicyDecision,
+			EffectiveDecision: types.DecisionDeny,
+			Rule:              secondary.Rule + " (second path " + string(secondary.PolicyDecision) + " unsupported in ptrace)",
+			Message:           secondary.Message,
+		}
+	}
+	return primary
 }
 
 // resolveTrashDir resolves the trash directory for a session.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/internal/platform"
 )
 
 // approvalsFSAdapter exposes approvals.Manager to the platform/FUSE layer as
@@ -15,17 +16,19 @@ type approvalsFSAdapter struct {
 	mgr *approvals.Manager
 }
 
-func (a approvalsFSAdapter) RequestApproval(ctx context.Context, sessionID, kind, target, rule, message, op string) error {
+func (a approvalsFSAdapter) RequestApproval(ctx context.Context, preq platform.ApprovalRequest) error {
 	if a.mgr == nil {
 		return fmt.Errorf("approvals not configured")
 	}
 	res, err := a.mgr.RequestApproval(ctx, approvals.Request{
-		SessionID: sessionID,
-		Kind:      kind,
-		Target:    target,
-		Rule:      rule,
-		Message:   message,
-		Fields:    map[string]any{"operation": op},
+		ID:        preq.ID,
+		SessionID: preq.SessionID,
+		CommandID: preq.CommandID,
+		Kind:      preq.Kind,
+		Target:    preq.Target,
+		Rule:      preq.Rule,
+		Message:   preq.Message,
+		Fields:    map[string]any{"operation": preq.Op},
 	})
 	if err != nil {
 		return err

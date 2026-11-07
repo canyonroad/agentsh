@@ -102,8 +102,6 @@ type FSConfig struct {
 
 	// Approver resolves a policy "approve" decision; nil means "no human
 	// available", which the filesystem layer treats as deny (fail closed).
-	// Declared as an interface because internal/platform cannot import
-	// internal/approvals (approvals imports platform).
 	Approver Approver
 
 	// AuditMode is the global configured FUSE audit mode
@@ -396,12 +394,25 @@ const (
 	ResourceCPUAffinity
 )
 
+// ApprovalRequest describes an operation that policy marked "approve".
+// Declared here because internal/platform cannot import internal/approvals
+// (approvals imports platform); ID and CommandID are carried through so the
+// pending-approval record and the file event can be correlated.
+type ApprovalRequest struct {
+	ID        string
+	SessionID string
+	CommandID string
+	Kind      string
+	Target    string
+	Rule      string
+	Message   string
+	Op        string
+}
+
 // Approver resolves a policy "approve" decision for the platform layer.
 // A non-nil error means "not approved": callers must fail closed.
-// Declared here because internal/platform cannot import internal/approvals
-// (approvals imports platform).
 type Approver interface {
-	RequestApproval(ctx context.Context, sessionID, kind, target, rule, message, op string) error
+	RequestApproval(ctx context.Context, req ApprovalRequest) error
 }
 
 // InterceptionManager handles synchronous operation interception.
