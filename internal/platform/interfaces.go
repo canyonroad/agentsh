@@ -100,6 +100,12 @@ type FSConfig struct {
 	// Interceptor handles synchronous interception (hold/redirect/approve)
 	Interceptor InterceptionManager
 
+	// Approver resolves a policy "approve" decision; nil means "no human
+	// available", which the filesystem layer treats as deny (fail closed).
+	// Declared as an interface because internal/platform cannot import
+	// internal/approvals (approvals imports platform).
+	Approver Approver
+
 	// AuditMode is the global configured FUSE audit mode
 	// ("monitor" | "soft_block" | "soft_delete" | "strict"; "" means
 	// monitor). The FUSE layer uses it as the default per-operation mode;
@@ -389,6 +395,14 @@ const (
 	ResourceNetworkBW
 	ResourceCPUAffinity
 )
+
+// Approver resolves a policy "approve" decision for the platform layer.
+// A non-nil error means "not approved": callers must fail closed.
+// Declared here because internal/platform cannot import internal/approvals
+// (approvals imports platform).
+type Approver interface {
+	RequestApproval(ctx context.Context, sessionID, kind, target, rule, message, op string) error
+}
 
 // InterceptionManager handles synchronous operation interception.
 // Operations can be held pending a policy decision, and may be

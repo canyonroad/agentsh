@@ -373,6 +373,7 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					EventChannel:      eventChan,
 					MaxBackground:     a.cfg.Sandbox.FUSE.MaxBackground,
 					SymlinkEscapeDeny: a.cfg.Policies.SymlinkEscapeDeny(),
+					Approver:          approvalsFSAdapter{mgr: a.approvals},
 					// For the primary workspace mount, use the session's effective virtual
 					// root so FUSE events report paths consistent with the session (e.g.
 					// /workspace in default mode). Non-workspace mounts use their real
@@ -1278,6 +1279,7 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 		EventChannel:      eventChan,
 		MaxBackground:     a.cfg.Sandbox.FUSE.MaxBackground,
 		SymlinkEscapeDeny: a.cfg.Policies.SymlinkEscapeDeny(),
+		Approver:          approvalsFSAdapter{mgr: a.approvals},
 	}
 
 	// Configure soft-delete/trash. Trash must be available to FUSE when the
