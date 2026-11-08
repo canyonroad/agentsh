@@ -435,7 +435,13 @@ func resolveTraceeSymlink(pid int, path string) string {
 	if !strings.HasPrefix(resolved, root) {
 		return path
 	}
-	return strings.TrimPrefix(resolved, root)
+	// Keep the tracee-absolute form: "/" + "etc/x" must stay "/etc/x", since a
+	// non-absolute path is allowed without evaluation by the file handler.
+	rel := strings.TrimPrefix(resolved, root)
+	if !strings.HasPrefix(rel, "/") {
+		rel = "/" + rel
+	}
+	return rel
 }
 
 // resolvePathAt reads a path string from tracee memory and resolves it

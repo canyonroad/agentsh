@@ -612,3 +612,13 @@ func TestTruncateSyscalls(t *testing.T) {
 	assert.Equal(t, uint64(0x1000), pargs.PathPtr)
 	assert.Equal(t, int32(unix.AT_FDCWD), pargs.Dirfd)
 }
+
+// The root prefix must not be stripped into a relative path: the file handler
+// allows non-absolute paths without evaluating them.
+func TestResolveTraceeSymlinkKeepsAbsolute(t *testing.T) {
+	// pid 1 always exists; /proc/1/root is "/" for the host.
+	target := resolveTraceeSymlink(1, "/etc/hostname")
+	if target != "/etc/hostname" {
+		t.Fatalf("resolved %q, want /etc/hostname", target)
+	}
+}

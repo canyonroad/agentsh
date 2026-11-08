@@ -1290,6 +1290,15 @@ func foreignABI(arch uint32, nr int) bool {
 	return arch != nativeAuditArch()
 }
 
+// compatCodeSegment is the amd64 CS value of a 32-bit (compat) code segment;
+// native 64-bit code runs with 0x33.
+const compatCodeSegment = 0x23
+
+// isCompatCodeSegment reports whether cs belongs to a 32-bit compat segment.
+func isCompatCodeSegment(cs uint64) bool {
+	return runtime.GOARCH == "amd64" && cs == compatCodeSegment
+}
+
 // tracesSyscall reports whether the prefilter stops this syscall number
 // natively, so a stop for any other number means a foreign ABI.
 func (t *Tracer) tracesSyscall(nr int) bool {
@@ -1318,15 +1327,25 @@ func (t *Tracer) dispatch(ctx context.Context, tid int, nr int, sc *SyscallConte
 		}
 		return
 	}
-	// Without PTRACE_GET_SYSCALL_INFO the arch is unknown. A stop for a number
-	// the prefilter does not trace can then only come from its arch-mismatch
-	// RET TRACE, i.e. a foreign-ABI syscall: fail closed rather than dispatch
-	// it as native (i386 execve is native munmap).
-	if fromSeccomp && sc.Info.Arch == 0 && !t.tracesSyscall(nr) {
-		if err := t.denySyscall(tid, int(unix.ENOSYS)); err != nil {
-			slog.Warn("ptrace: deny arch-unknown syscall failed", "tid", tid, "nr", nr, "error", err)
+	// Without PTRACE_GET_SYSCALL_INFO the audit arch is unknown. The code
+	// segment selector still tells a compat (32-bit) syscall from a native one
+	// (i386 execve is native munmap), so check it before dispatching.
+	if sc.Info.Arch == 0 {
+		if regs, err := sc.Regs(); err == nil {
+			if isCompatCodeSegment(regs.CodeSegment()) {
+				if err := t.denySyscall(tid, int(unix.ENOSYS)); err != nil {
+					slog.Warn("ptrace: deny compat syscall failed", "tid", tid, "nr", nr, "error", err)
+				}
+				return
+			}
+		} else if fromSeccomp && !t.tracesSyscall(nr) {
+			// No registers either: on a seccomp stop, an untraced number can
+			// only come from the prefilter's arch-mismatch branch.
+			if err := t.denySyscall(tid, int(unix.ENOSYS)); err != nil {
+				slog.Warn("ptrace: deny arch-unknown syscall failed", "tid", tid, "nr", nr, "error", err)
+			}
+			return
 		}
-		return
 	}
 
 	// Socket tuple rules are the most-specific socket policy. Check them

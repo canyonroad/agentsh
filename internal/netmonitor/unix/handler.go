@@ -537,12 +537,19 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		path2 = p2
 	}
 
-	// truncate/ftruncate follow symlinks, so judge the target of the link
-	// rather than the (possibly allowed) link path.
-	// shortcut: this is a snapshot taken before CONTINUE, so a sibling thread can
-	// repoint the link afterwards; upgrade to fd-bound mediation if it matters.
-	if args.Nr == unix.SYS_TRUNCATE || args.Nr == unix.SYS_FTRUNCATE {
-		path = resolveTraceeSymlink(pid, path)
+	// truncate/ftruncate follow symlinks. The resolved target is only a
+	// pre-CONTINUE snapshot, so a sibling thread could repoint the link before
+	// the kernel runs the syscall; when the path really is a symlink, deny
+	// instead of racing it (a plain path is checked as itself below).
+	// shortcut: symlink truncate is denied outright; upgrade to fd-bound
+	// mediation if truncating through links must be allowed.
+	if args.Nr == unix.SYS_TRUNCATE {
+		if target := resolveTraceeSymlink(pid, path); target != path {
+			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
+				slog.Debug("file handler: symlink truncate deny failed", "pid", pid, "error", err)
+			}
+			return
+		}
 	}
 
 	operation := syscallToOperation(args.Nr, fileArgs.Flags)
@@ -680,9 +687,14 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 		path2 = p2
 	}
 
-	// truncate/ftruncate follow symlinks: judge the target, not the link path.
-	if args.Nr == unix.SYS_TRUNCATE || args.Nr == unix.SYS_FTRUNCATE {
-		path = resolveTraceeSymlink(pid, path)
+	// truncate/fruncate follow symlinks: judge the target, not the link path.
+	if args.Nr == unix.SYS_TRUNCATE {
+		if target := resolveTraceeSymlink(pid, path); target != path {
+			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
+				slog.Debug("emulated file handler: symlink truncate deny failed", "pid", pid, "error", err)
+			}
+			return
+		}
 	}
 
 	operation := syscallToOperation(args.Nr, fileArgs.Flags)
