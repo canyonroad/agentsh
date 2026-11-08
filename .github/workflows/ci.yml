@@ -183,11 +183,15 @@ jobs:
           # to amd64 and adding a ports source for arm64, `apt-get
           # update` after `dpkg --add-architecture arm64` 404s on every
           # arm64 Packages file.
+          # Use the runner's own suite for the ports source: a hardcoded suite
+          # pins arm64 packages to an older release and apt then fails on
+          # "Breaks" between the amd64 and arm64 libseccomp-dev versions.
+          CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME}")
           sudo sed -i '/^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
-          sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<'EOF'
+          sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<EOF
           Types: deb
           URIs: http://ports.ubuntu.com/ubuntu-ports
-          Suites: noble noble-updates noble-security
+          Suites: ${CODENAME} ${CODENAME}-updates ${CODENAME}-security
           Components: main universe restricted multiverse
           Architectures: arm64
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
