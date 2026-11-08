@@ -28,6 +28,14 @@ Known pre-existing failure on this machine: `internal/fsmonitor TestFUSE_FsyncFl
 | 15 (High) | ptrace `HandleFile` evaluates `Path2` too (rename/link/symlink destination), stricter decision wins, `path2` added to the event | `227c4a1b` |
 | 42 (High) | ptrace `readArgv` reports truncation (slot budget, byte budget, over-long element) and the execve handler denies with rule `argv_truncated` | `06055ce5` |
 | 24 (High, known C1) | shim CLI bypass treats standalone `&`, `>(`/`<(` **and** `&>`/`&>>` as compound; table test added | `3c30670c` |
+| N1 (High, new) | PTY sessions get the same kernel enforcement as an exec: command routed through `setupSeccompWrapper`, wrapper fds + env passed, hybrid READY/attach/GO handshake, tracer-managed wait (`pty.StartRequest.ExtraFiles/ExternalWait`, `Session.SetWaitOverride`) | `1a28b6a8` |
+| 28 (High) | `policies.allowed` enforced on session create (empty list ⇒ only `policies.default`) and on a profile's base/mount policies when a list is set | `2bfce103` |
+| 2 (High) | `truncate`/`ftruncate` join both engines (seccomp notify set, ptrace traced set, arg extraction, ftruncate via `/proc/<pid>/fd`), operation `write`; `mknodat` arg extraction added | `073b79e6` |
+| 9 (High) | io_uring denied outright in every ptrace BPF builder (prefilter, static-deny, arg-level) | `a0b33642` |
+| 17 (High) | ptrace keeps the audit arch, denies non-native/x32 numbers, and detects compat ABIs from the CS selector when the arch is unavailable | `754df8da` |
+| 20 (High) | `pidfd_send_signal` intercepted in both engines, target resolved from fdinfo, unresolved target denied before policy | `2818df42` |
+| 18 (High) | ptrace evaluates the destination of `sendto`/`sendmsg`/`sendmmsg` (every vector); seccomp AF_INET path still continues | `fafc6fa4` |
+| review loop (batch 1) | 5 roborev rounds, jobs 19052-19065: PTY env/hybrid/argv0, profile allowlist, truncate symlinks (incl. the root-prefix bug and the audit-only regression), io_uring + x32 in the injected builders, vfork/unknown-arch dispatch, sendmmsg vectors, pidfd unresolved target | `8fbc99d5`, `03966d22`, `c346cb18`, `875149f8`, `adb908b1` |
 | review loop | 5 roborev rounds on the branch (jobs 19038-19045). Fixed in follow-ups: shared macOS/Windows FUSE approve path, approval ID/CommandID correlation, `renameat2` approve-then-fail, `readArgv` false truncation at exactly `maxArgc`, POSIX `sh` `&>`, approval id now returned per-op instead of a path-keyed map | `3c17bacc`, `3b816bc3`, `e1120054`, `af0cbb2d` |
 | CI | darwin policysock shadow-mode test updated to the fail-closed expectation; `fsmonitor/approve_test.go` tagged linux; `build-linux-arm64-cgo` repaired for the ubuntu-26.04 runner (ports suite from the runner codename + `--allow-downgrades`) | `af0cbb2d`, `c3470a52` |
 
@@ -41,12 +49,11 @@ subsystem is not configured (previously it allowed silently). In ptrace mode a c
 
 | # | Finding | Plan |
 |---|---|---|
-| N1 (High) | PTY exec installs no seccomp wrapper and no ptrace attach | route `pty.Start` through the same `setupSeccompWrapper`/attach path as `exec_stream`, or refuse PTY when `seccomp.execve`/ptrace are configured |
-| 1 (High) | seccomp file monitor judges the lexical path | resolve the absolute path through `/proc/<pid>/root` (mirroring `ptrace.resolveViaProc`) before `CheckFile`; fail closed on resolution error |
+| 1 (High) | seccomp file monitor judges the lexical path for every other syscall | generalise `resolveTraceeSymlink` (already used by truncate) to open/rename/unlink and fail closed on resolution error |
 | 3 (High) | FUSE leaves `link`/`mknod`/setxattr/chown/utimes to the root loopback | add the node ops with `check()` + events, and make the seccomp-to-FUSE deferral op-aware |
-| 17 (High) | ptrace dispatches on the raw nr, dropping the ABI | keep `Arch` in `SyscallEntryInfo`, deny non-native arch, add the x32 high-bit guard in the BPF |
 | 29/30 (High) | no session ownership on the HTTP API; totp/webauthn never prompt | per-session principal check; drive the prompt off `mode != api` |
-| 5, 6, 7, 9, 11, 12, 13 (High) | cap drop dead code, shim PATH identity, gRPC RBAC, io_uring, `sh script.sh`, netns UDP, MCP registry | after the above |
+| 5, 6, 7, 11, 12, 13 (High) | cap drop dead code, shim PATH identity, gRPC RBAC, `sh script.sh`, netns UDP, MCP registry | after the above |
+| partial rows | #18 (seccomp AF_INET still continues), #20 (ptrace signal handler still allows every signal: needs the registry/ancestry context), #1 (only truncate resolves symlinks) | finish with the network/wrapper work |
 
 ### Not started
 
