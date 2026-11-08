@@ -296,3 +296,20 @@ func TestForeignABI(t *testing.T) {
 		}
 	}
 }
+
+// pidfd_send_signal was not in any signal set, so a traced process could signal
+// any same-uid process (including the supervisor) with no policy decision.
+func TestPidfdSendSignalIsTraced(t *testing.T) {
+	if !isSignalSyscall(unix.SYS_PIDFD_SEND_SIGNAL) {
+		t.Fatal("pidfd_send_signal is not a signal syscall")
+	}
+	found := false
+	for _, nr := range narrowTracedSyscallNumbers(&TracerConfig{TraceSignal: true}) {
+		if nr == unix.SYS_PIDFD_SEND_SIGNAL {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("pidfd_send_signal missing from the traced syscall set")
+	}
+}

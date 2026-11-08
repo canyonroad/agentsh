@@ -43,7 +43,8 @@ func isCloseSyscall(nr int) bool {
 func isSignalSyscall(nr int) bool {
 	switch nr {
 	case unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL,
-		unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO:
+		unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO,
+		unix.SYS_PIDFD_SEND_SIGNAL:
 		return true
 	}
 	return false
@@ -85,6 +86,7 @@ func narrowTracedSyscallNumbers(cfg *TracerConfig) []int {
 		nums = append(nums,
 			unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL,
 			unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO,
+			unix.SYS_PIDFD_SEND_SIGNAL,
 		)
 	}
 	if cfg.MaskTracerPid || (cfg.TraceNetwork && cfg.NetworkHandler != nil) {
