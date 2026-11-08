@@ -313,3 +313,24 @@ func TestPidfdSendSignalIsTraced(t *testing.T) {
 		t.Fatal("pidfd_send_signal missing from the traced syscall set")
 	}
 }
+
+// Datagram sends on unconnected sockets only expose their destination via
+// sendto/sendmsg/sendmmsg, so all three must be traced when a network handler
+// is configured.
+func TestSendSyscallsAreTraced(t *testing.T) {
+	for _, nr := range []int{unix.SYS_SENDTO, unix.SYS_SENDMSG, unix.SYS_SENDMMSG} {
+		if !isNetworkSyscall(nr) {
+			t.Fatalf("syscall %d is not a network syscall", nr)
+		}
+	}
+	traced := map[int]bool{}
+	cfg := &TracerConfig{TraceNetwork: true, NetworkHandler: &minimalNetworkHandler{}}
+	for _, nr := range narrowTracedSyscallNumbers(cfg) {
+		traced[nr] = true
+	}
+	for _, nr := range []int{unix.SYS_SENDTO, unix.SYS_SENDMSG, unix.SYS_SENDMMSG} {
+		if !traced[nr] {
+			t.Fatalf("send syscall %d missing from the traced set", nr)
+		}
+	}
+}

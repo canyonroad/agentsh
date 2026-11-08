@@ -84,7 +84,7 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, sc *SyscallContext)
 
 	// Sendto DNS redirect: if sendto targets port 53, rewrite destination to proxy
 	if t.dnsProxy != nil && nr == unix.SYS_SENDTO {
-		destAddrPtr := args[4] // sendto arg4 = dest_addr
+		destAddrPtr := args[4]      // sendto arg4 = dest_addr
 		destAddrLen := int(args[5]) // sendto arg5 = addrlen
 		if destAddrPtr != 0 && destAddrLen > 0 && destAddrLen <= 128 {
 			destBuf := make([]byte, destAddrLen)
@@ -124,6 +124,13 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, sc *SyscallContext)
 				}
 			}
 		}
+	}
+
+	// Datagram sends on an unconnected socket never call connect(), so the
+	// destination is only visible on sendto/sendmsg/sendmmsg.
+	if nr == unix.SYS_SENDTO || nr == unix.SYS_SENDMSG || nr == unix.SYS_SENDMMSG {
+		t.handleSend(ctx, tid, nr, args)
+		return
 	}
 
 	// Only evaluate policy for connect and bind
@@ -294,6 +301,95 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, sc *SyscallContext)
 	default:
 		slog.Warn("handleNetwork: unknown action, denying", "tid", tid, "action", action)
 		t.denySyscall(tid, int(unix.EACCES))
+	}
+}
+
+// handleSend evaluates the destination of a datagram send. A send on a
+// connected socket has no name (msg_name NULL / addrlen 0): connect() already
+// evaluated it, so it is allowed.
+func (t *Tracer) handleSend(ctx context.Context, tid int, nr int, args [6]uint64) {
+	namePtr, nameLen, ok := t.sendSockaddr(tid, nr, args)
+	if !ok {
+		t.allowSyscall(tid)
+		return
+	}
+	if nameLen < 2 || nameLen > 128 {
+		slog.Warn("handleSend: addrlen out of range, denying", "tid", tid, "addrlen", nameLen)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
+	buf := make([]byte, nameLen)
+	if err := t.readBytes(tid, namePtr, buf); err != nil {
+		slog.Warn("handleSend: cannot read sockaddr, denying", "tid", tid, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
+	family, address, port, err := parseSockaddr(buf)
+	if err != nil {
+		slog.Warn("handleSend: cannot parse sockaddr, denying", "tid", tid, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
+
+	t.mu.Lock()
+	state := t.tracees[tid]
+	var tgid int
+	var sessionID string
+	if state != nil {
+		tgid = state.TGID
+		sessionID = state.SessionID
+	}
+	t.mu.Unlock()
+
+	operation := "sendto"
+	if nr != unix.SYS_SENDTO {
+		operation = "sendmsg"
+	}
+	result := t.cfg.NetworkHandler.HandleNetwork(ctx, NetworkContext{
+		PID:       tgid,
+		SessionID: sessionID,
+		Syscall:   nr,
+		Family:    family,
+		Address:   address,
+		Port:      port,
+		Operation: operation,
+	})
+	allow := result.Allow || result.Action == "allow" || result.Action == "continue"
+	if !allow {
+		errno := int(result.Errno)
+		if errno == 0 {
+			errno = int(unix.EACCES)
+		}
+		t.denySyscall(tid, errno)
+		return
+	}
+	t.allowSyscall(tid)
+}
+
+// sendSockaddr returns the destination sockaddr of a send syscall. ok is false
+// for a connected-socket send, which carries no destination.
+func (t *Tracer) sendSockaddr(tid, nr int, args [6]uint64) (uint64, int, bool) {
+	switch nr {
+	case unix.SYS_SENDTO:
+		// sendto(sockfd, buf, len, flags, dest_addr, addrlen)
+		if args[4] == 0 || args[5] == 0 {
+			return 0, 0, false
+		}
+		return args[4], int(args[5]), true
+	default:
+		// sendmsg(sockfd, msg, flags) / sendmmsg(sockfd, msgvec, vlen, flags):
+		// struct msghdr { void *msg_name; socklen_t msg_namelen; ... } and
+		// struct mmsghdr starts with the same msghdr.
+		var hdr [12]byte
+		if err := t.readBytes(tid, args[1], hdr[:]); err != nil {
+			return 0, 0, false
+		}
+		namePtr := binary.NativeEndian.Uint64(hdr[0:8])
+		nameLen := int(binary.NativeEndian.Uint32(hdr[8:12]))
+		if namePtr == 0 || nameLen == 0 {
+			return 0, 0, false
+		}
+		return namePtr, nameLen, true
 	}
 }
 

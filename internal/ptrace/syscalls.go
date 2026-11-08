@@ -22,7 +22,7 @@ func isFileSyscall(nr int) bool {
 func isNetworkSyscall(nr int) bool {
 	switch nr {
 	case unix.SYS_CONNECT, unix.SYS_SOCKET, unix.SYS_BIND,
-		unix.SYS_SENDTO, unix.SYS_LISTEN:
+		unix.SYS_SENDTO, unix.SYS_SENDMSG, unix.SYS_SENDMMSG, unix.SYS_LISTEN:
 		return true
 	}
 	return false
@@ -78,7 +78,9 @@ func narrowTracedSyscallNumbers(cfg *TracerConfig) []int {
 	if cfg.TraceNetwork {
 		nums = append(nums, unix.SYS_CONNECT, unix.SYS_BIND)
 		if cfg.NetworkHandler != nil {
-			nums = append(nums, unix.SYS_SENDTO)
+			// Unconnected datagrams are written with sendto/sendmsg/sendmmsg;
+			// without these the destination never reaches policy.
+			nums = append(nums, unix.SYS_SENDTO, unix.SYS_SENDMSG, unix.SYS_SENDMMSG)
 		}
 		// socket, listen: removed — always allowed by handleNetwork
 	}
