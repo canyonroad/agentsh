@@ -343,6 +343,9 @@ sandbox:
 policies:
   dir: "/policies"
   default: "default"
+  # A non-default policy can only be selected when it is allowlisted
+  # (docs/spec.md 9.2); this fixture uses "custom".
+  allowed: ["default", "custom"]
 approvals:
   enabled: false
 metrics:
