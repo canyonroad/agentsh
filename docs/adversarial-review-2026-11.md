@@ -31,7 +31,7 @@ Known pre-existing failure on this machine: `internal/fsmonitor TestFUSE_FsyncFl
 | review loop | 5 roborev rounds on the branch (jobs 19038-19045). Fixed in follow-ups: shared macOS/Windows FUSE approve path, approval ID/CommandID correlation, `renameat2` approve-then-fail, `readArgv` false truncation at exactly `maxArgc`, POSIX `sh` `&>`, approval id now returned per-op instead of a path-keyed map | `3c17bacc`, `3b816bc3`, `e1120054`, `af0cbb2d` |
 | CI | darwin policysock shadow-mode test updated to the fail-closed expectation; `fsmonitor/approve_test.go` tagged linux; `build-linux-arm64-cgo` repaired for the ubuntu-26.04 runner (ports suite from the runner codename + `--allow-downgrades`) | `af0cbb2d`, `c3470a52` |
 
-This document is committed via PR #455 (`docs:` commit). PR #454: all checks green (test-linux, test-macos, test-windows, integration, build-linux-arm64-cgo, build-matrix x4), squash-merged to `main`.
+This document was squash-merged as `cb5f5b43` (PR #456). PR #454: all checks green (test-linux, test-macos, test-windows, integration, build-linux-arm64-cgo, build-matrix x4), squash-merged to `main`.
 
 Behavior changes to mention in release notes: an `approve` rule now **denies** when the approvals
 subsystem is not configured (previously it allowed silently). In ptrace mode a command line with
