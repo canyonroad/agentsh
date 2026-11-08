@@ -663,6 +663,8 @@ func installFileMonitorRules(adder fileMonitorRuleAdder, action seccomp.ScmpActi
 		seccomp.ScmpSyscall(unix.SYS_FCHMODAT),
 		seccomp.ScmpSyscall(unix.SYS_FCHOWNAT),
 		seccomp.ScmpSyscall(unix.SYS_MKNODAT),
+		seccomp.ScmpSyscall(unix.SYS_TRUNCATE),
+		seccomp.ScmpSyscall(unix.SYS_FTRUNCATE),
 	} {
 		if err := addRule(sc, "file monitor"); err != nil {
 			return added, err

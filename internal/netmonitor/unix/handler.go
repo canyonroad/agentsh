@@ -506,7 +506,7 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 
 	// Resolve primary path. For mutating operations, retry with /proc/<pid>/mem
 	// fallback when ProcessVMReadv fails (Yama ptrace_scope).
-	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
+	path, err := resolveFileArgsPath(pid, fileArgs)
 	if err != nil {
 		if !isReadOnlyFileOp(args.Nr, fileArgs.Flags) {
 			path, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd, fileArgs.PathPtr)
@@ -537,17 +537,31 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		path2 = p2
 	}
 
+	// truncate follows symlinks, so judge the resolved target. It is only a
+	// pre-CONTINUE snapshot, so mark it and let the handler decide (deny while
+	// enforcing, audit-only otherwise).
+	// shortcut: a symlink truncate is denied while enforcing; upgrade to
+	// fd-bound mediation if truncating through links must be allowed.
+	symlinkSnapshot := false
+	if args.Nr == unix.SYS_TRUNCATE {
+		if target := resolveTraceeSymlink(pid, path); target != path {
+			path = target
+			symlinkSnapshot = true
+		}
+	}
+
 	operation := syscallToOperation(args.Nr, fileArgs.Flags)
 
 	frequest := FileRequest{
-		PID:       pid,
-		Syscall:   args.Nr,
-		Path:      path,
-		Path2:     path2,
-		Operation: operation,
-		Flags:     fileArgs.Flags,
-		Mode:      fileArgs.Mode,
-		SessionID: sessID,
+		PID:             pid,
+		Syscall:         args.Nr,
+		SymlinkSnapshot: symlinkSnapshot,
+		Path:            path,
+		Path2:           path2,
+		Operation:       operation,
+		Flags:           fileArgs.Flags,
+		Mode:            fileArgs.Mode,
+		SessionID:       sessID,
 	}
 
 	result, ev := h.Handle(frequest)
@@ -631,7 +645,7 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	// resolution failure falls back to CONTINUE — the kernel handles the
 	// syscall without policy evaluation. This is safe because reads cannot
 	// mutate the filesystem.
-	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
+	path, err := resolveFileArgsPath(pid, fileArgs)
 	if err != nil {
 		// For writes, retry with /proc/<pid>/mem fallback — deny rules
 		// must be evaluated even when ProcessVMReadv is blocked by Yama.
@@ -672,6 +686,15 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 		path2 = p2
 	}
 
+	// truncate follows symlinks: judge the resolved target (see above).
+	symlinkSnapshot := false
+	if args.Nr == unix.SYS_TRUNCATE {
+		if target := resolveTraceeSymlink(pid, path); target != path {
+			path = target
+			symlinkSnapshot = true
+		}
+	}
+
 	operation := syscallToOperation(args.Nr, fileArgs.Flags)
 
 	// Resolve /proc/self/fd/N, /proc/<pid>/fd/N, /dev/fd/N aliases before
@@ -689,6 +712,7 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	frequest := FileRequest{
 		PID: pid, Syscall: args.Nr, Path: path, Path2: path2,
 		Operation: operation, Flags: fileArgs.Flags, Mode: fileArgs.Mode, SessionID: sessID,
+		SymlinkSnapshot: symlinkSnapshot,
 	}
 
 	// For non-emulated syscalls (CONTINUE path), do first ID validation

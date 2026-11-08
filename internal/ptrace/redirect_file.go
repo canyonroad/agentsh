@@ -35,6 +35,10 @@ func filePathArgIndex(nr int) int {
 		return 1
 	case unix.SYS_SYMLINKAT:
 		return 0
+	case unix.SYS_TRUNCATE:
+		return 0
+	case unix.SYS_MKNODAT:
+		return 1
 	default:
 		// Check for legacy (non-at) file syscalls on architectures that have them.
 		return legacyFilePathArgIndex(nr)

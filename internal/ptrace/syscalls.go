@@ -12,7 +12,8 @@ func isFileSyscall(nr int) bool {
 	switch nr {
 	case unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
 		unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
-		unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT:
+		unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT,
+		unix.SYS_TRUNCATE, unix.SYS_FTRUNCATE, unix.SYS_MKNODAT:
 		return true
 	}
 	return isLegacyFileSyscall(nr)
@@ -21,7 +22,7 @@ func isFileSyscall(nr int) bool {
 func isNetworkSyscall(nr int) bool {
 	switch nr {
 	case unix.SYS_CONNECT, unix.SYS_SOCKET, unix.SYS_BIND,
-		unix.SYS_SENDTO, unix.SYS_LISTEN:
+		unix.SYS_SENDTO, unix.SYS_SENDMSG, unix.SYS_SENDMMSG, unix.SYS_LISTEN:
 		return true
 	}
 	return false
@@ -42,7 +43,8 @@ func isCloseSyscall(nr int) bool {
 func isSignalSyscall(nr int) bool {
 	switch nr {
 	case unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL,
-		unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO:
+		unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO,
+		unix.SYS_PIDFD_SEND_SIGNAL:
 		return true
 	}
 	return false
@@ -69,13 +71,16 @@ func narrowTracedSyscallNumbers(cfg *TracerConfig) []int {
 			unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
 			unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
 			unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT,
+			unix.SYS_TRUNCATE, unix.SYS_FTRUNCATE, unix.SYS_MKNODAT,
 		)
 		nums = append(nums, legacyFileSyscalls()...)
 	}
 	if cfg.TraceNetwork {
 		nums = append(nums, unix.SYS_CONNECT, unix.SYS_BIND)
 		if cfg.NetworkHandler != nil {
-			nums = append(nums, unix.SYS_SENDTO)
+			// Unconnected datagrams are written with sendto/sendmsg/sendmmsg;
+			// without these the destination never reaches policy.
+			nums = append(nums, unix.SYS_SENDTO, unix.SYS_SENDMSG, unix.SYS_SENDMMSG)
 		}
 		// socket, listen: removed — always allowed by handleNetwork
 	}
@@ -83,6 +88,7 @@ func narrowTracedSyscallNumbers(cfg *TracerConfig) []int {
 		nums = append(nums,
 			unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL,
 			unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO,
+			unix.SYS_PIDFD_SEND_SIGNAL,
 		)
 	}
 	if cfg.MaskTracerPid || (cfg.TraceNetwork && cfg.NetworkHandler != nil) {
@@ -102,6 +108,7 @@ func AllFileSyscalls() []int {
 		unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
 		unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
 		unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT,
+		unix.SYS_TRUNCATE, unix.SYS_FTRUNCATE, unix.SYS_MKNODAT,
 	}
 	nums = append(nums, legacyFileSyscalls()...)
 	return nums
@@ -126,8 +133,11 @@ func isVforkSafeSyscall(nr int) bool {
 }
 
 // AllNetworkSyscalls returns all network-related syscall numbers that the
-// tracer intercepts (connect, bind, sendto). Exported for use by
-// StaticAllowChecker implementations.
+// tracer intercepts (connect, bind, sendto, sendmsg, sendmmsg). Exported for use
+// by StaticAllowChecker implementations.
 func AllNetworkSyscalls() []int {
-	return []int{unix.SYS_CONNECT, unix.SYS_BIND, unix.SYS_SENDTO}
+	return []int{
+		unix.SYS_CONNECT, unix.SYS_BIND, unix.SYS_SENDTO,
+		unix.SYS_SENDMSG, unix.SYS_SENDMMSG,
+	}
 }

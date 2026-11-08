@@ -35,6 +35,9 @@ type ptyRun struct {
 
 	req ptyStartParams
 	ps  *pty.Session
+
+	// handlerCancel stops the wrapper notify/signal handlers; run on finish.
+	handlerCancel context.CancelFunc
 }
 
 func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams) (*ptyRun, int, error) {
@@ -184,7 +187,21 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 		cols = 80
 	}
 
-	ps, err := pty.New().Start(ctx, pty.StartRequest{
+	// PTY sessions must get the same kernel enforcement as a plain exec:
+	// route the command through agentsh-unixwrap (seccomp file/net/execve,
+	// Landlock) and attach the ptrace tracer when that mode is active.
+	// Previously the PTY path ran the raw command with only FUSE in front.
+	wrap := a.setupSeccompWrapper(types.ExecRequest{
+		Command: req.Command,
+		Args:    req.Args,
+		Env:     req.Env,
+	}, sessionID, sess)
+
+	var extra *extraProcConfig
+	if wrap != nil {
+		extra = wrap.extraCfg
+	}
+	startReq := pty.StartRequest{
 		Command: req.Command,
 		Args:    req.Args,
 		Argv0:   strings.TrimSpace(req.Argv0),
@@ -194,12 +211,119 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 			Rows: rows,
 			Cols: cols,
 		},
-	})
+	}
+	argv0 := startReq.Argv0
+	if wrap != nil {
+		startReq.Command = wrap.wrappedReq.Command
+		startReq.Args = wrap.wrappedReq.Args
+		// The wrapper launches the target, so the requested argv0 travels via
+		// its env rather than as the wrapper's own argv[0].
+		if argv0 != "" {
+			startReq.Argv0 = ""
+		}
+	}
+	startReq.ExternalWait = a.ptraceTracer != nil
+	if extra != nil {
+		// extra.env carries the wrapper's own plumbing (notify socket fd, seccomp
+		// config, signal fd, wrapper log fd); without it agentsh-unixwrap exits.
+		envSet := func(env []string, k, v string) []string {
+			filtered := env[:0]
+			for _, e := range env {
+				if ek, _, ok := strings.Cut(e, "="); ok && ek == k {
+					continue
+				}
+				filtered = append(filtered, e)
+			}
+			return append(filtered, k+"="+v)
+		}
+		for k, v := range extra.env {
+			startReq.Env = envSet(startReq.Env, k, v)
+		}
+		for k, v := range extra.envInject {
+			startReq.Env = envSet(startReq.Env, k, v)
+		}
+		if argv0 != "" {
+			startReq.Env = envSet(startReq.Env, "AGENTSH_UNIXWRAP_ARGV0", argv0)
+		}
+		startReq.ExtraFiles = extra.extraFiles
+	}
+
+	ps, err := pty.New().Start(ctx, startReq)
 	if err != nil {
+		if extra != nil {
+			for _, f := range extra.extraFiles {
+				_ = f.Close()
+			}
+		}
 		defer unlock()
 		return nil, http.StatusInternalServerError, err
 	}
 	sess.SetCurrentProcessPID(ps.PID())
+	pgid := getProcessGroupID(ps.PID())
+
+	// Hand the wrapper's fds to its handlers, then attach the tracer, mirroring
+	// the exec path: in hybrid mode (execve-only ptrace + wrapper) the wrapper
+	// runs seccomp setup, signals READY, waits for the tracer, then for GO.
+	failStart := func(what string, cause error) (*ptyRun, int, error) {
+		_ = killProcess(ps.PID())
+		_ = killProcessGroup(pgid)
+		_, _ = ps.Wait()
+		defer unlock()
+		return nil, http.StatusInternalServerError, fmt.Errorf("%s: %w", what, cause)
+	}
+	var waitExit func() ptraceExecResult
+	// handlerCancel stops the wrapper's notify/signal handlers; it must live as
+	// long as the PTY run, so it is handed to ptyRun instead of deferred here.
+	var handlerCancel context.CancelFunc
+	if extra != nil && extra.ptraceSync && a.ptraceTracer != nil {
+		handlerCtx, cancel := context.WithCancel(ctx)
+		handlerCancel = cancel
+		ptraceReady := make(chan error, 1)
+		startWrapperHandlers(handlerCtx, extra, ps.PID(), pgid, ptraceReady)
+
+		var readyErr error
+		select {
+		case readyErr = <-ptraceReady:
+		case <-ctx.Done():
+			readyErr = ctx.Err()
+		}
+		if readyErr != nil {
+			return failStart("PTY wrapper ready (hybrid)", readyErr)
+		}
+		attachWait, resume, attachErr := ptraceExecAttach(a.ptraceTracer, ps.PID(), sessionID, cmdID, false)
+		if attachErr != nil {
+			return failStart("ptrace attach (PTY, hybrid)", attachErr)
+		}
+		if resume != nil {
+			if resumeErr := resume(); resumeErr != nil {
+				return failStart("ptrace resume (PTY, hybrid)", resumeErr)
+			}
+		}
+		if extra.notifyParentSock != nil {
+			if _, goErr := extra.notifyParentSock.Write([]byte{'G'}); goErr != nil {
+				return failStart("hybrid GO byte (PTY)", goErr)
+			}
+		}
+		waitExit = attachWait
+	} else {
+		handlerCtx, cancel := context.WithCancel(ctx)
+		handlerCancel = cancel
+		startWrapperHandlers(handlerCtx, extra, ps.PID(), pgid, nil)
+		if a.ptraceTracer != nil {
+			attachWait, _, attachErr := ptraceExecAttach(a.ptraceTracer, ps.PID(), sessionID, cmdID, false)
+			if attachErr != nil {
+				return failStart("ptrace attach (PTY)", attachErr)
+			}
+			waitExit = attachWait
+		}
+	}
+	if waitExit != nil {
+		// The tracer reaps the child, so cmd.Wait would report ECHILD.
+		ps.SetWaitOverride(func() (int, error) {
+			res := waitExit()
+			return res.exitCode, res.err
+		})
+	}
 
 	startEv := types.Event{
 		ID:        uuid.NewString(),
@@ -216,16 +340,20 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 	a.broker.Publish(startEv)
 
 	return &ptyRun{
-		sessionID: sessionID,
-		unlock:    unlock,
-		cmdID:     cmdID,
-		started:   start,
-		req:       req,
-		ps:        ps,
+		sessionID:     sessionID,
+		unlock:        unlock,
+		cmdID:         cmdID,
+		started:       start,
+		req:           req,
+		ps:            ps,
+		handlerCancel: handlerCancel,
 	}, http.StatusOK, nil
 }
 
 func (a *App) finishPTY(ctx context.Context, run *ptyRun, exitCode int, started time.Time, err error, out []byte, outTotal int64, outTrunc bool) {
+	if run != nil && run.handlerCancel != nil {
+		run.handlerCancel()
+	}
 	if a == nil || run == nil {
 		return
 	}

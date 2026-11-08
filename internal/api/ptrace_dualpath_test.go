@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/ptrace"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -125,5 +126,41 @@ func TestHandleExecve_TruncatedArgvDenies(t *testing.T) {
 	})
 	if res.Allow {
 		t.Fatalf("exec with truncated argv was allowed: %+v", res)
+	}
+}
+
+func TestCheckPolicyNameAllowed(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Policies.Default = "default"
+	app := &App{cfg: cfg}
+
+	if err := app.checkPolicyNameAllowed("default"); err != nil {
+		t.Fatalf("default rejected: %v", err)
+	}
+	if err := app.checkPolicyNameAllowed("bench-allow-all"); err == nil {
+		t.Fatal("empty policies.allowed must reject a non-default policy")
+	}
+
+	app.cfg.Policies.Allowed = []string{"default", "strict"}
+	if err := app.checkPolicyNameAllowed("strict"); err != nil {
+		t.Fatalf("allowlisted policy rejected: %v", err)
+	}
+	if err := app.checkPolicyNameAllowed("bench-allow-all"); err == nil {
+		t.Fatal("policy outside policies.allowed was accepted")
+	}
+}
+
+func TestCheckPolicyAllowlisted(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Policies.Default = "default"
+	app := &App{cfg: cfg}
+	// Empty list: profiles/mounts keep working.
+	if err := app.checkPolicyAllowlisted("workspace-rw"); err != nil {
+		t.Fatalf("empty allowlist rejected a mount policy: %v", err)
+	}
+	// Non-empty list is enforced.
+	app.cfg.Policies.Allowed = []string{"default"}
+	if err := app.checkPolicyAllowlisted("workspace-rw"); err == nil {
+		t.Fatal("non-empty allowlist accepted a policy outside it")
 	}
 }

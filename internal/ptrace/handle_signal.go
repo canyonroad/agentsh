@@ -4,7 +4,11 @@ package ptrace
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -30,6 +34,26 @@ func extractSignalArgs(nr int, arg0, arg1, arg2 int) (int, int, int) {
 	}
 }
 
+// pidfdTargetPID resolves the process behind a pidfd via the sender's fdinfo
+// ("Pid:" line). Returns -1 when the target cannot be resolved.
+func pidfdTargetPID(tid, fd int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/fdinfo/%d", tid, fd))
+	if err != nil {
+		return -1
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "Pid:") {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "Pid:")))
+		if err != nil {
+			return -1
+		}
+		return pid
+	}
+	return -1
+}
+
 // handleSignal intercepts signal delivery syscalls for policy evaluation.
 func (t *Tracer) handleSignal(ctx context.Context, tid int, sc *SyscallContext) {
 	if t.cfg.SignalHandler == nil || !t.cfg.TraceSignal {
@@ -41,7 +65,8 @@ func (t *Tracer) handleSignal(ctx context.Context, tid int, sc *SyscallContext) 
 
 	switch nr {
 	case unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL,
-		unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO:
+		unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO,
+		unix.SYS_PIDFD_SEND_SIGNAL:
 		// handled below
 	default:
 		t.allowSyscall(tid)
@@ -53,6 +78,18 @@ func (t *Tracer) handleSignal(ctx context.Context, tid int, sc *SyscallContext) 
 	arg2 := int(int32(sc.Info.Args[2]))
 
 	targetPID, signal, sigArgIndex := extractSignalArgs(nr, arg0, arg1, arg2)
+	if nr == unix.SYS_PIDFD_SEND_SIGNAL {
+		// pidfd_send_signal(pidfd, sig, info, flags): the pidfd carries the
+		// target, which is otherwise invisible to signal policy.
+		targetPID = pidfdTargetPID(tid, arg0)
+		signal = arg1
+		sigArgIndex = 1
+		if targetPID < 0 {
+			slog.Warn("handleSignal: cannot resolve pidfd target, denying", "tid", tid, "pidfd", arg0)
+			t.denySyscall(tid, int(unix.EPERM))
+			return
+		}
+	}
 
 	t.mu.Lock()
 	state := t.tracees[tid]

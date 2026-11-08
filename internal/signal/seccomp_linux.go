@@ -4,6 +4,9 @@ package signal
 
 import (
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 
 	seccomp "github.com/seccomp/libseccomp-golang"
 	"golang.org/x/sys/unix"
@@ -25,6 +28,7 @@ func DefaultSignalFilterConfig() SignalFilterConfig {
 			unix.SYS_TKILL,
 			unix.SYS_RT_SIGQUEUEINFO,
 			unix.SYS_RT_TGSIGQUEUEINFO,
+			unix.SYS_PIDFD_SEND_SIGNAL,
 		},
 	}
 }
@@ -36,11 +40,11 @@ type SignalFilter struct {
 
 // SignalContext holds information extracted from a signal syscall.
 type SignalContext struct {
-	PID       int                  // PID of the process making the syscall
-	Syscall   int                  // The syscall number (SYS_KILL, SYS_TGKILL, etc.)
-	TargetPID int                  // Target PID of the signal
-	TargetTID int                  // Target TID (for tgkill/tkill)
-	Signal    int                  // The signal number being sent
+	PID       int // PID of the process making the syscall
+	Syscall   int // The syscall number (SYS_KILL, SYS_TGKILL, etc.)
+	TargetPID int // Target PID of the signal
+	TargetTID int // Target TID (for tgkill/tkill)
+	Signal    int // The signal number being sent
 }
 
 // IsSignalSupportAvailable checks if seccomp user-notify is available (API >= 6).
@@ -185,12 +189,49 @@ func ExtractSignalContext(req *seccomp.ScmpNotifReq) SignalContext {
 		ctx.TargetPID = int(req.Data.Args[0])
 		ctx.TargetTID = int(req.Data.Args[1])
 		ctx.Signal = int(req.Data.Args[2])
+
+	case unix.SYS_PIDFD_SEND_SIGNAL:
+		// pidfd_send_signal(int pidfd, int sig, siginfo_t *info, flags)
+		// The pidfd carries the target; resolve it from the sender's fdinfo.
+		// -1 (unresolvable) must be denied by the caller, not classified as an
+		// external target.
+		// shortcut: fdinfo is sampled before the syscall runs, so a sibling
+		// thread can swap the fd; upgrade to pidfd-object binding if it matters.
+		ctx.TargetPID = PidfdTargetPID(int(req.Pid), int(req.Data.Args[0]))
+		ctx.Signal = int(req.Data.Args[1])
 	}
 
 	return ctx
 }
 
+// PidfdTargetPID resolves the process behind a pidfd by reading the "Pid:"
+// line of the tracee's fdinfo. Returns -1 when the target cannot be resolved,
+// which callers must treat as "policy unavailable" and fail closed.
+func PidfdTargetPID(tid, fd int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/fdinfo/%d", tid, fd))
+	if err != nil {
+		return -1
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "Pid:") {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "Pid:")))
+		if err != nil {
+			return -1
+		}
+		return pid
+	}
+	return -1
+}
+
 // IsProcessGroupSignal returns true if the signal targets a process group.
+// UnresolvedTarget reports a pidfd_send_signal whose pidfd could not be
+// resolved. Policy cannot classify it, so callers must deny.
+func (c *SignalContext) UnresolvedTarget() bool {
+	return c.Syscall == unix.SYS_PIDFD_SEND_SIGNAL && c.TargetPID < 0
+}
+
 func (c *SignalContext) IsProcessGroupSignal() bool {
 	// kill(0, sig) or kill(-pgid, sig)
 	return c.TargetPID <= 0

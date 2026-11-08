@@ -1180,7 +1180,8 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		// Fast-path vfork children for known safe setup syscalls.
 		// Exclude SYS_CLOSE when fd tracking is active (same as handleSeccompStop).
 		if state.IsVforkChild && !isExecveSyscall(nr) && isVforkSafeSyscall(nr) &&
-			!(nr == unix.SYS_CLOSE && t.fds != nil) {
+			!(nr == unix.SYS_CLOSE && t.fds != nil) && !foreignABI(sc.Info.Arch, nr) &&
+			sc.Info.Arch != 0 {
 			t.allowSyscall(tid)
 			return
 		}
@@ -1259,16 +1260,94 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	// Exception: SYS_CLOSE must go through handleClose when fd tracking
 	// is active (t.fds != nil) to clean up statusFds/dnsRedirects/tlsWatched.
 	if isVfork && !isExecveSyscall(nr) && isVforkSafeSyscall(nr) &&
-		!(nr == unix.SYS_CLOSE && t.fds != nil) {
+		!(nr == unix.SYS_CLOSE && t.fds != nil) && !foreignABI(sc.Info.Arch, nr) &&
+		sc.Info.Arch != 0 {
 		t.allowSyscall(tid)
 		return
 	}
 
-	t.dispatchSyscall(ctx, tid, nr, sc)
+	t.dispatch(ctx, tid, nr, sc, true)
+}
+
+// nativeAuditArch is the AUDIT_ARCH_* value of the ABI this tracer runs on.
+func nativeAuditArch() uint32 {
+	if runtime.GOARCH == "arm64" {
+		return auditArchAarch64
+	}
+	return auditArchX86_64
+}
+
+// foreignABI reports whether a syscall came from another ABI: another audit
+// arch, or an x32 number (bit 30 set) on amd64. Their numbers collide with
+// unrelated native syscalls, so the nr switch cannot route them.
+func foreignABI(arch uint32, nr int) bool {
+	if runtime.GOARCH == "amd64" && nr&0x40000000 != 0 {
+		return true
+	}
+	if arch == 0 {
+		return false // unknown arch (older kernels / tests): assume native
+	}
+	return arch != nativeAuditArch()
+}
+
+// compatCodeSegment is the amd64 CS value of a 32-bit (compat) code segment;
+// native 64-bit code runs with 0x33.
+const compatCodeSegment = 0x23
+
+// isCompatCodeSegment reports whether cs belongs to a 32-bit compat segment.
+func isCompatCodeSegment(cs uint64) bool {
+	return runtime.GOARCH == "amd64" && cs == compatCodeSegment
+}
+
+// tracesSyscall reports whether the prefilter stops this syscall number
+// natively, so a stop for any other number means a foreign ABI.
+func (t *Tracer) tracesSyscall(nr int) bool {
+	for _, n := range tracedSyscallNumbers(&t.cfg) {
+		if n == nr {
+			return true
+		}
+	}
+	return false
 }
 
 // dispatchSyscall routes a syscall to the appropriate handler.
 func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *SyscallContext) {
+	t.dispatch(ctx, tid, nr, sc, false)
+}
+
+// dispatch is dispatchSyscall with the stop kind: fromSeccomp marks a
+// PTRACE_EVENT_SECCOMP stop (prefilter), which is the only kind that can be a
+// foreign-ABI stop when the audit arch is unknown.
+func (t *Tracer) dispatch(ctx context.Context, tid int, nr int, sc *SyscallContext, fromSeccomp bool) {
+	// A foreign-ABI syscall must never reach the native switch: i386 execve is
+	// amd64 munmap, i386 open is amd64 fstat, so every handler would be wrong.
+	if foreignABI(sc.Info.Arch, nr) {
+		if err := t.denySyscall(tid, int(unix.ENOSYS)); err != nil {
+			slog.Warn("ptrace: deny foreign-ABI syscall failed", "tid", tid, "nr", nr, "arch", sc.Info.Arch, "error", err)
+		}
+		return
+	}
+	// Without PTRACE_GET_SYSCALL_INFO the audit arch is unknown. The code
+	// segment selector still tells a compat (32-bit) syscall from a native one
+	// (i386 execve is native munmap), so check it before dispatching.
+	if sc.Info.Arch == 0 {
+		if regs, err := sc.Regs(); err == nil {
+			if isCompatCodeSegment(regs.CodeSegment()) {
+				if err := t.denySyscall(tid, int(unix.ENOSYS)); err != nil {
+					slog.Warn("ptrace: deny compat syscall failed", "tid", tid, "nr", nr, "error", err)
+				}
+				return
+			}
+		} else if fromSeccomp && !t.tracesSyscall(nr) {
+			// No registers either: on a seccomp stop, an untraced number can
+			// only come from the prefilter's arch-mismatch branch.
+			if err := t.denySyscall(tid, int(unix.ENOSYS)); err != nil {
+				slog.Warn("ptrace: deny arch-unknown syscall failed", "tid", tid, "nr", nr, "error", err)
+			}
+			return
+		}
+	}
+
 	// Socket tuple rules are the most-specific socket policy. Check them
 	// before family rules and the generic network handler so protocol-specific
 	// Dirty Frag rules are not shadowed by broad AF_* entries.

@@ -20,9 +20,13 @@ const (
 	ptraceSyscallInfoSeccomp uint8 = 3
 )
 
-// SyscallEntryInfo holds syscall number and arguments extracted at entry time.
+// SyscallEntryInfo holds syscall number, arguments and the seccomp audit arch
+// (AUDIT_ARCH_*) extracted at entry time. The arch matters: a 64-bit tracee can
+// issue i386 (int $0x80) or x32 numbers, whose values do not line up with the
+// native table, so dispatching on nr alone allows them.
 type SyscallEntryInfo struct {
 	Nr   int
+	Arch uint32
 	Args [6]uint64
 }
 
@@ -87,6 +91,7 @@ func (t *Tracer) getSyscallEntryInfo(tid int) (*SyscallEntryInfo, error) {
 	}
 	return &SyscallEntryInfo{
 		Nr:   int(info.EntryNr),
+		Arch: info.Arch,
 		Args: info.EntryArgs,
 	}, nil
 }

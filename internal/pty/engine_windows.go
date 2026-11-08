@@ -40,12 +40,21 @@ type StartRequest struct {
 	Dir   string
 	Env   []string
 
+	// ExtraFiles is accepted for API parity with Unix; ConPTY has no fd
+	// inheritance, so the supervisor passes nothing here on Windows.
+	ExtraFiles []*os.File
+
+	// ExternalWait is accepted for API parity with Unix (no external reaper on
+	// Windows today).
+	ExternalWait bool
+
 	InitialSize Winsize
 }
 
 // Session represents a PTY session on Windows using ConPTY.
 type Session struct {
 	cpty    *conpty.ConPty
+	wait    func() (int, error)
 	outCh   chan []byte
 	outDone chan struct{}
 	pid     int
@@ -139,10 +148,27 @@ func (s *Session) terminateProcess() error {
 	return proc.Kill()
 }
 
+// SetWaitOverride replaces the wait implementation for processes reaped by
+// another component. Accepted for API parity with Unix; no such component
+// exists on Windows today, so it is only stored and preferred when set.
+func (s *Session) SetWaitOverride(fn func() (int, error)) {
+	if s == nil {
+		return
+	}
+	s.wait = fn
+}
+
 // Wait waits for the PTY process to exit and returns the exit code.
 func (s *Session) Wait() (exitCode int, err error) {
 	if s == nil || s.cpty == nil {
 		return 127, errors.New("process not started")
+	}
+	if s.wait != nil {
+		code, waitErr := s.wait()
+		if s.outDone != nil {
+			<-s.outDone
+		}
+		return code, waitErr
 	}
 
 	code, err := s.cpty.Wait(context.Background())

@@ -4,6 +4,7 @@ package ptrace
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/seccomp"
@@ -276,4 +277,60 @@ func containsSyscall(nums []int, want int) bool {
 		}
 	}
 	return false
+}
+
+// A 64-bit tracee can issue i386 (int $0x80) or x32 numbers; their values
+// collide with unrelated native syscalls (i386 execve=11 is amd64 munmap), so
+// they must be rejected before the native dispatch switch.
+func TestForeignABI(t *testing.T) {
+	native := nativeAuditArch()
+	if foreignABI(native, unix.SYS_OPENAT) {
+		t.Fatal("native syscall classified as foreign")
+	}
+	if !foreignABI(0x40000003 /* AUDIT_ARCH_I386 */, unix.SYS_OPENAT) {
+		t.Fatal("i386 arch not classified as foreign")
+	}
+	if runtime.GOARCH == "amd64" {
+		if !foreignABI(native, 0x40000000|unix.SYS_OPENAT) {
+			t.Fatal("x32 syscall number not classified as foreign")
+		}
+	}
+}
+
+// pidfd_send_signal was not in any signal set, so a traced process could signal
+// any same-uid process (including the supervisor) with no policy decision.
+func TestPidfdSendSignalIsTraced(t *testing.T) {
+	if !isSignalSyscall(unix.SYS_PIDFD_SEND_SIGNAL) {
+		t.Fatal("pidfd_send_signal is not a signal syscall")
+	}
+	found := false
+	for _, nr := range narrowTracedSyscallNumbers(&TracerConfig{TraceSignal: true}) {
+		if nr == unix.SYS_PIDFD_SEND_SIGNAL {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("pidfd_send_signal missing from the traced syscall set")
+	}
+}
+
+// Datagram sends on unconnected sockets only expose their destination via
+// sendto/sendmsg/sendmmsg, so all three must be traced when a network handler
+// is configured.
+func TestSendSyscallsAreTraced(t *testing.T) {
+	for _, nr := range []int{unix.SYS_SENDTO, unix.SYS_SENDMSG, unix.SYS_SENDMMSG} {
+		if !isNetworkSyscall(nr) {
+			t.Fatalf("syscall %d is not a network syscall", nr)
+		}
+	}
+	traced := map[int]bool{}
+	cfg := &TracerConfig{TraceNetwork: true, NetworkHandler: &minimalNetworkHandler{}}
+	for _, nr := range narrowTracedSyscallNumbers(cfg) {
+		traced[nr] = true
+	}
+	for _, nr := range []int{unix.SYS_SENDTO, unix.SYS_SENDMSG, unix.SYS_SENDMMSG} {
+		if !traced[nr] {
+			t.Fatalf("send syscall %d missing from the traced set", nr)
+		}
+	}
 }

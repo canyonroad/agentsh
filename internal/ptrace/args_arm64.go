@@ -8,11 +8,12 @@ type arm64Regs struct {
 	raw unix.PtraceRegsArm64
 }
 
-func (r *arm64Regs) SyscallNr() int             { return int(int64(r.raw.Regs[8])) }
-func (r *arm64Regs) SetSyscallNr(nr int)         { r.raw.Regs[8] = uint64(nr) }
-func (r *arm64Regs) ReturnValue() int64          { return int64(r.raw.Regs[0]) }
-func (r *arm64Regs) SetReturnValue(v int64)      { r.raw.Regs[0] = uint64(v) }
-func (r *arm64Regs) InstructionPointer() uint64    { return r.raw.Pc }
+func (r *arm64Regs) SyscallNr() int                    { return int(int64(r.raw.Regs[8])) }
+func (r *arm64Regs) SetSyscallNr(nr int)               { r.raw.Regs[8] = uint64(nr) }
+func (r *arm64Regs) CodeSegment() uint64               { return 0 }
+func (r *arm64Regs) ReturnValue() int64                { return int64(r.raw.Regs[0]) }
+func (r *arm64Regs) SetReturnValue(v int64)            { r.raw.Regs[0] = uint64(v) }
+func (r *arm64Regs) InstructionPointer() uint64        { return r.raw.Pc }
 func (r *arm64Regs) SetInstructionPointer(addr uint64) { r.raw.Pc = addr }
 
 func (r *arm64Regs) Clone() Regs {
