@@ -625,6 +625,28 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 	return s.Snapshot(), http.StatusCreated, nil
 }
 
+// checkPolicyNameAllowed enforces policies.allowed: with a list, only those
+// names may be loaded; with an empty list, only policies.default
+// (docs/spec.md 9.2).
+func (a *App) checkPolicyNameAllowed(name string) error {
+	if a == nil || a.cfg == nil {
+		return nil
+	}
+	allowed := a.cfg.Policies.Allowed
+	if len(allowed) == 0 {
+		if def := a.cfg.Policies.Default; def != "" && name != def {
+			return fmt.Errorf("policy %q is not allowed (policies.allowed is empty, only %q is permitted)", name, def)
+		}
+		return nil
+	}
+	for _, n := range allowed {
+		if n == name {
+			return nil
+		}
+	}
+	return fmt.Errorf("policy %q is not in policies.allowed", name)
+}
+
 func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequest) (types.Session, int, error) {
 	// Handle profile-based session creation
 	if req.Profile != "" {
@@ -634,6 +656,12 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	policyName := req.Policy
 	if policyName == "" {
 		policyName = a.cfg.Policies.Default
+	}
+	// policies.allowed is the documented allowlist: a caller could otherwise
+	// name any file in the policy dir (e.g. a shipped allow-all policy) and get
+	// its session compiled from it.
+	if err := a.checkPolicyNameAllowed(policyName); err != nil {
+		return types.Session{}, http.StatusForbidden, err
 	}
 
 	// Determine if we should detect project root
