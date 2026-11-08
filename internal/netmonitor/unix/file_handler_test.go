@@ -642,3 +642,25 @@ func TestEmulationPath_ResolvePathAtFailure_ReadVsWrite(t *testing.T) {
 		}
 	})
 }
+
+// A symlink snapshot is denied while enforcing, but audit-only mode keeps its
+// documented allow behaviour and still emits the event.
+func TestHandle_SymlinkSnapshot(t *testing.T) {
+	pol := &mockFilePolicy{}
+	em := &mockFileEmitter{}
+	req := FileRequest{Path: "/tmp/link", Operation: "write", Syscall: int32(unix.SYS_TRUNCATE), SymlinkSnapshot: true}
+
+	enforcing := NewFileHandler(pol, nil, em, true)
+	if res, _ := enforcing.Handle(req); res.Action != ActionDeny {
+		t.Fatalf("enforcing: action = %q, want deny", res.Action)
+	}
+
+	auditOnly := NewFileHandler(pol, nil, em, false)
+	res, ev := auditOnly.Handle(req)
+	if res.Action != ActionContinue {
+		t.Fatalf("audit-only: action = %q, want continue", res.Action)
+	}
+	if ev == nil {
+		t.Fatal("audit-only mode returned no event")
+	}
+}

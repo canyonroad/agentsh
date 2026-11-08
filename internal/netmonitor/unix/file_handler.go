@@ -35,6 +35,11 @@ type FileRequest struct {
 	Flags     uint32
 	Mode      uint32
 	SessionID string
+
+	// SymlinkSnapshot marks a pathname whose target could change between the
+	// policy check and the syscall (truncate through a symlink). It is denied
+	// when enforcement is active, but still audited in audit-only modes.
+	SymlinkSnapshot bool
 }
 
 // FileResult holds the outcome of handling a file syscall.
@@ -165,6 +170,16 @@ func (h *FileHandler) Handle(req FileRequest) (FileResult, *types.Event) {
 			}
 		}
 		// Enforced deny.
+		return FileResult{Action: ActionDeny, Errno: int32(sysunix.EACCES)}, h.buildFileEvent(req, dec, true, false)
+	}
+
+	// A symlink target observed before CONTINUE is not bound to the syscall, so
+	// a sibling thread could repoint it. Deny while enforcing; audit-only modes
+	// keep their allow behaviour.
+	if req.SymlinkSnapshot {
+		if !h.enforce {
+			return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, false)
+		}
 		return FileResult{Action: ActionDeny, Errno: int32(sysunix.EACCES)}, h.buildFileEvent(req, dec, true, false)
 	}
 

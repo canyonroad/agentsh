@@ -537,32 +537,31 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		path2 = p2
 	}
 
-	// truncate/ftruncate follow symlinks. The resolved target is only a
-	// pre-CONTINUE snapshot, so a sibling thread could repoint the link before
-	// the kernel runs the syscall; when the path really is a symlink, deny
-	// instead of racing it (a plain path is checked as itself below).
-	// shortcut: symlink truncate is denied outright; upgrade to fd-bound
-	// mediation if truncating through links must be allowed.
+	// truncate follows symlinks, so judge the resolved target. It is only a
+	// pre-CONTINUE snapshot, so mark it and let the handler decide (deny while
+	// enforcing, audit-only otherwise).
+	// shortcut: a symlink truncate is denied while enforcing; upgrade to
+	// fd-bound mediation if truncating through links must be allowed.
+	symlinkSnapshot := false
 	if args.Nr == unix.SYS_TRUNCATE {
 		if target := resolveTraceeSymlink(pid, path); target != path {
-			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
-				slog.Debug("file handler: symlink truncate deny failed", "pid", pid, "error", err)
-			}
-			return
+			path = target
+			symlinkSnapshot = true
 		}
 	}
 
 	operation := syscallToOperation(args.Nr, fileArgs.Flags)
 
 	frequest := FileRequest{
-		PID:       pid,
-		Syscall:   args.Nr,
-		Path:      path,
-		Path2:     path2,
-		Operation: operation,
-		Flags:     fileArgs.Flags,
-		Mode:      fileArgs.Mode,
-		SessionID: sessID,
+		PID:             pid,
+		Syscall:         args.Nr,
+		SymlinkSnapshot: symlinkSnapshot,
+		Path:            path,
+		Path2:           path2,
+		Operation:       operation,
+		Flags:           fileArgs.Flags,
+		Mode:            fileArgs.Mode,
+		SessionID:       sessID,
 	}
 
 	result, ev := h.Handle(frequest)
@@ -687,13 +686,12 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 		path2 = p2
 	}
 
-	// truncate/fruncate follow symlinks: judge the target, not the link path.
+	// truncate follows symlinks: judge the resolved target (see above).
+	symlinkSnapshot := false
 	if args.Nr == unix.SYS_TRUNCATE {
 		if target := resolveTraceeSymlink(pid, path); target != path {
-			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
-				slog.Debug("emulated file handler: symlink truncate deny failed", "pid", pid, "error", err)
-			}
-			return
+			path = target
+			symlinkSnapshot = true
 		}
 	}
 
@@ -714,6 +712,7 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	frequest := FileRequest{
 		PID: pid, Syscall: args.Nr, Path: path, Path2: path2,
 		Operation: operation, Flags: fileArgs.Flags, Mode: fileArgs.Mode, SessionID: sessID,
+		SymlinkSnapshot: symlinkSnapshot,
 	}
 
 	// For non-emulated syscalls (CONTINUE path), do first ID validation
