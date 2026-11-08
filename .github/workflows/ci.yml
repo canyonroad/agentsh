@@ -198,7 +198,9 @@ jobs:
           EOF
           sudo dpkg --add-architecture arm64
           sudo apt-get update
-          sudo apt-get install -y libfuse-dev libfuse3-dev pkg-config gcc-aarch64-linux-gnu libseccomp-dev libseccomp-dev:arm64
+          # --allow-downgrades: adding the arm64 arch can present older arm64
+          # versions of multi-arch build deps than the amd64 ones installed.
+          sudo apt-get install -y --allow-downgrades libfuse-dev libfuse3-dev pkg-config gcc-aarch64-linux-gnu libseccomp-dev libseccomp-dev:arm64
 
       - uses: actions/setup-go@v5
         with:
