@@ -612,10 +612,10 @@ func TestEmulationPath_ResolvePathAtFailure_ReadVsWrite(t *testing.T) {
 	t.Run("read_only_flags_fail_open", func(t *testing.T) {
 		// Typical read-only flags from dynamic linker / cat / ls
 		readFlags := []uint32{
-			uint32(unix.O_RDONLY),                     // plain read
-			uint32(unix.O_RDONLY | unix.O_CLOEXEC),    // shared library load
-			uint32(unix.O_RDONLY | unix.O_NONBLOCK),   // nonblocking read
-			uint32(unix.O_RDONLY | unix.O_DIRECTORY),   // directory listing
+			uint32(unix.O_RDONLY),                    // plain read
+			uint32(unix.O_RDONLY | unix.O_CLOEXEC),   // shared library load
+			uint32(unix.O_RDONLY | unix.O_NONBLOCK),  // nonblocking read
+			uint32(unix.O_RDONLY | unix.O_DIRECTORY), // directory listing
 		}
 		for _, flags := range readFlags {
 			assert.True(t, isReadOnlyOpen(flags),
@@ -631,10 +631,10 @@ func TestEmulationPath_ResolvePathAtFailure_ReadVsWrite(t *testing.T) {
 		// On resolvePathAt failure these also fall back to CONTINUE (not deny),
 		// because the handler can't evaluate policy without a resolved path.
 		writeFlags := []uint32{
-			uint32(unix.O_WRONLY),                            // write only
-			uint32(unix.O_RDWR),                              // read-write
+			uint32(unix.O_WRONLY), // write only
+			uint32(unix.O_RDWR),   // read-write
 			uint32(unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC), // truncating write
-			uint32(unix.O_WRONLY | unix.O_APPEND),            // append
+			uint32(unix.O_WRONLY | unix.O_APPEND),               // append
 		}
 		for _, flags := range writeFlags {
 			assert.False(t, isReadOnlyOpen(flags),

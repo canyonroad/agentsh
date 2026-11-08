@@ -32,16 +32,16 @@ type ExecveHandlerConfig struct {
 
 // ExecveContext holds context for an execve notification.
 type ExecveContext struct {
-	PID         int
-	ParentPID   int
-	Filename    string
-	RawFilename string // Original filename before canonicalization
-	Argv        []string
+	PID            int
+	ParentPID      int
+	Filename       string
+	RawFilename    string // Original filename before canonicalization
+	Argv           []string
 	Truncated      bool
 	SessionID      string
 	Depth          int
-	UnwrappedFrom  string   // If unwrapped: the transparent wrapper command
-	PayloadCommand string   // If unwrapped: the real command being evaluated
+	UnwrappedFrom  string // If unwrapped: the transparent wrapper command
+	PayloadCommand string // If unwrapped: the real command being evaluated
 }
 
 // ExecveResult holds the result of handling an execve.
@@ -91,11 +91,11 @@ type ExecveEmitter interface {
 
 // ExecveHandler handles execve/execveat notifications.
 type ExecveHandler struct {
-	cfg             ExecveHandlerConfig
-	policy          PolicyChecker
-	depthTracker    *DepthTracker
-	emitter         ExecveEmitter
-	approver        ApprovalRequester
+	cfg                  ExecveHandlerConfig
+	policy               PolicyChecker
+	depthTracker         *DepthTracker
+	emitter              ExecveEmitter
+	approver             ApprovalRequester
 	stubSymlinkPath      string // Short symlink path pointing to agentsh-stub
 	transparentOverrides *netmonitor.TransparentOverrides
 }
@@ -250,7 +250,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) (Execve
 				return result, h.buildEvent(ctx, result, "truncated_approval_denied")
 			}
 			// Approved — fall through to policy check
-		// "allow" falls through to policy check
+			// "allow" falls through to policy check
 		}
 	}
 
@@ -478,16 +478,16 @@ func (h *ExecveHandler) buildEvent(ctx ExecveContext, result ExecveResult, rule 
 	}
 
 	return &types.Event{
-		ID:        fmt.Sprintf("execve-%d-%d", ctx.PID, time.Now().UnixNano()),
-		Timestamp: time.Now().UTC(),
-		Type:      "execve",
-		SessionID: ctx.SessionID,
-		PID:       ctx.PID,
-		ParentPID: ctx.ParentPID,
-		Depth:     ctx.Depth,
-		Filename:    ctx.Filename,
-		RawFilename: ctx.RawFilename,
-		Argv:        ctx.Argv,
+		ID:             fmt.Sprintf("execve-%d-%d", ctx.PID, time.Now().UnixNano()),
+		Timestamp:      time.Now().UTC(),
+		Type:           "execve",
+		SessionID:      ctx.SessionID,
+		PID:            ctx.PID,
+		ParentPID:      ctx.ParentPID,
+		Depth:          ctx.Depth,
+		Filename:       ctx.Filename,
+		RawFilename:    ctx.RawFilename,
+		Argv:           ctx.Argv,
 		Truncated:      ctx.Truncated,
 		UnwrappedFrom:  ctx.UnwrappedFrom,
 		PayloadCommand: ctx.PayloadCommand,

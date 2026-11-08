@@ -506,7 +506,7 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 
 	// Resolve primary path. For mutating operations, retry with /proc/<pid>/mem
 	// fallback when ProcessVMReadv fails (Yama ptrace_scope).
-	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
+	path, err := resolveFileArgsPath(pid, fileArgs)
 	if err != nil {
 		if !isReadOnlyFileOp(args.Nr, fileArgs.Flags) {
 			path, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd, fileArgs.PathPtr)
@@ -631,7 +631,7 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	// resolution failure falls back to CONTINUE — the kernel handles the
 	// syscall without policy evaluation. This is safe because reads cannot
 	// mutate the filesystem.
-	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
+	path, err := resolveFileArgsPath(pid, fileArgs)
 	if err != nil {
 		// For writes, retry with /proc/<pid>/mem fallback — deny rules
 		// must be evaluated even when ProcessVMReadv is blocked by Yama.

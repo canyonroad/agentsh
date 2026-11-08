@@ -146,3 +146,22 @@ func TestResolvePath_DanglingSymlink(t *testing.T) {
 		t.Fatal("resolvePath for dangling symlink: expected error, got nil")
 	}
 }
+
+// truncate/ftruncate must reach the file handler and map to a write.
+func TestTruncateCoverage(t *testing.T) {
+	for _, nr := range []int{unix.SYS_TRUNCATE, unix.SYS_FTRUNCATE} {
+		if !isFileSyscall(nr) {
+			t.Fatalf("syscall %d is not a file syscall", nr)
+		}
+		if got := syscallToOperation(nr, 0); got != "write" {
+			t.Fatalf("syscall %d maps to %q, want write", nr, got)
+		}
+	}
+	found := map[int]bool{}
+	for _, nr := range narrowTracedSyscallNumbers(&TracerConfig{TraceFile: true}) {
+		found[nr] = true
+	}
+	if !found[int(unix.SYS_TRUNCATE)] || !found[int(unix.SYS_FTRUNCATE)] {
+		t.Fatal("truncate/ftruncate missing from the traced syscall set")
+	}
+}

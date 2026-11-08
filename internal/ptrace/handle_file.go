@@ -28,6 +28,10 @@ func syscallToOperation(nr int, flags int) string {
 		return "mkdir"
 	case unix.SYS_RENAMEAT2:
 		return "rename"
+	case unix.SYS_TRUNCATE, unix.SYS_FTRUNCATE:
+		return "write"
+	case unix.SYS_MKNODAT:
+		return "mknod"
 	case unix.SYS_LINKAT:
 		return "link"
 	case unix.SYS_SYMLINKAT:
@@ -365,6 +369,30 @@ func (t *Tracer) extractFileArgs(tid int, nr int, args [6]uint64) (path, path2 s
 			path, err = resolvePath(tid, dirfd, rawPath)
 		}
 		return path, "", flags, err
+
+	case unix.SYS_TRUNCATE:
+		// truncate(path, length) — no dirfd, follows symlinks.
+		rawPath, err := t.readString(tid, args[0], 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		path, err = resolvePath(tid, unix.AT_FDCWD, rawPath)
+		return path, "", 0, err
+
+	case unix.SYS_FTRUNCATE:
+		// ftruncate(fd, length) — the fd names the file.
+		path, err := resolveDirFD(tid, int(int32(args[0])))
+		return path, "", 0, err
+
+	case unix.SYS_MKNODAT:
+		// mknodat(dirfd, path, mode, dev)
+		dirfd := int(int32(args[0]))
+		rawPath, err := t.readString(tid, args[1], 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		path, err = resolvePathNoFollow(tid, dirfd, rawPath)
+		return path, "", 0, err
 
 	case unix.SYS_UNLINKAT, unix.SYS_MKDIRAT:
 		dirfd := int(int32(args[0]))

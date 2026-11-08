@@ -32,7 +32,8 @@ func isFileSyscall(nr int32) bool {
 		unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
 		unix.SYS_FCHMODAT, unix.SYS_FCHOWNAT,
 		unix.SYS_STATX, unix.SYS_NEWFSTATAT, unix.SYS_FACCESSAT2,
-		unix.SYS_READLINKAT, unix.SYS_MKNODAT:
+		unix.SYS_READLINKAT, unix.SYS_MKNODAT,
+		unix.SYS_TRUNCATE, unix.SYS_FTRUNCATE:
 		return true
 	default:
 		return isLegacyFileSyscall(nr)
@@ -44,6 +45,7 @@ func isFileSyscall(nr int32) bool {
 //   - openat2 has non-zero RESOLVE_* flags (the supervisor cannot replicate
 //     these resolution semantics).
 //   - O_TMPFILE is used (file has no path to open via /proc/<pid>/root).
+//
 // emulableFlagMask is the set of open flags the supervisor can faithfully replicate.
 const emulableFlagMask = unix.O_RDONLY | unix.O_WRONLY | unix.O_RDWR |
 	unix.O_APPEND | unix.O_TRUNC | unix.O_CREAT | unix.O_EXCL |
@@ -118,6 +120,11 @@ type FileArgs struct {
 
 	// For openat2: pointer to open_how struct in tracee memory.
 	HowPtr uint64
+
+	// HasFdPath means Arg0 is a file descriptor whose path must be resolved
+	// from /proc/<pid>/fd/<n> (ftruncate), not a path pointer.
+	HasFdPath bool
+	FdPath    int32
 }
 
 // extractFileArgs extracts file arguments based on syscall number.
@@ -215,6 +222,14 @@ func extractFileArgs(args SyscallArgs) FileArgs {
 		return FileArgs{Dirfd: int32(args.Arg0), PathPtr: args.Arg1}
 	case unix.SYS_MKNODAT:
 		return FileArgs{Dirfd: int32(args.Arg0), PathPtr: args.Arg1, Mode: uint32(args.Arg2)}
+
+	case unix.SYS_TRUNCATE:
+		// truncate(path, length) — no dirfd, follows symlinks.
+		return FileArgs{Dirfd: int32(unix.AT_FDCWD), PathPtr: args.Arg0}
+
+	case unix.SYS_FTRUNCATE:
+		// ftruncate(fd, length) — the fd carries the path.
+		return FileArgs{HasFdPath: true, FdPath: int32(args.Arg0)}
 
 	default:
 		return extractLegacyFileArgs(args)
@@ -335,6 +350,8 @@ func syscallToOperation(nr int32, flags uint32) string {
 		return "readlink"
 	case unix.SYS_MKNODAT:
 		return "mknod"
+	case unix.SYS_TRUNCATE, unix.SYS_FTRUNCATE:
+		return "write"
 	default:
 		return legacySyscallToOperation(nr, flags)
 	}
@@ -371,9 +388,25 @@ func fileSyscallName(nr int32) string {
 		return "readlinkat"
 	case unix.SYS_MKNODAT:
 		return "mknodat"
+	case unix.SYS_TRUNCATE:
+		return "truncate"
+	case unix.SYS_FTRUNCATE:
+		return "ftruncate"
 	default:
 		return legacyFileSyscallName(nr)
 	}
+}
+
+// resolveFileArgsPath resolves the subject path of a file syscall, using the fd
+// when the syscall carries one (ftruncate) instead of a path pointer.
+func resolveFileArgsPath(pid int, fileArgs FileArgs) (string, error) {
+	if !fileArgs.HasFdPath {
+		return resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
+	}
+	if fileArgs.FdPath == int32(unix.AT_FDCWD) {
+		return os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	}
+	return os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", pid, fileArgs.FdPath))
 }
 
 // resolvePathAt reads a path string from tracee memory and resolves it

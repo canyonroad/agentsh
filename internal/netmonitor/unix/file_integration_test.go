@@ -528,13 +528,13 @@ func TestNotifAddFD_InvalidFD_Integration(t *testing.T) {
 // x (emulateOpen on/off).
 func TestEmulatedOpen_FullDecisionMatrix(t *testing.T) {
 	tests := []struct {
-		name        string
-		path        string
-		decision    string
-		emulate     bool
-		enforce     bool
-		wantAction  string
-		wantErrno   int32
+		name       string
+		path       string
+		decision   string
+		emulate    bool
+		enforce    bool
+		wantAction string
+		wantErrno  int32
 	}{
 		{
 			name: "allow_open_emulated",
@@ -647,12 +647,12 @@ func TestIOUringBlocking_RawSyscall(t *testing.T) {
 // map to the same operation strings the FUSE layer produces.
 func TestFileHandler_OperationMapping(t *testing.T) {
 	tests := []struct {
-		name      string
-		syscall   int32
-		flags     uint32
-		wantOp    string
-		wantType  string // "file_" + wantOp
-		wantSysc  string // fileSyscallName output
+		name     string
+		syscall  int32
+		flags    uint32
+		wantOp   string
+		wantType string // "file_" + wantOp
+		wantSysc string // fileSyscallName output
 	}{
 		{
 			name:     "openat_read",

@@ -35,6 +35,8 @@ func TestIsFileSyscall(t *testing.T) {
 		unix.SYS_FACCESSAT2,
 		unix.SYS_READLINKAT,
 		unix.SYS_MKNODAT,
+		unix.SYS_TRUNCATE,
+		unix.SYS_FTRUNCATE,
 	}
 
 	for _, nr := range fileSyscalls {
@@ -590,4 +592,23 @@ func TestIsReadOnlyFileOp(t *testing.T) {
 				"nr=%d flags=0x%x", tt.nr, tt.flags)
 		})
 	}
+}
+
+// truncate/ftruncate were not trapped at all, so a deny-write rule could be
+// evaded by zeroing the file instead of opening it.
+func TestTruncateSyscalls(t *testing.T) {
+	for _, nr := range []int32{unix.SYS_TRUNCATE, unix.SYS_FTRUNCATE} {
+		assert.True(t, isFileSyscall(nr), "syscall %d must be a file syscall", nr)
+		assert.Equal(t, "write", syscallToOperation(nr, 0), "syscall %d must map to write", nr)
+		assert.False(t, isReadOnlyFileOp(nr, 0), "syscall %d must not be read-only", nr)
+	}
+
+	fargs := extractFileArgs(SyscallArgs{Nr: unix.SYS_FTRUNCATE, Arg0: 7})
+	assert.True(t, fargs.HasFdPath)
+	assert.Equal(t, int32(7), fargs.FdPath)
+
+	pargs := extractFileArgs(SyscallArgs{Nr: unix.SYS_TRUNCATE, Arg0: 0x1000})
+	assert.False(t, pargs.HasFdPath)
+	assert.Equal(t, uint64(0x1000), pargs.PathPtr)
+	assert.Equal(t, int32(unix.AT_FDCWD), pargs.Dirfd)
 }

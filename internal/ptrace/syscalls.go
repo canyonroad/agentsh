@@ -12,7 +12,8 @@ func isFileSyscall(nr int) bool {
 	switch nr {
 	case unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
 		unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
-		unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT:
+		unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT,
+		unix.SYS_TRUNCATE, unix.SYS_FTRUNCATE, unix.SYS_MKNODAT:
 		return true
 	}
 	return isLegacyFileSyscall(nr)
@@ -69,6 +70,7 @@ func narrowTracedSyscallNumbers(cfg *TracerConfig) []int {
 			unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
 			unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
 			unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT,
+			unix.SYS_TRUNCATE, unix.SYS_FTRUNCATE, unix.SYS_MKNODAT,
 		)
 		nums = append(nums, legacyFileSyscalls()...)
 	}
@@ -102,6 +104,7 @@ func AllFileSyscalls() []int {
 		unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
 		unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
 		unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT,
+		unix.SYS_TRUNCATE, unix.SYS_FTRUNCATE, unix.SYS_MKNODAT,
 	}
 	nums = append(nums, legacyFileSyscalls()...)
 	return nums
