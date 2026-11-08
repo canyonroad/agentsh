@@ -133,8 +133,11 @@ func isVforkSafeSyscall(nr int) bool {
 }
 
 // AllNetworkSyscalls returns all network-related syscall numbers that the
-// tracer intercepts (connect, bind, sendto). Exported for use by
-// StaticAllowChecker implementations.
+// tracer intercepts (connect, bind, sendto, sendmsg, sendmmsg). Exported for use
+// by StaticAllowChecker implementations.
 func AllNetworkSyscalls() []int {
-	return []int{unix.SYS_CONNECT, unix.SYS_BIND, unix.SYS_SENDTO}
+	return []int{
+		unix.SYS_CONNECT, unix.SYS_BIND, unix.SYS_SENDTO,
+		unix.SYS_SENDMSG, unix.SYS_SENDMMSG,
+	}
 }

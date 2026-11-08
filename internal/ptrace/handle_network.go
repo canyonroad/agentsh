@@ -394,7 +394,8 @@ func (t *Tracer) sendDestinations(tid, nr int, args [6]uint64) ([]sendSockaddr, 
 }
 
 // maxSendmmsgVectors caps how many destinations one sendmmsg may carry.
-const maxSendmmsgVectors = 64
+// Linux accepts up to UIO_MAXIOV (1024) vectors per call.
+const maxSendmmsgVectors = 1024
 
 func (t *Tracer) readSendSockaddr(tid int, namePtr uint64, nameLen int) (sendSockaddr, error) {
 	if nameLen < 2 || nameLen > 128 {

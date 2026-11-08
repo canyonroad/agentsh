@@ -35,6 +35,9 @@ type ptyRun struct {
 
 	req ptyStartParams
 	ps  *pty.Session
+
+	// handlerCancel stops the wrapper notify/signal handlers; run on finish.
+	handlerCancel context.CancelFunc
 }
 
 func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams) (*ptyRun, int, error) {
@@ -269,9 +272,12 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 		return nil, http.StatusInternalServerError, fmt.Errorf("%s: %w", what, cause)
 	}
 	var waitExit func() ptraceExecResult
+	// handlerCancel stops the wrapper's notify/signal handlers; it must live as
+	// long as the PTY run, so it is handed to ptyRun instead of deferred here.
+	var handlerCancel context.CancelFunc
 	if extra != nil && extra.ptraceSync && a.ptraceTracer != nil {
-		handlerCtx, handlerCancel := context.WithCancel(ctx)
-		defer handlerCancel()
+		handlerCtx, cancel := context.WithCancel(ctx)
+		handlerCancel = cancel
 		ptraceReady := make(chan error, 1)
 		startWrapperHandlers(handlerCtx, extra, ps.PID(), pgid, ptraceReady)
 
@@ -300,7 +306,9 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 		}
 		waitExit = attachWait
 	} else {
-		startWrapperHandlers(ctx, extra, ps.PID(), pgid, nil)
+		handlerCtx, cancel := context.WithCancel(ctx)
+		handlerCancel = cancel
+		startWrapperHandlers(handlerCtx, extra, ps.PID(), pgid, nil)
 		if a.ptraceTracer != nil {
 			attachWait, _, attachErr := ptraceExecAttach(a.ptraceTracer, ps.PID(), sessionID, cmdID, false)
 			if attachErr != nil {
@@ -332,16 +340,20 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 	a.broker.Publish(startEv)
 
 	return &ptyRun{
-		sessionID: sessionID,
-		unlock:    unlock,
-		cmdID:     cmdID,
-		started:   start,
-		req:       req,
-		ps:        ps,
+		sessionID:     sessionID,
+		unlock:        unlock,
+		cmdID:         cmdID,
+		started:       start,
+		req:           req,
+		ps:            ps,
+		handlerCancel: handlerCancel,
 	}, http.StatusOK, nil
 }
 
 func (a *App) finishPTY(ctx context.Context, run *ptyRun, exitCode int, started time.Time, err error, out []byte, outTotal int64, outTrunc bool) {
+	if run != nil && run.handlerCancel != nil {
+		run.handlerCancel()
+	}
 	if a == nil || run == nil {
 		return
 	}

@@ -413,14 +413,20 @@ func resolveFileArgsPath(pid int, fileArgs FileArgs) (string, error) {
 // rule matches the inode the kernel actually touches. A path that does not
 // exist yet resolves through its parent, keeping the basename.
 func resolveTraceeSymlink(pid int, path string) string {
-	root := "/proc/" + strconv.Itoa(pid) + "/root"
-	resolved, err := filepath.EvalSymlinks(root + path)
+	// Resolve the magic link itself first: EvalSymlinks("/proc/<pid>/root/...")
+	// can mis-handle it (gVisor), which would silently return the link path.
+	root, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/root")
 	if err != nil {
+		return path
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(root, path))
+	if err != nil {
+		// Nonexistent target (create): resolve the parent, keep the basename.
 		dir, base := filepath.Split(path)
 		if dir == "" {
 			return path
 		}
-		rdir, derr := filepath.EvalSymlinks(root + filepath.Clean(dir))
+		rdir, derr := filepath.EvalSymlinks(filepath.Join(root, filepath.Clean(dir)))
 		if derr != nil {
 			return path
 		}

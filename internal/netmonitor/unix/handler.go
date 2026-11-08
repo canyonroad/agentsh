@@ -539,6 +539,8 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 
 	// truncate/ftruncate follow symlinks, so judge the target of the link
 	// rather than the (possibly allowed) link path.
+	// shortcut: this is a snapshot taken before CONTINUE, so a sibling thread can
+	// repoint the link afterwards; upgrade to fd-bound mediation if it matters.
 	if args.Nr == unix.SYS_TRUNCATE || args.Nr == unix.SYS_FTRUNCATE {
 		path = resolveTraceeSymlink(pid, path)
 	}
