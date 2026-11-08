@@ -219,7 +219,7 @@ func TestCheckPolicy_ApproveFailsClosedWithoutApprover(t *testing.T) {
 		MountPoint:   "/workspace",
 		PolicyEngine: fakePolicy{decision: platform.DecisionApprove},
 	}}}
-	if got := fs.checkPolicy("/.env", platform.FileOpWrite); got != platform.DecisionDeny {
+	if got, _ := fs.checkPolicy("/.env", platform.FileOpWrite); got != platform.DecisionDeny {
 		t.Fatalf("checkPolicy = %q, want deny", got)
 	}
 }
@@ -233,7 +233,7 @@ func TestCheckPolicy_ApproveResolvedByApprover(t *testing.T) {
 		Approver:      ap,
 		CommandIDFunc: func() string { return "cmd-7" },
 	}}}
-	if got := fs.checkPolicy("/.env", platform.FileOpWrite); got != platform.DecisionAllow {
+	if got, _ := fs.checkPolicy("/.env", platform.FileOpWrite); got != platform.DecisionAllow {
 		t.Fatalf("checkPolicy = %q, want allow", got)
 	}
 	if ap.calls != 1 || ap.last.CommandID != "cmd-7" || ap.last.Target != "/workspace/.env" || ap.last.Op != "write" {
@@ -248,7 +248,7 @@ func TestCheckPolicy_ApproveDeniedByApprover(t *testing.T) {
 		PolicyEngine: fakePolicy{decision: platform.DecisionApprove},
 		Approver:     &fakeApprover{err: errors.New("no")},
 	}}}
-	if got := fs.checkPolicy("/.env", platform.FileOpWrite); got != platform.DecisionDeny {
+	if got, _ := fs.checkPolicy("/.env", platform.FileOpWrite); got != platform.DecisionDeny {
 		t.Fatalf("checkPolicy = %q, want deny", got)
 	}
 }
@@ -330,8 +330,8 @@ func TestCheckPolicy_ApprovalIDReachesEvent(t *testing.T) {
 		PolicyEngine: fakePolicy{decision: platform.DecisionApprove},
 		Approver:     ap,
 	}}}
-	decision := fs.checkPolicy("/.env", platform.FileOpWrite)
-	fs.emitEvent("file_open", "/workspace/.env", platform.FileOpWrite, decision, false)
+	decision, approvalID := fs.checkPolicy("/.env", platform.FileOpWrite)
+	fs.emitEvent("file_open", "/workspace/.env", platform.FileOpWrite, decision, false, approvalID)
 
 	select {
 	case ev := <-ch:
@@ -340,5 +340,44 @@ func TestCheckPolicy_ApprovalIDReachesEvent(t *testing.T) {
 		}
 	default:
 		t.Fatal("no event emitted")
+	}
+}
+
+// Rename: an approval needed only for the destination must land on the rename
+// event, and concurrent approvals on the same path must not interfere (no
+// shared lookup table any more).
+func TestRename_DestinationApprovalIDOnEvent(t *testing.T) {
+	ap := &fakeApprover{}
+	ch := make(chan platform.IOEvent, 1)
+	fs := &fuseFS{cfg: Config{FSConfig: platform.FSConfig{
+		SessionID:    "s1",
+		MountPoint:   "/workspace",
+		EventChannel: ch,
+		PolicyEngine: pathPolicy{"/b": platform.DecisionApprove},
+		Approver:     ap,
+	}}}
+	_ = fs.Rename("/a", "/b") // fails on the missing files; the event still fires
+	select {
+	case ev := <-ch:
+		if ev.ApprovalID == "" || ev.ApprovalID != ap.last.ID {
+			t.Fatalf("rename event approval id = %q, request id = %q", ev.ApprovalID, ap.last.ID)
+		}
+	default:
+		t.Fatal("no event emitted")
+	}
+}
+
+func TestCheckPolicy_TwoApprovalsSamePathKeepOwnIDs(t *testing.T) {
+	ap := &fakeApprover{}
+	fs := &fuseFS{cfg: Config{FSConfig: platform.FSConfig{
+		SessionID:    "s1",
+		MountPoint:   "/workspace",
+		PolicyEngine: fakePolicy{decision: platform.DecisionApprove},
+		Approver:     ap,
+	}}}
+	_, id1 := fs.checkPolicy("/.env", platform.FileOpWrite)
+	_, id2 := fs.checkPolicy("/.env", platform.FileOpWrite)
+	if id1 == "" || id2 == "" || id1 == id2 {
+		t.Fatalf("ids = %q, %q; want two distinct ids", id1, id2)
 	}
 }

@@ -33,29 +33,31 @@ func (f *fuseFS) realPath(path string) string {
 // checkPolicy checks the policy for a file operation.
 // Uses the source path (not mount point) for policy evaluation because
 // policy rules reference ${PROJECT_ROOT} which resolves to the workspace source path.
-func (f *fuseFS) checkPolicy(fusePath string, operation platform.FileOperation) platform.Decision {
+// checkPolicy returns the decision plus the approval id when an "approve"
+// decision had to be resolved, so the caller can attach it to its event.
+func (f *fuseFS) checkPolicy(fusePath string, operation platform.FileOperation) (platform.Decision, string) {
 	if f.cfg.PolicyEngine == nil {
-		return platform.DecisionAllow
+		return platform.DecisionAllow, ""
 	}
 	return f.applyApproval(fusePath, operation, f.cfg.PolicyEngine.CheckFile(f.realPath(fusePath), operation))
 }
 
 // applyApproval resolves an "approve" decision (already-made policy decision in),
 // so callers that must look at several paths can decide first and prompt once.
-func (f *fuseFS) applyApproval(fusePath string, operation platform.FileOperation, decision platform.Decision) platform.Decision {
+func (f *fuseFS) applyApproval(fusePath string, operation platform.FileOperation, decision platform.Decision) (platform.Decision, string) {
 	if decision == platform.DecisionApprove {
 		return f.resolveApproval(fusePath, operation)
 	}
-	return decision
+	return decision, ""
 }
 
 // resolveApproval asks the configured approver to resolve an "approve" decision
 // and turns a missing approver, an error or a rejection into a deny, so every
 // operation in this backend (open, create, unlink, rename, chmod, symlink,
 // readlink, ...) fails closed instead of proceeding unprompted.
-func (f *fuseFS) resolveApproval(fusePath string, operation platform.FileOperation) platform.Decision {
+func (f *fuseFS) resolveApproval(fusePath string, operation platform.FileOperation) (platform.Decision, string) {
 	if f.cfg.Approver == nil {
-		return platform.DecisionDeny
+		return platform.DecisionDeny, ""
 	}
 	// The ID is minted here so the pending approval and the emitted file event
 	// share it. The platform Decision carries no rule/message, so those stay
@@ -72,16 +74,14 @@ func (f *fuseFS) resolveApproval(fusePath string, operation platform.FileOperati
 	if f.cfg.CommandIDFunc != nil {
 		req.CommandID = f.cfg.CommandIDFunc()
 	}
-	f.approvalIDs.Store(virt, req.ID)
 	if err := f.cfg.Approver.RequestApproval(context.Background(), req); err != nil {
-		f.approvalIDs.Delete(virt)
-		return platform.DecisionDeny
+		return platform.DecisionDeny, ""
 	}
-	return platform.DecisionAllow
+	return platform.DecisionAllow, req.ID
 }
 
 // emitEvent emits a file event if an event channel is configured.
-func (f *fuseFS) emitEvent(eventType, virtPath string, operation platform.FileOperation, decision platform.Decision, blocked bool) {
+func (f *fuseFS) emitEvent(eventType, virtPath string, operation platform.FileOperation, decision platform.Decision, blocked bool, approvalID ...string) {
 	f.totalOps.Add(1)
 	if blocked {
 		f.deniedOps.Add(1)
@@ -105,8 +105,8 @@ func (f *fuseFS) emitEvent(eventType, virtPath string, operation platform.FileOp
 		Platform:  "fuse",
 	}
 	// Correlate the event with the approval that allowed this operation.
-	if id, ok := f.approvalIDs.LoadAndDelete(virtPath); ok {
-		event.ApprovalID, _ = id.(string)
+	if len(approvalID) > 0 {
+		event.ApprovalID = approvalID[0]
 	}
 
 	// Get command ID if function is available
@@ -166,12 +166,12 @@ func (f *fuseFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 
 func (f *fuseFS) Opendir(path string) (int, uint64) {
 	virtPath := f.virtPath(path)
-	decision := f.checkPolicy(path, platform.FileOpList)
+	decision, approvalID := f.checkPolicy(path, platform.FileOpList)
 	if decision == platform.DecisionDeny {
-		f.emitEvent("dir_open", virtPath, platform.FileOpList, decision, true)
+		f.emitEvent("dir_open", virtPath, platform.FileOpList, decision, true, approvalID)
 		return -fuse.EACCES, 0
 	}
-	f.emitEvent("dir_open", virtPath, platform.FileOpList, decision, false)
+	f.emitEvent("dir_open", virtPath, platform.FileOpList, decision, false, approvalID)
 
 	realPath := f.realPath(path)
 	if _, err := os.Stat(realPath); err != nil {
@@ -212,12 +212,12 @@ func (f *fuseFS) Open(path string, flags int) (int, uint64) {
 		operation = platform.FileOpWrite
 	}
 
-	decision := f.checkPolicy(path, operation)
+	decision, approvalID := f.checkPolicy(path, operation)
 	if decision == platform.DecisionDeny {
-		f.emitEvent("file_open", virtPath, operation, decision, true)
+		f.emitEvent("file_open", virtPath, operation, decision, true, approvalID)
 		return -fuse.EACCES, 0
 	}
-	f.emitEvent("file_open", virtPath, operation, decision, false)
+	f.emitEvent("file_open", virtPath, operation, decision, false, approvalID)
 
 	realPath := f.realPath(path)
 	file, err := os.OpenFile(realPath, flags, 0)
@@ -240,12 +240,12 @@ func (f *fuseFS) Open(path string, flags int) (int, uint64) {
 func (f *fuseFS) Create(path string, flags int, mode uint32) (int, uint64) {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(path, platform.FileOpCreate)
+	decision, approvalID := f.checkPolicy(path, platform.FileOpCreate)
 	if decision == platform.DecisionDeny {
-		f.emitEvent("file_create", virtPath, platform.FileOpCreate, decision, true)
+		f.emitEvent("file_create", virtPath, platform.FileOpCreate, decision, true, approvalID)
 		return -fuse.EACCES, 0
 	}
-	f.emitEvent("file_create", virtPath, platform.FileOpCreate, decision, false)
+	f.emitEvent("file_create", virtPath, platform.FileOpCreate, decision, false, approvalID)
 
 	realPath := f.realPath(path)
 	file, err := os.OpenFile(realPath, flags|os.O_CREATE, os.FileMode(mode))
@@ -286,12 +286,12 @@ func (f *fuseFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
 	}
 	openFile := of.(*openFile)
 
-	decision := f.checkPolicy(openFile.fusePath, platform.FileOpWrite)
+	decision, approvalID := f.checkPolicy(openFile.fusePath, platform.FileOpWrite)
 	if decision == platform.DecisionDeny {
-		f.emitEvent("file_write", openFile.virtPath, platform.FileOpWrite, decision, true)
+		f.emitEvent("file_write", openFile.virtPath, platform.FileOpWrite, decision, true, approvalID)
 		return -fuse.EACCES
 	}
-	f.emitEvent("file_write", openFile.virtPath, platform.FileOpWrite, decision, false)
+	f.emitEvent("file_write", openFile.virtPath, platform.FileOpWrite, decision, false, approvalID)
 
 	n, err := openFile.file.WriteAt(buff, ofst)
 	if err != nil {
@@ -314,7 +314,7 @@ func (f *fuseFS) Unlink(path string) int {
 	virtPath := f.virtPath(path)
 	realPath := f.realPath(path)
 
-	decision := f.checkPolicy(path, platform.FileOpDelete)
+	decision, approvalID := f.checkPolicy(path, platform.FileOpDelete)
 
 	// Handle soft-delete
 	if decision == platform.DecisionSoftDelete {
@@ -322,10 +322,10 @@ func (f *fuseFS) Unlink(path string) int {
 	}
 
 	if decision == platform.DecisionDeny {
-		f.emitEvent("file_delete", virtPath, platform.FileOpDelete, decision, true)
+		f.emitEvent("file_delete", virtPath, platform.FileOpDelete, decision, true, approvalID)
 		return -fuse.EACCES
 	}
-	f.emitEvent("file_delete", virtPath, platform.FileOpDelete, decision, false)
+	f.emitEvent("file_delete", virtPath, platform.FileOpDelete, decision, false, approvalID)
 
 	if err := os.Remove(realPath); err != nil {
 		return toErrno(err)
@@ -336,12 +336,12 @@ func (f *fuseFS) Unlink(path string) int {
 func (f *fuseFS) Mkdir(path string, mode uint32) int {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(path, platform.FileOpCreate)
+	decision, approvalID := f.checkPolicy(path, platform.FileOpCreate)
 	if decision == platform.DecisionDeny {
-		f.emitEvent("dir_create", virtPath, platform.FileOpCreate, decision, true)
+		f.emitEvent("dir_create", virtPath, platform.FileOpCreate, decision, true, approvalID)
 		return -fuse.EACCES
 	}
-	f.emitEvent("dir_create", virtPath, platform.FileOpCreate, decision, false)
+	f.emitEvent("dir_create", virtPath, platform.FileOpCreate, decision, false, approvalID)
 
 	realPath := f.realPath(path)
 	if err := os.Mkdir(realPath, os.FileMode(mode)); err != nil {
@@ -353,12 +353,12 @@ func (f *fuseFS) Mkdir(path string, mode uint32) int {
 func (f *fuseFS) Rmdir(path string) int {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(path, platform.FileOpDelete)
+	decision, approvalID := f.checkPolicy(path, platform.FileOpDelete)
 	if decision == platform.DecisionDeny {
-		f.emitEvent("dir_delete", virtPath, platform.FileOpDelete, decision, true)
+		f.emitEvent("dir_delete", virtPath, platform.FileOpDelete, decision, true, approvalID)
 		return -fuse.EACCES
 	}
-	f.emitEvent("dir_delete", virtPath, platform.FileOpDelete, decision, false)
+	f.emitEvent("dir_delete", virtPath, platform.FileOpDelete, decision, false, approvalID)
 
 	realPath := f.realPath(path)
 	if err := os.Remove(realPath); err != nil {
@@ -374,6 +374,7 @@ func (f *fuseFS) Rename(oldpath string, newpath string) int {
 	// Both ends are evaluated before any approval is requested, so a rename
 	// into a denied destination does not consume a human approval first.
 	var decOld, decNew platform.Decision
+	var approvalID string
 	if f.cfg.PolicyEngine == nil {
 		decOld, decNew = platform.DecisionAllow, platform.DecisionAllow
 	} else {
@@ -396,13 +397,13 @@ func (f *fuseFS) Rename(oldpath string, newpath string) int {
 	}
 	decision := platform.DecisionAllow
 	if decOld == platform.DecisionApprove || decNew == platform.DecisionApprove {
-		decision = f.applyApproval(approvePath, platform.FileOpRename, platform.DecisionApprove)
+		decision, approvalID = f.applyApproval(approvePath, platform.FileOpRename, platform.DecisionApprove)
 		if decision == platform.DecisionDeny {
-			f.emitEvent("file_rename", f.virtPath(approvePath), platform.FileOpRename, decision, true)
+			f.emitEvent("file_rename", f.virtPath(approvePath), platform.FileOpRename, decision, true, approvalID)
 			return -fuse.EACCES
 		}
 	}
-	f.emitEvent("file_rename", virtOldPath, platform.FileOpRename, decision, false)
+	f.emitEvent("file_rename", virtOldPath, platform.FileOpRename, decision, false, approvalID)
 
 	realOldPath := f.realPath(oldpath)
 	realNewPath := f.realPath(newpath)
@@ -415,12 +416,12 @@ func (f *fuseFS) Rename(oldpath string, newpath string) int {
 func (f *fuseFS) Chmod(path string, mode uint32) int {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(path, platform.FileOpWrite)
+	decision, approvalID := f.checkPolicy(path, platform.FileOpWrite)
 	if decision == platform.DecisionDeny {
-		f.emitEvent("file_chmod", virtPath, platform.FileOpWrite, decision, true)
+		f.emitEvent("file_chmod", virtPath, platform.FileOpWrite, decision, true, approvalID)
 		return -fuse.EACCES
 	}
-	f.emitEvent("file_chmod", virtPath, platform.FileOpWrite, decision, false)
+	f.emitEvent("file_chmod", virtPath, platform.FileOpWrite, decision, false, approvalID)
 
 	realPath := f.realPath(path)
 	if err := os.Chmod(realPath, os.FileMode(mode)); err != nil {
@@ -432,12 +433,12 @@ func (f *fuseFS) Chmod(path string, mode uint32) int {
 func (f *fuseFS) Symlink(target string, newpath string) int {
 	virtPath := f.virtPath(newpath)
 
-	decision := f.checkPolicy(newpath, platform.FileOpCreate)
+	decision, approvalID := f.checkPolicy(newpath, platform.FileOpCreate)
 	if decision == platform.DecisionDeny {
-		f.emitEvent("symlink_create", virtPath, platform.FileOpCreate, decision, true)
+		f.emitEvent("symlink_create", virtPath, platform.FileOpCreate, decision, true, approvalID)
 		return -fuse.EACCES
 	}
-	f.emitEvent("symlink_create", virtPath, platform.FileOpCreate, decision, false)
+	f.emitEvent("symlink_create", virtPath, platform.FileOpCreate, decision, false, approvalID)
 
 	realPath := f.realPath(newpath)
 	if err := os.Symlink(target, realPath); err != nil {
@@ -449,12 +450,12 @@ func (f *fuseFS) Symlink(target string, newpath string) int {
 func (f *fuseFS) Readlink(path string) (int, string) {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(path, platform.FileOpRead)
+	decision, approvalID := f.checkPolicy(path, platform.FileOpRead)
 	if decision == platform.DecisionDeny {
-		f.emitEvent("symlink_read", virtPath, platform.FileOpRead, decision, true)
+		f.emitEvent("symlink_read", virtPath, platform.FileOpRead, decision, true, approvalID)
 		return -fuse.EACCES, ""
 	}
-	f.emitEvent("symlink_read", virtPath, platform.FileOpRead, decision, false)
+	f.emitEvent("symlink_read", virtPath, platform.FileOpRead, decision, false, approvalID)
 
 	realPath := f.realPath(path)
 	target, err := os.Readlink(realPath)
@@ -467,12 +468,12 @@ func (f *fuseFS) Readlink(path string) (int, string) {
 func (f *fuseFS) Link(oldpath string, newpath string) int {
 	virtPath := f.virtPath(newpath)
 
-	decision := f.checkPolicy(newpath, platform.FileOpCreate)
+	decision, approvalID := f.checkPolicy(newpath, platform.FileOpCreate)
 	if decision == platform.DecisionDeny {
-		f.emitEvent("link_create", virtPath, platform.FileOpCreate, decision, true)
+		f.emitEvent("link_create", virtPath, platform.FileOpCreate, decision, true, approvalID)
 		return -fuse.EACCES
 	}
-	f.emitEvent("link_create", virtPath, platform.FileOpCreate, decision, false)
+	f.emitEvent("link_create", virtPath, platform.FileOpCreate, decision, false, approvalID)
 
 	realOldPath := f.realPath(oldpath)
 	realNewPath := f.realPath(newpath)
@@ -485,12 +486,12 @@ func (f *fuseFS) Link(oldpath string, newpath string) int {
 func (f *fuseFS) Truncate(path string, size int64, fh uint64) int {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(path, platform.FileOpWrite)
+	decision, approvalID := f.checkPolicy(path, platform.FileOpWrite)
 	if decision == platform.DecisionDeny {
-		f.emitEvent("file_truncate", virtPath, platform.FileOpWrite, decision, true)
+		f.emitEvent("file_truncate", virtPath, platform.FileOpWrite, decision, true, approvalID)
 		return -fuse.EACCES
 	}
-	f.emitEvent("file_truncate", virtPath, platform.FileOpWrite, decision, false)
+	f.emitEvent("file_truncate", virtPath, platform.FileOpWrite, decision, false, approvalID)
 
 	realPath := f.realPath(path)
 	if err := os.Truncate(realPath, size); err != nil {
