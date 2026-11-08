@@ -297,9 +297,9 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		}
 	})
 
-	t.Run("approve_shadow_mode_returns_continue", func(t *testing.T) {
-		// In shadow mode (enforceApprovals=false), PolicyDecision is "approve"
-		// but EffectiveDecision is "allow", so the action should be "continue".
+	t.Run("approve_without_approvals_fails_closed", func(t *testing.T) {
+		// With enforceApprovals=false nobody can answer the prompt, so the
+		// engine resolves "approve" to deny and the action must not continue.
 		p := &policy.Policy{
 			Version: 1,
 			Name:    "test",
@@ -319,8 +319,8 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		if result.Decision != "approve" {
 			t.Errorf("decision: got %q, want %q", result.Decision, "approve")
 		}
-		if result.Action != "continue" {
-			t.Errorf("action: got %q, want %q (shadow mode should continue, not redirect)", result.Action, "continue")
+		if result.Action != "deny" {
+			t.Errorf("action: got %q, want %q (approve without approvals must fail closed)", result.Action, "deny")
 		}
 		if result.Rule != "approve-sudo" {
 			t.Errorf("rule: got %q, want %q", result.Rule, "approve-sudo")

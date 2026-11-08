@@ -112,6 +112,29 @@ func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecCo
 	if depth < 0 {
 		depth = 0
 	}
+	// argv was longer than what we read (slot/byte budget or an over-long
+	// element): the hidden tail can carry the token an args_pattern rule
+	// denies, so fail closed instead of evaluating a partial command line.
+	if ec.Truncated {
+		ev := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now().UTC(),
+			Type:      "ptrace_execve",
+			SessionID: ec.SessionID,
+			Fields: map[string]any{
+				"pid":       ec.PID,
+				"filename":  ec.Filename,
+				"argv":      ec.Argv,
+				"depth":     ec.Depth,
+				"decision":  string(types.DecisionDeny),
+				"rule":      "argv_truncated",
+				"truncated": true,
+			},
+		}
+		_ = r.store.AppendEvent(ctx, ev)
+		r.broker.Publish(ev)
+		return ptrace.ExecResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES), Rule: "argv_truncated"}
+	}
 	decision := pe.CheckExecve(ec.Filename, ec.Argv, depth)
 
 	// Emit audit event
@@ -194,6 +217,13 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 
 	decision := pe.CheckFile(fc.Path, fc.Operation)
 
+	// Dual-path syscalls (renameat2, linkat, symlinkat) also touch Path2. The
+	// policy must hold for both ends: a rename into a denied tree, or a hardlink
+	// of a denied-read file onto an allowed name, otherwise evades the rule.
+	if fc.Path2 != "" {
+		decision = mergeDualPathDecision(decision, pe.CheckFile(fc.Path2, fc.Operation))
+	}
+
 	ev := types.Event{
 		ID:        uuid.NewString(),
 		Timestamp: time.Now().UTC(),
@@ -202,6 +232,7 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 		Fields: map[string]any{
 			"pid":       fc.PID,
 			"path":      fc.Path,
+			"path2":     fc.Path2,
 			"operation": fc.Operation,
 			"decision":  string(decision.EffectiveDecision),
 			"rule":      decision.Rule,
@@ -248,9 +279,43 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 		}
 		// Invalid redirect payload — deny to fail closed.
 		return ptrace.FileResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES)}
+	case types.DecisionApprove:
+		// Approvals are resolved out-of-band; ptrace has no synchronous prompt,
+		// so an unresolved "approve" must not fall through to allow.
+		return ptrace.FileResult{
+			Allow:  false,
+			Action: "deny",
+			Errno:  int32(syscall.EACCES),
+		}
 	default:
 		return ptrace.FileResult{Allow: true, Action: "allow"}
 	}
+}
+
+// mergeDualPathDecision picks the decision that has to hold for both paths of a
+// dual-path syscall (renameat2, linkat, symlinkat): deny wins, then approve.
+// ptrace can only rewrite the first path argument (redirectFile), so a
+// transformation that comes from the second path becomes a deny instead of
+// being silently dropped.
+func mergeDualPathDecision(primary, secondary policy.Decision) policy.Decision {
+	switch {
+	case secondary.EffectiveDecision == types.DecisionDeny:
+		return secondary
+	case primary.EffectiveDecision == types.DecisionDeny:
+		return primary
+	case secondary.PolicyDecision == types.DecisionApprove:
+		return secondary
+	case primary.EffectiveDecision == types.DecisionApprove:
+		return primary
+	case secondary.PolicyDecision == types.DecisionRedirect || secondary.PolicyDecision == types.DecisionSoftDelete:
+		return policy.Decision{
+			PolicyDecision:    secondary.PolicyDecision,
+			EffectiveDecision: types.DecisionDeny,
+			Rule:              secondary.Rule + " (second path " + string(secondary.PolicyDecision) + " unsupported in ptrace)",
+			Message:           secondary.Message,
+		}
+	}
+	return primary
 }
 
 // resolveTrashDir resolves the trash directory for a session.

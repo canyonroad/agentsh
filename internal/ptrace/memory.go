@@ -307,29 +307,46 @@ func (t *Tracer) writeString(tid int, addr uint64, s string) error {
 	return t.writeBytes(tid, addr, buf)
 }
 
-// readArgv reads the argv array from tracee memory.
+// maxArgLen caps a single argv element read from tracee memory.
+const maxArgLen = 4096
+
+// readArgv reads the argv array from tracee memory. truncated reports that the
+// real argv was longer than what was returned (slot budget, byte budget, or an
+// over-long single element), so callers can fail closed on argument policy.
 func (t *Tracer) readArgv(tid int, argvPtr uint64, maxArgc int, maxBytes int) ([]string, bool, error) {
 	r, err := t.getMemReader(tid)
 	if err != nil {
 		return nil, false, err
 	}
+	return readArgvFrom(r, argvPtr, maxArgc, maxBytes)
+}
 
+// readArgvFrom is readArgv against an arbitrary reader (tests).
+func readArgvFrom(r memReader, argvPtr uint64, maxArgc int, maxBytes int) ([]string, bool, error) {
 	var args []string
 	totalBytes := 0
+	truncated := false
 	ptrBuf := make([]byte, 8)
 
 	for i := 0; i < maxArgc; i++ {
 		if err := r.read(argvPtr+uint64(i*8), ptrBuf); err != nil {
-			return args, false, err
+			return args, truncated, err
 		}
 		ptr := nativeEndianUint64(ptrBuf)
 		if ptr == 0 {
-			break
+			return args, truncated, nil
 		}
 
-		s, err := readStringFrom(r, ptr, 4096)
+		// Read one byte past the cap so an oversized argument is detected
+		// instead of silently truncated: a truncated tail can hide the token
+		// an args_pattern rule denies.
+		s, err := readStringFrom(r, ptr, maxArgLen+1)
 		if err != nil {
-			return args, false, err
+			return args, truncated, err
+		}
+		if len(s) > maxArgLen {
+			truncated = true
+			s = s[:maxArgLen]
 		}
 
 		totalBytes += len(s) + 1
@@ -338,7 +355,13 @@ func (t *Tracer) readArgv(tid int, argvPtr uint64, maxArgc int, maxBytes int) ([
 		}
 		args = append(args, s)
 	}
-	return args, false, nil
+	// Exhausted the slot budget: read the terminator to tell "exactly maxArgc
+	// arguments" (complete) from "more arguments follow" (truncated). A read
+	// error is reported as such rather than assumed to be truncation.
+	if err := r.read(argvPtr+uint64(maxArgc*8), ptrBuf); err != nil {
+		return args, true, err
+	}
+	return args, nativeEndianUint64(ptrBuf) != 0, nil
 }
 
 func nativeEndianUint64(b []byte) uint64 {

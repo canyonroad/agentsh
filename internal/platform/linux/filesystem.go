@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/fsmonitor"
 	"github.com/agentsh/agentsh/internal/platform"
@@ -271,6 +272,9 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 		MaxBackground:     cfg.MaxBackground,
 		SymlinkEscapeDeny: cfg.SymlinkEscapeDeny,
 	}
+	if cfg.Approver != nil {
+		hooks.Approvals = &approverAdapter{inner: cfg.Approver, sessionID: cfg.SessionID}
+	}
 
 	// Set up trash/soft-delete if configured. The audit Mode reflects the
 	// global configured mode (default monitor); a per-path soft_delete policy
@@ -519,6 +523,36 @@ func wrapPolicyEngine(pe platform.PolicyEngine) *policy.Engine {
 // contains checks if a string contains a substring.
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsAt(s, substr))
+}
+
+// approverAdapter bridges platform.Approver (primitives only, because
+// internal/approvals imports internal/platform) to the fsmonitor.Approver the
+// FUSE node calls. A non-nil error means "not approved".
+type approverAdapter struct {
+	inner     platform.Approver
+	sessionID string
+}
+
+func (a *approverAdapter) RequestApproval(ctx context.Context, req approvals.Request) (approvals.Resolution, error) {
+	op, _ := req.Fields["operation"].(string)
+	sessionID := req.SessionID
+	if sessionID == "" {
+		sessionID = a.sessionID
+	}
+	preq := platform.ApprovalRequest{
+		ID:        req.ID,
+		SessionID: sessionID,
+		CommandID: req.CommandID,
+		Kind:      req.Kind,
+		Target:    req.Target,
+		Rule:      req.Rule,
+		Message:   req.Message,
+		Op:        op,
+	}
+	if err := a.inner.RequestApproval(ctx, preq); err != nil {
+		return approvals.Resolution{Approved: false, Reason: err.Error(), At: time.Now().UTC()}, err
+	}
+	return approvals.Resolution{Approved: true, At: time.Now().UTC()}, nil
 }
 
 func containsAt(s, substr string) bool {

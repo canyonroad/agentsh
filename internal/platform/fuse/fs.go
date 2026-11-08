@@ -18,7 +18,8 @@ type fuseFS struct {
 	fuse.FileSystemBase
 	realRoot  string
 	cfg       Config
-	openFiles sync.Map   // uint64 -> *openFile
+	openFiles sync.Map // uint64 -> *openFile
+
 	nextFh    atomic.Uint64
 	mountedAt time.Time
 

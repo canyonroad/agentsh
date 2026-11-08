@@ -1251,7 +1251,7 @@ func (e *Engine) wrapDecision(decision string, rule string, msg string, redirect
 		}
 		return Decision{
 			PolicyDecision:    pd,
-			EffectiveDecision: types.DecisionAllow,
+			EffectiveDecision: types.DecisionDeny,
 			Rule:              rule,
 			Message:           msg,
 			Approval:          &types.ApprovalInfo{Required: true, Mode: types.ApprovalModeShadow},

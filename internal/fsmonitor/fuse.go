@@ -29,11 +29,18 @@ type Emitter interface {
 	Publish(ev types.Event)
 }
 
+// Approver resolves a policy "approve" decision by asking a human. It is an
+// interface (not *approvals.Manager) so the platform layer, which cannot import
+// internal/approvals, can supply one. RequestApproval blocks until decided.
+type Approver interface {
+	RequestApproval(ctx context.Context, req approvals.Request) (approvals.Resolution, error)
+}
+
 type Hooks struct {
 	SessionID         string
 	Session           *session.Session
 	Policy            *policy.Engine
-	Approvals         *approvals.Manager
+	Approvals         Approver
 	Emit              Emitter
 	FUSEAudit         *FUSEAuditHooks
 	TraceContextFunc  func() (traceID, spanID, traceFlags string)
@@ -585,7 +592,10 @@ func (n *node) maybeApprove(ctx context.Context, dec policy.Decision, kind, targ
 	if dec.PolicyDecision != types.DecisionApprove || dec.EffectiveDecision != types.DecisionApprove {
 		return dec
 	}
+	// No approver wired: policy asked for a human, so fail closed rather than
+	// letting the operation through silently (issue: approve degraded to allow).
 	if n.hooks == nil || n.hooks.Approvals == nil {
+		dec.EffectiveDecision = types.DecisionDeny
 		return dec
 	}
 	req := approvals.Request{
