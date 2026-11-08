@@ -477,3 +477,40 @@ func TestWatcher_DoesNotFireOnSiblingsOfMissingRoot(t *testing.T) {
 		t.Fatal("watcher did not detect skill in legitimately-created root")
 	}
 }
+
+// Close must not return while a debounce callback is still running: the
+// callback can be writing quarantine/trash files, and callers remove the tree
+// right after Close (t.TempDir on Windows failed with "directory is not empty").
+func TestWatcherCloseWaitsForInflightCallback(t *testing.T) {
+	root := t.TempDir()
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	w, err := NewWatcher(WatcherConfig{
+		Roots:    []string{root},
+		Debounce: 10 * time.Millisecond,
+		OnSkill: func(skillDir string) {
+			close(started)
+			time.Sleep(100 * time.Millisecond)
+			close(finished)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+
+	skillDir := filepath.Join(root, "s")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	w.scheduleDebounce(skillDir)
+	<-started
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-finished:
+	default:
+		t.Fatal("Close returned while the OnSkill callback was still running")
+	}
+}

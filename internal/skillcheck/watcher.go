@@ -23,11 +23,9 @@ type WatcherConfig struct {
 // Watcher observes watch roots for new SKILL.md landings and invokes
 // OnSkill (debounced per skill dir).
 //
-// Goroutine lifetime: time.AfterFunc timers scheduled by scheduleDebounce
-// may fire after Close is called. Close stops all pending timers to prevent
-// spurious OnSkill callbacks after shutdown, but there is a small window
-// where a timer goroutine already entered its callback before Stop returned.
-// Callers must tolerate at most one OnSkill call after Close.
+// Goroutine lifetime: time.AfterFunc timers scheduled by scheduleDebounce may
+// fire after Close is called. Close stops pending timers and waits for any
+// callback that already started, so OnSkill does not run after Close returns.
 type Watcher struct {
 	cfg          WatcherConfig
 	watcher      *fsnotify.Watcher
@@ -37,6 +35,11 @@ type Watcher struct {
 	pending      []string        // literal roots not yet existing; removed on first match
 	pendingGlobs []string        // glob roots; retained after each match for future matches
 	promoted     map[string]bool // roots that have been registered (full subtree watched)
+
+	// callbacks counts scheduled debounce callbacks that have not finished, so
+	// Close can wait for an in-flight OnSkill (which may still be writing the
+	// quarantine/trash files) before returning.
+	callbacks sync.WaitGroup
 }
 
 // NewWatcher creates a new Watcher. Call Run to start processing events.
@@ -84,10 +87,17 @@ func (w *Watcher) Run(ctx context.Context) {
 func (w *Watcher) Close() error {
 	w.mu.Lock()
 	for key, t := range w.timers {
-		t.Stop()
+		if t.Stop() {
+			// The timer never fired, so its callback will not run: release its
+			// slot here. A false return means the callback owns the Done.
+			w.callbacks.Done()
+		}
 		delete(w.timers, key)
 	}
 	w.mu.Unlock()
+	// Wait for callbacks already running (a quarantine write can still be in
+	// flight; the caller may be about to remove the tree).
+	w.callbacks.Wait()
 	return w.watcher.Close()
 }
 
@@ -422,9 +432,15 @@ func (w *Watcher) scheduleDebounce(skillDir string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if t, ok := w.timers[skillDir]; ok {
-		t.Stop()
+		if t.Stop() {
+			// Rescheduled before it fired: its callback will not run, so release
+			// the slot this timer held (Close waits on that counter).
+			w.callbacks.Done()
+		}
 	}
+	w.callbacks.Add(1)
 	w.timers[skillDir] = time.AfterFunc(w.cfg.Debounce, func() {
+		defer w.callbacks.Done()
 		w.cfg.OnSkill(skillDir)
 		w.mu.Lock()
 		delete(w.timers, skillDir)
