@@ -308,29 +308,113 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, sc *SyscallContext)
 // connected socket has no name (msg_name NULL / addrlen 0): connect() already
 // evaluated it, so it is allowed.
 func (t *Tracer) handleSend(ctx context.Context, tid int, nr int, args [6]uint64) {
-	namePtr, nameLen, ok := t.sendSockaddr(tid, nr, args)
-	if !ok {
+	dests, connected, err := t.sendDestinations(tid, nr, args)
+	if err != nil {
+		slog.Warn("handleSend: cannot read send header, denying", "tid", tid, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
+	if connected {
+		// Connected socket: connect() already evaluated the peer.
 		t.allowSyscall(tid)
 		return
 	}
-	if nameLen < 2 || nameLen > 128 {
-		slog.Warn("handleSend: addrlen out of range, denying", "tid", tid, "addrlen", nameLen)
+	if len(dests) == 0 {
 		t.denySyscall(tid, int(unix.EACCES))
 		return
+	}
+	// Every destination of the call must pass: sendmmsg can carry a different
+	// peer per element, and allowing on the first one would send the rest.
+	for _, d := range dests {
+		if !t.sendAllowed(ctx, tid, nr, d) {
+			return // sendAllowed denied
+		}
+	}
+	t.allowSyscall(tid)
+}
+
+// sendSockaddr is one destination of a send syscall.
+type sendSockaddr struct {
+	Family  int
+	Address string
+	Port    int
+}
+
+// sendDestinations collects the destinations of sendto/sendmsg/sendmmsg.
+// connected reports a readable header whose msg_name is NULL (a send on a
+// connected socket); an unreadable header is an error, not a connected send.
+func (t *Tracer) sendDestinations(tid, nr int, args [6]uint64) ([]sendSockaddr, bool, error) {
+	if nr == unix.SYS_SENDTO {
+		if args[4] == 0 || args[5] == 0 {
+			return nil, true, nil
+		}
+		d, err := t.readSendSockaddr(tid, args[4], int(args[5]))
+		if err != nil {
+			return nil, false, err
+		}
+		return []sendSockaddr{d}, false, nil
+	}
+
+	// sendmsg(sockfd, msg, flags): one msghdr.
+	// sendmmsg(sockfd, msgvec, vlen, flags): vlen mmsghdrs, 64 bytes apart;
+	// each starts with the msghdr this reads.
+	count := 1
+	if nr == unix.SYS_SENDMMSG {
+		vlen := int(args[2])
+		if vlen <= 0 {
+			return nil, false, fmt.Errorf("sendmmsg vlen %d", vlen)
+		}
+		if vlen > maxSendmmsgVectors {
+			return nil, false, fmt.Errorf("sendmmsg vlen %d exceeds %d", vlen, maxSendmmsgVectors)
+		}
+		count = vlen
+	}
+
+	var dests []sendSockaddr
+	for i := 0; i < count; i++ {
+		var hdr [12]byte
+		if err := t.readBytes(tid, args[1]+uint64(i*64), hdr[:]); err != nil {
+			return nil, false, fmt.Errorf("read msghdr %d: %w", i, err)
+		}
+		namePtr := binary.NativeEndian.Uint64(hdr[0:8])
+		nameLen := int(binary.NativeEndian.Uint32(hdr[8:12]))
+		if namePtr == 0 || nameLen == 0 {
+			continue // connected socket, no per-send peer
+		}
+		d, err := t.readSendSockaddr(tid, namePtr, nameLen)
+		if err != nil {
+			return nil, false, err
+		}
+		dests = append(dests, d)
+	}
+	if len(dests) == 0 {
+		return nil, true, nil
+	}
+	return dests, false, nil
+}
+
+// maxSendmmsgVectors caps how many destinations one sendmmsg may carry.
+const maxSendmmsgVectors = 64
+
+func (t *Tracer) readSendSockaddr(tid int, namePtr uint64, nameLen int) (sendSockaddr, error) {
+	if nameLen < 2 || nameLen > 128 {
+		return sendSockaddr{}, fmt.Errorf("addrlen %d out of range", nameLen)
 	}
 	buf := make([]byte, nameLen)
 	if err := t.readBytes(tid, namePtr, buf); err != nil {
-		slog.Warn("handleSend: cannot read sockaddr, denying", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
-		return
+		return sendSockaddr{}, fmt.Errorf("read sockaddr: %w", err)
 	}
 	family, address, port, err := parseSockaddr(buf)
 	if err != nil {
-		slog.Warn("handleSend: cannot parse sockaddr, denying", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
-		return
+		return sendSockaddr{}, fmt.Errorf("parse sockaddr: %w", err)
 	}
+	return sendSockaddr{Family: family, Address: address, Port: port}, nil
+}
 
+// sendAllowed asks the network handler about one destination. It denies and
+// reports false on anything other than allow/continue (redirect is only
+// supported for connect).
+func (t *Tracer) sendAllowed(ctx context.Context, tid, nr int, d sendSockaddr) bool {
 	t.mu.Lock()
 	state := t.tracees[tid]
 	var tgid int
@@ -349,48 +433,25 @@ func (t *Tracer) handleSend(ctx context.Context, tid int, nr int, args [6]uint64
 		PID:       tgid,
 		SessionID: sessionID,
 		Syscall:   nr,
-		Family:    family,
-		Address:   address,
-		Port:      port,
+		Family:    d.Family,
+		Address:   d.Address,
+		Port:      d.Port,
 		Operation: operation,
 	})
-	allow := result.Allow || result.Action == "allow" || result.Action == "continue"
-	if !allow {
-		errno := int(result.Errno)
-		if errno == 0 {
-			errno = int(unix.EACCES)
+	switch result.Action {
+	case "allow", "continue":
+		return true
+	case "":
+		if result.Allow {
+			return true
 		}
-		t.denySyscall(tid, errno)
-		return
 	}
-	t.allowSyscall(tid)
-}
-
-// sendSockaddr returns the destination sockaddr of a send syscall. ok is false
-// for a connected-socket send, which carries no destination.
-func (t *Tracer) sendSockaddr(tid, nr int, args [6]uint64) (uint64, int, bool) {
-	switch nr {
-	case unix.SYS_SENDTO:
-		// sendto(sockfd, buf, len, flags, dest_addr, addrlen)
-		if args[4] == 0 || args[5] == 0 {
-			return 0, 0, false
-		}
-		return args[4], int(args[5]), true
-	default:
-		// sendmsg(sockfd, msg, flags) / sendmmsg(sockfd, msgvec, vlen, flags):
-		// struct msghdr { void *msg_name; socklen_t msg_namelen; ... } and
-		// struct mmsghdr starts with the same msghdr.
-		var hdr [12]byte
-		if err := t.readBytes(tid, args[1], hdr[:]); err != nil {
-			return 0, 0, false
-		}
-		namePtr := binary.NativeEndian.Uint64(hdr[0:8])
-		nameLen := int(binary.NativeEndian.Uint32(hdr[8:12]))
-		if namePtr == 0 || nameLen == 0 {
-			return 0, 0, false
-		}
-		return namePtr, nameLen, true
+	errno := int(result.Errno)
+	if errno == 0 || result.Action == "redirect" {
+		errno = int(unix.EACCES)
 	}
+	t.denySyscall(tid, errno)
+	return false
 }
 
 // buildSockaddrIn4 builds a raw sockaddr_in for IPv4.

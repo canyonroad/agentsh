@@ -13,7 +13,7 @@ type SignalFilterConfig struct {
 // DefaultSignalFilterConfig returns a config for intercepting all signal syscalls.
 func DefaultSignalFilterConfig() SignalFilterConfig {
 	return SignalFilterConfig{
-		Enabled: false,
+		Enabled:  false,
 		Syscalls: nil,
 	}
 }
@@ -76,6 +76,10 @@ func ExtractSignalContext(req interface{}) SignalContext {
 }
 
 // IsProcessGroupSignal returns true if the signal targets a process group.
+// UnresolvedTarget reports a pidfd_send_signal whose pidfd could not be
+// resolved (stub: never, Windows has no pidfd).
+func (c *SignalContext) UnresolvedTarget() bool { return false }
+
 func (c *SignalContext) IsProcessGroupSignal() bool {
 	return c.TargetPID <= 0
 }

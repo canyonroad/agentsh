@@ -139,6 +139,14 @@ func serveSignalNotify(ctx context.Context, fd *os.File, handler *signal.Handler
 		}
 
 		sigCtx := signal.ExtractSignalContext(req)
+		// An unresolved pidfd target cannot be classified, so it cannot be
+		// allowed: policy would see -1 as "external" and pass it.
+		if sigCtx.UnresolvedTarget() {
+			if err := filter.Respond(req.ID, false, 1); err != nil { // EPERM
+				slog.Debug("signal filter respond (unresolved pidfd)", "error", err)
+			}
+			continue
+		}
 		dec := handler.Handle(ctx, sigCtx)
 
 		// Respond based on decision

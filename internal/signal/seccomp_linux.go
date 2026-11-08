@@ -193,6 +193,10 @@ func ExtractSignalContext(req *seccomp.ScmpNotifReq) SignalContext {
 	case unix.SYS_PIDFD_SEND_SIGNAL:
 		// pidfd_send_signal(int pidfd, int sig, siginfo_t *info, flags)
 		// The pidfd carries the target; resolve it from the sender's fdinfo.
+		// -1 (unresolvable) must be denied by the caller, not classified as an
+		// external target.
+		// shortcut: fdinfo is sampled before the syscall runs, so a sibling
+		// thread can swap the fd; upgrade to pidfd-object binding if it matters.
 		ctx.TargetPID = PidfdTargetPID(int(req.Pid), int(req.Data.Args[0]))
 		ctx.Signal = int(req.Data.Args[1])
 	}
@@ -222,6 +226,12 @@ func PidfdTargetPID(tid, fd int) int {
 }
 
 // IsProcessGroupSignal returns true if the signal targets a process group.
+// UnresolvedTarget reports a pidfd_send_signal whose pidfd could not be
+// resolved. Policy cannot classify it, so callers must deny.
+func (c *SignalContext) UnresolvedTarget() bool {
+	return c.Syscall == unix.SYS_PIDFD_SEND_SIGNAL && c.TargetPID < 0
+}
+
 func (c *SignalContext) IsProcessGroupSignal() bool {
 	// kill(0, sig) or kill(-pgid, sig)
 	return c.TargetPID <= 0

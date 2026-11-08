@@ -3,6 +3,7 @@
 package ptrace
 
 import (
+	"context"
 	"encoding/binary"
 	"net"
 	"testing"
@@ -161,4 +162,21 @@ func TestParseSockaddr_AFUnspec(t *testing.T) {
 	if port != 0 {
 		t.Errorf("port = %d, want 0", port)
 	}
+}
+
+// sendAllowed must deny an unsupported action even when Allow is true (a
+// redirect on a send cannot be applied).
+func TestSendAllowedRejectsRedirect(t *testing.T) {
+	h := &fixedNetworkHandler{res: NetworkResult{Allow: true, Action: "redirect"}}
+	cfg := &TracerConfig{TraceNetwork: true, NetworkHandler: h}
+	tr := &Tracer{cfg: *cfg}
+	if tr.sendAllowed(context.Background(), 1, unix.SYS_SENDTO, sendSockaddr{Family: unix.AF_INET, Address: "1.2.3.4", Port: 80}) {
+		t.Fatal("sendAllowed accepted a redirect action")
+	}
+}
+
+type fixedNetworkHandler struct{ res NetworkResult }
+
+func (f *fixedNetworkHandler) HandleNetwork(ctx context.Context, nc NetworkContext) NetworkResult {
+	return f.res
 }

@@ -1180,7 +1180,7 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		// Fast-path vfork children for known safe setup syscalls.
 		// Exclude SYS_CLOSE when fd tracking is active (same as handleSeccompStop).
 		if state.IsVforkChild && !isExecveSyscall(nr) && isVforkSafeSyscall(nr) &&
-			!(nr == unix.SYS_CLOSE && t.fds != nil) {
+			!(nr == unix.SYS_CLOSE && t.fds != nil) && !foreignABI(sc.Info.Arch, nr) {
 			t.allowSyscall(tid)
 			return
 		}
@@ -1259,7 +1259,7 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	// Exception: SYS_CLOSE must go through handleClose when fd tracking
 	// is active (t.fds != nil) to clean up statusFds/dnsRedirects/tlsWatched.
 	if isVfork && !isExecveSyscall(nr) && isVforkSafeSyscall(nr) &&
-		!(nr == unix.SYS_CLOSE && t.fds != nil) {
+		!(nr == unix.SYS_CLOSE && t.fds != nil) && !foreignABI(sc.Info.Arch, nr) {
 		t.allowSyscall(tid)
 		return
 	}
@@ -1288,6 +1288,17 @@ func foreignABI(arch uint32, nr int) bool {
 	return arch != nativeAuditArch()
 }
 
+// tracesSyscall reports whether the prefilter stops this syscall number
+// natively, so a stop for any other number means a foreign ABI.
+func (t *Tracer) tracesSyscall(nr int) bool {
+	for _, n := range tracedSyscallNumbers(&t.cfg) {
+		if n == nr {
+			return true
+		}
+	}
+	return false
+}
+
 // dispatchSyscall routes a syscall to the appropriate handler.
 func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *SyscallContext) {
 	// A foreign-ABI syscall must never reach the native switch: i386 execve is
@@ -1295,6 +1306,16 @@ func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *Sysca
 	if foreignABI(sc.Info.Arch, nr) {
 		if err := t.denySyscall(tid, int(unix.ENOSYS)); err != nil {
 			slog.Warn("ptrace: deny foreign-ABI syscall failed", "tid", tid, "nr", nr, "arch", sc.Info.Arch, "error", err)
+		}
+		return
+	}
+	// Without PTRACE_GET_SYSCALL_INFO the arch is unknown. A stop for a number
+	// the prefilter does not trace can then only come from its arch-mismatch
+	// RET TRACE, i.e. a foreign-ABI syscall: fail closed rather than dispatch
+	// it as native (i386 execve is native munmap).
+	if sc.Info.Arch == 0 && !t.tracesSyscall(nr) {
+		if err := t.denySyscall(tid, int(unix.ENOSYS)); err != nil {
+			slog.Warn("ptrace: deny arch-unknown syscall failed", "tid", tid, "nr", nr, "error", err)
 		}
 		return
 	}
