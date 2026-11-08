@@ -27,6 +27,10 @@ type StartRequest struct {
 	Dir   string
 	Env   []string
 
+	// ExtraFiles are passed to the child as fds 3, 4, ... (seccomp notify /
+	// signal sockets handed over by the supervisor).
+	ExtraFiles []*os.File
+
 	InitialSize Winsize
 }
 
@@ -36,6 +40,10 @@ type Session struct {
 
 	outCh   chan []byte
 	outDone chan struct{}
+
+	// wait overrides cmd.Wait when the process is reaped by someone else (the
+	// ptrace tracer), otherwise Wait reports "no child processes".
+	wait func() (int, error)
 
 	pid int
 }
@@ -76,9 +84,25 @@ func (s *Session) Signal(sig syscall.Signal) error {
 	return syscall.Kill(-pgid, sig)
 }
 
+// SetWaitOverride replaces the wait implementation for processes reaped by
+// another component (ptrace). Safe to call only before Wait.
+func (s *Session) SetWaitOverride(fn func() (int, error)) {
+	if s == nil {
+		return
+	}
+	s.wait = fn
+}
+
 func (s *Session) Wait() (exitCode int, err error) {
 	if s == nil || s.cmd == nil {
 		return 127, errors.New("process not started")
+	}
+	if s.wait != nil {
+		code, waitErr := s.wait()
+		if s.outDone != nil {
+			<-s.outDone
+		}
+		return code, waitErr
 	}
 	err = s.cmd.Wait()
 	if s.outDone != nil {
@@ -128,6 +152,10 @@ func (e *Engine) Start(ctx context.Context, req StartRequest) (*Session, error) 
 		Setctty: true,
 		// Use stdin (fd 0) as controlling TTY after the child maps slave onto stdio.
 		Ctty: 0,
+	}
+
+	if len(req.ExtraFiles) > 0 {
+		cmd.ExtraFiles = req.ExtraFiles
 	}
 
 	cmd.Stdin = slave

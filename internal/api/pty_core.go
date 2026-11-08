@@ -184,7 +184,21 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 		cols = 80
 	}
 
-	ps, err := pty.New().Start(ctx, pty.StartRequest{
+	// PTY sessions must get the same kernel enforcement as a plain exec:
+	// route the command through agentsh-unixwrap (seccomp file/net/execve,
+	// Landlock) and attach the ptrace tracer when that mode is active.
+	// Previously the PTY path ran the raw command with only FUSE in front.
+	wrap := a.setupSeccompWrapper(types.ExecRequest{
+		Command: req.Command,
+		Args:    req.Args,
+		Env:     req.Env,
+	}, sessionID, sess)
+
+	var extra *extraProcConfig
+	if wrap != nil {
+		extra = wrap.extraCfg
+	}
+	startReq := pty.StartRequest{
 		Command: req.Command,
 		Args:    req.Args,
 		Argv0:   strings.TrimSpace(req.Argv0),
@@ -194,12 +208,50 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 			Rows: rows,
 			Cols: cols,
 		},
-	})
+	}
+	if wrap != nil {
+		startReq.Command = wrap.wrappedReq.Command
+		startReq.Args = wrap.wrappedReq.Args
+	}
+	if extra != nil {
+		for k, v := range extra.envInject {
+			startReq.Env = append(startReq.Env, k+"="+v)
+		}
+		startReq.ExtraFiles = extra.extraFiles
+	}
+
+	ps, err := pty.New().Start(ctx, startReq)
 	if err != nil {
+		if extra != nil {
+			for _, f := range extra.extraFiles {
+				_ = f.Close()
+			}
+		}
 		defer unlock()
 		return nil, http.StatusInternalServerError, err
 	}
 	sess.SetCurrentProcessPID(ps.PID())
+	pgid := getProcessGroupID(ps.PID())
+
+	// Hand the wrapper's fds to their handlers, then attach the tracer. Both
+	// must happen before the child does useful work; the seccomp wrapper holds
+	// the child until its notify fd has been received.
+	startWrapperHandlers(ctx, extra, ps.PID(), pgid, nil)
+	if a.ptraceTracer != nil && !a.cfg.Sandbox.Ptrace.IsExecveOnly() {
+		waitExit, _, attachErr := ptraceExecAttach(a.ptraceTracer, ps.PID(), sessionID, cmdID, false)
+		if attachErr != nil {
+			_ = killProcessGroup(pgid)
+			_ = killProcess(ps.PID())
+			_, _ = ps.Wait()
+			defer unlock()
+			return nil, http.StatusInternalServerError, fmt.Errorf("ptrace attach (PTY): %w", attachErr)
+		}
+		// The tracer reaps the child, so cmd.Wait would report ECHILD.
+		ps.SetWaitOverride(func() (int, error) {
+			res := waitExit()
+			return res.exitCode, res.err
+		})
+	}
 
 	startEv := types.Event{
 		ID:        uuid.NewString(),
