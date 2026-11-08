@@ -68,6 +68,7 @@ func buildBPFForSyscalls(syscalls []int) ([]unix.SockFilter, error) {
 	prog = append(prog, unix.SockFilter{Code: bpfJMP | bpfJEQ | bpfK, Jt: 1, Jf: 0, K: auditArch})
 	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetTrace})
 	prog = append(prog, unix.SockFilter{Code: bpfLD | bpfW | bpfABS, K: offsetNr})
+	prog = appendDenyRules(prog, deniedSyscalls())
 
 	for i, nr := range syscalls {
 		remaining := n - i - 1
@@ -89,6 +90,32 @@ func buildBPFForSyscalls(syscalls []int) ([]unix.SockFilter, error) {
 // seccompRetErrno returns the SECCOMP_RET_ERRNO value for the given errno.
 func seccompRetErrno(errno int) uint32 {
 	return seccompRetErrnoBase | uint32(errno&0xFFFF)
+}
+
+// deniedSyscalls are syscalls the ptrace engine cannot observe at all, so they
+// are denied outright for every traced process. io_uring submits file and
+// network work through a ring: io_uring_setup/enter/register are the only
+// syscalls the kernel makes, and none of the ring operations pass through a
+// handler, so an unblocked ring bypasses file, network, exec and audit policy.
+func deniedSyscalls() []int {
+	return []int{
+		unix.SYS_IO_URING_SETUP,
+		unix.SYS_IO_URING_ENTER,
+		unix.SYS_IO_URING_REGISTER,
+	}
+}
+
+// appendDenyRules appends "if nr == N return ERRNO(EPERM)" pairs. Each pair is
+// [JEQ nr, jt=0, jf=1][RET ERRNO], so the matching syscall falls onto the
+// return and everything else skips it.
+func appendDenyRules(prog []unix.SockFilter, syscalls []int) []unix.SockFilter {
+	for _, nr := range syscalls {
+		prog = append(prog,
+			unix.SockFilter{Code: bpfJMP | bpfJEQ | bpfK, Jt: 0, Jf: 1, K: uint32(nr)},
+			unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetErrno(int(unix.EPERM))},
+		)
+	}
+	return prog
 }
 
 // bpfSyscallAction pairs a syscall number with its BPF return action.
@@ -146,6 +173,7 @@ func buildBPFForActions(actions []bpfSyscallAction) ([]unix.SockFilter, error) {
 	prog = append(prog, unix.SockFilter{Code: bpfJMP | bpfJEQ | bpfK, Jt: 1, Jf: 0, K: auditArch})
 	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetTrace})
 	prog = append(prog, unix.SockFilter{Code: bpfLD | bpfW | bpfABS, K: offsetNr})
+	prog = appendDenyRules(prog, deniedSyscalls())
 
 	// Comparisons: each JEQ jumps to its action's return instruction.
 	// Layout after comparisons: [ALLOW ret] [action0 ret] [action1 ret] ...

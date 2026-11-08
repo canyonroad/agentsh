@@ -26,8 +26,9 @@ func TestPrefilterBPFInstructionCount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 4 header instructions + len(syscalls) comparisons + 2 return instructions.
-	want := 4 + len(syscalls) + 2
+	// 4 header + 2 per denied syscall (io_uring) + len(syscalls) comparisons
+	// + 2 return instructions.
+	want := 4 + 2*len(deniedSyscalls()) + len(syscalls) + 2
 	if len(prog) != want {
 		t.Errorf("instruction count = %d, want %d (4 header + %d comparisons + 2 returns)",
 			len(prog), want, len(syscalls))
@@ -447,4 +448,35 @@ func TestStaticAllowsExcludedFromBPF(t *testing.T) {
 	if !jeqValues[uint32(unix.SYS_EXECVE)] {
 		t.Error("SYS_EXECVE should still be in BPF filter")
 	}
+}
+
+// io_uring must be denied by the ptrace prefilter: the ring's file/network work
+// never reaches a handler, so an unblocked ring is a full policy bypass.
+func TestPrefilterDeniesIOUring(t *testing.T) {
+	cfg := &TracerConfig{TraceFile: true, TraceNetwork: true, TraceExecve: true}
+	prog, err := buildPrefilterBPF(cfg)
+	if err != nil {
+		t.Fatalf("buildPrefilterBPF: %v", err)
+	}
+	for _, nr := range deniedSyscalls() {
+		if !bpfDeniesSyscall(prog, nr) {
+			t.Fatalf("prefilter does not deny syscall %d", nr)
+		}
+	}
+	if bpfDeniesSyscall(prog, unix.SYS_READ) {
+		t.Fatal("prefilter denies SYS_READ, which must stay traced")
+	}
+}
+
+// bpfDeniesSyscall reports whether prog contains an ERRNO return for nr.
+func bpfDeniesSyscall(prog []unix.SockFilter, nr int) bool {
+	want := seccompRetErrno(int(unix.EPERM))
+	for i := 0; i+1 < len(prog); i++ {
+		if prog[i].Code == bpfJMP|bpfJEQ|bpfK && prog[i].K == uint32(nr) &&
+			prog[i].Jt == 0 && prog[i].Jf == 1 &&
+			prog[i+1].Code == bpfRET|bpfK && prog[i+1].K == want {
+			return true
+		}
+	}
+	return false
 }
