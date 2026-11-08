@@ -3,6 +3,7 @@
 package ptrace
 
 import (
+	"runtime"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -26,9 +27,12 @@ func TestPrefilterBPFInstructionCount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 4 header + 2 per denied syscall (io_uring) + len(syscalls) comparisons
-	// + 2 return instructions.
+	// 4 header + 2 per denied syscall (io_uring) + x32 guard (amd64)
+	// + len(syscalls) comparisons + 2 return instructions.
 	want := 4 + 2*len(deniedSyscalls()) + len(syscalls) + 2
+	if runtime.GOARCH == "amd64" {
+		want += 2
+	}
 	if len(prog) != want {
 		t.Errorf("instruction count = %d, want %d (4 header + %d comparisons + 2 returns)",
 			len(prog), want, len(syscalls))
@@ -479,4 +483,24 @@ func bpfDeniesSyscall(prog []unix.SockFilter, nr int) bool {
 		}
 	}
 	return false
+}
+
+// The prefilter must reject x32 numbers (bit 30) before the traced-syscall
+// chain, otherwise they match no JEQ and fall through to ALLOW.
+func TestPrefilterHasX32Guard(t *testing.T) {
+	if runtime.GOARCH != "amd64" {
+		t.Skip("x32 is amd64-only")
+	}
+	prog, err := buildPrefilterBPF(allFeaturesConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := seccompRetErrno(int(unix.ENOSYS))
+	for i := 0; i+1 < len(prog); i++ {
+		if prog[i].Code == bpfJMP|bpfJSET|bpfK && prog[i].K == x32SyscallBit &&
+			prog[i+1].Code == bpfRET|bpfK && prog[i+1].K == want {
+			return
+		}
+	}
+	t.Fatal("prefilter has no x32 guard")
 }

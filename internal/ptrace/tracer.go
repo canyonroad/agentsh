@@ -1267,8 +1267,38 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	t.dispatchSyscall(ctx, tid, nr, sc)
 }
 
+// nativeAuditArch is the AUDIT_ARCH_* value of the ABI this tracer runs on.
+func nativeAuditArch() uint32 {
+	if runtime.GOARCH == "arm64" {
+		return auditArchAarch64
+	}
+	return auditArchX86_64
+}
+
+// foreignABI reports whether a syscall came from another ABI: another audit
+// arch, or an x32 number (bit 30 set) on amd64. Their numbers collide with
+// unrelated native syscalls, so the nr switch cannot route them.
+func foreignABI(arch uint32, nr int) bool {
+	if runtime.GOARCH == "amd64" && nr&0x40000000 != 0 {
+		return true
+	}
+	if arch == 0 {
+		return false // unknown arch (older kernels / tests): assume native
+	}
+	return arch != nativeAuditArch()
+}
+
 // dispatchSyscall routes a syscall to the appropriate handler.
 func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *SyscallContext) {
+	// A foreign-ABI syscall must never reach the native switch: i386 execve is
+	// amd64 munmap, i386 open is amd64 fstat, so every handler would be wrong.
+	if foreignABI(sc.Info.Arch, nr) {
+		if err := t.denySyscall(tid, int(unix.ENOSYS)); err != nil {
+			slog.Warn("ptrace: deny foreign-ABI syscall failed", "tid", tid, "nr", nr, "arch", sc.Info.Arch, "error", err)
+		}
+		return
+	}
+
 	// Socket tuple rules are the most-specific socket policy. Check them
 	// before family rules and the generic network handler so protocol-specific
 	// Dirty Frag rules are not shadowed by broad AF_* entries.

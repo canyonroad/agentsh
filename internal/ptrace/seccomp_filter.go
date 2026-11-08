@@ -11,13 +11,13 @@ import (
 
 // BPF instruction classes and fields.
 const (
-	bpfLD  = 0x00
-	bpfW   = 0x00
-	bpfABS = 0x20
-	bpfJMP = 0x05
-	bpfJEQ = 0x10
-	bpfK   = 0x00
-	bpfRET = 0x06
+	bpfLD   = 0x00
+	bpfW    = 0x00
+	bpfABS  = 0x20
+	bpfJMP  = 0x05
+	bpfJEQ  = 0x10
+	bpfK    = 0x00
+	bpfRET  = 0x06
 	bpfJSET = 0x40
 
 	seccompRetAllow = 0x7FFF0000
@@ -68,6 +68,7 @@ func buildBPFForSyscalls(syscalls []int) ([]unix.SockFilter, error) {
 	prog = append(prog, unix.SockFilter{Code: bpfJMP | bpfJEQ | bpfK, Jt: 1, Jf: 0, K: auditArch})
 	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetTrace})
 	prog = append(prog, unix.SockFilter{Code: bpfLD | bpfW | bpfABS, K: offsetNr})
+	prog = appendX32Guard(prog)
 	prog = appendDenyRules(prog, deniedSyscalls())
 
 	for i, nr := range syscalls {
@@ -103,6 +104,22 @@ func deniedSyscalls() []int {
 		unix.SYS_IO_URING_ENTER,
 		unix.SYS_IO_URING_REGISTER,
 	}
+}
+
+// x32SyscallBit marks an x32 (x86-64 ILP32) syscall number on amd64.
+const x32SyscallBit = 0x40000000
+
+// appendX32Guard appends "if nr & x32SyscallBit -> ENOSYS". x32 numbers share
+// AUDIT_ARCH_X86_64 with native ones but carry bit 30, so they match no JEQ and
+// used to fall through to ALLOW with no ptrace stop and no policy decision.
+func appendX32Guard(prog []unix.SockFilter) []unix.SockFilter {
+	if runtime.GOARCH != "amd64" {
+		return prog
+	}
+	return append(prog,
+		unix.SockFilter{Code: bpfJMP | bpfJSET | bpfK, Jt: 0, Jf: 1, K: x32SyscallBit},
+		unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetErrno(int(unix.ENOSYS))},
+	)
 }
 
 // appendDenyRules appends "if nr == N return ERRNO(EPERM)" pairs. Each pair is

@@ -4,6 +4,7 @@ package ptrace
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/seccomp"
@@ -276,4 +277,22 @@ func containsSyscall(nums []int, want int) bool {
 		}
 	}
 	return false
+}
+
+// A 64-bit tracee can issue i386 (int $0x80) or x32 numbers; their values
+// collide with unrelated native syscalls (i386 execve=11 is amd64 munmap), so
+// they must be rejected before the native dispatch switch.
+func TestForeignABI(t *testing.T) {
+	native := nativeAuditArch()
+	if foreignABI(native, unix.SYS_OPENAT) {
+		t.Fatal("native syscall classified as foreign")
+	}
+	if !foreignABI(0x40000003 /* AUDIT_ARCH_I386 */, unix.SYS_OPENAT) {
+		t.Fatal("i386 arch not classified as foreign")
+	}
+	if runtime.GOARCH == "amd64" {
+		if !foreignABI(native, 0x40000000|unix.SYS_OPENAT) {
+			t.Fatal("x32 syscall number not classified as foreign")
+		}
+	}
 }
