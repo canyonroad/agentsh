@@ -165,3 +165,14 @@ func TestTruncateCoverage(t *testing.T) {
 		t.Fatal("truncate/ftruncate missing from the traced syscall set")
 	}
 }
+
+// A redirect decision on the newly intercepted truncate/mknodat must be able to
+// rewrite their path argument, or it degrades to EACCES.
+func TestFilePathArgIndexTruncateMknodat(t *testing.T) {
+	if got := filePathArgIndex(unix.SYS_TRUNCATE); got != 0 {
+		t.Fatalf("truncate path arg index = %d, want 0", got)
+	}
+	if got := filePathArgIndex(unix.SYS_MKNODAT); got != 1 {
+		t.Fatalf("mknodat path arg index = %d, want 1", got)
+	}
+}

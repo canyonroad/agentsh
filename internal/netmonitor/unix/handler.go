@@ -537,6 +537,12 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		path2 = p2
 	}
 
+	// truncate/ftruncate follow symlinks, so judge the target of the link
+	// rather than the (possibly allowed) link path.
+	if args.Nr == unix.SYS_TRUNCATE || args.Nr == unix.SYS_FTRUNCATE {
+		path = resolveTraceeSymlink(pid, path)
+	}
+
 	operation := syscallToOperation(args.Nr, fileArgs.Flags)
 
 	frequest := FileRequest{
@@ -670,6 +676,11 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 			return
 		}
 		path2 = p2
+	}
+
+	// truncate/ftruncate follow symlinks: judge the target, not the link path.
+	if args.Nr == unix.SYS_TRUNCATE || args.Nr == unix.SYS_FTRUNCATE {
+		path = resolveTraceeSymlink(pid, path)
 	}
 
 	operation := syscallToOperation(args.Nr, fileArgs.Flags)

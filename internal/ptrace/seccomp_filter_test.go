@@ -135,18 +135,17 @@ func TestBuildBPFForActionsErrnoValue(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The filter also carries fixed deny/guard returns (io_uring, x32), so look
+	// for the action's own ERRNO rather than asserting on every ERRNO return.
+	want := uint32(0x00050000 | errno)
 	found := false
 	for _, inst := range prog {
-		if inst.Code == bpfRET|bpfK && inst.K != seccompRetAllow && inst.K != seccompRetTrace {
-			want := uint32(0x00050000 | errno)
-			if inst.K != want {
-				t.Errorf("ERRNO return = 0x%x, want 0x%x", inst.K, want)
-			}
+		if inst.Code == bpfRET|bpfK && inst.K == want {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("no ERRNO return instruction found")
+		t.Errorf("no ERRNO return 0x%x found", want)
 	}
 }
 
@@ -289,9 +288,10 @@ func TestBPFWithArgFilterSkippedForDeny(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// JSET should NOT appear — deny takes priority over arg filter.
+	// No JSET arg-filter check for OPENAT — deny takes priority over arg filter.
+	// (The x32 guard is also a JSET, so ignore bit-30 tests.)
 	for _, inst := range prog {
-		if inst.Code == bpfJMP|bpfJSET|bpfK {
+		if inst.Code == bpfJMP|bpfJSET|bpfK && inst.K != x32SyscallBit {
 			t.Errorf("unexpected JSET instruction for syscall with ERRNO action")
 		}
 	}
@@ -503,4 +503,42 @@ func TestPrefilterHasX32Guard(t *testing.T) {
 		}
 	}
 	t.Fatal("prefilter has no x32 guard")
+}
+
+// The injected builders (static deny and arg-level filter) must deny io_uring
+// and x32 too, not just the plain prefilter.
+func TestInjectedBuildersDenyIOUringAndX32(t *testing.T) {
+	actions := []bpfSyscallAction{{Nr: unix.SYS_OPENAT, Action: seccompRetTrace}}
+	builders := map[string][]unix.SockFilter{}
+	if prog, err := buildBPFForActions(actions); err == nil {
+		builders["actions"] = prog
+	} else {
+		t.Fatalf("buildBPFForActions: %v", err)
+	}
+	prog, err := buildBPFWithArgFilters(actions,
+		[]bpfArgFilter{{Nr: unix.SYS_OPENAT, ArgIndex: 2, Mask: openatWriteMask}}, nil)
+	if err != nil {
+		t.Fatalf("buildBPFWithArgFilters: %v", err)
+	}
+	builders["argfilters"] = prog
+
+	for name, p := range builders {
+		for _, nr := range deniedSyscalls() {
+			if !bpfDeniesSyscall(p, nr) {
+				t.Errorf("%s builder does not deny syscall %d", name, nr)
+			}
+		}
+		if runtime.GOARCH != "amd64" {
+			continue
+		}
+		hasGuard := false
+		for i := 0; i+1 < len(p); i++ {
+			if p[i].Code == bpfJMP|bpfJSET|bpfK && p[i].K == x32SyscallBit {
+				hasGuard = true
+			}
+		}
+		if !hasGuard {
+			t.Errorf("%s builder has no x32 guard", name)
+		}
+	}
 }

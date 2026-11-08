@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,9 @@ func TestEngine_RunPTY(t *testing.T) {
 // supervisor hands over). PTY sessions used to start the raw command with no
 // fds, so the wrapper never ran.
 func TestStartPassesExtraFiles(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("uses /proc/self/fd")
+	}
 	f, err := os.CreateTemp(t.TempDir(), "extra")
 	if err != nil {
 		t.Fatal(err)

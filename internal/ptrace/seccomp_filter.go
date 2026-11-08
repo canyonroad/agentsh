@@ -190,6 +190,7 @@ func buildBPFForActions(actions []bpfSyscallAction) ([]unix.SockFilter, error) {
 	prog = append(prog, unix.SockFilter{Code: bpfJMP | bpfJEQ | bpfK, Jt: 1, Jf: 0, K: auditArch})
 	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetTrace})
 	prog = append(prog, unix.SockFilter{Code: bpfLD | bpfW | bpfABS, K: offsetNr})
+	prog = appendX32Guard(prog)
 	prog = appendDenyRules(prog, deniedSyscalls())
 
 	// Comparisons: each JEQ jumps to its action's return instruction.
@@ -327,6 +328,8 @@ func buildBPFWithArgFilters(actions []bpfSyscallAction, argFilters []bpfArgFilte
 	prog = append(prog, unix.SockFilter{Code: bpfJMP | bpfJEQ | bpfK, Jt: 1, Jf: 0, K: auditArch})
 	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetTrace})
 	prog = append(prog, unix.SockFilter{Code: bpfLD | bpfW | bpfABS, K: offsetNr})
+	prog = appendX32Guard(prog)
+	prog = appendDenyRules(prog, deniedSyscalls())
 
 	// Comparisons.
 	for i, a := range actions {

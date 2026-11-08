@@ -409,6 +409,29 @@ func resolveFileArgsPath(pid int, fileArgs FileArgs) (string, error) {
 	return os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", pid, fileArgs.FdPath))
 }
 
+// resolveTraceeSymlink follows symlinks in the tracee's filesystem view, so a
+// rule matches the inode the kernel actually touches. A path that does not
+// exist yet resolves through its parent, keeping the basename.
+func resolveTraceeSymlink(pid int, path string) string {
+	root := "/proc/" + strconv.Itoa(pid) + "/root"
+	resolved, err := filepath.EvalSymlinks(root + path)
+	if err != nil {
+		dir, base := filepath.Split(path)
+		if dir == "" {
+			return path
+		}
+		rdir, derr := filepath.EvalSymlinks(root + filepath.Clean(dir))
+		if derr != nil {
+			return path
+		}
+		resolved = filepath.Join(rdir, base)
+	}
+	if !strings.HasPrefix(resolved, root) {
+		return path
+	}
+	return strings.TrimPrefix(resolved, root)
+}
+
 // resolvePathAt reads a path string from tracee memory and resolves it
 // relative to the given dirfd. If the path is absolute, it is cleaned
 // and returned directly. If relative, it is resolved against:

@@ -149,3 +149,18 @@ func TestCheckPolicyNameAllowed(t *testing.T) {
 		t.Fatal("policy outside policies.allowed was accepted")
 	}
 }
+
+func TestCheckPolicyAllowlisted(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Policies.Default = "default"
+	app := &App{cfg: cfg}
+	// Empty list: profiles/mounts keep working.
+	if err := app.checkPolicyAllowlisted("workspace-rw"); err != nil {
+		t.Fatalf("empty allowlist rejected a mount policy: %v", err)
+	}
+	// Non-empty list is enforced.
+	app.cfg.Policies.Allowed = []string{"default"}
+	if err := app.checkPolicyAllowlisted("workspace-rw"); err == nil {
+		t.Fatal("non-empty allowlist accepted a policy outside it")
+	}
+}

@@ -31,6 +31,11 @@ type StartRequest struct {
 	// signal sockets handed over by the supervisor).
 	ExtraFiles []*os.File
 
+	// ExternalWait means another component (the ptrace tracer) reaps the child,
+	// so the process is started without a CommandContext watcher, whose
+	// goroutine only ends when cmd.Wait is called.
+	ExternalWait bool
+
 	InitialSize Winsize
 }
 
@@ -135,7 +140,12 @@ func (e *Engine) Start(ctx context.Context, req StartRequest) (*Session, error) 
 		return nil, err
 	}
 
-	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
+	var cmd *exec.Cmd
+	if req.ExternalWait {
+		cmd = exec.Command(req.Command, req.Args...)
+	} else {
+		cmd = exec.CommandContext(ctx, req.Command, req.Args...)
+	}
 	if req.Dir != "" {
 		cmd.Dir = req.Dir
 	}

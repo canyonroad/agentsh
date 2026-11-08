@@ -209,13 +209,38 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 			Cols: cols,
 		},
 	}
+	argv0 := startReq.Argv0
 	if wrap != nil {
 		startReq.Command = wrap.wrappedReq.Command
 		startReq.Args = wrap.wrappedReq.Args
+		// The wrapper launches the target, so the requested argv0 travels via
+		// its env rather than as the wrapper's own argv[0].
+		if argv0 != "" {
+			startReq.Argv0 = ""
+		}
 	}
+	startReq.ExternalWait = a.ptraceTracer != nil
 	if extra != nil {
+		// extra.env carries the wrapper's own plumbing (notify socket fd, seccomp
+		// config, signal fd, wrapper log fd); without it agentsh-unixwrap exits.
+		envSet := func(env []string, k, v string) []string {
+			filtered := env[:0]
+			for _, e := range env {
+				if ek, _, ok := strings.Cut(e, "="); ok && ek == k {
+					continue
+				}
+				filtered = append(filtered, e)
+			}
+			return append(filtered, k+"="+v)
+		}
+		for k, v := range extra.env {
+			startReq.Env = envSet(startReq.Env, k, v)
+		}
 		for k, v := range extra.envInject {
-			startReq.Env = append(startReq.Env, k+"="+v)
+			startReq.Env = envSet(startReq.Env, k, v)
+		}
+		if argv0 != "" {
+			startReq.Env = envSet(startReq.Env, "AGENTSH_UNIXWRAP_ARGV0", argv0)
 		}
 		startReq.ExtraFiles = extra.extraFiles
 	}
@@ -233,19 +258,58 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 	sess.SetCurrentProcessPID(ps.PID())
 	pgid := getProcessGroupID(ps.PID())
 
-	// Hand the wrapper's fds to their handlers, then attach the tracer. Both
-	// must happen before the child does useful work; the seccomp wrapper holds
-	// the child until its notify fd has been received.
-	startWrapperHandlers(ctx, extra, ps.PID(), pgid, nil)
-	if a.ptraceTracer != nil && !a.cfg.Sandbox.Ptrace.IsExecveOnly() {
-		waitExit, _, attachErr := ptraceExecAttach(a.ptraceTracer, ps.PID(), sessionID, cmdID, false)
-		if attachErr != nil {
-			_ = killProcessGroup(pgid)
-			_ = killProcess(ps.PID())
-			_, _ = ps.Wait()
-			defer unlock()
-			return nil, http.StatusInternalServerError, fmt.Errorf("ptrace attach (PTY): %w", attachErr)
+	// Hand the wrapper's fds to its handlers, then attach the tracer, mirroring
+	// the exec path: in hybrid mode (execve-only ptrace + wrapper) the wrapper
+	// runs seccomp setup, signals READY, waits for the tracer, then for GO.
+	failStart := func(what string, cause error) (*ptyRun, int, error) {
+		_ = killProcess(ps.PID())
+		_ = killProcessGroup(pgid)
+		_, _ = ps.Wait()
+		defer unlock()
+		return nil, http.StatusInternalServerError, fmt.Errorf("%s: %w", what, cause)
+	}
+	var waitExit func() ptraceExecResult
+	if extra != nil && extra.ptraceSync && a.ptraceTracer != nil {
+		handlerCtx, handlerCancel := context.WithCancel(ctx)
+		defer handlerCancel()
+		ptraceReady := make(chan error, 1)
+		startWrapperHandlers(handlerCtx, extra, ps.PID(), pgid, ptraceReady)
+
+		var readyErr error
+		select {
+		case readyErr = <-ptraceReady:
+		case <-ctx.Done():
+			readyErr = ctx.Err()
 		}
+		if readyErr != nil {
+			return failStart("PTY wrapper ready (hybrid)", readyErr)
+		}
+		attachWait, resume, attachErr := ptraceExecAttach(a.ptraceTracer, ps.PID(), sessionID, cmdID, false)
+		if attachErr != nil {
+			return failStart("ptrace attach (PTY, hybrid)", attachErr)
+		}
+		if resume != nil {
+			if resumeErr := resume(); resumeErr != nil {
+				return failStart("ptrace resume (PTY, hybrid)", resumeErr)
+			}
+		}
+		if extra.notifyParentSock != nil {
+			if _, goErr := extra.notifyParentSock.Write([]byte{'G'}); goErr != nil {
+				return failStart("hybrid GO byte (PTY)", goErr)
+			}
+		}
+		waitExit = attachWait
+	} else {
+		startWrapperHandlers(ctx, extra, ps.PID(), pgid, nil)
+		if a.ptraceTracer != nil {
+			attachWait, _, attachErr := ptraceExecAttach(a.ptraceTracer, ps.PID(), sessionID, cmdID, false)
+			if attachErr != nil {
+				return failStart("ptrace attach (PTY)", attachErr)
+			}
+			waitExit = attachWait
+		}
+	}
+	if waitExit != nil {
 		// The tracer reaps the child, so cmd.Wait would report ECHILD.
 		ps.SetWaitOverride(func() (int, error) {
 			res := waitExit()

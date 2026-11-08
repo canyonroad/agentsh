@@ -498,6 +498,20 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 	if basePolicy == "" {
 		basePolicy = a.cfg.Policies.Default
 	}
+	// An explicit allowlist also covers a profile's base policy and its
+	// per-mount policies, so a profile is not a way around it. An empty list
+	// still permits them: profiles are operator config, not caller input.
+	if err := a.checkPolicyAllowlisted(basePolicy); err != nil {
+		return types.Session{}, http.StatusForbidden, err
+	}
+	for _, spec := range profile.Mounts {
+		if spec.Policy == "" {
+			continue
+		}
+		if err := a.checkPolicyAllowlisted(spec.Policy); err != nil {
+			return types.Session{}, http.StatusForbidden, err
+		}
+	}
 	basePolicyDoc, code, err := a.loadOptionalProfileBasePolicy(basePolicy)
 	if err != nil {
 		return types.Session{}, code, err
@@ -623,6 +637,16 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 	a.applyTorFailClosed(ctx, s, false)
 
 	return s.Snapshot(), http.StatusCreated, nil
+}
+
+// checkPolicyAllowlisted enforces a non-empty policies.allowed list for
+// operator-configured policy names (profile base policy, mount policies). An
+// empty list means "no allowlist" and permits them.
+func (a *App) checkPolicyAllowlisted(name string) error {
+	if a == nil || a.cfg == nil || len(a.cfg.Policies.Allowed) == 0 {
+		return nil
+	}
+	return a.checkPolicyNameAllowed(name)
 }
 
 // checkPolicyNameAllowed enforces policies.allowed: with a list, only those

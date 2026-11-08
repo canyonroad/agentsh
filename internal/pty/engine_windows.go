@@ -44,6 +44,10 @@ type StartRequest struct {
 	// inheritance, so the supervisor passes nothing here on Windows.
 	ExtraFiles []*os.File
 
+	// ExternalWait is accepted for API parity with Unix (no external reaper on
+	// Windows today).
+	ExternalWait bool
+
 	InitialSize Winsize
 }
 
