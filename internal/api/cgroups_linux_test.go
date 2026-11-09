@@ -113,6 +113,74 @@ func networkPolicyEngineForCgroupTest(t *testing.T) *policy.Engine {
 	return engine
 }
 
+func TestCgroupHookUsesProvidedPolicyEngine(t *testing.T) {
+	withEBPFHooks(t)
+
+	cfg := &config.Config{}
+	cfg.Sandbox.Cgroups.Enabled = true
+	cfg.Sandbox.Network.EBPF.Enabled = true
+	cfg.Sandbox.Network.EBPF.Enforce = true
+	cgPath := filepath.Join(t.TempDir(), "agentsh-test-cgroup")
+	app := newAppWithFakeCgroupManager(t, cfg, cgPath)
+
+	engine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "session-policy",
+		NetworkRules: []policy.NetworkRule{{
+			Name:     "allow-session-cidr",
+			CIDRs:    []string{"10.1.2.0/24"},
+			Ports:    []int{443},
+			Decision: "allow",
+		}},
+	}, false, true)
+	if err != nil {
+		t.Fatalf("build session policy: %v", err)
+	}
+
+	ebpfCheckSupport = func() ebpftrace.SupportStatus {
+		return ebpftrace.SupportStatus{Supported: true}
+	}
+	ebpfAttachConnectToCgroup = func(path string) (*ebpf.Collection, func() error, error) {
+		return &ebpf.Collection{}, func() error { return nil }, nil
+	}
+	ebpfCgroupID = func(path string) (uint64, error) {
+		return 42, nil
+	}
+	var gotCIDRs []ebpftrace.AllowCIDR
+	ebpfPopulateAllowlist = func(coll *ebpf.Collection, cgroupID uint64, allow []ebpftrace.AllowKey, allowCIDRs []ebpftrace.AllowCIDR, deny []ebpftrace.AllowKey, denyCIDRs []ebpftrace.AllowCIDR, defaultDeny bool) error {
+		gotCIDRs = append(gotCIDRs, allowCIDRs...)
+		return nil
+	}
+	ebpfCleanupAllowlist = func(coll *ebpf.Collection, cgroupID uint64) error {
+		return nil
+	}
+	ebpfStartCollector = func(coll *ebpf.Collection, bufSize int) (*ebpftrace.Collector, error) {
+		return nil, errors.New("test collector unavailable after population")
+	}
+
+	hook := app.cgroupHook("sess", "cmd", engine.Limits(), engine)
+	cleanup, err := hook(1234)
+	if err != nil {
+		t.Fatalf("cgroup hook: %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("cgroup hook returned nil cleanup")
+	}
+	t.Cleanup(func() {
+		if err := cleanup(); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	})
+
+	if len(gotCIDRs) != 1 {
+		t.Fatalf("allow CIDRs = %d, want 1", len(gotCIDRs))
+	}
+	got := gotCIDRs[0]
+	if got.Family != 2 || got.PrefixLen != 24 || got.Dport != 443 || got.Addr[0] != 10 || got.Addr[1] != 1 || got.Addr[2] != 2 {
+		t.Fatalf("allow CIDR = %+v, want 10.1.2.0/24:443", got)
+	}
+}
+
 func TestApplyCgroupV2_CleansCgroupWhenRequiredEBPFUnsupported(t *testing.T) {
 	withEBPFHooks(t)
 

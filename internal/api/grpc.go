@@ -412,7 +412,8 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 		return stream.SendMsg(out)
 	}
 
-	limits := s.app.policyEngineFor(sess).Limits()
+	engine := s.app.policyEngineFor(sess)
+	limits := engine.Limits()
 	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResourcesStreamingEmit(
 		stream.Context(),
 		sess,
@@ -421,7 +422,7 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 		s.app.cfg,
 		limits.CommandTimeout,
 		emit,
-		s.app.cgroupHook(req.SessionID, cmdID, limits),
+		s.app.cgroupHook(req.SessionID, cmdID, limits, engine),
 		extraCfg,
 		s.app.ptraceTracer,
 		req.SessionID,

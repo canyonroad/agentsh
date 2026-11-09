@@ -370,7 +370,7 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 								SessionID: sessionID,
 								CommandID: cmdID,
 								Fields: map[string]any{
-									"reason": "rules include wildcards or cidrs; default-deny disabled",
+									"reason": "rules include wildcard domains or unresolved domains; default-deny disabled",
 								},
 							}
 							_ = emit.AppendEvent(ctx, ev)

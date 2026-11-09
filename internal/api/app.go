@@ -979,7 +979,7 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, resp)
 }
 
-func (a *App) cgroupHook(sessionID string, cmdID string, limits policy.Limits) postStartHook {
+func (a *App) cgroupHook(sessionID string, cmdID string, limits policy.Limits, engine *policy.Engine) postStartHook {
 	// Return nil (not a no-op function) when cgroups are disabled.
 	// This prevents exec.go from activating ptrace-stopped mode unnecessarily,
 	// which can cause issues in environments where ptrace isn't fully supported.
@@ -988,7 +988,7 @@ func (a *App) cgroupHook(sessionID string, cmdID string, limits policy.Limits) p
 	}
 	return func(pid int) (func() error, error) {
 		em := storeEmitter{store: a.store, broker: a.broker}
-		return applyCgroupV2(context.Background(), em, a, sessionID, cmdID, pid, limits, a.metrics, a.policy)
+		return applyCgroupV2(context.Background(), em, a, sessionID, cmdID, pid, limits, a.metrics, engine)
 	}
 }
 
