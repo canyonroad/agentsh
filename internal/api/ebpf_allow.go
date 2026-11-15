@@ -220,7 +220,9 @@ func dedupCIDRs(in []ebpf.AllowCIDR) []ebpf.AllowCIDR {
 	seen := make(map[string]struct{}, len(in))
 	out := make([]ebpf.AllowCIDR, 0, len(in))
 	for _, k := range in {
-		key := fmt.Sprintf("%d-%d-%x", k.Family, k.PrefixLen, k.Addr)
+		// Dport is part of the identity: a rule listing several ports for one
+		// CIDR yields one LPM entry per port.
+		key := fmt.Sprintf("%d-%d-%d-%x", k.Family, k.PrefixLen, k.Dport, k.Addr)
 		if _, ok := seen[key]; ok {
 			continue
 		}
