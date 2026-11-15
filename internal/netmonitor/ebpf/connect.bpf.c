@@ -100,18 +100,28 @@ struct {
     __type(value, __u8);
 } default_deny SEC(".maps");
 
+// LPM trie keys. The kernel matches the first `prefixlen` bits of the bytes
+// that follow `prefixlen`, so the layout must be:
+//  * packed: with natural alignment, 4 bytes of padding after `prefixlen`
+//    become the first 32 bits the trie compares, every prefix length is off
+//    by 32, and the Go side (encoding/binary, no padding) cannot marshal a
+//    key of the declared size at all.
+//  * dport before addr: a port-specific CIDR is then one contiguous prefix,
+//    cgroup_id (64) || dport (16) || first N bits of addr. Any-port entries
+//    store dport = 0 and are found by a second lookup with dport = 0.
+// Keep in sync with lpm4Key / lpm6Key in lpm_keys.go (see keysize_test.go).
 struct lpm4_key {
-    __u32 prefixlen; // bits of (cgroup_id || addr || dport)
+    __u32 prefixlen; // bits of (cgroup_id || dport || addr)
     __u64 cgroup_id;
+    __u16 dport;
     __u32 addr;
-    __u16 dport;
-};
+} __attribute__((packed));
 struct lpm6_key {
-    __u32 prefixlen; // bits of (cgroup_id || addr || dport)
+    __u32 prefixlen; // bits of (cgroup_id || dport || addr)
     __u64 cgroup_id;
-    __u8 addr[16];
     __u16 dport;
-};
+    __u8 addr[16];
+} __attribute__((packed));
 
 struct {
     __uint(type, BPF_MAP_TYPE_LPM_TRIE);
@@ -203,12 +213,11 @@ static __always_inline bool is_denied(struct ctx_info *info, __u8 protocol) {
         lk.cgroup_id = key.cgroup_id;
         __builtin_memcpy(&lk.addr, &info->ipv4, 4);
         lk.dport = info->dport;
-        lk.prefixlen = 64 + 32 + 16; // include port
+        lk.prefixlen = 64 + 16 + 32; // cgroup_id || dport || addr
         val = bpf_map_lookup_elem(&lpm4_deny, &lk);
         if (val)
             return true;
-        // fallback to any-port prefix
-        lk.prefixlen = 64 + 32;
+        // any-port entries are stored with dport = 0
         lk.dport = 0;
         val = bpf_map_lookup_elem(&lpm4_deny, &lk);
         if (val)
@@ -218,11 +227,11 @@ static __always_inline bool is_denied(struct ctx_info *info, __u8 protocol) {
         lk.cgroup_id = key.cgroup_id;
         __builtin_memcpy(&lk.addr, info->ipv6, 16);
         lk.dport = info->dport;
-        lk.prefixlen = 64 + 128 + 16; // include port
+        lk.prefixlen = 64 + 16 + 128; // cgroup_id || dport || addr
         val = bpf_map_lookup_elem(&lpm6_deny, &lk);
         if (val)
             return true;
-        lk.prefixlen = 64 + 128;
+        // any-port entries are stored with dport = 0
         lk.dport = 0;
         val = bpf_map_lookup_elem(&lpm6_deny, &lk);
         if (val)
@@ -262,12 +271,11 @@ static __always_inline bool allow(struct ctx_info *info, __u8 protocol) {
         lk.cgroup_id = key.cgroup_id;
         __builtin_memcpy(&lk.addr, &info->ipv4, 4);
         lk.dport = info->dport;
-        lk.prefixlen = 64 + 32 + 16; // include port
+        lk.prefixlen = 64 + 16 + 32; // cgroup_id || dport || addr
         val = bpf_map_lookup_elem(&lpm4_allow, &lk);
         if (val)
             return true;
-        // fallback to any-port prefix
-        lk.prefixlen = 64 + 32;
+        // any-port entries are stored with dport = 0
         lk.dport = 0;
         val = bpf_map_lookup_elem(&lpm4_allow, &lk);
         if (val)
@@ -277,11 +285,11 @@ static __always_inline bool allow(struct ctx_info *info, __u8 protocol) {
         lk.cgroup_id = key.cgroup_id;
         __builtin_memcpy(&lk.addr, info->ipv6, 16);
         lk.dport = info->dport;
-        lk.prefixlen = 64 + 128 + 16; // include port
+        lk.prefixlen = 64 + 16 + 128; // cgroup_id || dport || addr
         val = bpf_map_lookup_elem(&lpm6_allow, &lk);
         if (val)
             return true;
-        lk.prefixlen = 64 + 128;
+        // any-port entries are stored with dport = 0
         lk.dport = 0;
         val = bpf_map_lookup_elem(&lpm6_allow, &lk);
         if (val)

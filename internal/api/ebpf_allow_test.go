@@ -86,3 +86,31 @@ func TestBuildAllowedEndpoints_NonStrictOnCIDR(t *testing.T) {
 		t.Fatalf("expected cidr to be included")
 	}
 }
+
+func TestBuildAllowedEndpoints_CIDRKeepsEveryPort(t *testing.T) {
+	t.Cleanup(func() { resolveDomainWithTTL = resolveDomainTTL })
+	pol := &policy.Policy{
+		NetworkRules: []policy.NetworkRule{
+			{
+				Name:     "allow-local-proxies",
+				CIDRs:    []string{"127.0.0.1/32"},
+				Ports:    []int{9480, 40993, 37299},
+				Decision: "allow",
+			},
+		},
+	}
+	engine, err := policy.NewEngine(pol, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cidrs, _, _, _, _, _ := buildAllowedEndpoints(engine, 60*time.Second)
+	got := map[uint16]bool{}
+	for _, c := range cidrs {
+		got[c.Dport] = true
+	}
+	for _, p := range []uint16{9480, 40993, 37299} {
+		if !got[p] {
+			t.Errorf("port %d dropped from CIDR entries (got %v)", p, got)
+		}
+	}
+}
